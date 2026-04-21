@@ -19,13 +19,38 @@ const DEFAULT_PLAZO_ENTREGA_TXT = "< 5 D\u00cdAS H\u00c1BILES";
 const DEFAULT_GARANTIA_TXT = "90 D\u00cdAS";
 const DEFAULT_MANT_OFERTA_TXT = "7 D\u00cdAS";
 
-export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeCosts, money, refreshIngreso, setErr }) {
+function buildEquipoHints(data) {
+  const marca = String(data?.marca || "").trim();
+  const modelo = String(data?.modelo || "").trim();
+  const variante = String(data?.equipo_variante || "").trim();
+  const seen = new Set();
+  const hints = [
+    [marca, modelo, variante],
+    [marca, modelo],
+    [modelo, variante],
+    [modelo],
+  ]
+    .map((parts) => parts.filter(Boolean).join(" | ").trim())
+    .filter(Boolean)
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  return hints;
+}
+
+export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeCosts, money, isCotizacion, refreshIngreso, setErr }) {
   const isAprobado = data.presupuesto_estado === "aprobado";
+  const tituloDoc = isCotizacion ? "cotización" : "presupuesto";
+  const tituloDocCap = isCotizacion ? "Cotización" : "Presupuesto";
   const garantiaTrabajos = (data?.garantia_reparacion_trabajos || "").trim();
 
   const [qErr, setQErr] = useState("");
   const [qLoading, setQLoading] = useState(false);
   const [quote, setQuote] = useState(null);
+  const [itemDrafts, setItemDrafts] = useState({});
   const [repOptions, setRepOptions] = useState([]);
   const [repQuery, setRepQuery] = useState("");
   const [repListOpen, setRepListOpen] = useState(false);
@@ -46,6 +71,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
 
   const [nuevoRep, setNuevoRep] = useState({ repuesto_id: "", repuesto_codigo: "", descripcion: "", qty: "1", precio_u: "" });
   const [manoObraStr, setManoObraStr] = useState("");
+  const equipoHints = buildEquipoHints(data);
 
   async function loadQuote() {
     try {
@@ -60,7 +86,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       setGarantiaTxt(q?.garantia_txt ?? DEFAULT_GARANTIA_TXT);
       setMantOfertaTxt(q?.mant_oferta_txt ?? DEFAULT_MANT_OFERTA_TXT);
     } catch (e) {
-      setQErr(e?.message || "No se pudo cargar el presupuesto");
+      setQErr(e?.message || `No se pudo cargar la ${tituloDoc}`);
       setQuote(null);
     } finally {
       setQLoading(false);
@@ -70,14 +96,30 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
   useEffect(() => { loadQuote(); }, [id]);
 
   useEffect(() => {
+    const validIds = new Set((quote?.items || []).map((it) => String(it?.id)));
+    setItemDrafts((prev) => {
+      let changed = false;
+      const next = {};
+      Object.entries(prev || {}).forEach(([key, value]) => {
+        if (validIds.has(String(key))) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [quote]);
+
+  useEffect(() => {
     let alive = true;
     const handle = setTimeout(() => {
-      getRepuestosCatalogo({ q: repQuery, limit: 50 })
+      getRepuestosCatalogo({ q: repQuery, limit: 50, equipo_hint: equipoHints })
         .then((rows) => { if (alive) setRepOptions(rows || []); })
         .catch(() => {});
     }, 200);
     return () => { alive = false; clearTimeout(handle); };
-  }, [repQuery]);
+  }, [repQuery, equipoHints.join("||")]);
 
   async function abrirPdf() {
     try {
@@ -88,7 +130,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       window.open(url, "_blank", "noopener");
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (e) {
-      setQErr(e?.message || "No se pudo abrir el PDF del presupuesto");
+      setQErr(e?.message || `No se pudo abrir el PDF de la ${tituloDoc}`);
     }
   }
 
@@ -120,11 +162,99 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     repAnchorRef.current = null;
   }
 
-  function selectRepuestoForItem(it, rep) {
+  function updateItemDraft(id, patch) {
+    setItemDrafts((prev) => ({
+      ...prev,
+      [id]: {
+        ...(prev[id] || {}),
+        ...patch,
+      },
+    }));
+  }
+
+  function clearItemDraft(id) {
+    setItemDrafts((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, id)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  function getItemValue(it, field) {
+    const draft = itemDrafts[it.id];
+    if (draft && Object.prototype.hasOwnProperty.call(draft, field)) {
+      return draft[field];
+    }
+    return it?.[field] ?? "";
+  }
+
+  async function commitItemDraft(it) {
+    const draft = itemDrafts[it.id];
+    if (!draft) return;
+
+    const payload = {};
+
+    if (Object.prototype.hasOwnProperty.call(draft, "repuesto_codigo")) {
+      const code = normalizeRepuestoCodigo(draft.repuesto_codigo || "");
+      if (String(it.repuesto_codigo || "") !== code) {
+        payload.repuesto_codigo = code || null;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(draft, "descripcion")) {
+      const descripcion = String(draft.descripcion || "");
+      if (String(it.descripcion || "") !== descripcion) {
+        payload.descripcion = descripcion;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(draft, "qty")) {
+      const qty = Number(draft.qty || 0);
+      if (Number.isNaN(qty)) {
+        setQErr("Cantidad inválida");
+        return;
+      }
+      if (Number(it.qty || 0) !== qty) {
+        payload.qty = qty;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(draft, "precio_u")) {
+      const precio = Number(draft.precio_u || 0);
+      if (Number.isNaN(precio) || precio < 0) {
+        setQErr("Precio inválido");
+        return;
+      }
+      if (Number(it.precio_u || 0) !== precio) {
+        payload.precio_u = precio;
+      }
+    }
+
+    if (!Object.keys(payload).length) {
+      clearItemDraft(it.id);
+      return;
+    }
+
+    try {
+      setQErr("");
+      const updated = await patchQuoteItem(id, it.id, payload);
+      setQuote(updated);
+      clearItemDraft(it.id);
+    } catch (e) {
+      setQErr(e?.message || "No se pudo actualizar el ítem");
+    }
+  }
+
+  async function selectRepuestoForItem(it, rep) {
     const patch = { repuesto_codigo: rep?.codigo || "" };
     if (rep?.id) patch.repuesto_id = rep.id;
     if (rep?.precio_venta != null) patch.precio_u = Number(rep.precio_venta);
-    updateItem(it, patch);
+    try {
+      setQErr("");
+      const updated = await patchQuoteItem(id, it.id, patch);
+      setQuote(updated);
+      clearItemDraft(it.id);
+    } catch (e) {
+      setQErr(e?.message || "No se pudo actualizar el repuesto");
+    }
     setRepQuery(rep?.codigo || "");
     closeRepList();
   }
@@ -172,12 +302,19 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
 
   function RepuestosList({ onPick }) {
     return (
-      <div ref={repListRef} className="absolute z-30 mt-1 w-full min-w-[18rem] max-h-56 overflow-auto rounded border bg-white shadow">
+      <div
+        ref={repListRef}
+        role="listbox"
+        className="absolute z-30 mt-1 w-full min-w-[18rem] max-h-56 overflow-auto rounded border bg-white shadow"
+        style={{ overscrollBehavior: "contain" }}
+      >
         {(repOptions || []).length ? (
           repOptions.map((r, idx) => (
             <button
               key={r.id || r.codigo}
               type="button"
+              role="option"
+              aria-selected={idx === repHighlight}
               className={`w-full text-left px-2 py-1 hover:bg-gray-100 ${idx === repHighlight ? "bg-gray-100" : ""}`}
               ref={(el) => { repItemRefs.current[idx] = el; }}
               tabIndex={-1}
@@ -214,9 +351,19 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
 
   useEffect(() => {
     if (!repListOpen || !repOptions.length) return;
+    const listEl = repListRef.current;
     const el = repItemRefs.current[repHighlight];
-    if (el && typeof el.scrollIntoView === "function") {
-      el.scrollIntoView({ block: "nearest" });
+    if (!listEl || !el) return;
+    const itemTop = el.offsetTop;
+    const itemBottom = itemTop + el.offsetHeight;
+    const viewTop = listEl.scrollTop;
+    const viewBottom = viewTop + listEl.clientHeight;
+    if (itemTop < viewTop) {
+      listEl.scrollTop = itemTop;
+      return;
+    }
+    if (itemBottom > viewBottom) {
+      listEl.scrollTop = itemBottom - listEl.clientHeight;
     }
   }, [repListOpen, repHighlight, repOptions.length]);
 
@@ -262,14 +409,14 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       if (typeof refreshIngreso === "function") await refreshIngreso();
       if (r?.pdf_url) await abrirPdf();
     } catch (e) {
-      setQErr(e?.message || "No se pudo emitir el presupuesto");
+      setQErr(e?.message || `No se pudo emitir la ${tituloDoc}`);
     } finally {
       setEmitiendo(false);
     }
   }
 
   async function anularPresupuesto() {
-    if (!confirm("Anular el presupuesto actual? Podrás editar y re-emitir luego.")) return;
+    if (!confirm(`Anular la ${tituloDoc} actual? Aplica también si está aprobada. Podrás editar y reemitir luego.`)) return;
     try {
       setAnulando(true);
       setQErr("");
@@ -277,7 +424,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       setQuote(r);
       if (typeof refreshIngreso === "function") await refreshIngreso();
     } catch (e) {
-      setQErr(e?.message || "No se pudo anular el presupuesto");
+      setQErr(e?.message || `No se pudo anular la ${tituloDoc}`);
     } finally {
       setAnulando(false);
     }
@@ -306,7 +453,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       }
       if (typeof refreshIngreso === "function") await refreshIngreso();
     } catch (e) {
-      setQErr(e?.message || "No se pudo aprobar el presupuesto");
+      setQErr(e?.message || `No se pudo aprobar la ${tituloDoc}`);
     } finally {
       setAprobando(false);
     }
@@ -348,7 +495,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     //if (qty <= 0) { setQErr("Cantidad > 0"); return; }
     if (pu != null && pu < 0) { setQErr("Precio inválido"); return; }
     const repCodigo = normalizeRepuestoCodigo(nuevoRep.repuesto_codigo || "");
-    await postQuoteItem(id, {
+    const updated = await postQuoteItem(id, {
       tipo: "repuesto",
       repuesto_id: nuevoRep.repuesto_id ? Number(nuevoRep.repuesto_id) : null,
       repuesto_codigo: repCodigo || null,
@@ -356,15 +503,15 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       qty, precio_u: pu,
     });
     setNuevoRep({ repuesto_id: "", repuesto_codigo: "", descripcion: "", qty: "1", precio_u: "" });
-    await loadQuote();
+    setQuote(updated);
   }
 
-  async function updateItem(it, patchRow) { await patchQuoteItem(id, it.id, patchRow); await loadQuote(); }
   async function handleRemoveItem(it) {
     if (!confirm("Eliminar renglón?")) return;
     try {
-      await deleteQuoteItem(id, it.id);
-      await loadQuote();
+      const updated = await deleteQuoteItem(id, it.id);
+      setQuote(updated);
+      clearItemDraft(it.id);
     } catch (e) {
       setQErr(e?.message || "No se pudo eliminar el renglón");
     }
@@ -372,8 +519,9 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
   async function saveManoObra() {
     const mo = Number(manoObraStr || 0);
     if (mo < 0) { setQErr("Mano de obra inválida"); return; }
-    await patchQuoteResumen(id, { mano_obra: mo });
-    await loadQuote();
+    const updated = await patchQuoteResumen(id, { mano_obra: mo });
+    setQuote(updated);
+    setManoObraStr(String(updated?.mano_obra ?? mo));
   }
 
   return (
@@ -435,22 +583,22 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
         </label>
         {canManagePresupuesto && data.presupuesto_estado === "pendiente" && (
           <button className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60" onClick={emitirPresupuesto} disabled={emitiendo}>
-            {emitiendo ? "Emitiendo..." : "Emitir presupuesto"}
+            {emitiendo ? "Emitiendo..." : `Emitir ${tituloDoc}`}
           </button>
         )}
         {["presupuestado", "aprobado"].includes(data.presupuesto_estado) && (
           <button className="underline text-blue-700" onClick={abrirPdf} type="button">
-            Ver/Descargar PDF
+            {`Ver/Descargar PDF de ${tituloDocCap}`}
           </button>
         )}
         {canManagePresupuesto && data.presupuesto_estado === "presupuestado" && (
           <button className="bg-emerald-600 text-white px-3 py-2 rounded disabled:opacity-60" onClick={aprobarPresupuesto} disabled={aprobando} type="button">
-            {aprobando ? "Aprobando..." : "Aprobar presupuesto"}
+            {aprobando ? "Aprobando..." : `Aprobar ${tituloDoc}`}
           </button>
         )}
-        {canManagePresupuesto && data.presupuesto_estado === "presupuestado" && (
+        {canManagePresupuesto && ["presupuestado", "aprobado"].includes(data.presupuesto_estado) && (
           <button className="bg-red-600 text-white px-3 py-2 rounded disabled:opacity-60" onClick={anularPresupuesto} disabled={anulando} type="button">
-            {anulando ? "Anulando..." : "Anular presupuesto"}
+            {anulando ? "Anulando..." : `Anular ${tituloDoc}`}
           </button>
         )}
         {canManagePresupuesto && data.presupuesto_estado === "pendiente" && (
@@ -470,7 +618,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
       ) : (
         <>
           {isAprobado && (
-            <div className="mb-3 text-sm text-emerald-700">Presupuesto aprobado - los tems y valores ya no son editables.</div>
+            <div className="mb-3 text-sm text-emerald-700">{`${tituloDocCap} aprobada - los ítems y valores ya no son editables.`}</div>
           )}
 
           <h3 className="font-medium mb-2">Repuestos</h3>
@@ -495,19 +643,21 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                       <div className="relative">
                         <input
                           className="border rounded p-1 w-28"
-                          value={it.repuesto_codigo || ""}
-                          onFocus={(e) => openRepList(`code-${it.id}`, it.repuesto_codigo || "", e.currentTarget)}
-                          onKeyDown={(e) => handleRepKeyDown(e, `code-${it.id}`, (rep) => selectRepuestoForItem(it, rep), e.currentTarget.value)}
+                          value={getItemValue(it, "repuesto_codigo")}
+                          onFocus={(e) => openRepList(`code-${it.id}`, getItemValue(it, "repuesto_codigo"), e.currentTarget)}
+                          onKeyDown={(e) => {
+                            handleRepKeyDown(e, `code-${it.id}`, (rep) => selectRepuestoForItem(it, rep), e.currentTarget.value);
+                            if (e.key === "Enter" && (!repListOpen || repActiveKey !== `code-${it.id}` || !repOptions.length)) {
+                              e.preventDefault();
+                              void commitItemDraft(it);
+                            }
+                          }}
                           onChange={(e) => {
                             const raw = e.target.value;
-                            const code = normalizeRepuestoCodigo(raw);
                             openRepList(`code-${it.id}`, raw, e.currentTarget);
-                            const found = findRepuestoByCode(code);
-                            const patch = { repuesto_codigo: code };
-                            if (found?.id) patch.repuesto_id = found.id;
-                            if (found?.precio_venta != null) patch.precio_u = Number(found.precio_venta);
-                            updateItem(it, patch);
+                            updateItemDraft(it.id, { repuesto_codigo: raw });
                           }}
+                          onBlur={() => { void commitItemDraft(it); }}
                           disabled={isAprobado}
                         />
                         {repListOpen && repActiveKey === `code-${it.id}` ? (
@@ -519,14 +669,21 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                       <div className="relative">
                         <input
                           className="border rounded p-1 w-full"
-                          value={it.descripcion || ""}
-                          onFocus={(e) => openRepList(`desc-${it.id}`, it.descripcion || "", e.currentTarget)}
-                          onKeyDown={(e) => handleRepKeyDown(e, `desc-${it.id}`, (rep) => selectRepuestoForItem(it, rep), e.currentTarget.value)}
+                          value={getItemValue(it, "descripcion")}
+                          onFocus={(e) => openRepList(`desc-${it.id}`, getItemValue(it, "descripcion"), e.currentTarget)}
+                          onKeyDown={(e) => {
+                            handleRepKeyDown(e, `desc-${it.id}`, (rep) => selectRepuestoForItem(it, rep), e.currentTarget.value);
+                            if (e.key === "Enter" && (!repListOpen || repActiveKey !== `desc-${it.id}` || !repOptions.length)) {
+                              e.preventDefault();
+                              void commitItemDraft(it);
+                            }
+                          }}
                           onChange={(e) => {
                             const raw = e.target.value;
                             openRepList(`desc-${it.id}`, raw, e.currentTarget);
-                            updateItem(it, { descripcion: raw });
+                            updateItemDraft(it.id, { descripcion: raw });
                           }}
+                          onBlur={() => { void commitItemDraft(it); }}
                           disabled={isAprobado}
                         />
                         {repListOpen && repActiveKey === `desc-${it.id}` ? (
@@ -539,8 +696,15 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                         type="number"
                         step="0.01"
                         className="border rounded p-1 w-24 text-right"
-                        value={it.qty}
-                        onChange={(e) => updateItem(it, { qty: Number(e.target.value || 0) })}
+                        value={getItemValue(it, "qty")}
+                        onChange={(e) => updateItemDraft(it.id, { qty: e.target.value })}
+                        onBlur={() => { void commitItemDraft(it); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void commitItemDraft(it);
+                          }
+                        }}
                         disabled={isAprobado}
                       />
                     </td>
@@ -554,8 +718,15 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                         type="number"
                         step="0.01"
                         className="border rounded p-1 w-32 text-right"
-                        value={it.precio_u}
-                        onChange={(e) => updateItem(it, { precio_u: Number(e.target.value || 0) })}
+                        value={getItemValue(it, "precio_u")}
+                        onChange={(e) => updateItemDraft(it.id, { precio_u: e.target.value })}
+                        onBlur={() => { void commitItemDraft(it); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void commitItemDraft(it);
+                          }
+                        }}
                         disabled={isAprobado}
                       />
                     </td>
@@ -670,3 +841,4 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     </div>
   );
 }
+

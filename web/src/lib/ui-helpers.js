@@ -124,6 +124,11 @@ export const norm = (v) => {
   }
 };
 
+export const isMotivoCotizacionEquipo = (motivo) => {
+  const key = norm(motivo).replace(/\s+/g, " ");
+  return key === "cotizacion de equipo";
+};
+
 export const formatMoney = (amount, currency = "ARS", locale = "es-AR") => {
   if (amount == null || isNaN(Number(amount))) return "-";
   try {

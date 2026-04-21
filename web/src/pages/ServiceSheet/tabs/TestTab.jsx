@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getIngresoTest, getIngresoTestPdfBlob, patchIngresoTest } from "../../../lib/api";
 
 function refLabel(ref) {
@@ -20,7 +20,6 @@ export default function TestTab({ id, setErr }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
-  const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
   const [templateInfo, setTemplateInfo] = useState({ key: "", version: "", tipo: "" });
@@ -33,7 +32,9 @@ export default function TestTab({ id, setErr }) {
   const [resultadoGlobal, setResultadoGlobal] = useState("pendiente");
   const [conclusion, setConclusion] = useState("");
   const [instrumentos, setInstrumentos] = useState("");
-  const [firmadoPor, setFirmadoPor] = useState("");
+
+  const lastSavedPayloadRef = useRef("");
+  const loadedRef = useRef(false);
 
   const hasReferences = (references || []).length > 0;
   const canMarkApto = hasReferences;
@@ -46,14 +47,32 @@ export default function TestTab({ id, setErr }) {
     return map;
   }, [references]);
 
+  const draftPayload = useMemo(
+    () => ({
+      values,
+      resultado_global: resultadoGlobal,
+      conclusion,
+      instrumentos,
+    }),
+    [values, resultadoGlobal, conclusion, instrumentos]
+  );
+  const draftPayloadKey = useMemo(() => JSON.stringify(draftPayload), [draftPayload]);
+  const hasUnsavedChanges = loadedRef.current && draftPayloadKey !== lastSavedPayloadRef.current;
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
         setLoading(true);
         setError("");
+        loadedRef.current = false;
         const data = await getIngresoTest(id);
         if (cancelled) return;
+
+        const loadedValues = data?.values && typeof data.values === "object" ? data.values : {};
+        const loadedResultadoGlobal = (data?.resultado_global || "pendiente").toString();
+        const loadedConclusion = (data?.conclusion || "").toString();
+        const loadedInstrumentos = (data?.instrumentos || "").toString();
 
         setTemplateInfo({
           key: data?.template_key || "",
@@ -64,11 +83,17 @@ export default function TestTab({ id, setErr }) {
         setSections(Array.isArray(data?.schema?.sections) ? data.schema.sections : []);
         setResultOptions(Array.isArray(data?.schema?.result_options) ? data.schema.result_options : []);
         setGlobalResultOptions(Array.isArray(data?.schema?.global_result_options) ? data.schema.global_result_options : []);
-        setValues(data?.values && typeof data.values === "object" ? data.values : {});
-        setResultadoGlobal((data?.resultado_global || "pendiente").toString());
-        setConclusion((data?.conclusion || "").toString());
-        setInstrumentos((data?.instrumentos || "").toString());
-        setFirmadoPor((data?.firmado_por || "").toString());
+        setValues(loadedValues);
+        setResultadoGlobal(loadedResultadoGlobal);
+        setConclusion(loadedConclusion);
+        setInstrumentos(loadedInstrumentos);
+        lastSavedPayloadRef.current = JSON.stringify({
+          values: loadedValues,
+          resultado_global: loadedResultadoGlobal,
+          conclusion: loadedConclusion,
+          instrumentos: loadedInstrumentos,
+        });
+        loadedRef.current = true;
       } catch (e) {
         if (cancelled) return;
         const detail = e?.message || "No se pudo cargar el test";
@@ -91,37 +116,45 @@ export default function TestTab({ id, setErr }) {
     });
   };
 
-  async function save() {
+  async function save(payload = draftPayload, payloadKey = draftPayloadKey) {
     try {
       setSaving(true);
       setError("");
-      if (resultadoGlobal === "apto" && !canMarkApto) {
+      if ((payload?.resultado_global || "") === "apto" && !canMarkApto) {
         const detail = "No se puede emitir 'Apto' sin referencias técnicas cargadas.";
         setError(detail);
-        return;
+        return false;
       }
-      await patchIngresoTest(id, {
-        values,
-        resultado_global: resultadoGlobal,
-        conclusion,
-        instrumentos,
-        firmado_por: firmadoPor,
-      });
-      setMsg("Test guardado");
-      setTimeout(() => setMsg(""), 2000);
+      await patchIngresoTest(id, payload);
+      lastSavedPayloadRef.current = payloadKey;
+      return true;
     } catch (e) {
       const detail = e?.message || "No se pudo guardar el test";
       setError(detail);
       if (typeof setErr === "function") setErr(detail);
+      return false;
     } finally {
       setSaving(false);
     }
   }
 
+  useEffect(() => {
+    if (loading || saving || !loadedRef.current) return;
+    if (!hasUnsavedChanges) return;
+    const timer = setTimeout(() => {
+      void save(draftPayload, draftPayloadKey);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [loading, saving, hasUnsavedChanges, draftPayload, draftPayloadKey]);
+
   async function printPdf() {
     try {
       setPrinting(true);
       setError("");
+      if (hasUnsavedChanges) {
+        const saved = await save(draftPayload, draftPayloadKey);
+        if (!saved) return;
+      }
       const blob = await getIngresoTestPdfBlob(id);
       if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
       const url = URL.createObjectURL(blob);
@@ -147,20 +180,15 @@ export default function TestTab({ id, setErr }) {
             {templateInfo.tipo || "-"} | {templateInfo.key || "-"} v{templateInfo.version || "-"}
           </div>
         </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            className="px-3 py-2 rounded bg-blue-600 text-white disabled:opacity-60"
-            onClick={save}
-            disabled={saving}
-          >
-            {saving ? "Guardando..." : "Guardar"}
-          </button>
+        <div className="flex items-center gap-2">
+          <div className="text-sm text-gray-600">
+            {saving ? "Guardando..." : hasUnsavedChanges ? "Cambios pendientes..." : "Guardado automático"}
+          </div>
           <button
             type="button"
             className="px-3 py-2 rounded bg-neutral-800 text-white disabled:opacity-60"
             onClick={printPdf}
-            disabled={printing}
+            disabled={printing || saving}
           >
             {printing ? "Generando PDF..." : "Imprimir informe"}
           </button>
@@ -168,7 +196,6 @@ export default function TestTab({ id, setErr }) {
       </div>
 
       {error && <div className="mb-3 bg-red-100 border border-red-300 text-red-700 p-2 rounded">{error}</div>}
-      {msg && <div className="mb-3 bg-emerald-100 border border-emerald-300 text-emerald-700 p-2 rounded">{msg}</div>}
 
       <div className="mb-5 rounded border bg-gray-50 p-3">
         <div className="text-sm font-semibold mb-2">Norma técnica aplicada</div>
@@ -207,8 +234,8 @@ export default function TestTab({ id, setErr }) {
                 <tr className="text-left">
                   <th className="p-2 border">Parámetro</th>
                   <th className="p-2 border">Objetivo / Tolerancia</th>
-                  <th className="p-2 border">Valor a medir</th>
-                  <th className="p-2 border">Medido</th>
+                  {!['result_only', 'measured_only'].includes((section?.entry_mode || "").toString().trim().toLowerCase()) ? <th className="p-2 border">Valor a medir</th> : null}
+                  {(section?.entry_mode || "").toString().trim().toLowerCase() !== "result_only" ? <th className="p-2 border">Medido</th> : null}
                   <th className="p-2 border">Resultado</th>
                   <th className="p-2 border">Ref.</th>
                 </tr>
@@ -222,23 +249,27 @@ export default function TestTab({ id, setErr }) {
                     <tr key={key || Math.random()} className="border-t align-top">
                       <td className="p-2 border">
                         <div className="font-medium">{item?.label || "-"}</div>
-                        {item?.unit ? <div className="text-xs text-gray-500">Unidad: {item.unit}</div> : null}
+                        {(section?.entry_mode || "").toString().trim().toLowerCase() !== "result_only" && item?.unit ? <div className="text-xs text-gray-500">Unidad: {item.unit}</div> : null}
                       </td>
                       <td className="p-2 border">{item?.target || "-"}</td>
-                      <td className="p-2 border">
-                        <input
-                          className="border rounded p-1 w-full"
-                          value={(val?.valor_a_medir || "").toString()}
-                          onChange={(e) => updateValue(key, "valor_a_medir", e.target.value)}
-                        />
-                      </td>
-                      <td className="p-2 border">
-                        <input
-                          className="border rounded p-1 w-full"
-                          value={(val?.measured || "").toString()}
-                          onChange={(e) => updateValue(key, "measured", e.target.value)}
-                        />
-                      </td>
+                      {!['result_only', 'measured_only'].includes((section?.entry_mode || "").toString().trim().toLowerCase()) ? (
+                        <td className="p-2 border">
+                          <input
+                            className="border rounded p-1 w-full"
+                            value={(val?.valor_a_medir || "").toString()}
+                            onChange={(e) => updateValue(key, "valor_a_medir", e.target.value)}
+                          />
+                        </td>
+                      ) : null}
+                      {(section?.entry_mode || "").toString().trim().toLowerCase() !== "result_only" ? (
+                        <td className="p-2 border">
+                          <input
+                            className="border rounded p-1 w-full"
+                            value={(val?.measured || "").toString()}
+                            onChange={(e) => updateValue(key, "measured", e.target.value)}
+                          />
+                        </td>
+                      ) : null}
                       <td className="p-2 border">
                         <select
                           className="border rounded p-1 w-full"
@@ -277,34 +308,23 @@ export default function TestTab({ id, setErr }) {
       ))}
 
       <div className="rounded border p-3">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Resultado global</label>
-            <select
-              className="border rounded p-2 w-full"
-              value={resultadoGlobal}
-              onChange={(e) => setResultadoGlobal(e.target.value)}
-            >
-              {(globalResultOptions || []).map((opt) => (
-                <option
-                  key={opt.value}
-                  value={opt.value}
-                  disabled={opt.value === "apto" && !canMarkApto}
-                >
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Firmado por</label>
-            <input
-              className="border rounded p-2 w-full"
-              value={firmadoPor}
-              onChange={(e) => setFirmadoPor(e.target.value)}
-              placeholder="Nombre y apellido"
-            />
-          </div>
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">Resultado global</label>
+          <select
+            className="border rounded p-2 w-full"
+            value={resultadoGlobal}
+            onChange={(e) => setResultadoGlobal(e.target.value)}
+          >
+            {(globalResultOptions || []).map((opt) => (
+              <option
+                key={opt.value}
+                value={opt.value}
+                disabled={opt.value === "apto" && !canMarkApto}
+              >
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="mt-3">
           <label className="block text-sm text-gray-600 mb-1">Instrumentos utilizados</label>
@@ -316,7 +336,7 @@ export default function TestTab({ id, setErr }) {
           />
         </div>
         <div className="mt-3">
-          <label className="block text-sm text-gray-600 mb-1">Conclusión técnica</label>
+          <label className="block text-sm text-gray-600 mb-1">Observaciones</label>
           <textarea
             className="border rounded p-2 w-full min-h-[80px]"
             value={conclusion}

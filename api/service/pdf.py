@@ -304,13 +304,61 @@ def render_remito_derivacion_pdf(ingreso_id: int, deriv_id: int | None = None, p
     def box(x, y, w, h):
         c.rect(x, y, w, h, stroke=1, fill=0)
 
+    def _truncate_to_width(text, font, fsz, max_w):
+        try:
+            if pdfmetrics.stringWidth(text, font, fsz) <= max_w:
+                return text
+        except Exception:
+            return text
+
+        ell = "..."
+        try:
+            ell_w = pdfmetrics.stringWidth(ell, font, fsz)
+        except Exception:
+            ell_w = 0
+        if max_w <= ell_w:
+            return ell
+
+        max_txt_w = max_w - ell_w
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            try:
+                w_mid = pdfmetrics.stringWidth(text[:mid], font, fsz)
+            except Exception:
+                w_mid = 0
+            if w_mid <= max_txt_w:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + ell
+
     def label_value(x, y, w, h, label, value, fsz=F_FIELD, bold=False, label_fsz=F_LABEL):
         c.setFont("Helvetica", label_fsz); c.setFillColor(colors.grey)
         c.drawString(x, y + h + 1.4 * mm, label)
         c.setFillColor(colors.black)
         box(x, y, w, h)
-        c.setFont("Helvetica-Bold" if bold else "Helvetica", fsz)
-        c.drawString(x + 1.4 * mm, y + 1.2 * mm, str(value or "-"))
+
+        font = "Helvetica-Bold" if bold else "Helvetica"
+        text = str(value or "-")
+        max_w = w - 2.8 * mm  # 1.4mm padding left + right
+        draw_fsz = fsz
+        try:
+            text_w = pdfmetrics.stringWidth(text, font, draw_fsz)
+        except Exception:
+            text_w = None
+        if text_w and text_w > max_w:
+            min_fsz = 5.2
+            draw_fsz = max(min_fsz, draw_fsz * (max_w / text_w))
+            try:
+                text_w = pdfmetrics.stringWidth(text, font, draw_fsz)
+            except Exception:
+                text_w = None
+            if text_w and text_w > max_w:
+                text = _truncate_to_width(text, font, draw_fsz, max_w)
+
+        c.setFont(font, draw_fsz)
+        c.drawString(x + 1.4 * mm, y + 1.2 * mm, text)
 
     def paragraph_in_box(x, y, w, h, title, text, fsz=F_FIELD):
         c.setFont("Helvetica", F_LABEL); c.setFillColor(colors.grey)
@@ -1003,13 +1051,61 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     def box(x, y, w, h):
         c.rect(x, y, w, h, stroke=1, fill=0)
 
+    def _truncate_to_width(text, font, fsz, max_w):
+        try:
+            if pdfmetrics.stringWidth(text, font, fsz) <= max_w:
+                return text
+        except Exception:
+            return text
+
+        ell = "..."
+        try:
+            ell_w = pdfmetrics.stringWidth(ell, font, fsz)
+        except Exception:
+            ell_w = 0
+        if max_w <= ell_w:
+            return ell
+
+        max_txt_w = max_w - ell_w
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            try:
+                w_mid = pdfmetrics.stringWidth(text[:mid], font, fsz)
+            except Exception:
+                w_mid = 0
+            if w_mid <= max_txt_w:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + ell
+
     def label_value(x, y, w, h, label, value, fsz=F_FIELD, bold=False, label_fsz=F_LABEL):
         c.setFont("Helvetica", label_fsz); c.setFillColor(colors.grey)
         c.drawString(x, y + h + 1.4 * mm, label)
         c.setFillColor(colors.black)
         box(x, y, w, h)
-        c.setFont("Helvetica-Bold" if bold else "Helvetica", fsz)
-        c.drawString(x + 1.4 * mm, y + 1.2 * mm, str(value or "-"))
+
+        font = "Helvetica-Bold" if bold else "Helvetica"
+        text = str(value or "-")
+        max_w = w - 2.8 * mm  # 1.4mm padding left + right
+        draw_fsz = fsz
+        try:
+            text_w = pdfmetrics.stringWidth(text, font, draw_fsz)
+        except Exception:
+            text_w = None
+        if text_w and text_w > max_w:
+            min_fsz = 5.2
+            draw_fsz = max(min_fsz, draw_fsz * (max_w / text_w))
+            try:
+                text_w = pdfmetrics.stringWidth(text, font, draw_fsz)
+            except Exception:
+                text_w = None
+            if text_w and text_w > max_w:
+                text = _truncate_to_width(text, font, draw_fsz, max_w)
+
+        c.setFont(font, draw_fsz)
+        c.drawString(x + 1.4 * mm, y + 1.2 * mm, text)
 
     def paragraph_in_box(x, y, w, h, title, text, fsz=F_FIELD):
         c.setFont("Helvetica", F_LABEL); c.setFillColor(colors.grey)
@@ -1090,32 +1186,41 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         
         y -= (ROW_H + ROW_GAP)
 
-        # r2: Equipo | Marca | Modelo | Numero Serie | Numero interno
-        serial_comp = _compose_serial_internal(head.get("numero_serie"), head.get("numero_interno"))
+        # r2: Tipo de equipo | Marca | Modelo (agrandados; NS pasa al r3)
         r2_gap = 2 * mm
-        r2_w1 = 50 * mm
-        r2_w2 = 26 * mm
-        r2_w3 = 30 * mm
-        r2_w4 = inner_w - (r2_w1 + r2_w2 + r2_w3 + 3 * r2_gap)
+        r2_w1 = 64 * mm  # Tipo de equipo (antes 50mm)
+        r2_w2 = 26 * mm  # Marca
+        r2_w3 = inner_w - (r2_w1 + r2_w2 + 2 * r2_gap)  # Modelo (resto)
         r2_x1 = inner_x
         r2_x2 = r2_x1 + r2_w1 + r2_gap
         r2_x3 = r2_x2 + r2_w2 + r2_gap
-        r2_x4 = r2_x3 + r2_w3 + r2_gap
 
-        label_value(r2_x1, y - ROW_H, r2_w1, ROW_H, "Equipo", head.get("equipo"))
+        modelo = (head.get("modelo") or "").strip()
+        variante = (head.get("equipo_variante") or "").strip()
+        modelo_comp = (f"{modelo} {variante}".strip() if (modelo or variante) else "")
+
+        label_value(r2_x1, y - ROW_H, r2_w1, ROW_H, "Tipo de equipo", head.get("equipo"))
         label_value(r2_x2, y - ROW_H, r2_w2, ROW_H, "Marca", head.get("marca"))
-        try:
-            label_value(r2_x3, y - ROW_H, r2_w3, ROW_H, "Modelo", head.get("modelo") + " " + head.get("equipo_variante"))
-        except:
-            label_value(r2_x3, y - ROW_H, r2_w3, ROW_H, "Modelo", head.get("modelo"))
-        label_value(r2_x4, y - ROW_H, r2_w4, ROW_H, "Numero Serie | Numero interno", serial_comp, label_fsz=6.2)
+        label_value(r2_x3, y - ROW_H, r2_w3, ROW_H, "Modelo", modelo_comp or head.get("modelo"))
         y -= (ROW_H + ROW_GAP)
 
-        # r3: Motivo | Garantia | Resolucion
-        label_value(inner_x, y - ROW_H, 102 * mm, ROW_H, "Motivo", head.get("motivo"))
+        # r3: Numero Serie | Numero interno (a la izquierda de Motivo) | Motivo | Garantia | Resolucion
+        serial_comp = _compose_serial_internal(head.get("numero_serie"), head.get("numero_interno"))
+        r3_gap = 2 * mm
+        r3_w1 = 62 * mm  # mantener ancho (antes era ~62mm en r2)
+        r3_w3 = 18 * mm  # garantia (Si/No)
+        r3_w4 = 38 * mm  # resolucion
+        r3_w2 = inner_w - (r3_w1 + r3_w3 + r3_w4 + 3 * r3_gap)  # motivo (resto)
+        r3_x1 = inner_x
+        r3_x2 = r3_x1 + r3_w1 + r3_gap
+        r3_x3 = r3_x2 + r3_w2 + r3_gap
+        r3_x4 = r3_x3 + r3_w3 + r3_gap
+
+        label_value(r3_x1, y - ROW_H, r3_w1, ROW_H, "Numero Serie | Numero interno", serial_comp, fsz=6.8, label_fsz=6.2)
+        label_value(r3_x2, y - ROW_H, r3_w2, ROW_H, "Motivo", head.get("motivo"))
         garantia_txt = "Si" if head.get("garantia") else "No"
-        label_value(inner_x + 104 * mm, y - ROW_H, 24 * mm, ROW_H, "Garantia", garantia_txt  )
-        label_value(inner_x + 131 * mm, y - ROW_H, 39 * mm, ROW_H, "Resolucion", resolution_label(head.get("resolucion")))
+        label_value(r3_x3, y - ROW_H, r3_w3, ROW_H, "Garantia", garantia_txt)
+        label_value(r3_x4, y - ROW_H, r3_w4, ROW_H, "Resolucion", resolution_label(head.get("resolucion")))
         y -= (ROW_H + ROW_GAP)
 
         # r4: Accesorios (ancho completo)

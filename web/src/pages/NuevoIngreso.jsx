@@ -19,9 +19,22 @@ import {
   lookupScan,
 } from "@/lib/api";
 
-const Input = (p) => <input {...p} className={`border rounded p-2 w-full ${p.className || ""}`} />;
-const Select = (p) => <select {...p} className={`border rounded p-2 w-full ${p.className || ""}`} />;
-const TextArea = (p) => <textarea {...p} className={`border rounded p-2 w-full ${p.className || ""}`} />;
+const FIELD_BASE_CLASS =
+  "border border-gray-300 bg-white rounded p-2 w-full text-[15px] font-semibold text-gray-900 placeholder:text-gray-400";
+const FIELD_LABEL_CLASS = "block text-xs font-semibold tracking-wide text-gray-600 mb-1";
+const Input = ({ className = "", readOnly = false, ...p }) => (
+  <input
+    {...p}
+    readOnly={readOnly}
+    className={`${FIELD_BASE_CLASS} ${readOnly ? "bg-gray-50 text-gray-700 font-medium" : ""} ${className}`}
+  />
+);
+const Select = ({ className = "", ...p }) => (
+  <select {...p} className={`${FIELD_BASE_CLASS} ${className}`} />
+);
+const TextArea = ({ className = "", ...p }) => (
+  <textarea {...p} className={`${FIELD_BASE_CLASS} ${className}`} />
+);
 
 // clone helper (fallback if structuredClone is missing)
 function clone(obj) {
@@ -107,12 +120,17 @@ export default function NuevoIngreso() {
   const [clientesPerm, setClientesPerm] = useState(true);
   const [garRepLoading, setGarRepLoading] = useState(false);
   const [garRepError, setGarRepError] = useState(false);
+  const [autofillBy, setAutofillBy] = useState("serie");
+  const [lookupRequest, setLookupRequest] = useState({ nonce: 0, source: "serie", code: "" });
   const [mgLookup, setMgLookup] = useState({ loading: false, notFound: false, checkedNs: "" });
-  const [mgAutoFilled, setMgAutoFilled] = useState(false);
+  const [mgInactiveInfo, setMgInactiveInfo] = useState(null);
+  const [nsAutofillInfo, setNsAutofillInfo] = useState("");
+  const [nsAutofillClienteWarning, setNsAutofillClienteWarning] = useState("");
   const mgLookupSeqRef = useRef(0);
-  const mgAutoNsRef = useRef("");
-  const mgValueRef = useRef("");
-  const mgAutoRef = useRef(false);
+  const lookupRequestSeqRef = useRef(0);
+  const nsAutofillSnapshotRef = useRef(null);
+  const nsAutoDesiredBrandRef = useRef(null);
+  const nsAutoDesiredModelRef = useRef(null);
 
   // Helpers de clientes
   const findClienteByRS = (v) =>
@@ -143,6 +161,98 @@ export default function NuevoIngreso() {
       return f;
     });
   }
+
+  const toIntOrNull = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const normalizeCustomerName = (value) =>
+    String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+
+  const isMgOwnerCustomer = (value) => {
+    const key = normalizeCustomerName(value);
+    return key.includes("mgbio");
+  };
+
+  const isInternalLookupReady = (value) => /^(MG|NM|NV|CE)\s*\d{4}$/i.test(String(value || "").trim());
+
+  const clearNsAutofillFields = () => {
+    const snap = nsAutofillSnapshotRef.current;
+    if (!snap) {
+      setNsAutofillInfo("");
+      setNsAutofillClienteWarning("");
+      return;
+    }
+
+    setForm((prev) => {
+      const next = clone(prev);
+      if (snap.auto_ns) {
+        next.equipo.numero_serie = "";
+      }
+      if (snap.auto_mg) {
+        next.equipo.numero_interno = "";
+      }
+      if (snap.auto_marca) {
+        next.equipo.marca_id = "";
+        next.equipo.modelo_id = "";
+      }
+      if (snap.auto_modelo) {
+        next.equipo.modelo_id = "";
+      }
+      if (snap.auto_cliente) {
+        next.cliente.id = null;
+        next.cliente.razon_social = "";
+        next.cliente.cod_empresa = "";
+        next.cliente.telefono = "";
+      }
+      return next;
+    });
+
+    if (snap.auto_marca) {
+      setMarcaId(null);
+      setMarcaTxt("");
+    }
+    if (snap.auto_tipo) setTipoSel("");
+    if (snap.auto_variante) setVarianteTxt("");
+    if (snap.auto_tecnico) setTecnicoId(null);
+    if (snap.auto_cliente) {
+      setClienteRsInput("");
+      setClienteCodInput("");
+      setSelectedCliente(null);
+    }
+    if (snap.auto_propietario) {
+      setPropietario({ nombre: "", contacto: "", doc: "" });
+    }
+
+    nsAutofillSnapshotRef.current = null;
+    nsAutoDesiredBrandRef.current = null;
+    nsAutoDesiredModelRef.current = null;
+    setNsAutofillInfo("");
+    setNsAutofillClienteWarning("");
+  };
+
+  const triggerLookupRequest = (source, rawValue) => {
+    if (source !== autofillBy) return;
+    const code = String(rawValue || "").trim();
+    if (!code) {
+      setMgLookup({ loading: false, notFound: false, checkedNs: "" });
+      setMgInactiveInfo(null);
+      clearNsAutofillFields();
+      return;
+    }
+    if (source === "interno" && !isInternalLookupReady(code)) {
+      setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
+      setMgInactiveInfo(null);
+      return;
+    }
+    const nonce = ++lookupRequestSeqRef.current;
+    setLookupRequest({ nonce, source, code });
+  };
 
   const formatFechaIngreso = (val) => {
     if (!val) return "-";
@@ -185,17 +295,13 @@ export default function NuevoIngreso() {
     setEmpresaFact("SEPID");
     setVarianteTxt("");
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
-    setMgAutoFilled(false);
-    mgAutoNsRef.current = "";
+    setMgInactiveInfo(null);
+    setNsAutofillInfo("");
+    setNsAutofillClienteWarning("");
+    nsAutofillSnapshotRef.current = null;
+    nsAutoDesiredBrandRef.current = null;
+    nsAutoDesiredModelRef.current = null;
   };
-
-  useEffect(() => {
-    mgValueRef.current = form.equipo.numero_interno || "";
-  }, [form.equipo.numero_interno]);
-
-  useEffect(() => {
-    mgAutoRef.current = mgAutoFilled;
-  }, [mgAutoFilled]);
 
   useEffect(() => {
     if (prefillAppliedRef.current) return;
@@ -214,7 +320,7 @@ export default function NuevoIngreso() {
     setForm((f0) => {
       const f = clone(f0);
       if (prefill.numero_serie) f.equipo.numero_serie = prefill.numero_serie;
-      if (prefill.numero_interno) f.equipo.numero_interno = prefill.numero_interno;
+      if (prefill.numero_interno && !prefill.mg_inactivo_venta) f.equipo.numero_interno = prefill.numero_interno;
       if (prefill.marca_id) f.equipo.marca_id = prefill.marca_id;
       if (prefill.model_id) f.equipo.modelo_id = prefill.model_id;
       return f;
@@ -241,6 +347,12 @@ export default function NuevoIngreso() {
     }
     if (prefill.alquilado && prefill.alquiler_a) {
       setNotice(`Equipo alquilado a ${prefill.alquiler_a}. Completa los datos restantes.`);
+    } else if (prefill.mg_inactivo_venta) {
+      setMgInactiveInfo({
+        numero_interno: prefill.numero_interno || "",
+        msg: prefill.mg_context_msg || "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
+      });
+      setNotice(prefill.mg_context_msg || "MG histórico inactivo por venta; no operativo para nuevos ingresos.");
     } else if (prefill.customer_nombre) {
       setNotice("Datos cargados desde lectura de código.");
     } else if (prefill.numero_serie || prefill.numero_interno) {
@@ -275,66 +387,202 @@ export default function NuevoIngreso() {
     syncClienteFromInputs(rsVal, codVal);
     prefillClienteAppliedRef.current = true;
   }, [clientes]);
-
-  // Autocompletar MG por N/S (debounce 400ms)
+  // Lookup manual por N/S o Numero interno (Enter o blur/Tab)
   useEffect(() => {
-    const ns = (form.equipo.numero_serie || "").trim();
-    if (!ns) {
-      setMgLookup({ loading: false, notFound: false, checkedNs: "" });
-      if (mgAutoRef.current && (mgValueRef.current || "").trim()) {
-        setForm((prev) => {
-          const copy = clone(prev);
-          copy.equipo.numero_interno = "";
-          return copy;
-        });
-        setMgAutoFilled(false);
-        mgAutoNsRef.current = "";
-      }
-      return;
-    }
-
-    if (mgAutoRef.current && mgAutoNsRef.current && mgAutoNsRef.current !== ns) {
-      setForm((prev) => {
-        const copy = clone(prev);
-        copy.equipo.numero_interno = "";
-        return copy;
-      });
-      setMgAutoFilled(false);
-      mgAutoNsRef.current = "";
-    }
-
+    if (!lookupRequest?.nonce) return;
+    const lookupByInterno = lookupRequest.source === "interno";
+    const lookupCode = String(lookupRequest.code || "").trim();
+    const lookupLabel = lookupByInterno ? "Numero interno" : "N/S";
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
     const seq = ++mgLookupSeqRef.current;
-    const h = setTimeout(async () => {
-      setMgLookup((s) => ({ ...s, loading: true, notFound: false, checkedNs: ns }));
+    (async () => {
+      setMgLookup((s) => ({ ...s, loading: true, notFound: false, checkedNs: lookupCode }));
       try {
-        const res = await lookupScan(ns);
+        const res = await lookupScan(lookupCode);
         if (mgLookupSeqRef.current !== seq) return;
-        const foundMg = (res?.device?.numero_interno || "").trim();
-        const currentMg = (mgValueRef.current || "").trim();
-        const canAuto = !currentMg || mgAutoRef.current;
-        if (foundMg && canAuto) {
-          setForm((prev) => {
-            const copy = clone(prev);
-            copy.equipo.numero_interno = foundMg;
-            return copy;
+
+        if (res?.kind !== "device" || !res?.device) {
+          clearNsAutofillFields();
+          setMgInactiveInfo(null);
+          setMgLookup({ loading: false, notFound: true, checkedNs: lookupCode });
+          return;
+        }
+
+        const device = res.device || {};
+        const ingreso = res.ingreso || {};
+        const flags = res.flags || {};
+
+        const marcaIdFromDevice = toIntOrNull(device.marca_id);
+        const modelIdFromDevice = toIntOrNull(device.model_id);
+        const nsFromDevice = String(device.numero_serie || "").trim();
+        const tipoFromDevice = String(device.tipo_equipo || "").trim();
+        const varianteFromDevice = String(device.variante || "").trim();
+        const mgFromDevice = String(device.numero_interno || "").trim();
+        const mgInactiveBySale = !!flags.mg_inactivo_venta;
+
+        const alquilerA = String(ingreso.alquiler_a || "").trim();
+        const esPropietarioMg = !!flags.es_propietario_mg;
+        const prevAutoCliente = !!nsAutofillSnapshotRef.current?.auto_cliente;
+
+        const deviceCustomerRs = String(device.customer_nombre || "").trim();
+        const deviceCustomerCod = String(device.customer_cod || "").trim();
+        const deviceCustomerTelefono = String(device.customer_telefono || "").trim();
+        const customerIsMgOwner = isMgOwnerCustomer(deviceCustomerRs);
+        const useAlquilerCliente = esPropietarioMg && customerIsMgOwner;
+
+        const clienteRawRs = useAlquilerCliente ? alquilerA : deviceCustomerRs;
+        const clienteRawCod = useAlquilerCliente ? "" : deviceCustomerCod;
+        const clienteRawTelefono = useAlquilerCliente ? "" : deviceCustomerTelefono;
+
+        const byRs = clienteRawRs ? findClienteByRS(clienteRawRs) : null;
+        const byCod = clienteRawCod ? findClienteByCod(clienteRawCod) : null;
+        let clienteMatch = byCod || byRs || null;
+        if (byRs && byCod && byRs.id !== byCod.id) {
+          clienteMatch = byRs;
+        }
+
+        const shouldAutofillCliente = !!(clienteRawRs || clienteRawCod);
+        const clienteRs = shouldAutofillCliente ? String(clienteMatch?.razon_social || clienteRawRs) : "";
+        const clienteCod = shouldAutofillCliente ? String(clienteMatch?.cod_empresa || clienteRawCod) : "";
+        const clienteTelefono = shouldAutofillCliente
+          ? String(clienteMatch?.telefono || clienteRawTelefono)
+          : "";
+        const clienteWarning = shouldAutofillCliente && !clienteMatch
+          ? useAlquilerCliente
+            ? `El cliente alquilado "${clienteRawRs}" no existe en el catalogo. Seleccionalo manualmente antes de guardar.`
+            : `El cliente dueno "${clienteRawRs || clienteRawCod}" no existe en el catalogo. Seleccionalo manualmente antes de guardar.`
+          : "";
+
+        const propietarioNombre = String(device.propietario_nombre || "").trim();
+        const propietarioContacto = String(device.propietario_contacto || "").trim();
+        const propietarioDoc = String(device.propietario_doc || "").trim();
+
+        const marcaFromCatalog = marcaIdFromDevice
+          ? (marcas || []).find((m) => Number(m.id) === marcaIdFromDevice)
+          : null;
+        const marcaNombre = String(device.marca || marcaFromCatalog?.nombre || "").trim();
+
+        const modelInCurrentList = modelIdFromDevice
+          ? (modelos || []).find((m) => Number(m.id) === modelIdFromDevice)
+          : null;
+        let tecnicoAutoId = toIntOrNull(modelInCurrentList?.tecnico_id);
+        if (!tecnicoAutoId && marcaIdFromDevice) {
+          tecnicoAutoId = toIntOrNull(marcaFromCatalog?.tecnico_id);
+        }
+
+        setForm((prev) => {
+          const next = clone(prev);
+          if (lookupByInterno) {
+            next.equipo.numero_interno = mgFromDevice || lookupCode;
+            next.equipo.numero_serie = nsFromDevice || "";
+          } else {
+            next.equipo.numero_serie = nsFromDevice || lookupCode;
+            next.equipo.numero_interno = mgInactiveBySale ? "" : mgFromDevice;
+          }
+          next.equipo.marca_id = marcaIdFromDevice ? String(marcaIdFromDevice) : "";
+          next.equipo.modelo_id = modelInCurrentList?.id ? String(modelInCurrentList.id) : "";
+          if (shouldAutofillCliente) {
+            next.cliente = {
+              id: clienteMatch?.id || null,
+              razon_social: clienteRs,
+              cod_empresa: clienteCod,
+              telefono: clienteTelefono,
+            };
+          } else if (prevAutoCliente) {
+            next.cliente = { id: null, razon_social: "", cod_empresa: "", telefono: "" };
+          }
+          return next;
+        });
+
+        prefillSkipTipoResetRef.current = true;
+        setTipoSel(tipoFromDevice || "");
+        setMarcaId(marcaIdFromDevice);
+        setMarcaTxt(marcaNombre);
+        setVarianteTxt(varianteFromDevice);
+        setTecnicoId(tecnicoAutoId);
+        setPropietario({
+          nombre: propietarioNombre,
+          contacto: propietarioContacto,
+          doc: propietarioDoc,
+        });
+
+        if (shouldAutofillCliente) {
+          setClienteRsInput(clienteRs);
+          setClienteCodInput(clienteCod);
+          setSelectedCliente(clienteMatch || null);
+        } else if (prevAutoCliente) {
+          setClienteRsInput("");
+          setClienteCodInput("");
+          setSelectedCliente(null);
+        }
+
+        if (mgInactiveBySale) {
+          setMgInactiveInfo({
+            numero_interno: mgFromDevice || (lookupByInterno ? lookupCode : ""),
+            msg: "MG historico inactivo por venta; no operativo para nuevos ingresos.",
           });
-          setMgAutoFilled(true);
-          mgAutoNsRef.current = ns;
-        }
-        if (foundMg) {
-          setMgLookup({ loading: false, notFound: false, checkedNs: ns });
         } else {
-          const showNotFound = !currentMg || mgAutoRef.current;
-          setMgLookup({ loading: false, notFound: showNotFound, checkedNs: ns });
+          setMgInactiveInfo(null);
         }
+
+        nsAutoDesiredBrandRef.current = marcaIdFromDevice;
+        nsAutoDesiredModelRef.current = modelInCurrentList?.id ? null : modelIdFromDevice;
+        nsAutofillSnapshotRef.current = {
+          auto_ns: lookupByInterno && !!nsFromDevice,
+          auto_mg: !lookupByInterno && !mgInactiveBySale && !!mgFromDevice,
+          auto_marca: true,
+          auto_modelo: !!modelIdFromDevice,
+          auto_tipo: true,
+          auto_variante: true,
+          auto_tecnico: true,
+          auto_cliente: shouldAutofillCliente,
+          auto_propietario: true,
+        };
+        const hasAutofillData = !!(
+          marcaIdFromDevice ||
+          modelIdFromDevice ||
+          nsFromDevice ||
+          tipoFromDevice ||
+          varianteFromDevice ||
+          mgFromDevice ||
+          tecnicoAutoId ||
+          shouldAutofillCliente ||
+          propietarioNombre ||
+          propietarioContacto ||
+          propietarioDoc ||
+          mgInactiveBySale
+        );
+        setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Podes editarlos.` : "");
+        setNsAutofillClienteWarning(clienteWarning);
+        setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
       } catch {
         if (mgLookupSeqRef.current !== seq) return;
         setMgLookup((s) => ({ ...s, loading: false }));
       }
-    }, 400);
-    return () => clearTimeout(h);
-  }, [form.equipo.numero_serie]);
+    })();
+  }, [lookupRequest, clientes.length, marcas.length, modelos.length]);
+
+  // Si el modelo llega despues del lookup (carga asincronica), aplicarlo cuando exista en la lista.
+  useEffect(() => {
+    const desiredBrand = nsAutoDesiredBrandRef.current;
+    const desiredModel = nsAutoDesiredModelRef.current;
+    if (!desiredModel) return;
+    if (desiredBrand && Number(marcaId || 0) !== Number(desiredBrand)) return;
+    if (!Array.isArray(modelos) || modelos.length === 0) return;
+
+    const match = modelos.find((m) => Number(m.id) === Number(desiredModel));
+    if (!match) return;
+
+    const modelIdTxt = String(match.id);
+    setForm((prev) => {
+      if (String(prev.equipo.modelo_id || "") === modelIdTxt) return prev;
+      return { ...prev, equipo: { ...prev.equipo, modelo_id: modelIdTxt } };
+    });
+
+    const tecnicoFromModel = toIntOrNull(match?.tecnico_id);
+    if (tecnicoFromModel) setTecnicoId(tecnicoFromModel);
+    nsAutoDesiredModelRef.current = null;
+  }, [modelos, marcaId]);
 
   // Garantía de reparación (por N/S o MG) - debounce 400ms
   useEffect(() => {
@@ -575,10 +823,19 @@ export default function NuevoIngreso() {
   };
 
   const onNumeroInternoChange = (e) => {
-    setMgAutoFilled(false);
-    mgAutoNsRef.current = "";
+    setMgInactiveInfo(null);
     setMgLookup((s) => (s.notFound ? { ...s, notFound: false } : s));
     onChange("equipo.numero_interno")(e);
+  };
+
+  const onLookupFieldBlur = (source) => (e) => {
+    triggerLookupRequest(source, e.currentTarget.value);
+  };
+
+  const onLookupFieldKeyDown = (source) => (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    triggerLookupRequest(source, e.currentTarget.value);
   };
 
   function onMarcaInput(val) {
@@ -666,6 +923,24 @@ export default function NuevoIngreso() {
       return;
     }
 
+    const mgInput = (form.equipo.numero_interno || "").trim();
+    if (mgInput) {
+      try {
+        const scanMg = await lookupScan(mgInput);
+        if (scanMg?.kind === "device" && scanMg?.flags?.mg_inactivo_venta) {
+          setMgInactiveInfo({
+            numero_interno: scanMg?.device?.numero_interno || mgInput,
+            msg: "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
+          });
+          setLoading(false);
+          setErr("MG histórico inactivo por venta; no operativo para nuevos ingresos.");
+          return;
+        }
+      } catch {
+        // Si falla la validación online, backend vuelve a validar en el submit.
+      }
+    }
+
     try {
       const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
       const payload = {
@@ -714,6 +989,14 @@ export default function NuevoIngreso() {
 
       resetFormFields();
     } catch (e2) {
+      if (e2?.data?.conflict_type === "MG_INACTIVO_VENTA") {
+        setMgInactiveInfo({
+          numero_interno: e2?.data?.payload?.numero_interno || mgInput,
+          msg: "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
+        });
+        setErr("MG histórico inactivo por venta; no operativo para nuevos ingresos.");
+        return;
+      }
       setErr(e2?.message || "Error creando ingreso");
     } finally {
       setLoading(false);
@@ -731,7 +1014,7 @@ export default function NuevoIngreso() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto p-4 space-y-4">
+    <div className="max-w-5xl mx-auto lg:mx-0 p-4 space-y-4">
       <h1 className="text-2xl font-bold">Nuevo Ingreso (Orden de Servicio)</h1>
 
       {dupPrompt.open && (
@@ -777,15 +1060,113 @@ export default function NuevoIngreso() {
       )}
 
       <form onSubmit={submit} className="space-y-6">
+        {nsAutofillInfo && (
+          <div className="bg-indigo-50 border border-indigo-200 text-indigo-800 p-2 rounded text-sm">
+            {nsAutofillInfo}
+          </div>
+        )}
+        {nsAutofillClienteWarning && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 p-2 rounded text-sm">
+            {nsAutofillClienteWarning}
+          </div>
+        )}
+
+        {/* Equipo - datos de identificacion y garantias */}
+        <fieldset className="border rounded p-3">
+          <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <h3 className="font-semibold">Equipo - Identificacion</h3>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-700">Autocompletado por:</label>
+              <Select
+                className="w-full md:w-52 text-xs font-medium"
+                value={autofillBy}
+                onChange={(e) => {
+                  const mode = e.target.value === "interno" ? "interno" : "serie";
+                  setAutofillBy(mode);
+                  setMgInactiveInfo(null);
+                  setMgLookup({ loading: false, notFound: false, checkedNs: "" });
+                }}
+              >
+                <option value="serie">Numero de serie</option>
+                <option value="interno">Numero interno</option>
+              </Select>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+            <div className={`md:col-span-7 ${autofillBy === "serie" ? "md:order-1" : "md:order-2"}`}>
+              <label className={FIELD_LABEL_CLASS}>Numero de serie</label>
+              <Input
+                value={form.equipo.numero_serie}
+                onChange={onNumeroSerieChange}
+                onBlur={onLookupFieldBlur("serie")}
+                onKeyDown={onLookupFieldKeyDown("serie")}
+              />
+            </div>
+
+            <div className={`md:col-span-5 ${autofillBy === "serie" ? "md:order-2" : "md:order-1"}`}>
+              <div className="flex items-center justify-between gap-2">
+                <label className={FIELD_LABEL_CLASS}>Numero Interno</label>
+                {mgLookup.notFound && (
+                  <span className="text-xs text-amber-600">
+                    Equipo no encontrado por {autofillBy === "serie" ? "N/S" : "Numero interno"}
+                  </span>
+                )}
+              </div>
+              <Input
+                value={form.equipo.numero_interno}
+                onChange={onNumeroInternoChange}
+                onBlur={onLookupFieldBlur("interno")}
+                onKeyDown={onLookupFieldKeyDown("interno")}
+                placeholder="MG/NM/NV/CE ..."
+              />
+              {autofillBy === "interno" && (form.equipo.numero_interno || "").trim() && !isInternalLookupReady(form.equipo.numero_interno) && (
+                <div className="text-xs text-gray-500 mt-1">
+                  Para autocompletar, ingresa el codigo completo (ej. MG 7293).
+                </div>
+              )}
+              {mgInactiveInfo?.msg && (
+                <div className="text-xs text-amber-700 mt-1">
+                  {mgInactiveInfo.msg}
+                  {mgInactiveInfo?.numero_interno ? ` (${mgInactiveInfo.numero_interno})` : ""}
+                </div>
+              )}
+            </div>
+            <div className="md:col-span-12 md:order-3 text-[11px] text-gray-500 mt-1">
+              {autofillBy === "serie"
+                ? "Para autocompletar por N/S, presiona Enter o Tab."
+                : "Para autocompletar por numero interno, presiona Enter o Tab."}
+            </div>
+
+            <div className="flex items-center gap-2 md:col-span-4 md:order-4">
+              <input id="gar" type="checkbox" checked={form.equipo.garantia} onChange={onChange("equipo.garantia")} />
+              <label htmlFor="gar" className="text-sm font-medium text-gray-800">En Garantia</label>
+            </div>
+            <div className="flex items-center gap-2 md:col-span-4 md:order-5">
+              <input type="checkbox" checked={form.garantia_reparacion} onChange={(e) => setForm((f) => ({ ...f, garantia_reparacion: e.target.checked }))} />
+              <span className="text-sm">Garantia de reparacion</span>
+              {garRepLoading && <span className="text-xs text-gray-500">...</span>}
+              {!garRepLoading && garRepError && <span className="text-xs text-gray-400">No disponible</span>}
+            </div>
+
+            <div className="md:col-span-4 md:order-6 flex items-center gap-2">
+              <input id="etiqok" type="checkbox" checked={!!form.etiq_garantia_ok} onChange={(e) => setForm((f) => ({ ...f, etiq_garantia_ok: !!e.target.checked }))} />
+              <label htmlFor="etiqok" className="text-sm font-medium text-gray-800">Faja de garantia abiertas</label>
+            </div>
+            <div className="md:col-span-12 md:order-7 text-xs text-gray-500 mt-1">
+              Marca si al ingresar el equipo la faja/etiquetas estaban en mal estado.
+            </div>
+          </div>
+        </fieldset>
+
         {/* Cliente */}
         <fieldset className="border rounded p-3">
           <legend className="px-2 font-semibold">Cliente</legend>
           {!clientesPerm && (
             <div className="text-xs text-gray-600 mb-2">No tenés permisos para listar clientes</div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <label className="text-sm">Razón social</label>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+            <div className="md:col-span-6">
+              <label className={FIELD_LABEL_CLASS}>Razón social</label>
               <Input
                 list={clientesPerm ? "clientes_rs" : undefined}
                 value={clienteRsInput}
@@ -804,8 +1185,8 @@ export default function NuevoIngreso() {
                 <div className="text-xs text-red-600 mt-1">Debés seleccionar de la lista</div>
               )}
             </div>
-            <div>
-              <label className="text-sm">Código empresa</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Código empresa</label>
               <Input
                 list={clientesPerm ? "clientes_cod" : undefined}
                 value={clienteCodInput}
@@ -825,8 +1206,8 @@ export default function NuevoIngreso() {
                 <div className="text-xs text-red-600 mt-1">Debés seleccionar de la lista</div>
               )}
             </div>
-            <div>
-              <label className="text-sm">Teléfono</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Teléfono</label>
               <Input value={form.cliente.telefono} readOnly placeholder="-" />
             </div>
           </div>
@@ -840,9 +1221,9 @@ export default function NuevoIngreso() {
         {/* Propietario: requerido si cliente es Particular */}
         <div className="mt-4 border rounded p-3">
           <h3 className="font-semibold mb-2">Propietario</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <label className="text-sm">Nombre</label>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+            <div className="md:col-span-4">
+              <label className={FIELD_LABEL_CLASS}>Nombre</label>
               <Input
                 value={propietario.nombre}
                 onChange={(e) => setPropietario((p) => ({ ...p, nombre: e.target.value }))}
@@ -850,16 +1231,16 @@ export default function NuevoIngreso() {
                 required={selectedCliente?.razon_social?.trim().toLowerCase() === 'particular'}
               />
             </div>
-            <div>
-              <label className="text-sm">Contacto</label>
+            <div className="md:col-span-4">
+              <label className={FIELD_LABEL_CLASS}>Contacto</label>
               <Input
                 value={propietario.contacto}
                 onChange={(e) => setPropietario((p) => ({ ...p, contacto: e.target.value }))}
                 placeholder="Contacto (opcional)"
               />
             </div>
-            <div>
-              <label className="text-sm">CUIT</label>
+            <div className="md:col-span-4">
+              <label className={FIELD_LABEL_CLASS}>CUIT</label>
               <Input
                 value={propietario.doc}
                 onChange={(e) => setPropietario((p) => ({ ...p, doc: e.target.value }))}
@@ -875,8 +1256,8 @@ export default function NuevoIngreso() {
 
         {/* Empresa a facturar */}
         <div className="border rounded p-3">
-          <label className="text-sm">Empresa a facturar</label>
-          <Select value={empresaFact} onChange={(e) => setEmpresaFact((e.target.value || "SEPID").toUpperCase())}>
+          <label className={FIELD_LABEL_CLASS}>Empresa a facturar</label>
+          <Select className="md:max-w-sm" value={empresaFact} onChange={(e) => setEmpresaFact((e.target.value || "SEPID").toUpperCase())}>
             <option value="SEPID">SEPID SA</option>
             <option value="MGBIO">MG BIO</option>
           </Select>
@@ -886,10 +1267,10 @@ export default function NuevoIngreso() {
         {/* Equipo */}
         <fieldset className="border rounded p-3">
           <legend className="px-2 font-semibold">Equipo</legend>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             {/* Tipo de equipo */}
-            <div className="md:col-span-4">
-              <label className="text-sm">Tipo de equipo</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Tipo de equipo</label>
               <Select value={tipoSel} onChange={(e) => setTipoSel(e.target.value || "")}> 
                 <option value="">-- Seleccionar --</option>
                 {(Array.isArray(tiposEquipo) ? tiposEquipo : []).map((t, i) => (
@@ -901,8 +1282,8 @@ export default function NuevoIngreso() {
             </div>
 
             {/* Marca (filtrada por tipo) */}
-            <div className="md:col-span-2">
-              <label className="text-sm">Marca</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Marca</label>
               <Input list="marcas-list" value={marcaTxt} placeholder="Marca" onChange={(e) => onMarcaInput(e.target.value)} />
               <datalist id="marcas-list">
                 {(tipoSel && marcasPorTipo.length ? marcasPorTipo : marcas).map((m) => (
@@ -915,8 +1296,8 @@ export default function NuevoIngreso() {
             </div>
 
             {/* Modelo */}
-            <div className="md:col-span-2">
-              <label className="text-sm">Modelo</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Modelo</label>
               <Select value={form.equipo.modelo_id} onChange={onChange("equipo.modelo_id")} disabled={!marcaId || !modelos.length}>
                 <option value="">{!marcaId ? "Elegí marca primero" : "Seleccioná modelo"}</option>
                 {modelos.map((m) => (
@@ -928,8 +1309,8 @@ export default function NuevoIngreso() {
             </div>
 
             {/* Variante (opcional) */}
-            <div className="md:col-span-4">
-              <label className="text-sm">Variante (opcional)</label>
+            <div className="md:col-span-12 md:order-5">
+              <label className={FIELD_LABEL_CLASS}>Variante (opcional)</label>
               <Input list="variantes_sugeridas" value={varianteTxt} onChange={(e) => setVarianteTxt(e.target.value)} placeholder="Ej: 25, 25T, V30BT, etc." />
               <datalist id="variantes_sugeridas">
                 {(varianteSugeridas || []).map((v, i) => (
@@ -939,8 +1320,8 @@ export default function NuevoIngreso() {
             </div>
 
             {/* Técnico asignado */}
-            <div className="md:col-span-2">
-              <label className="text-sm">Técnico asignado</label>
+            <div className="md:col-span-3 md:order-4">
+              <label className={FIELD_LABEL_CLASS}>Técnico asignado</label>
               <Select value={tecnicoId ?? ""} onChange={(e) => setTecnicoId(e.target.value ? Number(e.target.value) : null)}>
                 <option value="">-- Seleccionar técnico --</option>
                 {(tecnicos || []).map((t) => (
@@ -953,65 +1334,21 @@ export default function NuevoIngreso() {
           </div>
         </fieldset>
 
-        {/* Equipo - datos de identificación y garantías */}
-        <fieldset className="border rounded p-3">
-          <legend className="px-2 font-semibold">Equipo - Identificación</legend>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {/* Número de serie */}
-            <div className="md:col-span-2">
-              <label className="text-sm">Número de serie</label>
-              <Input value={form.equipo.numero_serie} onChange={onNumeroSerieChange} />
-            </div>
-
-            {/* Número interno */}
-            <div className="md:col-span-2">
-              <div className="flex items-center justify-between gap-2">
-                <label className="text-sm">Número Interno</label>
-                {mgLookup.notFound && (
-                  <span className="text-xs text-amber-600">MG no encontrado</span>
-                )}
-              </div>
-              <Input value={form.equipo.numero_interno} onChange={onNumeroInternoChange} placeholder="MG/NM/NV/CE ..." />
-            </div>
-
-            {/* Garantías */}
-            <div className="flex items-center gap-2">
-              <input id="gar" type="checkbox" checked={form.equipo.garantia} onChange={onChange("equipo.garantia")} />
-              <label htmlFor="gar">En Garantía</label>
-            </div>
-            <div className="flex items-center gap-2">
-              <input type="checkbox" checked={form.garantia_reparacion} onChange={(e) => setForm((f) => ({ ...f, garantia_reparacion: e.target.checked }))} />
-              <span className="text-sm">Garantía de reparación</span>
-              {garRepLoading && <span className="text-xs text-gray-500">...</span>}
-              {!garRepLoading && garRepError && <span className="text-xs text-gray-400">No disponible</span>}
-            </div>
-
-            {/* Etiquetas OK */}
-            <div className="md:col-span-2 flex items-center gap-2 mt-2">
-              <input id="etiqok" type="checkbox" checked={!!form.etiq_garantia_ok} onChange={(e) => setForm((f) => ({ ...f, etiq_garantia_ok: !!e.target.checked }))} />
-              <label htmlFor="etiqok" className="text-sm">Faja de garantía abiertas</label>
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              Marcá si al ingresar el equipo la faja/etiquetas estaban en mal estado.
-            </div>
-          </div>
-        </fieldset>
-
         {/* Ingreso */}
         <fieldset className="border rounded p-3">
           <legend className="px-2 font-semibold">Ingreso</legend>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="text-sm">Número de remito</label>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Número de remito</label>
               <Input value={form.remito_ingreso} onChange={onChange("remito_ingreso")} placeholder="Opcional" />
             </div>
-            <div>
-              <label className="text-sm">Fecha de ingreso</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Fecha de ingreso</label>
               <Input type="date" value={form.fecha_ingreso} onChange={onChange("fecha_ingreso")} />
               <div className="text-xs text-gray-500 mt-1">Si se deja vacío, se usa la fecha de hoy.</div>
             </div>
-            <div>
-              <label className="text-sm">Motivo</label>
+            <div className="md:col-span-3">
+              <label className={FIELD_LABEL_CLASS}>Motivo</label>
               <Select value={form.motivo} onChange={onChange("motivo")} required>
                 <option value="">Seleccioná motivo</option>
                 {motivos.map((m) => (
@@ -1022,36 +1359,37 @@ export default function NuevoIngreso() {
               </Select>
               {!form.motivo && <div className="text-xs text-gray-600 mt-1">Seleccioná un motivo</div>}
             </div>
-            <div className="text-sm text-gray-600 self-end">
+            <div className="md:col-span-3 text-sm text-gray-600 self-end">
               Ubicación inicial: <b>Taller</b> (se puede modificar desde la hoja de servicio)
             </div>
-            <div className="md:col-span-2">
-              <label className="text-sm">Informe preliminar</label>
+            <div className="md:col-span-6">
+              <label className={FIELD_LABEL_CLASS}>Informe preliminar</label>
               <TextArea rows={3} value={form.informe_preliminar} onChange={onChange("informe_preliminar")} />
             </div>
-            <div className="md:col-span-2">
-              <label className="text-sm">Comentarios</label>
+            <div className="md:col-span-6">
+              <label className={FIELD_LABEL_CLASS}>Comentarios</label>
               <TextArea rows={3} value={form.comentarios} onChange={onChange("comentarios")} placeholder="Notas internas u observaciones del ingreso" />
             </div>
 
             {/* Accesorios */}
-            <div className="md:col-span-2">
-              <label className="text-sm font-medium">Accesorios</label>
-              <div className="flex flex-wrap items-end gap-3 mb-2">
-                <div className="grow min-w-[260px]">
-                  <label className="block text-sm text-gray-600 mb-1">Descripción</label>
-                  <input className="border rounded p-2 w-full" list="accesorios_catalogo" value={nuevoAcc.descripcion} onChange={(e) => setNuevoAcc((s) => ({ ...s, descripcion: e.target.value }))} placeholder="Escribí y elegí de la lista" />
+            <div className="md:col-span-12">
+              <label className="block text-xs font-semibold tracking-wide text-gray-600 mb-1">Accesorios</label>
+              <div className="grid grid-cols-1 md:grid-cols-12 items-end gap-3 mb-2">
+                <div className="md:col-span-6">
+                  <label className={FIELD_LABEL_CLASS}>Descripción</label>
+                  <Input list="accesorios_catalogo" value={nuevoAcc.descripcion} onChange={(e) => setNuevoAcc((s) => ({ ...s, descripcion: e.target.value }))} placeholder="Escribí y elegí de la lista" />
                   <datalist id="accesorios_catalogo">
                     {(Array.isArray(accesCatalogo) ? accesCatalogo : []).map((a) => (
                       <option key={a.id} value={a.nombre} />
                     ))}
                   </datalist>
                 </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">Número de referencia</label>
+                <div className="md:col-span-4">
+                  <label className={FIELD_LABEL_CLASS}>Número de referencia</label>
                   <Input value={nuevoAcc.referencia} onChange={(e) => setNuevoAcc((s) => ({ ...s, referencia: e.target.value }))} placeholder="Opcional" />
                 </div>
-                <button type="button" className="bg-blue-600 text-white px-3 py-2 rounded" onClick={() => {
+                <div className="md:col-span-2">
+                  <button type="button" className="bg-blue-600 text-white px-3 py-2 rounded w-full" onClick={() => {
                   const d = (nuevoAcc.descripcion || "").trim().toLowerCase();
                   if (!d) return;
                   const acc = (accesCatalogo || []).find((a) => (a.nombre || "").trim().toLowerCase() === d);
@@ -1064,7 +1402,8 @@ export default function NuevoIngreso() {
                     { accesorio_id: acc.id, referencia: (nuevoAcc.referencia || "").trim(), accesorio_nombre: acc.nombre },
                   ]);
                   setNuevoAcc({ descripcion: "", referencia: "" });
-                }}>Agregar</button>
+                  }}>Agregar</button>
+                </div>
               </div>
               {accItems.length > 0 && (
                 <ul className="list-disc pl-5 text-sm text-gray-700">
@@ -1077,7 +1416,7 @@ export default function NuevoIngreso() {
           </div>
         </fieldset>
 
-        <div className="flex gap-3">
+        <div className="flex justify-end gap-3">
           <button
             disabled={loading || !canSubmitCliente || !marcaId || !form.equipo.modelo_id || !form.motivo}
             className={`px-4 py-2 rounded text-white ${
@@ -1093,3 +1432,6 @@ export default function NuevoIngreso() {
     </div>
   );
 }
+
+
+

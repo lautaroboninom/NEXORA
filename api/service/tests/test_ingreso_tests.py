@@ -91,6 +91,7 @@ class IngresoTestsAPITest(TestCase):
                     template_version TEXT NOT NULL,
                     tipo_equipo_snapshot TEXT,
                     payload TEXT NOT NULL,
+                    schema_snapshot TEXT NOT NULL DEFAULT '{}',
                     references_snapshot TEXT NOT NULL,
                     resultado_global TEXT NOT NULL DEFAULT 'pendiente',
                     conclusion TEXT,
@@ -111,6 +112,7 @@ class IngresoTestsAPITest(TestCase):
                     template_version TEXT NOT NULL,
                     tipo_equipo_snapshot TEXT,
                     payload JSONB NOT NULL,
+                    schema_snapshot JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     references_snapshot JSONB NOT NULL,
                     resultado_global TEXT NOT NULL DEFAULT 'pendiente',
                     conclusion TEXT,
@@ -131,6 +133,7 @@ class IngresoTestsAPITest(TestCase):
                     template_version TEXT NOT NULL,
                     tipo_equipo_snapshot TEXT,
                     payload JSON NOT NULL,
+                    schema_snapshot JSON NOT NULL,
                     references_snapshot JSON NOT NULL,
                     resultado_global TEXT NOT NULL DEFAULT 'pendiente',
                     conclusion TEXT,
@@ -228,6 +231,48 @@ class IngresoTestsAPITest(TestCase):
             )
             cls.ingreso_asp_id = cls._last_insert_id(cur)
 
+            cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Fisher & Paykel"])
+            marca_af = cls._last_insert_id(cur)
+            cur.execute(
+                "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
+                [marca_af, "Airvo 2", "ALTO FLUJO"],
+            )
+            model_af = cls._last_insert_id(cur)
+            cur.execute(
+                """
+                INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                [customer_id, marca_af, model_af, "AF-001", "MG 0003", "ALTO FLUJO"],
+            )
+            device_af = cls._last_insert_id(cur)
+            cur.execute(
+                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                [device_af, "diagnosticado", cls.tech_user.id],
+            )
+            cls.ingreso_af_id = cls._last_insert_id(cur)
+
+            cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Covidien"])
+            marca_pb = cls._last_insert_id(cur)
+            cur.execute(
+                "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
+                [marca_pb, "PB 560", "Respirador"],
+            )
+            model_pb = cls._last_insert_id(cur)
+            cur.execute(
+                """
+                INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                [customer_id, marca_pb, model_pb, "PB560-001", "MG 0004", "Respirador"],
+            )
+            device_pb = cls._last_insert_id(cur)
+            cur.execute(
+                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                [device_pb, "diagnosticado", cls.tech_user.id],
+            )
+            cls.ingreso_pb560_id = cls._last_insert_id(cur)
+
     def setUp(self):
         super().setUp()
         self.client = APIClient()
@@ -242,7 +287,8 @@ class IngresoTestsAPITest(TestCase):
         return f"/api/ingresos/{ingreso_id}/test/pdf/"
 
     def test_all_templates_define_at_least_one_reference(self):
-        self.assertEqual(len(test_protocols.BASE_TEMPLATES.keys()), 7)
+        self.assertEqual(len(test_protocols.BASE_TEMPLATES.keys()), 8)
+        self.assertIn("alto_flujo", test_protocols.BASE_TEMPLATES)
         for key, tpl in test_protocols.BASE_TEMPLATES.items():
             refs = tpl.get("references") or []
             self.assertGreaterEqual(len(refs), 1, f"Template {key} must define references")
@@ -270,6 +316,95 @@ class IngresoTestsAPITest(TestCase):
         sections = resp.data.get("schema", {}).get("sections") or []
         keys = [it.get("key") for sec in sections for it in (sec.get("items") or [])]
         self.assertIn("asp_duracion_bateria", keys)
+        self.assertNotIn("asp_alarma_obstruccion", keys)
+
+        seguridad = next((sec for sec in sections if sec.get("id") == "seguridad"), None)
+        self.assertIsNotNone(seguridad)
+        self.assertEqual(seguridad.get("entry_mode"), "result_only")
+
+        performance = next((sec for sec in sections if sec.get("id") == "performance"), None)
+        self.assertIsNotNone(performance)
+        self.assertEqual(performance.get("entry_mode"), "measured_only")
+
+        vacio = next(
+            (it for sec in sections for it in (sec.get("items") or []) if it.get("key") == "asp_vacio_max"),
+            None,
+        )
+        self.assertIsNotNone(vacio)
+        self.assertEqual(vacio.get("target"), ">= 500 mmHg")
+
+        caudal = next(
+            (it for sec in sections for it in (sec.get("items") or []) if it.get("key") == "asp_caudal_libre"),
+            None,
+        )
+        self.assertIsNotNone(caudal)
+        self.assertEqual(caudal.get("target"), ">= 15 L/min")
+
+        battery = next(
+            (it for sec in sections for it in (sec.get("items") or []) if it.get("key") == "asp_duracion_bateria"),
+            None,
+        )
+        self.assertIsNotNone(battery)
+        self.assertEqual(battery.get("target"), "Tensión de batería > 11 V luego de 15 min de prueba continua")
+        self.assertEqual(battery.get("unit"), "V")
+
+    def test_get_returns_alto_flujo_protocol(self):
+        resp = self.client.get(self._url(self.ingreso_af_id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("template_key"), "alto_flujo_v1")
+
+        refs = resp.data.get("schema", {}).get("references") or []
+        self.assertGreaterEqual(len(refs), 1)
+        self.assertTrue(all((r.get("tipo") == "norma") for r in refs))
+
+        sections = resp.data.get("schema", {}).get("sections") or []
+        keys = [it.get("key") for sec in sections for it in (sec.get("items") or [])]
+        self.assertIn("af_flujo_setpoint", keys)
+        self.assertIn("af_fio2_setpoint", keys)
+
+    def test_get_respirador_pb560_returns_ch6_override_protocol(self):
+        resp = self.client.get(self._url(self.ingreso_pb560_id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("template_key"), "respirador_pb560_v1")
+
+        applied = resp.data.get("applied_overrides") or []
+        self.assertIn("covidien_pb560_ch6_performance_verification", applied)
+
+        refs = resp.data.get("schema", {}).get("references") or []
+        ref_ids = [r.get("ref_id") for r in refs]
+        self.assertIn("REF-PB560-CH6", ref_ids)
+
+        sections = resp.data.get("schema", {}).get("sections") or []
+        sec_ids = [s.get("id") for s in sections]
+        self.assertIn("pb560_mediciones", sec_ids)
+        self.assertIn("pb560_calibraciones", sec_ids)
+        self.assertIn("pb560_accuracy", sec_ids)
+        self.assertIn("pb560_alarmas_interfaces", sec_ids)
+
+        mediciones_section = next((s for s in sections if s.get("id") == "pb560_mediciones"), None)
+        self.assertIsNotNone(mediciones_section)
+        self.assertEqual(mediciones_section.get("entry_mode"), "measured_only")
+
+        alarmas_section = next((s for s in sections if s.get("id") == "pb560_alarmas_interfaces"), None)
+        self.assertIsNotNone(alarmas_section)
+        self.assertEqual(alarmas_section.get("entry_mode"), "result_only")
+
+        keys = [it.get("key") for sec in sections for it in (sec.get("items") or [])]
+        self.assertIn("pb560_24v_check", keys)
+        self.assertIn("pb560_adult_press", keys)
+        self.assertNotIn("pb560_o2_ambient", keys)
+        self.assertNotIn("pb560_o2_enriched", keys)
+        self.assertNotIn("pb560_dc_led_on", keys)
+        self.assertNotIn("pb560_battery_led_on", keys)
+        self.assertNotIn("pb560_dc_reentry", keys)
+        self.assertNotIn("pb560_ped_vol", keys)
+        self.assertNotIn("pb560_ped_vol_pts", keys)
+        self.assertNotIn("pb560_ped_press", keys)
+        self.assertNotIn("pb560_ped_press_pts", keys)
+        self.assertNotIn("pb560_fio2_detection", keys)
+        self.assertNotIn("pb560_remote_alarm", keys)
+        self.assertNotIn("pb560_usb_ports", keys)
+        self.assertNotIn("pb560_clear_faults", keys)
 
     def test_patch_persists_references_snapshot_norma_only(self):
         payload = {
@@ -315,6 +450,37 @@ class IngresoTestsAPITest(TestCase):
             self.assertIn("Apto", str(resp.data.get("detail") or ""))
         finally:
             test_protocols.BASE_TEMPLATES["aspirador"]["references"] = original_refs
+
+    def test_schema_snapshot_freezes_sections_after_first_save(self):
+        first_get = self.client.get(self._url(self.ingreso_cpap_id))
+        self.assertEqual(first_get.status_code, 200)
+        first_sections = first_get.data.get("schema", {}).get("sections") or []
+        self.assertTrue(first_sections and first_sections[0].get("items"))
+        original_label = first_sections[0]["items"][0].get("label")
+        self.assertTrue(original_label)
+
+        save_resp = self.client.patch(
+            self._url(self.ingreso_cpap_id),
+            {
+                "values": {
+                    "cpap_presion_setpoint": {"measured": "10", "result": "ok", "observaciones": ""}
+                },
+                "resultado_global": "pendiente",
+            },
+            format="json",
+        )
+        self.assertEqual(save_resp.status_code, 200)
+
+        original_sections = copy.deepcopy(test_protocols.BASE_TEMPLATES["cpap_autocpap"]["sections"])
+        try:
+            test_protocols.BASE_TEMPLATES["cpap_autocpap"]["sections"][0]["items"][0]["label"] = "CAMBIO GLOBAL"
+            after_get = self.client.get(self._url(self.ingreso_cpap_id))
+            self.assertEqual(after_get.status_code, 200)
+            after_sections = after_get.data.get("schema", {}).get("sections") or []
+            self.assertTrue(after_sections and after_sections[0].get("items"))
+            self.assertEqual(after_sections[0]["items"][0].get("label"), original_label)
+        finally:
+            test_protocols.BASE_TEMPLATES["cpap_autocpap"]["sections"] = original_sections
 
     def test_pdf_uses_references_snapshot(self):
         # First persist a regular row.

@@ -70,48 +70,115 @@ class Command(BaseCommand):
             self.stdout.write("No hay destinatarios activos con rol jefe.")
             return
 
-        rows = q(
-            """
-            WITH plans AS (
-              SELECT
-                p.id AS plan_id,
-                p.scope_type::text AS scope_type,
-                p.device_id,
-                p.customer_id,
-                p.periodicidad_valor,
-                p.periodicidad_unidad::text AS periodicidad_unidad,
-                p.aviso_anticipacion_dias,
-                p.ultima_revision_fecha,
-                p.proxima_revision_fecha,
-                COALESCE(cdev.razon_social, ccust.razon_social, '') AS cliente,
-                COALESCE(d.numero_interno,'') AS numero_interno,
-                COALESCE(d.numero_serie,'') AS numero_serie,
-                COALESCE(b.nombre,'') AS marca,
-                COALESCE(m.nombre,'') AS modelo
-              FROM preventivo_planes p
-              LEFT JOIN devices d ON d.id = p.device_id
-              LEFT JOIN customers cdev ON cdev.id = d.customer_id
-              LEFT JOIN customers ccust ON ccust.id = p.customer_id
-              LEFT JOIN marcas b ON b.id = d.marca_id
-              LEFT JOIN models m ON m.id = d.model_id
-              WHERE p.activa = true
-                AND p.proxima_revision_fecha IS NOT NULL
-            )
-            SELECT
-              plans.*,
-              CASE
-                WHEN CURRENT_DATE > plans.proxima_revision_fecha THEN 'vencido'
-                WHEN (CURRENT_DATE + (COALESCE(plans.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= plans.proxima_revision_fecha THEN 'proximo'
-                ELSE 'al_dia'
-              END AS preventivo_estado,
-              (plans.proxima_revision_fecha - CURRENT_DATE) AS dias_restantes
-            FROM plans
-            WHERE
-              CURRENT_DATE > plans.proxima_revision_fecha
-              OR (CURRENT_DATE + (COALESCE(plans.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= plans.proxima_revision_fecha
-            ORDER BY plans.proxima_revision_fecha ASC, plans.plan_id ASC
-            """
-        ) or []
+        has_repuestos = True
+        try:
+            q("SELECT 1 FROM preventivo_plan_repuestos LIMIT 1")
+        except Exception:
+            has_repuestos = False
+
+        if has_repuestos:
+            rows = q(
+                """
+                WITH plans AS (
+                  SELECT
+                    p.id AS plan_id,
+                    p.scope_type::text AS scope_type,
+                    p.device_id,
+                    p.customer_id,
+                    p.periodicidad_valor,
+                    p.periodicidad_unidad::text AS periodicidad_unidad,
+                    COALESCE(prn.repuesto_aviso_anticipacion_dias, p.aviso_anticipacion_dias) AS aviso_anticipacion_dias,
+                    COALESCE(prn.repuesto_ultima_revision_fecha, p.ultima_revision_fecha) AS ultima_revision_fecha,
+                    COALESCE(prn.repuesto_proxima_revision_fecha, p.proxima_revision_fecha) AS proxima_revision_fecha,
+                    COALESCE(prn.repuesto_nombre, '') AS repuesto_proximo_nombre,
+                    COALESCE(cdev.razon_social, ccust.razon_social, '') AS cliente,
+                    COALESCE(d.numero_interno,'') AS numero_interno,
+                    COALESCE(d.numero_serie,'') AS numero_serie,
+                    COALESCE(b.nombre,'') AS marca,
+                    COALESCE(m.nombre,'') AS modelo
+                  FROM preventivo_planes p
+                  LEFT JOIN devices d ON d.id = p.device_id
+                  LEFT JOIN customers cdev ON cdev.id = d.customer_id
+                  LEFT JOIN customers ccust ON ccust.id = p.customer_id
+                  LEFT JOIN marcas b ON b.id = d.marca_id
+                  LEFT JOIN models m ON m.id = d.model_id
+                  LEFT JOIN LATERAL (
+                    SELECT
+                      COALESCE(pr.nombre_repuesto,'') AS repuesto_nombre,
+                      pr.aviso_anticipacion_dias AS repuesto_aviso_anticipacion_dias,
+                      pr.ultima_revision_fecha AS repuesto_ultima_revision_fecha,
+                      pr.proxima_revision_fecha AS repuesto_proxima_revision_fecha
+                    FROM preventivo_plan_repuestos pr
+                    WHERE pr.plan_id = p.id
+                      AND pr.activa = true
+                    ORDER BY
+                      CASE WHEN pr.proxima_revision_fecha IS NULL THEN 1 ELSE 0 END,
+                      pr.proxima_revision_fecha ASC,
+                      pr.id ASC
+                    LIMIT 1
+                  ) prn ON TRUE
+                  WHERE p.activa = true
+                    AND COALESCE(prn.repuesto_proxima_revision_fecha, p.proxima_revision_fecha) IS NOT NULL
+                )
+                SELECT
+                  plans.*,
+                  CASE
+                    WHEN CURRENT_DATE > plans.proxima_revision_fecha THEN 'vencido'
+                    WHEN (CURRENT_DATE + (COALESCE(plans.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= plans.proxima_revision_fecha THEN 'proximo'
+                    ELSE 'al_dia'
+                  END AS preventivo_estado,
+                  (plans.proxima_revision_fecha - CURRENT_DATE) AS dias_restantes
+                FROM plans
+                WHERE
+                  CURRENT_DATE > plans.proxima_revision_fecha
+                  OR (CURRENT_DATE + (COALESCE(plans.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= plans.proxima_revision_fecha
+                ORDER BY plans.proxima_revision_fecha ASC, plans.plan_id ASC
+                """
+            ) or []
+        else:
+            rows = q(
+                """
+                WITH plans AS (
+                  SELECT
+                    p.id AS plan_id,
+                    p.scope_type::text AS scope_type,
+                    p.device_id,
+                    p.customer_id,
+                    p.periodicidad_valor,
+                    p.periodicidad_unidad::text AS periodicidad_unidad,
+                    p.aviso_anticipacion_dias,
+                    p.ultima_revision_fecha,
+                    p.proxima_revision_fecha,
+                    ''::text AS repuesto_proximo_nombre,
+                    COALESCE(cdev.razon_social, ccust.razon_social, '') AS cliente,
+                    COALESCE(d.numero_interno,'') AS numero_interno,
+                    COALESCE(d.numero_serie,'') AS numero_serie,
+                    COALESCE(b.nombre,'') AS marca,
+                    COALESCE(m.nombre,'') AS modelo
+                  FROM preventivo_planes p
+                  LEFT JOIN devices d ON d.id = p.device_id
+                  LEFT JOIN customers cdev ON cdev.id = d.customer_id
+                  LEFT JOIN customers ccust ON ccust.id = p.customer_id
+                  LEFT JOIN marcas b ON b.id = d.marca_id
+                  LEFT JOIN models m ON m.id = d.model_id
+                  WHERE p.activa = true
+                    AND p.proxima_revision_fecha IS NOT NULL
+                )
+                SELECT
+                  plans.*,
+                  CASE
+                    WHEN CURRENT_DATE > plans.proxima_revision_fecha THEN 'vencido'
+                    WHEN (CURRENT_DATE + (COALESCE(plans.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= plans.proxima_revision_fecha THEN 'proximo'
+                    ELSE 'al_dia'
+                  END AS preventivo_estado,
+                  (plans.proxima_revision_fecha - CURRENT_DATE) AS dias_restantes
+                FROM plans
+                WHERE
+                  CURRENT_DATE > plans.proxima_revision_fecha
+                  OR (CURRENT_DATE + (COALESCE(plans.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= plans.proxima_revision_fecha
+                ORDER BY plans.proxima_revision_fecha ASC, plans.plan_id ASC
+                """
+            ) or []
 
         if not rows:
             self.stdout.write("No hay preventivos para alertar.")
@@ -133,6 +200,7 @@ class Command(BaseCommand):
                 return (
                     f"- Plan #{r.get('plan_id')} | Cliente: {r.get('cliente') or '-'} | "
                     f"Equipo: {equipo} | Serie: {ns} | Proxima: {r.get('proxima_revision_fecha')} | "
+                    f"Repuesto: {(r.get('repuesto_proximo_nombre') or '-') } | "
                     f"Dias: {r.get('dias_restantes')}"
                 )
             return (

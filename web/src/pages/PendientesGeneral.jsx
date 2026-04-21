@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion, catalogEquipmentLabel, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion, catalogEquipmentLabel, nsPreferInternoOf, isMotivoCotizacionEquipo } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
 import useQueryState from "../hooks/useQueryState";
 
@@ -136,6 +136,7 @@ export default function PendientesGeneral() {
               {filteredAndSorted.map((row) => {
                 const urgente = isUrgente(row);
                 const devuelto = !!row?.derivado_devuelto;
+                const esCotizacion = isMotivoCotizacionEquipo(row?.motivo);
                 const estadoTxt = String(row?.estado || "").toLowerCase();
                 const presupuestoTxt = String(row?.presupuesto_estado || "").toLowerCase();
                 const showPresupuestoEstado = !(presupuestoTxt === "pendiente" && estadoTxt !== "diagnosticado");
@@ -169,6 +170,11 @@ export default function PendientesGeneral() {
                       {urgente && (
                         <span className="ml-2 inline-block px-2 py-0.5 text-[10px] rounded bg-red-100 text-red-700 align-middle">
                           URGENTE
+                        </span>
+                      )}
+                      {esCotizacion && (
+                        <span className="ml-2 inline-block px-2 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800 align-middle">
+                          COTIZACIÓN EQUIPO
                         </span>
                       )}
                     </td>

@@ -1,4 +1,5 @@
 import os
+import unicodedata
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import connection, transaction
@@ -15,6 +16,7 @@ from ..serializers import (
     QuoteDetailSerializer,
 )
 from .helpers import (
+    _motivo_is_cotizacion_equipo,
     q,
     exec_void,
     exec_returning,
@@ -85,6 +87,188 @@ def _send_stock_min_alerts(items: list[dict]):
     send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", None), recipients, fail_silently=True)
 
 
+def _has_catalogo_repuestos_estado_column() -> bool:
+    try:
+        if connection.vendor == "sqlite":
+            with connection.cursor() as cur:
+                cur.execute("PRAGMA table_info('catalogo_repuestos')")
+                cols = {str(row[1]).lower() for row in cur.fetchall()}
+            return "estado" in cols
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='catalogo_repuestos'
+                   AND column_name='estado'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+        else:
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_schema = DATABASE()
+                   AND table_name='catalogo_repuestos'
+                   AND column_name='estado'
+                 LIMIT 1
+                """,
+                one=True,
+            )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _ingresos_has_permite_reparacion_col() -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='ingresos'
+                   AND column_name='permite_reparacion'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name='ingresos'
+               AND column_name='permite_reparacion'
+             LIMIT 1
+            """,
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _normalize_assoc_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return " ".join(text.split())
+
+
+def _build_ingreso_equipo_assoc_label(ingreso_id: int) -> str | None:
+    try:
+        row = q(
+            """
+            SELECT
+              COALESCE(b.nombre,'') AS marca,
+              COALESCE(m.nombre,'') AS modelo,
+              COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS variante
+            FROM ingresos t
+            JOIN devices d ON d.id = t.device_id
+            LEFT JOIN marcas b ON b.id = d.marca_id
+            LEFT JOIN models m ON m.id = d.model_id
+            WHERE t.id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        ) or {}
+    except Exception:
+        return None
+
+    marca = (row.get("marca") or "").strip()
+    modelo = (row.get("modelo") or "").strip()
+    variante = (row.get("variante") or "").strip()
+    if not marca or not modelo:
+        return None
+    if variante:
+        return f"{marca} | {modelo} | {variante}"
+    return f"{marca} | {modelo}"
+
+
+def _get_quote_repuesto_ids_for_assoc(quote_id: int) -> list[int]:
+    rows = q(
+        """
+        SELECT DISTINCT
+          COALESCE(
+            qi.repuesto_id,
+            (
+              SELECT cr.id
+              FROM catalogo_repuestos cr
+              WHERE UPPER(cr.codigo)=UPPER(qi.repuesto_codigo)
+                AND cr.activo
+              ORDER BY cr.id
+              LIMIT 1
+            )
+          ) AS repuesto_id
+        FROM quote_items qi
+        WHERE qi.quote_id=%s
+          AND qi.tipo='repuesto'
+        """,
+        [quote_id],
+    ) or []
+    out: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        rep_id = row.get("repuesto_id")
+        try:
+            rep_id_i = int(rep_id)
+        except (TypeError, ValueError):
+            continue
+        if rep_id_i <= 0 or rep_id_i in seen:
+            continue
+        seen.add(rep_id_i)
+        out.append(rep_id_i)
+    return out
+
+
+def _append_equipo_assoc_to_repuesto(repuesto_id: int, equipo_label: str) -> bool:
+    if not _has_catalogo_repuestos_estado_column():
+        return False
+    target = (equipo_label or "").strip()
+    if not target:
+        return False
+
+    lock_clause = "" if connection.vendor == "sqlite" else "FOR UPDATE"
+    row = q(
+        f"""
+        SELECT id, COALESCE(estado, '') AS estado
+        FROM catalogo_repuestos
+        WHERE id=%s
+        {lock_clause}
+        """,
+        [repuesto_id],
+        one=True,
+    )
+    if not row:
+        return False
+
+    lines = [str(line).strip() for line in str(row.get("estado") or "").splitlines() if str(line).strip()]
+    target_key = _normalize_assoc_key(target)
+    existing_keys = {_normalize_assoc_key(line) for line in lines}
+    if target_key in existing_keys:
+        return False
+
+    lines.append(target)
+    exec_void(
+        "UPDATE catalogo_repuestos SET estado=%s WHERE id=%s",
+        ["\n".join(lines), repuesto_id],
+    )
+    return True
+
+
+def _sync_quote_repuestos_equipo_assoc(ingreso_id: int, quote_id: int):
+    equipo_label = _build_ingreso_equipo_assoc_label(ingreso_id)
+    if not equipo_label:
+        return
+    for repuesto_id in _get_quote_repuesto_ids_for_assoc(quote_id):
+        _append_equipo_assoc_to_repuesto(repuesto_id, equipo_label)
+
+
 def _resolve_repuesto_data(repuesto_id, repuesto_codigo):
     rep_id = None
     rep_codigo = None
@@ -95,13 +279,21 @@ def _resolve_repuesto_data(repuesto_id, repuesto_codigo):
     row = None
     if repuesto_id:
         row = q(
-            "SELECT id, codigo, nombre, costo_usd, multiplicador, precio_venta FROM catalogo_repuestos WHERE id=%s AND activo",
+            """
+            SELECT id, codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, precio_venta
+            FROM catalogo_repuestos
+            WHERE id=%s AND activo
+            """,
             [repuesto_id],
             one=True,
         )
     if not row and repuesto_codigo:
         row = q(
-            "SELECT id, codigo, nombre, costo_usd, multiplicador, precio_venta FROM catalogo_repuestos WHERE UPPER(codigo)=UPPER(%s) AND activo",
+            """
+            SELECT id, codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, precio_venta
+            FROM catalogo_repuestos
+            WHERE UPPER(codigo)=UPPER(%s) AND activo
+            """,
             [repuesto_codigo],
             one=True,
         )
@@ -111,12 +303,20 @@ def _resolve_repuesto_data(repuesto_id, repuesto_codigo):
         rep_codigo = row.get("codigo")
         rep_nombre = row.get("nombre")
         cfg = get_repuestos_config()
-        rep_costo = calc_costo_ars(row.get("costo_usd"), cfg.get("dolar_ars"))
+        rep_costo = calc_costo_ars(
+            row.get("costo_usd"),
+            cfg.get("dolar_ars"),
+            costo_moneda=row.get("costo_moneda"),
+            costo_neto=row.get("costo_neto"),
+        )
         rep_precio = calc_precio_venta(
             row.get("costo_usd"),
             cfg.get("dolar_ars"),
             cfg.get("multiplicador_general"),
             row.get("multiplicador"),
+            costo_moneda=row.get("costo_moneda"),
+            costo_neto=row.get("costo_neto"),
+            costo_ars=rep_costo,
         )
         if rep_precio is None:
             rep_precio = row.get("precio_venta")
@@ -510,22 +710,24 @@ class EmitirPresupuestoView(APIView):
         garantia_txt = _clean_text_or_default(request.data.get("garantia_txt"), DEFAULT_GARANTIA_TXT)
         mant_oferta_txt = _clean_text_or_default(request.data.get("mant_oferta_txt"), DEFAULT_MANT_OFERTA_TXT)
         qid = _ensure_quote(ingreso_id)
-        _set_audit_user(request)
-        exec_void(
-            """
-            UPDATE quotes
-               SET estado='presupuestado',
-                   autorizado_por=%s,
-                   forma_pago=%s,
-                   plazo_entrega_txt=%s,
-                   garantia_txt=%s,
-                   mant_oferta_txt=%s,
-                   fecha_emitido=now()
-             WHERE id=%s
-            """,
-            [autorizado_por, forma_pago, plazo_entrega_txt, garantia_txt, mant_oferta_txt, qid],
-        )
-        exec_void("UPDATE ingresos SET presupuesto_estado='presupuestado' WHERE id=%s", [ingreso_id])
+        with transaction.atomic():
+            _set_audit_user(request)
+            exec_void(
+                """
+                UPDATE quotes
+                   SET estado='presupuestado',
+                       autorizado_por=%s,
+                       forma_pago=%s,
+                       plazo_entrega_txt=%s,
+                       garantia_txt=%s,
+                       mant_oferta_txt=%s,
+                       fecha_emitido=now()
+                 WHERE id=%s
+                """,
+                [autorizado_por, forma_pago, plazo_entrega_txt, garantia_txt, mant_oferta_txt, qid],
+            )
+            exec_void("UPDATE ingresos SET presupuesto_estado='presupuestado' WHERE id=%s", [ingreso_id])
+            _sync_quote_repuestos_equipo_assoc(ingreso_id, qid)
 
         fname, pdf = render_quote_pdf(ingreso_id)
         try:
@@ -578,19 +780,48 @@ class AprobarPresupuestoView(APIView):
                 """,
                 [qid],
             )
-            exec_void(
-                """
-                UPDATE ingresos
-                   SET presupuesto_estado='aprobado',
-                       estado = CASE
-                                  WHEN estado IN ('ingresado','diagnosticado','presupuestado')
-                                  THEN 'reparar'
-                                  ELSE estado
-                                END
+            has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+            permite_reparacion_sql = (
+                "COALESCE(permite_reparacion, TRUE) AS permite_reparacion"
+                if has_permite_reparacion
+                else "TRUE AS permite_reparacion"
+            )
+            ingreso_row = q(
+                f"""
+                SELECT estado, motivo, {permite_reparacion_sql}
+                  FROM ingresos
                  WHERE id=%s
+                 FOR UPDATE
                 """,
                 [ingreso_id],
+                one=True,
+            ) or {}
+            bloqueada_por_cotizacion = _motivo_is_cotizacion_equipo(ingreso_row.get("motivo")) and not bool(
+                ingreso_row.get("permite_reparacion")
             )
+            if bloqueada_por_cotizacion:
+                exec_void(
+                    """
+                    UPDATE ingresos
+                       SET presupuesto_estado='aprobado'
+                     WHERE id=%s
+                    """,
+                    [ingreso_id],
+                )
+            else:
+                exec_void(
+                    """
+                    UPDATE ingresos
+                       SET presupuesto_estado='aprobado',
+                           estado = CASE
+                                      WHEN estado IN ('ingresado','diagnosticado','presupuestado')
+                                      THEN 'reparar'
+                                      ELSE estado
+                                    END
+                     WHERE id=%s
+                    """,
+                    [ingreso_id],
+                )
 
             if not was_approved:
                 items = q(
@@ -724,29 +955,120 @@ class AnularPresupuestoView(APIView):
 
     def post(self, request, ingreso_id: int):
         require_roles_strict(request, ["jefe", "admin"])
-        row = q("SELECT presupuesto_estado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
-        if not row:
-            raise ValidationError("Ingreso no encontrado")
-        if (row.get("presupuesto_estado") or "").strip() != "presupuestado":
-            raise ValidationError("Solo se puede anular cuando el presupuesto está 'presupuestado'.")
+        with transaction.atomic():
+            row = q(
+                """
+                SELECT estado, presupuesto_estado
+                FROM ingresos
+                WHERE id=%s
+                FOR UPDATE
+                """,
+                [ingreso_id],
+                one=True,
+            )
+            if not row:
+                raise ValidationError("Ingreso no encontrado")
 
-        qid = _ensure_quote(ingreso_id)
-        exec_void(
-            """
-            UPDATE quotes
-               SET estado='pendiente',
-                   fecha_emitido=NULL,
-                   fecha_aprobado=NULL,
-                   pdf_url=NULL
-             WHERE id=%s
-            """,
-            [qid],
-        )
-        exec_void("UPDATE ingresos SET presupuesto_estado='pendiente' WHERE id=%s", [ingreso_id])
+            estado_ingreso = (row.get("estado") or "").strip()
+            presu_estado = (row.get("presupuesto_estado") or "").strip()
+            if presu_estado not in ("presupuestado", "aprobado"):
+                raise ValidationError("Solo se puede anular cuando el presupuesto esta 'presupuestado' o 'aprobado'.")
+            if presu_estado == "aprobado" and estado_ingreso in ("entregado", "alquilado", "baja"):
+                raise ValidationError("No se puede anular un presupuesto aprobado en estado entregado, alquilado o baja.")
+
+            qid = _ensure_quote(ingreso_id)
+            q("SELECT id FROM quotes WHERE id=%s FOR UPDATE", [qid], one=True)
+            _set_audit_user(request)
+
+            if presu_estado == "aprobado":
+                items = q(
+                    """
+                    SELECT repuesto_id, SUM(qty) AS qty
+                    FROM quote_items
+                    WHERE quote_id=%s
+                      AND tipo='repuesto'
+                      AND repuesto_id IS NOT NULL
+                    GROUP BY repuesto_id
+                    """,
+                    [qid],
+                ) or []
+                for it in items:
+                    rep_id = it.get("repuesto_id")
+                    if not rep_id:
+                        continue
+                    qty = money(it.get("qty") or 0)
+                    if qty == 0:
+                        continue
+
+                    rep_row = q(
+                        """
+                        SELECT id, stock_on_hand
+                        FROM catalogo_repuestos
+                        WHERE id=%s
+                        FOR UPDATE
+                        """,
+                        [rep_id],
+                        one=True,
+                    )
+                    if not rep_row:
+                        continue
+
+                    stock_prev = money(rep_row.get("stock_on_hand") or 0)
+                    delta = money(qty)
+                    stock_new = money(stock_prev + delta)
+
+                    exec_void(
+                        "UPDATE catalogo_repuestos SET stock_on_hand=%s, updated_at=NOW() WHERE id=%s",
+                        [stock_new, rep_id],
+                    )
+                    exec_void(
+                        """
+                        INSERT INTO repuestos_movimientos
+                          (repuesto_id, tipo, qty, stock_prev, stock_new, ref_tipo, ref_id, created_by)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        [
+                            rep_id,
+                            "ingreso_anulacion_aprobado",
+                            delta,
+                            stock_prev,
+                            stock_new,
+                            "quote",
+                            qid,
+                            getattr(request.user, "id", None),
+                        ],
+                    )
+
+            exec_void(
+                """
+                UPDATE quotes
+                   SET estado='pendiente',
+                       fecha_emitido=NULL,
+                       fecha_aprobado=NULL,
+                       pdf_url=NULL
+                 WHERE id=%s
+                """,
+                [qid],
+            )
+            if presu_estado == "aprobado":
+                exec_void(
+                    """
+                    UPDATE ingresos
+                       SET presupuesto_estado='pendiente',
+                           estado=CASE
+                                    WHEN estado='reparar' THEN 'diagnosticado'
+                                    ELSE estado
+                                  END
+                     WHERE id=%s
+                    """,
+                    [ingreso_id],
+                )
+            else:
+                exec_void("UPDATE ingresos SET presupuesto_estado='pendiente' WHERE id=%s", [ingreso_id])
+
         data = _load_quote_payload(ingreso_id)
         data = _mask_costs(data, _can_view_costs(request.user))
         return Response(QuoteDetailSerializer(data).data)
-
 
 class NoAplicaPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -822,3 +1144,4 @@ __all__ = [
     'NoAplicaPresupuestoView',
     'QuitarNoAplicaPresupuestoView',
 ]
+

@@ -1,10 +1,12 @@
 import re
 
+from django.db import connection
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import q, require_roles, _set_audit_user
+from .mg_state import resolve_mg_flags
 
 
 def _parse_ingreso_id(raw: str):
@@ -60,7 +62,37 @@ def _fetch_ingreso_summary(ingreso_id: int):
     )
 
 
-def _fetch_device_by_code(raw: str):
+def _has_mg_schema() -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='devices'
+                   AND column_name='mg_estado'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name='devices'
+               AND column_name='mg_estado'
+             LIMIT 1
+            """,
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _fetch_device_by_code(raw: str, mg_select_sql: str):
     raw = (raw or "").strip()
     if not raw:
         return None, None
@@ -103,7 +135,8 @@ def _fetch_device_by_code(raw: str):
           COALESCE(d.propietario_contacto, '') AS propietario_contacto,
           COALESCE(d.propietario_doc, '') AS propietario_doc,
           COALESCE(d.alquilado, false) AS alquilado,
-          COALESCE(d.alquiler_a, '') AS alquiler_a
+          COALESCE(d.alquiler_a, '') AS alquiler_a,
+          {mg_select_sql}
         FROM devices d
         LEFT JOIN customers c ON c.id = d.customer_id
         LEFT JOIN marcas b ON b.id = d.marca_id
@@ -175,7 +208,29 @@ class ScanLookupView(APIView):
                     "detail": "Ingreso no encontrado",
                 })
 
-        device, ns_key = _fetch_device_by_code(code)
+        has_mg_schema = _has_mg_schema()
+        if has_mg_schema:
+            mg_select_sql = """
+              COALESCE(d.mg_estado, 'activo') AS mg_estado,
+              d.mg_inactivo_desde AS mg_inactivo_desde,
+              d.mg_venta_fecha AS mg_venta_fecha,
+              COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
+              COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
+              COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
+              d.mg_venta_usuario_id AS mg_venta_usuario_id
+            """
+        else:
+            mg_select_sql = """
+              'activo' AS mg_estado,
+              NULL AS mg_inactivo_desde,
+              NULL AS mg_venta_fecha,
+              '' AS mg_venta_factura_numero,
+              '' AS mg_venta_remito_numero,
+              '' AS mg_venta_observaciones,
+              NULL AS mg_venta_usuario_id
+            """
+
+        device, ns_key = _fetch_device_by_code(code, mg_select_sql)
         if not device:
             return Response({
                 "kind": "none",
@@ -193,12 +248,7 @@ class ScanLookupView(APIView):
             one=True,
         )
         mg_owner_id = mg_owner["id"] if mg_owner else None
-        raw_id = (device.get("numero_interno") or device.get("numero_serie") or "").strip()
-        es_propietario_mg = bool(re.match(r"^(MG|NM|NV|CE)\s*\d{1,4}$", raw_id, re.IGNORECASE))
-        vendido = False
-        if es_propietario_mg and not device.get("alquilado") and device.get("customer_id"):
-            if mg_owner_id is None or int(device["customer_id"]) != int(mg_owner_id):
-                vendido = True
+        flags = resolve_mg_flags(device, mg_owner_id)
 
         return Response({
             "kind": "device",
@@ -208,10 +258,7 @@ class ScanLookupView(APIView):
             "normalized_key": ns_key,
             "device": device,
             "ingreso": last_ingreso,
-            "flags": {
-                "es_propietario_mg": bool(es_propietario_mg),
-                "vendido": bool(vendido),
-            },
+            "flags": flags,
         })
 
 

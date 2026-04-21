@@ -2,8 +2,13 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import api from "../lib/api";
 import Footer from "../components/Footer.jsx";
+
+function normalizeApiBase(rawValue) {
+  const value = String(rawValue || "").trim().replace(/\/+$/, "");
+  if (!value) return "";
+  return value.endsWith("/api") ? value.slice(0, -4) : value;
+}
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -24,7 +29,7 @@ export default function Login() {
   useEffect(() => {
     (async () => {
       try {
-        const base = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+        const base = normalizeApiBase(import.meta.env.VITE_API_URL);
         const pingUrl = `${base}/api/ping/`;
         const res = await fetch(pingUrl, {
           method: "GET",
@@ -49,7 +54,7 @@ export default function Login() {
     } catch (e) {
       const msg = e?.message || "Credenciales invalidas";
       if (!backendOk) {
-        setErr("Backend no disponible en /api. Verifica que la API dev este levantada (http://localhost:18100).");
+        setErr("Backend no disponible en /api. Verifica que la API este levantada y accesible.");
       } else {
         setErr(msg);
       }

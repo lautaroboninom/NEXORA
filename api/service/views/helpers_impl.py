@@ -339,6 +339,7 @@ def _get_motivo_enum_values() -> list:
         "baja alquiler",
         "reparacion alquiler",
         "devolucion demo",
+        "cotizacion de equipo",
         "otros",
     ]
 
@@ -398,6 +399,12 @@ def _map_motivo_to_db_label(user_value: str):
     k_user1 = user_value.strip().lower()
     k_user2 = _norm_txt(user_value)
     return by_key.get(k_user1) or by_key.get(k_user2)
+
+
+def _motivo_is_cotizacion_equipo(value: str) -> bool:
+    key = _norm_txt(value or "")
+    target = _norm_txt("cotización de equipo")
+    return key == target
 
 
 def _fetchall_dicts(cur):
@@ -721,7 +728,7 @@ __all__ = [
     # text/encoding
     '_fix_text_value','_fix_row','_norm_txt',
     # motivo
-    '_get_motivo_enum_values','_get_motivo_enum_values_raw','_map_motivo_to_db_label','_fetchall_dicts',
+    '_get_motivo_enum_values','_get_motivo_enum_values_raw','_map_motivo_to_db_label','_motivo_is_cotizacion_equipo','_fetchall_dicts',
     # roles
     'require_roles','require_roles_strict','require_jefe','_rol','_is','_in',
     # misc

@@ -1,7 +1,7 @@
--- schema/postgres.sql
+﻿-- schema/postgres.sql
 -- Esquema consolidado para PostgreSQL (12+)
--- Unifica DDL, índices, vistas y triggers necesarios para la app.
--- Objetivo: base “prolija” y mínima sin parches adicionales.
+-- Unifica DDL, Ã­ndices, vistas y triggers necesarios para la app.
+-- Objetivo: base â€œprolijaâ€ y mÃ­nima sin parches adicionales.
 
 SET TIME ZONE 'America/Argentina/Buenos_Aires';
 CREATE EXTENSION IF NOT EXISTS citext;
@@ -17,7 +17,7 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'motivo_ingreso') THEN
     CREATE TYPE motivo_ingreso AS ENUM (
-      'reparación','service preventivo','baja alquiler','reparación alquiler','urgente control','devolución demo','otros'
+      'reparaciÃ³n','service preventivo','baja alquiler','reparaciÃ³n alquiler','urgente control','devolución demo','cotización de equipo','otros'
     );
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'disposicion_type') THEN
@@ -69,9 +69,17 @@ RETURNS TRIGGER AS $$
 DECLARE
   v_cur_estado ticket_state;
   v_new_estado quote_estado;
+  v_permite_reparacion BOOLEAN := TRUE;
+  v_motivo TEXT := '';
 BEGIN
   v_new_estado := NEW.estado;
-  SELECT estado INTO v_cur_estado FROM ingresos WHERE id = NEW.ingreso_id;
+  SELECT
+    estado,
+    COALESCE(permite_reparacion, TRUE),
+    COALESCE(CAST(motivo AS TEXT), '')
+  INTO v_cur_estado, v_permite_reparacion, v_motivo
+  FROM ingresos
+  WHERE id = NEW.ingreso_id;
   UPDATE ingresos
      SET presupuesto_estado = (
             CASE v_new_estado
@@ -85,7 +93,13 @@ BEGIN
          ),
          estado = (
             CASE
-              WHEN v_new_estado = 'aprobado' AND v_cur_estado IN ('ingresado','diagnosticado','presupuestado') THEN 'reparar'::ticket_state
+              WHEN v_new_estado = 'aprobado'
+                   AND v_cur_estado IN ('ingresado','diagnosticado','presupuestado')
+                   AND NOT (
+                     LOWER(v_motivo) IN ('cotización de equipo', 'cotizacion de equipo')
+                     AND NOT COALESCE(v_permite_reparacion, TRUE)
+                   )
+              THEN 'reparar'::ticket_state
               ELSE v_cur_estado
             END
          )
@@ -157,11 +171,11 @@ CREATE TABLE IF NOT EXISTS locations (
   nombre  TEXT NOT NULL UNIQUE
 );
 
--- Seed mínimo indispensable
+-- Seed mÃ­nimo indispensable
 INSERT INTO locations(nombre) VALUES
   ('Taller'),
   ('Sarmiento'),
-  ('Estantería de Alquiler'),
+  ('EstanterÃ­a de Alquiler'),
   ('-')
 ON CONFLICT DO NOTHING;
 
@@ -191,6 +205,13 @@ CREATE TABLE IF NOT EXISTS devices (
   model_id         INTEGER  NULL REFERENCES models(id) ON DELETE SET NULL,
   numero_serie     TEXT,
   numero_interno   TEXT,    -- MG|NM|NV|CE #### (normalizado)
+  mg_estado        TEXT NOT NULL DEFAULT 'activo' CHECK (mg_estado IN ('activo','inactivo_venta')),
+  mg_inactivo_desde TIMESTAMPTZ,
+  mg_venta_fecha   TIMESTAMPTZ,
+  mg_venta_factura_numero TEXT,
+  mg_venta_remito_numero TEXT,
+  mg_venta_observaciones TEXT,
+  mg_venta_usuario_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   tipo_equipo      TEXT,
   variante         TEXT,
   garantia_vence   DATE,
@@ -199,18 +220,18 @@ CREATE TABLE IF NOT EXISTS devices (
   propietario_nombre   TEXT,
   propietario_contacto TEXT,
   propietario_doc      TEXT,
-  n_de_control     TEXT,    -- N° faja garantía (snapshot del último ingreso)
+  n_de_control     TEXT,    -- NÂ° faja garantÃ­a (snapshot del Ãºltimo ingreso)
   alquilado        BOOLEAN NOT NULL DEFAULT FALSE,
   alquiler_a       TEXT
 );
 
--- Índices funcionales y unicidad (normalizados)
--- Unicidad por número de serie normalizado (UPPER, sin espacios ni guiones)
+-- Ãndices funcionales y unicidad (normalizados)
+-- Unicidad por nÃºmero de serie normalizado (UPPER, sin espacios ni guiones)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_norm
   ON devices ((UPPER(REPLACE(REPLACE(numero_serie, ' ', ''), '-', ''))))
   WHERE NULLIF(TRIM(numero_serie), '') IS NOT NULL;
 
--- Unicidad por número interno normalizado a 'XX ####' (MG|NM|NV|CE)
+-- Unicidad por nÃºmero interno normalizado a 'XX ####' (MG|NM|NV|CE)
 DO $$
 BEGIN
   BEGIN
@@ -232,6 +253,7 @@ CREATE TABLE IF NOT EXISTS ingresos (
   device_id            INTEGER NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
   estado               ticket_state NOT NULL DEFAULT 'ingresado',
   motivo               motivo_ingreso NOT NULL,
+  permite_reparacion   BOOLEAN NOT NULL DEFAULT TRUE,
   fecha_ingreso        TIMESTAMPTZ NULL,
   fecha_creacion       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   fecha_servicio       TIMESTAMPTZ NULL,
@@ -268,6 +290,13 @@ CREATE TABLE IF NOT EXISTS ingresos (
 
 -- Compat de schema para bases legacy (evita parches manuales fase 1/2)
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_estado TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_inactivo_desde TIMESTAMPTZ;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_fecha TIMESTAMPTZ;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_factura_numero TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_remito_numero TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_observaciones TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_usuario_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS tipo_equipo TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS variante TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS garantia_vence DATE;
@@ -275,12 +304,51 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS ubicacion_id INTEGER NULL REFERENCE
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS propietario_nombre TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS propietario_contacto TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS propietario_doc TEXT;
+UPDATE devices SET mg_estado = 'activo' WHERE mg_estado IS NULL OR TRIM(mg_estado) = '';
+UPDATE devices SET mg_estado = 'activo' WHERE mg_estado NOT IN ('activo','inactivo_venta');
+ALTER TABLE devices ALTER COLUMN mg_estado SET DEFAULT 'activo';
+ALTER TABLE devices ALTER COLUMN mg_estado SET NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'chk_devices_mg_estado'
+       AND conrelid = 'devices'::regclass
+  ) THEN
+    ALTER TABLE devices
+      ADD CONSTRAINT chk_devices_mg_estado
+      CHECK (mg_estado IN ('activo','inactivo_venta'));
+  END IF;
+END
+$$;
 
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS etiq_garantia_ok BOOLEAN;
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS garantia_fabrica BOOLEAN;
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS propietario_nombre TEXT;
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS propietario_contacto TEXT;
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS propietario_doc TEXT;
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS permite_reparacion BOOLEAN NOT NULL DEFAULT TRUE;
+UPDATE ingresos
+   SET permite_reparacion = FALSE
+ WHERE LOWER(CAST(motivo AS TEXT)) IN ('cotización de equipo', 'cotizacion de equipo');
+
+CREATE TABLE IF NOT EXISTS device_mg_events (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  accion TEXT NOT NULL CHECK (accion IN ('venta', 'reactivacion')),
+  numero_interno_snapshot TEXT,
+  fecha_evento TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  factura_numero TEXT,
+  remito_numero TEXT,
+  observaciones TEXT,
+  usuario_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  ingreso_id INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL,
+  source TEXT NOT NULL DEFAULT 'equipos' CHECK (source IN ('equipos', 'service_sheet'))
+);
+CREATE INDEX IF NOT EXISTS idx_device_mg_events_device_fecha_desc
+  ON device_mg_events (device_id, fecha_evento DESC);
+CREATE INDEX IF NOT EXISTS idx_device_mg_events_fecha_desc
+  ON device_mg_events (fecha_evento DESC);
 
 -- Backfill minimo para bases antiguas
 WITH cand AS (
@@ -448,7 +516,7 @@ BEGIN
   END IF;
 END $$;
 
--- Reglas de garantía (excepciones administrables) - Parte 2 editará, Parte 1 solo lectura
+-- Reglas de garantÃ­a (excepciones administrables) - Parte 2 editarÃ¡, Parte 1 solo lectura
 CREATE TABLE IF NOT EXISTS warranty_rules (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   brand_id      INTEGER NULL REFERENCES marcas(id) ON DELETE SET NULL,
@@ -467,7 +535,7 @@ CREATE INDEX IF NOT EXISTS idx_wr_model ON warranty_rules(model_id);
 CREATE INDEX IF NOT EXISTS idx_wr_activo ON warranty_rules(activo);
 
 -- =============================
--- Sincronización snapshot devices <- último ingreso
+-- SincronizaciÃ³n snapshot devices <- Ãºltimo ingreso
 -- =============================
 CREATE OR REPLACE FUNCTION sync_device_snapshot()
 RETURNS TRIGGER AS $$
@@ -486,7 +554,7 @@ DECLARE
 BEGIN
   v_device_id := COALESCE(NEW.device_id, OLD.device_id);
 
-  -- Último ingreso del equipo afectado
+  -- Ãšltimo ingreso del equipo afectado
   SELECT t.id, t.alquilado, t.alquiler_a, t.propietario_nombre, t.propietario_contacto, t.propietario_doc, t.faja_garantia, t.ubicacion_id
     INTO v_last_id, v_alquilado, v_alquiler_a, v_propietario_nombre, v_propietario_contacto, v_propietario_doc, v_faja, v_ubic_id
     FROM ingresos t
@@ -494,13 +562,13 @@ BEGIN
    ORDER BY COALESCE(t.fecha_ingreso, t.fecha_creacion) DESC, t.id DESC
    LIMIT 1;
 
-  -- Determinar si es equipo propio por patrón del número de serie
+  -- Determinar si es equipo propio por patrÃ³n del nÃºmero de serie
   SELECT (CASE WHEN d.numero_serie ~* '^(MG|NM|NV)\s*\d{1,4}$' THEN TRUE ELSE FALSE END)
     INTO v_is_own
     FROM devices d
    WHERE d.id = v_device_id;
 
-  -- Buscar id de MGBIO si aplica (heurístico por nombre)
+  -- Buscar id de MGBIO si aplica (heurÃ­stico por nombre)
   IF v_is_own THEN
     SELECT id INTO v_mgbio_id FROM customers
      WHERE LOWER(razon_social) LIKE '%mg%bio%'
@@ -608,7 +676,7 @@ CREATE TABLE IF NOT EXISTS ingreso_media (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Solicitudes de asignación de técnico (simple, una fila por solicitud)
+-- Solicitudes de asignaciÃ³n de tÃ©cnico (simple, una fila por solicitud)
 CREATE TABLE IF NOT EXISTS ingreso_tests (
   id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id           INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -616,6 +684,7 @@ CREATE TABLE IF NOT EXISTS ingreso_tests (
   template_version     TEXT NOT NULL,
   tipo_equipo_snapshot TEXT,
   payload              JSONB NOT NULL DEFAULT '{}'::jsonb,
+  schema_snapshot      JSONB NOT NULL DEFAULT '{}'::jsonb,
   references_snapshot  JSONB NOT NULL DEFAULT '[]'::jsonb,
   resultado_global     TEXT NOT NULL DEFAULT 'pendiente',
   conclusion           TEXT,
@@ -630,6 +699,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ingreso_tests_ingreso ON ingreso_tests(ingr
 CREATE INDEX IF NOT EXISTS ix_ingreso_tests_template_key ON ingreso_tests(template_key);
 CREATE INDEX IF NOT EXISTS ix_ingreso_tests_updated_at ON ingreso_tests(updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS test_protocol_templates (
+  id           INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  type_key     TEXT NOT NULL,
+  template_key TEXT NOT NULL,
+  active       BOOLEAN NOT NULL DEFAULT TRUE,
+  doc          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by   INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  updated_by   INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_test_protocol_templates_type_key ON test_protocol_templates(type_key);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_test_protocol_templates_template_key ON test_protocol_templates(template_key);
+CREATE INDEX IF NOT EXISTS ix_test_protocol_templates_active ON test_protocol_templates(active);
+CREATE INDEX IF NOT EXISTS ix_test_protocol_templates_updated_at ON test_protocol_templates(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS ingreso_assignment_requests (
   id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id  INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -640,6 +725,19 @@ CREATE TABLE IF NOT EXISTS ingreso_assignment_requests (
   canceled_at TIMESTAMPTZ NULL
 );
 CREATE INDEX IF NOT EXISTS ix_iars_ingreso_created ON ingreso_assignment_requests(ingreso_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ingreso_baja_requests (
+  id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ingreso_id  INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  usuario_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  motivo      TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  accepted_at TIMESTAMPTZ NULL,
+  canceled_at TIMESTAMPTZ NULL
+);
+CREATE INDEX IF NOT EXISTS ix_ibr_ingreso_created ON ingreso_baja_requests(ingreso_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_ibr_ingreso_pending ON ingreso_baja_requests(ingreso_id) WHERE accepted_at IS NULL AND canceled_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ibr_ingreso_pending ON ingreso_baja_requests(ingreso_id) WHERE accepted_at IS NULL AND canceled_at IS NULL;
 
 -- Alertas por presupuestos pendientes (uno por ingreso; guarda ultimo envio)
 CREATE TABLE IF NOT EXISTS ingreso_presupuesto_alerts (
@@ -740,7 +838,7 @@ CREATE INDEX IF NOT EXISTS ix_audit_change_log_ts ON audit.change_log(ts DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_change_log_ingreso ON audit.change_log(ingreso_id, ts DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_change_log_table ON audit.change_log(table_name, record_id, ts DESC);
 
--- Función genérica de auditoría por fila (INSERT/UPDATE/DELETE)
+-- FunciÃ³n genÃ©rica de auditorÃ­a por fila (INSERT/UPDATE/DELETE)
 CREATE OR REPLACE FUNCTION audit.log_row_change()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -816,7 +914,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Accesorios (catálogo y vínculo con ingreso)
+-- Accesorios (catÃ¡logo y vÃ­nculo con ingreso)
 CREATE TABLE IF NOT EXISTS catalogo_accesorios (
   id      INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre  TEXT NOT NULL,
@@ -831,6 +929,7 @@ CREATE TABLE IF NOT EXISTS catalogo_repuestos (
   nombre       TEXT NOT NULL,
   costo_neto   NUMERIC(12,2) NOT NULL DEFAULT 0,
   costo_usd    NUMERIC(12,2) NULL,
+  costo_moneda VARCHAR(3) NOT NULL DEFAULT 'USD',
   precio_venta NUMERIC(12,2) NULL,
   multiplicador NUMERIC(10,4) NULL,
   stock_on_hand NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -844,6 +943,7 @@ CREATE TABLE IF NOT EXISTS catalogo_repuestos (
 
 -- Compat con schemas previos de repuestos
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS costo_usd NUMERIC(12,2);
+ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS costo_moneda VARCHAR(3);
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS precio_venta NUMERIC(12,2);
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS multiplicador NUMERIC(10,4);
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS stock_on_hand NUMERIC(12,2) NOT NULL DEFAULT 0;
@@ -859,6 +959,39 @@ ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS notas TEXT;
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS fecha_ultima_compra DATE;
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS fecha_ultimo_conteo DATE;
 ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS fecha_vencimiento DATE;
+UPDATE catalogo_repuestos
+   SET costo_moneda = CASE
+        WHEN costo_usd IS NOT NULL THEN 'USD'
+        WHEN costo_usd IS NULL AND COALESCE(costo_neto, 0) > 0 THEN 'ARS'
+        ELSE 'USD'
+      END
+ WHERE costo_moneda IS NULL OR TRIM(costo_moneda) = '';
+UPDATE catalogo_repuestos
+   SET costo_moneda = UPPER(TRIM(costo_moneda))
+ WHERE costo_moneda IS NOT NULL;
+UPDATE catalogo_repuestos
+   SET costo_moneda = CASE
+        WHEN costo_usd IS NOT NULL THEN 'USD'
+        WHEN COALESCE(costo_neto, 0) > 0 THEN 'ARS'
+        ELSE 'USD'
+      END
+ WHERE costo_moneda NOT IN ('USD', 'ARS');
+ALTER TABLE catalogo_repuestos ALTER COLUMN costo_moneda SET DEFAULT 'USD';
+ALTER TABLE catalogo_repuestos ALTER COLUMN costo_moneda SET NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'chk_catalogo_repuestos_costo_moneda'
+       AND conrelid = 'catalogo_repuestos'::regclass
+  ) THEN
+    ALTER TABLE catalogo_repuestos
+      ADD CONSTRAINT chk_catalogo_repuestos_costo_moneda
+      CHECK (costo_moneda IN ('USD', 'ARS'));
+  END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS repuestos_subrubros (
   codigo TEXT PRIMARY KEY,
@@ -1008,7 +1141,7 @@ CREATE TABLE IF NOT EXISTS ingreso_accesorios (
   descripcion   TEXT NULL
 );
 
--- Accesorios asociados específicamente a alquileres de equipos
+-- Accesorios asociados especÃ­ficamente a alquileres de equipos
 CREATE TABLE IF NOT EXISTS ingreso_alquiler_accesorios (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id    INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -1018,7 +1151,7 @@ CREATE TABLE IF NOT EXISTS ingreso_alquiler_accesorios (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Catálogo general de tipos de equipo
+-- CatÃ¡logo general de tipos de equipo
 CREATE TABLE IF NOT EXISTS catalogo_tipos_equipo (
   id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre     VARCHAR(160) NOT NULL UNIQUE,
@@ -1027,7 +1160,7 @@ CREATE TABLE IF NOT EXISTS catalogo_tipos_equipo (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Catálogo por marca/tipo/serie/variante (jerárquico) y mapeo de models
+-- CatÃ¡logo por marca/tipo/serie/variante (jerÃ¡rquico) y mapeo de models
 CREATE TABLE IF NOT EXISTS marca_tipos_equipo (
   id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   marca_id   INTEGER NOT NULL REFERENCES marcas(id) ON DELETE CASCADE,
@@ -1167,7 +1300,7 @@ CREATE TABLE IF NOT EXISTS preventivo_revision_items (
 );
 
 -- =============================
--- Índices
+-- Ãndices
 -- =============================
 CREATE INDEX IF NOT EXISTS idx_models_marca ON models(marca_id);
 CREATE INDEX IF NOT EXISTS idx_models_tecnico ON models(tecnico_id);
@@ -1238,7 +1371,7 @@ CREATE INDEX IF NOT EXISTS idx_mh_tipo   ON model_hierarchy(tipo_id);
 CREATE INDEX IF NOT EXISTS idx_mh_serie  ON model_hierarchy(serie_id);
 CREATE INDEX IF NOT EXISTS idx_mh_var    ON model_hierarchy(variante_id);
 
--- Unicidad case-insensitive (nombres) mediante índices únicos funcionales
+-- Unicidad case-insensitive (nombres) mediante Ã­ndices Ãºnicos funcionales
 CREATE UNIQUE INDEX IF NOT EXISTS uq_marcas_nombre_ci ON marcas ((LOWER(nombre)));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_models_marca_nombre_ci ON models (marca_id, (LOWER(nombre)));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_accesorios_nombre_ci ON catalogo_accesorios ((LOWER(nombre)));
@@ -1316,7 +1449,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Activar triggers de auditoría por fila (si no existen)
+-- Activar triggers de auditorÃ­a por fila (si no existen)
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_ingresos') THEN
     CREATE TRIGGER trg_audit_ingresos
@@ -1389,4 +1522,5 @@ DO $$ BEGIN
     FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
   END IF;
 END $$;
+
 

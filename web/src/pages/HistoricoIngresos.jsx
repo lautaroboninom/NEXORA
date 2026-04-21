@@ -1,6 +1,6 @@
 // web/src/pages/HistoricoIngresos.jsx
 import { useEffect, useRef, useState } from "react";
-import { getHistoricoIngresos } from "../lib/api";
+import { getHistoricoIngresos, downloadAuth } from "../lib/api";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, resolveFechaIngreso } from "../lib/ui-helpers";
 import useQueryState from "../hooks/useQueryState";
@@ -13,7 +13,8 @@ export default function HistoricoIngresos() {
   const [page, setPage] = useState(1);
   const [hasNext, setHasNext] = useState(false);
   const [err, setErr] = useState("");
-  const [q, setQ] = useQueryState("q", "", { debounceMs: 0 });
+  const [exporting, setExporting] = useState(false);
+  const [q, setQ] = useQueryState("q", "");
   const [qDebounced, setQDebounced] = useState(q);
   const [osFilter, setOsFilter] = useQueryState("os", "");
   const [clienteFilter, setClienteFilter] = useQueryState("cliente", "");
@@ -105,6 +106,31 @@ export default function HistoricoIngresos() {
   };
 
   const qEffective = (qDebounced || "").trim();
+  const buildFilterParams = ({ includePaging = false, pageValue = 1 } = {}) => {
+    const params = new URLSearchParams();
+    if (delivered === "1") params.set("delivered", "1");
+    if (osFilter) params.set("os", osFilter);
+    if (clienteFilter) params.set("cliente", clienteFilter);
+    if (tipoFilter) params.set("tipo_equipo", tipoFilter);
+    if (marcaFilter) params.set("marca", marcaFilter);
+    if (modeloFilter) params.set("modelo", modeloFilter);
+    if (varianteFilter) params.set("variante", varianteFilter);
+    if (estadoFilter) params.set("estado_q", estadoFilter);
+    if (serieFilter) params.set("numero_serie", serieFilter);
+    if (mgFilter) params.set("numero_interno", mgFilter);
+    if (fechaIngresoFrom) params.set("fecha_ingreso_from", fechaIngresoFrom);
+    if (fechaIngresoTo) params.set("fecha_ingreso_to", fechaIngresoTo);
+    if (fechaLiberacionFrom) params.set("fecha_liberacion_from", fechaLiberacionFrom);
+    if (fechaLiberacionTo) params.set("fecha_liberacion_to", fechaLiberacionTo);
+    if (fechaEntregaFromEffective) params.set("fecha_entrega_from", fechaEntregaFromEffective);
+    if (fechaEntregaToEffective) params.set("fecha_entrega_to", fechaEntregaToEffective);
+    if (qEffective) params.set("q", qEffective);
+    if (includePaging) {
+      params.set("page", String(pageValue));
+      params.set("page_size", String(pageSize));
+    }
+    return params;
+  };
 
   async function loadPage(p = 1, { reset = false } = {}) {
     try {
@@ -117,26 +143,7 @@ export default function HistoricoIngresos() {
       isFirst ? setLoading(true) : setLoadingMore(true);
       setErr("");
 
-      const params = new URLSearchParams();
-      if (delivered === "1") params.set("delivered", "1");
-      if (osFilter) params.set("os", osFilter);
-      if (clienteFilter) params.set("cliente", clienteFilter);
-      if (tipoFilter) params.set("tipo_equipo", tipoFilter);
-      if (marcaFilter) params.set("marca", marcaFilter);
-      if (modeloFilter) params.set("modelo", modeloFilter);
-      if (varianteFilter) params.set("variante", varianteFilter);
-      if (estadoFilter) params.set("estado_q", estadoFilter);
-      if (serieFilter) params.set("numero_serie", serieFilter);
-      if (mgFilter) params.set("numero_interno", mgFilter);
-      if (fechaIngresoFrom) params.set("fecha_ingreso_from", fechaIngresoFrom);
-      if (fechaIngresoTo) params.set("fecha_ingreso_to", fechaIngresoTo);
-      if (fechaLiberacionFrom) params.set("fecha_liberacion_from", fechaLiberacionFrom);
-      if (fechaLiberacionTo) params.set("fecha_liberacion_to", fechaLiberacionTo);
-      if (fechaEntregaFromEffective) params.set("fecha_entrega_from", fechaEntregaFromEffective);
-      if (fechaEntregaToEffective) params.set("fecha_entrega_to", fechaEntregaToEffective);
-      if (qEffective) params.set("q", qEffective);
-      params.set("page", String(p));
-      params.set("page_size", String(pageSize));
+      const params = buildFilterParams({ includePaging: true, pageValue: p });
 
       const res = await getHistoricoIngresos(Object.fromEntries(params.entries()));
       const pageItems = Array.isArray(res) ? (res || []) : (res.items || []);
@@ -151,6 +158,23 @@ export default function HistoricoIngresos() {
     } finally {
       setLoading(false);
       setLoadingMore(false);
+    }
+  }
+
+  async function exportFiltered() {
+    try {
+      setExporting(true);
+      setErr("");
+      const params = buildFilterParams({ includePaging: false });
+      const qs = params.toString();
+      await downloadAuth(
+        `/api/ingresos/historico/export/${qs ? `?${qs}` : ""}`,
+        "historico_ingresos.xlsx"
+      );
+    } catch (e) {
+      setErr(e?.message || "No se pudo exportar el Excel del historico");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -236,6 +260,15 @@ export default function HistoricoIngresos() {
           aria-busy={loading ? "true" : "false"}
         >
           Recargar
+        </button>
+        <button
+          className="btn"
+          onClick={exportFiltered}
+          title="Exportar resultados filtrados"
+          disabled={loading || exporting}
+          aria-busy={exporting ? "true" : "false"}
+        >
+          {exporting ? "Exportando..." : "Exportar filtrados"}
         </button>
       </div>
 

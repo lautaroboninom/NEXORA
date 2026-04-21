@@ -77,6 +77,7 @@ class Command(BaseCommand):
                       nombre       TEXT NOT NULL,
                       costo_neto   NUMERIC(12,2) NOT NULL DEFAULT 0,
                       costo_usd    NUMERIC(12,2) NULL,
+                      costo_moneda VARCHAR(3) NOT NULL DEFAULT 'USD',
                       precio_venta NUMERIC(12,2) NULL,
                       multiplicador NUMERIC(10,4) NULL,
                       stock_on_hand NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -90,6 +91,7 @@ class Command(BaseCommand):
                     """
                 )
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS costo_usd NUMERIC(12,2)")
+                cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS costo_moneda VARCHAR(3)")
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS precio_venta NUMERIC(12,2)")
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS multiplicador NUMERIC(10,4)")
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS stock_on_hand NUMERIC(12,2) NOT NULL DEFAULT 0")
@@ -105,6 +107,55 @@ class Command(BaseCommand):
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS fecha_ultima_compra DATE")
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS fecha_ultimo_conteo DATE")
                 cur.execute("ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS fecha_vencimiento DATE")
+                cur.execute(
+                    """
+                    UPDATE catalogo_repuestos
+                       SET costo_moneda = CASE
+                            WHEN costo_usd IS NOT NULL THEN 'USD'
+                            WHEN costo_usd IS NULL AND COALESCE(costo_neto, 0) > 0 THEN 'ARS'
+                            ELSE 'USD'
+                          END
+                     WHERE costo_moneda IS NULL OR TRIM(costo_moneda) = ''
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE catalogo_repuestos
+                       SET costo_moneda = UPPER(TRIM(costo_moneda))
+                     WHERE costo_moneda IS NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE catalogo_repuestos
+                       SET costo_moneda = CASE
+                            WHEN costo_usd IS NOT NULL THEN 'USD'
+                            WHEN COALESCE(costo_neto, 0) > 0 THEN 'ARS'
+                            ELSE 'USD'
+                          END
+                     WHERE costo_moneda NOT IN ('USD', 'ARS')
+                    """
+                )
+                cur.execute("ALTER TABLE catalogo_repuestos ALTER COLUMN costo_moneda SET DEFAULT 'USD'")
+                cur.execute("ALTER TABLE catalogo_repuestos ALTER COLUMN costo_moneda SET NOT NULL")
+                cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1
+                          FROM pg_constraint
+                         WHERE conname = 'chk_catalogo_repuestos_costo_moneda'
+                           AND conrelid = 'catalogo_repuestos'::regclass
+                      ) THEN
+                        ALTER TABLE catalogo_repuestos
+                          ADD CONSTRAINT chk_catalogo_repuestos_costo_moneda
+                          CHECK (costo_moneda IN ('USD', 'ARS'));
+                      END IF;
+                    END
+                    $$;
+                    """
+                )
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_catalogo_repuestos_codigo_ci ON catalogo_repuestos ((LOWER(codigo)))"
                 )

@@ -10,6 +10,9 @@ from django.db import connection
 from django.utils import timezone
 
 
+COST_CURRENCIES = {"USD", "ARS"}
+
+
 def _is_header_unificados(code: str, name: str, proveedor_raw) -> bool:
     h = f"{code} {name}".strip().lower()
     if not h:
@@ -241,7 +244,23 @@ def get_repuestos_config() -> Dict:
     return {"id": row[0], "dolar_ars": row[1], "multiplicador_general": row[2]}
 
 
-def calc_costo_ars(costo_usd, dolar_ars):
+def normalize_costo_moneda(value) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in ("ARS", "$", "PESOS", "PESO"):
+        return "ARS"
+    if raw in ("USD", "U$D", "US$", "DOLAR", "DOLARES", "DÓLAR", "DÓLARES"):
+        return "USD"
+    return "USD"
+
+
+def calc_costo_ars(costo_usd, dolar_ars, costo_moneda="USD", costo_neto=None):
+    moneda = normalize_costo_moneda(costo_moneda)
+    if moneda == "ARS":
+        costo_ars = _to_decimal(costo_neto if costo_neto is not None else costo_usd)
+        if costo_ars is None:
+            return None
+        return costo_ars.quantize(Decimal("0.01"))
+
     costo = _to_decimal(costo_usd)
     dolar = _to_decimal(dolar_ars)
     if costo is None or dolar is None:
@@ -249,17 +268,66 @@ def calc_costo_ars(costo_usd, dolar_ars):
     return (costo * dolar).quantize(Decimal("0.01"))
 
 
-def calc_precio_venta(costo_usd, dolar_ars, multiplicador_general, multiplicador_individual):
-    costo = _to_decimal(costo_usd)
-    dolar = _to_decimal(dolar_ars)
+def calc_precio_venta(
+    costo_usd,
+    dolar_ars=None,
+    multiplicador_general=None,
+    multiplicador_individual=None,
+    costo_moneda="USD",
+    costo_neto=None,
+    costo_ars=None,
+):
+    costo_ars_val = _to_decimal(costo_ars)
+    if costo_ars_val is None:
+        costo_ars_val = calc_costo_ars(
+            costo_usd,
+            dolar_ars,
+            costo_moneda=costo_moneda,
+            costo_neto=costo_neto,
+        )
     mult_gen = _to_decimal(multiplicador_general)
     mult_ind = _to_decimal(multiplicador_individual)
-    if costo is None or dolar is None:
+    if costo_ars_val is None:
         return None
     mult = mult_ind if mult_ind is not None else mult_gen
     if mult is None:
         return None
-    return (costo * dolar * mult).quantize(Decimal("0.01"))
+    return (costo_ars_val * mult).quantize(Decimal("0.01"))
+
+
+def resolve_repuesto_cost_fields(
+    *,
+    costo_moneda=None,
+    costo_valor=None,
+    costo_usd=None,
+    costo_neto=None,
+    dolar_ars=None,
+):
+    moneda = normalize_costo_moneda(costo_moneda)
+    valor = _to_decimal(costo_valor)
+    if valor is None:
+        if moneda == "ARS":
+            valor = _to_decimal(costo_neto)
+        else:
+            valor = _to_decimal(costo_usd)
+    if valor is not None:
+        valor = valor.quantize(Decimal("0.01"))
+
+    stored_usd = valor if moneda == "USD" else None
+    stored_ars = valor if moneda == "ARS" else None
+    costo_ars = calc_costo_ars(
+        stored_usd,
+        dolar_ars,
+        costo_moneda=moneda,
+        costo_neto=stored_ars,
+    )
+
+    return {
+        "costo_moneda": moneda,
+        "costo_valor": valor,
+        "costo_usd": stored_usd,
+        "costo_ars": costo_ars,
+    }
 
 
 def _fallback_code_from_name(name: str) -> str:
@@ -335,7 +403,7 @@ def load_repuestos_from_excel(path: str, sheet: str | None = None) -> Tuple[Dict
                     "sheet": sheet_name,
                     "row": row_idx,
                 })
-            items[code] = {"codigo": code, "nombre": name, "costo_usd": cost}
+            items[code] = {"codigo": code, "nombre": name, "costo_usd": cost, "costo_moneda": "USD"}
 
     return items, conflicts
 
@@ -354,17 +422,18 @@ def sync_catalogo_repuestos(path: str | None = None, sheet: str | None = None, d
     for it in items.values():
         costo_usd = it["costo_usd"]
         costo_ars = (costo_usd * dolar_ars).quantize(Decimal("0.01")) if dolar_ars else Decimal("0.00")
-        rows.append((it["codigo"], it["nombre"], costo_usd, costo_ars, mtime_dt))
+        rows.append((it["codigo"], it["nombre"], costo_usd, costo_ars, "USD", mtime_dt))
 
     with connection.cursor() as cur:
         cur.executemany(
             """
-            INSERT INTO catalogo_repuestos (codigo, nombre, costo_usd, costo_neto, activo, source_mtime, updated_at)
-            VALUES (%s,%s,%s,%s,TRUE,%s,NOW())
+            INSERT INTO catalogo_repuestos (codigo, nombre, costo_usd, costo_neto, costo_moneda, activo, source_mtime, updated_at)
+            VALUES (%s,%s,%s,%s,%s,TRUE,%s,NOW())
             ON CONFLICT (codigo) DO UPDATE SET
               nombre=EXCLUDED.nombre,
               costo_usd=EXCLUDED.costo_usd,
               costo_neto=EXCLUDED.costo_neto,
+              costo_moneda=EXCLUDED.costo_moneda,
               activo=TRUE,
               source_mtime=EXCLUDED.source_mtime,
               updated_at=NOW()
@@ -376,20 +445,25 @@ def sync_catalogo_repuestos(path: str | None = None, sheet: str | None = None, d
                 "UPDATE catalogo_repuestos SET activo=FALSE WHERE source_mtime IS DISTINCT FROM %s",
                 [mtime_dt],
             )
-        if dolar_ars:
-            cur.execute(
-                """
-                UPDATE quote_items qi
-                   SET costo_u_neto = ROUND(cr.costo_usd * %s, 2)
-                  FROM catalogo_repuestos cr
-                 WHERE qi.tipo='repuesto'
-                   AND qi.costo_u_neto IS NULL
-                   AND qi.repuesto_codigo IS NOT NULL
-                   AND UPPER(qi.repuesto_codigo)=UPPER(cr.codigo)
-                   AND cr.activo
-                   AND cr.costo_usd IS NOT NULL
-                """,
-                [dolar_ars],
-            )
+        cur.execute(
+            """
+            UPDATE quote_items qi
+               SET costo_u_neto = CASE
+                     WHEN COALESCE(cr.costo_moneda, 'USD') = 'ARS' THEN ROUND(cr.costo_neto, 2)
+                     ELSE ROUND(cr.costo_usd * %s, 2)
+                   END
+              FROM catalogo_repuestos cr
+             WHERE qi.tipo='repuesto'
+               AND qi.costo_u_neto IS NULL
+               AND qi.repuesto_codigo IS NOT NULL
+               AND UPPER(qi.repuesto_codigo)=UPPER(cr.codigo)
+               AND cr.activo
+               AND (
+                    (COALESCE(cr.costo_moneda, 'USD') = 'ARS' AND cr.costo_neto IS NOT NULL)
+                    OR (%s > 0 AND COALESCE(cr.costo_moneda, 'USD') = 'USD' AND cr.costo_usd IS NOT NULL)
+               )
+            """,
+            [dolar_ars, dolar_ars],
+        )
 
     return {"count": len(rows), "conflicts": conflicts}

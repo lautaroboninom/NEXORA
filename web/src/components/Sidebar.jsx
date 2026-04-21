@@ -62,10 +62,11 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canCatalogs = can(user, PERMISSION_CODES.PAGE_CATALOGS);
   const canSpareParts = can(user, PERMISSION_CODES.PAGE_SPARE_PARTS);
   const canWarranty = can(user, PERMISSION_CODES.PAGE_WARRANTY);
+  const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
 
-  const showEquiposSection = canWorkQueues || canBudgetQueues || canLogistics || canDevices;
+  const showEquiposSection = canWorkQueues || canBudgetQueues || canLogistics;
   const showSistema =
-    canMetrics || canUsers || canCatalogs || canSpareParts || canWarranty || canDevices;
+    canMetrics || canUsers || canCatalogs || canSpareParts || canWarranty || canManageTestProtocols;
 
   const handleNavigate = () => {
     if (onClose) onClose();
@@ -185,11 +186,6 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   </LinkItem>
                 </>
               )}
-              {canDevices && (
-                <LinkItem to="/equipos" {...linkProps}>
-                  Equipos
-                </LinkItem>
-              )}
             </div>
           )}
 
@@ -235,9 +231,9 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   Garantías
                 </LinkItem>
               )}
-              {canDevices && (
-                <LinkItem to="/equipos" {...linkProps}>
-                  Equipos
+              {canManageTestProtocols && (
+                <LinkItem to="/sistema/protocolos-test" {...linkProps}>
+                  Protocolos de test
                 </LinkItem>
               )}
             </div>

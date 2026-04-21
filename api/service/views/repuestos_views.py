@@ -1,4 +1,5 @@
 import datetime as dt
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -11,7 +12,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import q, exec_void, exec_returning, require_roles, money, _email_append_footer_text
-from ..repuestos import get_repuestos_config, calc_precio_venta
+from ..repuestos import (
+    get_repuestos_config,
+    calc_precio_venta,
+    normalize_costo_moneda,
+    resolve_repuesto_cost_fields,
+)
 
 
 FOUR_DEC = Decimal("0.0001")
@@ -115,6 +121,140 @@ def _parse_subrubro_codigo(val):
 
 def _can_edit_costs(user) -> bool:
     return _can_view_costs(user)
+
+
+def _normalize_equipo_token(value):
+    raw = str(value or "")
+    clean = unicodedata.normalize("NFD", raw)
+    clean = "".join(ch for ch in clean if unicodedata.category(ch) != "Mn")
+    return " ".join(clean.lower().split())
+
+
+def _split_equipo_parts(value):
+    return [part.strip() for part in str(value or "").split("|") if part.strip()]
+
+
+def _parse_equipo_lines(value):
+    return [line.strip() for line in str(value or "").splitlines() if line.strip()]
+
+
+def _is_prefix_parts(short_parts, long_parts):
+    if len(short_parts) > len(long_parts):
+        return False
+    for idx, short_part in enumerate(short_parts):
+        long_part = long_parts[idx]
+        if not _normalize_equipo_token(long_part).startswith(_normalize_equipo_token(short_part)):
+            return False
+    return True
+
+
+def _match_equipo_entry(filter_raw, entry_raw):
+    filter_txt = str(filter_raw or "").strip()
+    if not filter_txt:
+        return True
+    entry_parts = _split_equipo_parts(entry_raw)
+    if not entry_parts:
+        return False
+    if "|" not in filter_txt:
+        needle = _normalize_equipo_token(filter_txt)
+        return any(needle in _normalize_equipo_token(part) for part in entry_parts)
+    filter_parts = _split_equipo_parts(filter_txt)
+    if not filter_parts:
+        return False
+    return _is_prefix_parts(filter_parts, entry_parts) or _is_prefix_parts(entry_parts, filter_parts)
+
+
+def _match_equipo_filter(filter_raw, estado_raw):
+    filter_txt = str(filter_raw or "").strip()
+    if not filter_txt:
+        return True
+    entries = _parse_equipo_lines(estado_raw)
+    if not entries:
+        return False
+    return any(_match_equipo_entry(filter_txt, entry) for entry in entries)
+
+
+def _equipo_hint_rank(equipo_hints, estado_raw):
+    best = 0
+    for idx, hint in enumerate(equipo_hints or []):
+        hint_txt = str(hint or "").strip()
+        if not hint_txt:
+            continue
+        if not _match_equipo_filter(hint_txt, estado_raw):
+            continue
+        parts = _split_equipo_parts(hint_txt)
+        score = ((len(equipo_hints) - idx) * 10) + len(parts)
+        if score > best:
+            best = score
+    return best
+
+
+def _serialize_repuesto_cost(row, cfg, allow_costs: bool):
+    costo = resolve_repuesto_cost_fields(
+        costo_moneda=row.get("costo_moneda"),
+        costo_usd=row.get("costo_usd"),
+        costo_neto=row.get("costo_neto"),
+        dolar_ars=cfg.get("dolar_ars"),
+    )
+    row["costo_moneda"] = costo.get("costo_moneda")
+    row["costo_valor"] = costo.get("costo_valor")
+    row["costo_ars"] = costo.get("costo_ars")
+    row["precio_venta"] = calc_precio_venta(
+        None,
+        None,
+        cfg.get("multiplicador_general"),
+        row.get("multiplicador"),
+        costo_ars=costo.get("costo_ars"),
+    )
+    if not allow_costs:
+        row["costo_moneda"] = None
+        row["costo_valor"] = None
+        row["costo_ars"] = None
+        row["precio_venta"] = None
+    row.pop("costo_usd", None)
+    row.pop("costo_neto", None)
+    return row
+
+
+def _parse_repuesto_cost_input(data, user, current=None):
+    if not any(key in data for key in ("costo_valor", "costo_moneda", "costo_usd")):
+        return None
+    if not _can_edit_costs(user):
+        raise PermissionDenied("No autorizado para editar costo")
+
+    if "costo_valor" in data:
+        valor = _parse_decimal_field(data.get("costo_valor"), "costo_valor", allow_none=True)
+    elif "costo_usd" in data:
+        valor = _parse_decimal_field(data.get("costo_usd"), "costo_usd", allow_none=True)
+    else:
+        current_cost = resolve_repuesto_cost_fields(
+            costo_moneda=(current or {}).get("costo_moneda"),
+            costo_usd=(current or {}).get("costo_usd"),
+            costo_neto=(current or {}).get("costo_neto"),
+            dolar_ars=get_repuestos_config().get("dolar_ars"),
+        )
+        valor = current_cost.get("costo_valor")
+
+    if valor is not None and valor < 0:
+        raise ValidationError("costo_valor invÃ¡lido")
+    if valor is not None:
+        valor = money(valor)
+
+    if "costo_moneda" in data:
+        moneda = normalize_costo_moneda(data.get("costo_moneda"))
+    elif "costo_usd" in data:
+        moneda = "USD"
+    else:
+        moneda = normalize_costo_moneda((current or {}).get("costo_moneda"))
+
+    if valor is None:
+        moneda = "USD"
+
+    return resolve_repuesto_cost_fields(
+        costo_moneda=moneda,
+        costo_valor=valor,
+        dolar_ars=get_repuestos_config().get("dolar_ars"),
+    )
 
 
 def _lock_subrubro(code: str):
@@ -350,7 +490,7 @@ def _load_repuesto_detail(repuesto_id: int, user):
     row = q(
         """
         SELECT
-          id, codigo, nombre, costo_usd, multiplicador,
+          id, codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador,
           stock_on_hand, stock_min,
           tipo_articulo, categoria, unidad_medida, marca_fabricante, nro_parte,
           ubicacion_deposito, estado, notas,
@@ -364,12 +504,7 @@ def _load_repuesto_detail(repuesto_id: int, user):
     if not row:
         return None
     cfg = get_repuestos_config()
-    row["precio_venta"] = calc_precio_venta(
-        row.get("costo_usd"),
-        cfg.get("dolar_ars"),
-        cfg.get("multiplicador_general"),
-        row.get("multiplicador"),
-    )
+    _serialize_repuesto_cost(row, cfg, _can_view_costs(user))
     row["multiplicador_aplicado"] = (
         row.get("multiplicador")
         if row.get("multiplicador") is not None
@@ -381,9 +516,6 @@ def _load_repuesto_detail(repuesto_id: int, user):
     row["stock_negativo"] = stock_on_hand < 0
     row["stock_on_hand"] = _to_int_or_none(row.get("stock_on_hand"))
     row["stock_min"] = _to_int_or_none(row.get("stock_min"))
-    if not _can_view_costs(user):
-        row["costo_usd"] = None
-        row["precio_venta"] = None
 
     proveedores = q(
         """
@@ -598,12 +730,14 @@ class CatalogoRepuestosView(APIView):
     def get(self, request):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"])
         qtxt = (request.GET.get("q") or "").strip()
+        equipo_hints = [str(v or "").strip() for v in request.GET.getlist("equipo_hint") if str(v or "").strip()]
         limit_raw = (request.GET.get("limit") or "").strip()
         try:
             limit = int(limit_raw or 50000)
         except ValueError:
             limit = 50000
         limit = max(1, min(limit, 2000))
+        query_limit = 2000 if equipo_hints else limit
 
         where = ["activo"]
         params = []
@@ -615,31 +749,31 @@ class CatalogoRepuestosView(APIView):
         where_sql = " WHERE " + " AND ".join(where) if where else ""
         rows = q(
             f"""
-            SELECT id, codigo, nombre, costo_usd, multiplicador
+            SELECT id, codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, estado
             FROM catalogo_repuestos
             {where_sql}
             ORDER BY codigo DESC
             LIMIT %s
             """,
-            [*params, limit],
+            [*params, query_limit],
         ) or []
 
         cfg = get_repuestos_config()
-        dolar_ars = cfg.get("dolar_ars")
-        mult_general = cfg.get("multiplicador_general")
         allow_costs = _can_view_costs(request.user)
+        if equipo_hints:
+            ranked = []
+            for idx, row in enumerate(rows):
+                rank = _equipo_hint_rank(equipo_hints, row.get("estado"))
+                ranked.append((idx, rank, row))
+            if any(rank > 0 for _, rank, _ in ranked):
+                ranked.sort(key=lambda item: (-1 if item[1] > 0 else 0, -item[1], item[0]))
+                rows = [row for _, _, row in ranked]
+        rows = rows[:limit]
 
         for row in rows:
-            row["precio_venta"] = calc_precio_venta(
-                row.get("costo_usd"),
-                dolar_ars,
-                mult_general,
-                row.get("multiplicador"),
-            )
-            row.pop("costo_usd", None)
+            _serialize_repuesto_cost(row, cfg, allow_costs)
             row.pop("multiplicador", None)
-            if not allow_costs:
-                row["precio_venta"] = None
+            row.pop("estado", None)
 
         return Response(rows)
 
@@ -687,7 +821,7 @@ class RepuestosView(APIView):
             order_sql = f"ORDER BY {order_expr} {dir_sql}, codigo DESC"
         rows = q(
             f"""
-            SELECT id, codigo, nombre, costo_usd, multiplicador, stock_on_hand, stock_min, estado
+            SELECT id, codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, stock_on_hand, stock_min, estado
             FROM catalogo_repuestos
             {where_sql}
             {order_sql}
@@ -697,17 +831,11 @@ class RepuestosView(APIView):
         ) or []
 
         cfg = get_repuestos_config()
-        dolar_ars = cfg.get("dolar_ars")
         mult_general = cfg.get("multiplicador_general")
         allow_costs = _can_view_costs(request.user)
 
         for row in rows:
-            row["precio_venta"] = calc_precio_venta(
-                row.get("costo_usd"),
-                dolar_ars,
-                mult_general,
-                row.get("multiplicador"),
-            )
+            _serialize_repuesto_cost(row, cfg, allow_costs)
             row["multiplicador_aplicado"] = (
                 row.get("multiplicador")
                 if row.get("multiplicador") is not None
@@ -719,9 +847,6 @@ class RepuestosView(APIView):
             row["stock_negativo"] = stock_on_hand < 0
             row["stock_on_hand"] = _to_int_or_none(row.get("stock_on_hand"))
             row["stock_min"] = _to_int_or_none(row.get("stock_min"))
-            if not allow_costs:
-                row["costo_usd"] = None
-                row["precio_venta"] = None
 
         return Response(rows)
 
@@ -768,6 +893,15 @@ class RepuestosView(APIView):
                     raise ValidationError("costo_usd inválido")
                 costo_usd = money(costo_usd)
 
+        costo_payload = _parse_repuesto_cost_input(d, request.user)
+        if costo_payload:
+            costo_usd = costo_payload.get("costo_usd")
+            costo_neto = costo_payload.get("costo_ars") or Decimal("0.00")
+            costo_moneda = costo_payload.get("costo_moneda") or "USD"
+        else:
+            costo_neto = Decimal("0.00")
+            costo_moneda = "USD"
+
         detail_text_fields = [
             "tipo_articulo",
             "categoria",
@@ -808,19 +942,21 @@ class RepuestosView(APIView):
             new_id = exec_returning(
                 """
                 INSERT INTO catalogo_repuestos
-                  (codigo, nombre, costo_usd, multiplicador,
+                  (codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador,
                    stock_on_hand, stock_min,
                    tipo_articulo, categoria, unidad_medida, marca_fabricante, nro_parte,
                    ubicacion_deposito, estado, notas,
                    fecha_ultima_compra, fecha_ultimo_conteo, fecha_vencimiento,
                    updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                 RETURNING id
                 """,
                 [
                     codigo,
                     nombre,
+                    costo_neto,
                     costo_usd,
+                    costo_moneda,
                     mult,
                     stock_on_hand,
                     stock_min,
@@ -900,7 +1036,7 @@ class RepuestoDetailView(APIView):
                 mult = mult.quantize(FOUR_DEC)
             sets.append("multiplicador=%s"); params.append(mult)
 
-        if "costo_usd" in d:
+        if False and "costo_usd" in d:
             if not can_edit_costs:
                 raise PermissionDenied("No autorizado para editar costo")
             costo = _parse_decimal_field(d.get("costo_usd"), "costo_usd", allow_none=True)
@@ -940,15 +1076,17 @@ class RepuestoDetailView(APIView):
         update_proveedores = "proveedores" in d
         if update_proveedores and not is_manager:
             raise PermissionDenied("No autorizado para editar proveedores")
+        update_costs = any(key in d for key in ("costo_valor", "costo_moneda", "costo_usd"))
 
-        if not sets and not update_proveedores:
+        if not sets and not update_proveedores and not update_costs:
             raise ValidationError("Sin cambios")
 
         updated_row = None
         with transaction.atomic():
             row = q(
                 """
-                SELECT id, codigo, nombre, stock_on_hand, stock_min, ubicacion_deposito
+                SELECT id, codigo, nombre, stock_on_hand, stock_min, ubicacion_deposito,
+                       costo_neto, costo_usd, costo_moneda
                 FROM catalogo_repuestos
                 WHERE id=%s
                 FOR UPDATE
@@ -964,6 +1102,12 @@ class RepuestoDetailView(APIView):
                 stock_new = stock_prev
             if stock_min_new is None:
                 stock_min_new = stock_min_prev
+
+            if update_costs:
+                costo_payload = _parse_repuesto_cost_input(d, request.user, current=row)
+                sets.append("costo_usd=%s"); params.append(costo_payload.get("costo_usd"))
+                sets.append("costo_neto=%s"); params.append(costo_payload.get("costo_ars") or Decimal("0.00"))
+                sets.append("costo_moneda=%s"); params.append(costo_payload.get("costo_moneda") or "USD")
 
             if sets:
                 sets.append("updated_at=NOW()")

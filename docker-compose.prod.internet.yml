@@ -94,7 +94,7 @@ services:
       context: ./web
       dockerfile: Dockerfile.prod
       args:
-        - VITE_API_URL=${VITE_API_URL}
+        - VITE_API_URL=
     container_name: sistemadereparaciones-web
     environment:
       - TZ=${TZ:-America/Argentina/Buenos_Aires}

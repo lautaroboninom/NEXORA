@@ -11,7 +11,7 @@ export default defineConfig(() => ({
     },
   },
   build: {
-    // Habilitar sourcemaps opcionalmente para debug de producción
-    sourcemap: process.env.VITE_SOURCEMAP === '1',
+    // Habilitar sourcemaps opcionalmente para debug de produccion
+    sourcemap: process.env.VITE_SOURCEMAP === "1",
   },
 }));

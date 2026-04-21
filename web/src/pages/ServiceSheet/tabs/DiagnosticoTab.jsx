@@ -1,7 +1,7 @@
 import Row from "../../../components/Row";
 import IngresoPhotos from "../../../components/IngresoPhotos";
 import { RESOLUCION_OPTIONS, RESOLUCION, ESTADO } from "../../../lib/constants";
-import { getBlob, postMarcarReparado, postCerrarReparacion, postAccesorioIngreso, deleteAccesorioIngreso, postMarcarControladoSinDefecto, postMarcarParaReparar } from "../../../lib/api";
+import { getBlob, postMarcarReparado, postCerrarReparacion, postAccesorioIngreso, deleteAccesorioIngreso, postMarcarControladoSinDefecto, postMarcarParaReparar, postHabilitarReparacionCotizacion } from "../../../lib/api";
 import { useEffect, useState } from "react";
 
 export default function DiagnosticoTab({
@@ -26,6 +26,9 @@ export default function DiagnosticoTab({
   resolucion,
   setResolucion,
   canAutorizarReparar,
+  isCotizacion,
+  permiteReparacion,
+  canHabilitarReparacionCotizacion,
   // permisos
   actAsTech,
   canEditDiag,
@@ -45,6 +48,7 @@ export default function DiagnosticoTab({
   const [savingAll, setSavingAll] = useState(false);
   const [savingResol, setSavingResol] = useState(false);
   const [marcandoReparar, setMarcandoReparar] = useState(false);
+  const [habilitandoReparacion, setHabilitandoReparacion] = useState(false);
   const [serialCambio, setSerialCambio] = useState("");
   const isEntregadoOBaja = ["entregado", "baja"].includes((data?.estado || "").toLowerCase());
   const estadoLower = (data?.estado || "").toLowerCase();
@@ -64,7 +68,8 @@ export default function DiagnosticoTab({
     ESTADO.CONTROLADO_SIN_DEFECTO,
   ].map((s) => String(s || "").toLowerCase()));
   const isEstadoBloqueadoReparado = estadosBloqueadosReparado.has(estadoLower);
-  const puedeReparar = !!canAutorizarReparar && estadoLower !== "reparar" && !isEstadoBloqueadoDiag;
+  const reparacionBloqueadaCotizacion = !!isCotizacion && !permiteReparacion;
+  const puedeReparar = !!canAutorizarReparar && estadoLower !== "reparar" && !isEstadoBloqueadoDiag && !reparacionBloqueadaCotizacion;
   const sinTecnicoAsignado = !data?.asignado_a;
 
   useEffect(() => {
@@ -139,6 +144,21 @@ export default function DiagnosticoTab({
       setErr(e?.message || "No se pudo marcar para reparar");
     } finally {
       setMarcandoReparar(false);
+    }
+  }
+
+  async function habilitarReparacionCotizacion() {
+    try {
+      setErr("");
+      setHabilitandoReparacion(true);
+      await postHabilitarReparacionCotizacion(id);
+      await refreshIngreso();
+      setToastMsg("Reparación habilitada para esta cotización.");
+      setTimeout(() => setToastMsg(""), 3000);
+    } catch (e) {
+      setErr(e?.message || "No se pudo habilitar la reparación");
+    } finally {
+      setHabilitandoReparacion(false);
     }
   }
 
@@ -284,6 +304,23 @@ export default function DiagnosticoTab({
         </div>
 
         <div className="ml-auto flex items-end gap-2">
+          {reparacionBloqueadaCotizacion && (
+            <div className="max-w-xs rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Ingreso en cotización de equipo. La reparación está bloqueada hasta habilitarla.
+            </div>
+          )}
+
+          {reparacionBloqueadaCotizacion && canHabilitarReparacionCotizacion && (
+            <button
+              className="bg-amber-700 text-white px-3 py-2 rounded disabled:opacity-60"
+              disabled={habilitandoReparacion}
+              onClick={habilitarReparacionCotizacion}
+              type="button"
+            >
+              {habilitandoReparacion ? "Habilitando..." : "Habilitar reparación"}
+            </button>
+          )}
+
           {puedeReparar && (
             <button
               className="bg-amber-600 text-white px-3 py-2 rounded disabled:opacity-60"
@@ -296,7 +333,7 @@ export default function DiagnosticoTab({
             </button>
           )}
 
-          {canResolve && (
+          {canResolve && !reparacionBloqueadaCotizacion && (
             <>
               <div className="min-w-[260px]">
                 <label className="block text-sm text-gray-600 mb-1">Resolución de reparación</label>
@@ -349,29 +386,31 @@ export default function DiagnosticoTab({
                   {savingAll ? "Guardando..." : "Controlado sin defecto"}
                 </button>
               )}
-              <button
-                className="bg-emerald-600 text-white px-3 py-2 rounded"
-                onClick={async () => {
-                  try {
-                    const resp = await postMarcarReparado(id);
-                    await refreshIngreso();
-                    if (typeof setShowReparadoToast === 'function') {
-                      setShowReparadoToast(true);
-                      setTimeout(() => setShowReparadoToast(false), 2000);
+              {!reparacionBloqueadaCotizacion && (
+                <button
+                  className="bg-emerald-600 text-white px-3 py-2 rounded"
+                  onClick={async () => {
+                    try {
+                      const resp = await postMarcarReparado(id);
+                      await refreshIngreso();
+                      if (typeof setShowReparadoToast === 'function') {
+                        setShowReparadoToast(true);
+                        setTimeout(() => setShowReparadoToast(false), 2000);
+                      }
+                      if (resp && resp.auto_moved) {
+                        const movedMsg = `Marcado como reparado. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || 'Estanteria de Alquiler'}`;
+                        setToastMsg(movedMsg);
+                        setTimeout(() => setToastMsg('') , 3000);
+                      }
+                    } catch (e) {
+                      setErr(e?.message || 'No se pudo marcar como reparado');
                     }
-                    if (resp && resp.auto_moved) {
-                      const movedMsg = `Marcado como reparado. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || 'Estanteria de Alquiler'}`;
-                      setToastMsg(movedMsg);
-                      setTimeout(() => setToastMsg('') , 3000);
-                    }
-                  } catch (e) {
-                    setErr(e?.message || 'No se pudo marcar como reparado');
-                  }
-                }}
-                type="button"
-              >
-                Marcar reparado
-              </button>
+                  }}
+                  type="button"
+                >
+                  Marcar reparado
+                </button>
+              )}
             </>
           )}
         </div>

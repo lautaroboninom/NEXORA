@@ -44,6 +44,7 @@ import MetricasClientes from "./pages/MetricasClientes.jsx";
 import MetricasFinanzas from "./pages/MetricasFinanzas.jsx";
 import Garantias from "./pages/Garantias.jsx";
 import Equipos from "./pages/Equipos.jsx";
+import ProtocolosTest from "./pages/ProtocolosTest.jsx";
 import { PERMISSION_CODES } from "./lib/permissions";
 
 function NotFound() {
@@ -316,6 +317,14 @@ const router = createBrowserRouter([
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_CATALOGS}>
             <CatalogoProveedores />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "sistema/protocolos-test",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE}>
+            <ProtocolosTest />
           </ProtectedRoute>
         ),
       },

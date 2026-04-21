@@ -35,6 +35,7 @@ from .helpers_impl import (
     _get_motivo_enum_values,
     _get_motivo_enum_values_raw,
     _map_motivo_to_db_label,
+    _motivo_is_cotizacion_equipo,
     _fetchall_dicts,
 
     # Roles/auth helpers
@@ -82,6 +83,7 @@ __all__ = [
     '_fix_text_value','_fix_row','_norm_txt',
     # motivo
     '_get_motivo_enum_values','_get_motivo_enum_values_raw','_map_motivo_to_db_label','_fetchall_dicts',
+    '_motivo_is_cotizacion_equipo',
     # roles
     'require_roles','require_roles_strict','require_jefe','require_permission','_rol','_is','_in',
     # misc

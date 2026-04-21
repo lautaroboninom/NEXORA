@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from io import BytesIO
@@ -213,18 +213,38 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
 
     def draw_sections() -> None:
         nonlocal y
-        columns_mm = [30, 50, 24, 18, 12, 18, 34]
-        col_widths = [w * mm for w in columns_mm]
         table_x = margin
         header_h = 6.5 * mm
         row_font = 7.4
         row_inner_pad = 1.2 * mm
-        col_titles = ["Parámetro", "Objetivo / Tolerancia", "Valor a medir", "Medido", "Unidad", "Resultado", "Ref."]
+        post_performance_drop = 2.2 * mm
+        dropped_after_performance = False
 
         for section in report.get("sections") or []:
             items = section.get("items") or []
             if not items:
                 continue
+            section_id = _safe_text(section.get("id")).lower()
+            section_title = _safe_text(section.get("title")).lower()
+            is_performance_section = (section_id == "performance") or (section_title == "rendimiento")
+            if is_performance_section and not dropped_after_performance:
+                ensure_space(post_performance_drop + 10 * mm)
+                y -= post_performance_drop
+                dropped_after_performance = True
+
+            entry_mode = _safe_text(section.get("entry_mode")).lower()
+            is_result_only = entry_mode == "result_only"
+            is_measured_only = entry_mode == "measured_only"
+            if is_result_only:
+                columns_mm = [44, 72, 22, 48]
+                col_titles = ["Parámetro", "Objetivo / Tolerancia", "Resultado", "Ref."]
+            elif is_measured_only:
+                columns_mm = [32, 64, 20, 12, 20, 38]
+                col_titles = ["Parámetro", "Objetivo / Tolerancia", "Medido", "Unidad", "Resultado", "Ref."]
+            else:
+                columns_mm = [30, 50, 24, 18, 12, 18, 34]
+                col_titles = ["Parámetro", "Objetivo / Tolerancia", "Valor a medir", "Medido", "Unidad", "Resultado", "Ref."]
+            col_widths = [w * mm for w in columns_mm]
 
             ensure_space(10 * mm)
             c.setFont("Helvetica-Bold", 9)
@@ -245,15 +265,33 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
             for item in items:
                 value = item.get("value") or {}
                 result_label = _ITEM_RESULT_LABELS.get(_safe_text(value.get("result")).lower(), _safe_text(value.get("result")))
-                cells = [
-                    _safe_text(item.get("label")),
-                    _safe_text(item.get("target")),
-                    _safe_text(value.get("valor_a_medir")),
-                    _safe_text(value.get("measured")),
-                    _safe_text(item.get("unit")),
-                    result_label,
-                    ", ".join(item.get("ref_ids") or []),
-                ]
+                if is_result_only:
+                    cells = [
+                        _safe_text(item.get("label")),
+                        _safe_text(item.get("target")),
+                        result_label,
+                        ", ".join(item.get("ref_ids") or []),
+                    ]
+                elif is_measured_only:
+                    cells = [
+                        _safe_text(item.get("label")),
+                        _safe_text(item.get("target")),
+                        _safe_text(value.get("measured")),
+                        _safe_text(item.get("unit")),
+                        result_label,
+                        ", ".join(item.get("ref_ids") or []),
+                    ]
+                else:
+                    cells = [
+                        _safe_text(item.get("label")),
+                        _safe_text(item.get("target")),
+                        _safe_text(value.get("valor_a_medir")),
+                        _safe_text(value.get("measured")),
+                        _safe_text(item.get("unit")),
+                        result_label,
+                        ", ".join(item.get("ref_ids") or []),
+                    ]
+
                 wrapped_cells = []
                 max_lines = 1
                 for idx, cell in enumerate(cells):
@@ -277,7 +315,7 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
 
     def draw_summary() -> None:
         nonlocal y
-        block_h = 26 * mm
+        block_h = 65 * mm
         ensure_space(block_h + 2 * mm)
         y -= summary_block_drop
 
@@ -285,24 +323,80 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
         c.drawString(margin, y, "Resultado y cierre técnico")
         y -= 4.5 * mm
 
+        result_key = _safe_text(report.get("resultado_global")).lower()
         result_global = _GLOBAL_RESULT_LABELS.get(
-            _safe_text(report.get("resultado_global")).lower(),
+            result_key,
             _safe_text(report.get("resultado_global")) or "Pendiente",
         )
-        lines = [
-            f"Resultado global: {result_global}",
-            f"Conclusión: {_safe_text(report.get('conclusion')) or '-'}",
-            f"Instrumentos: {_safe_text(report.get('instrumentos')) or '-'}",
-            f"Firmado por: {_safe_text(report.get('firmado_por')) or '-'}",
-        ]
-        c.setFont("Helvetica", 8)
-        for line in lines:
-            wrapped = _wrap_text(line, "Helvetica", 8, W - 2 * margin)
-            for wline in wrapped:
+        # Visual pensado para impresion en blanco y negro:
+        # APTO queda con alto contraste (fondo negro + texto blanco).
+        if result_key == "apto":
+            text_color, fill_color, stroke_color = (colors.white, colors.black, colors.black)
+            badge_line_w = 1.4
+        elif result_key == "no_apto":
+            text_color, fill_color, stroke_color = (colors.black, colors.white, colors.black)
+            badge_line_w = 1.4
+        elif result_key == "apto_condicional":
+            text_color, fill_color, stroke_color = (colors.black, colors.HexColor("#e5e7eb"), colors.black)
+            badge_line_w = 1.2
+        else:
+            text_color, fill_color, stroke_color = (colors.black, colors.white, colors.black)
+            badge_line_w = 1.0
+
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica-Bold", 8)
+        badge_w = 62 * mm
+        badge_h = 10.5 * mm
+        result_x = W - margin - badge_w
+        c.drawString(margin, y, "Resultado global:")
+        y -= 1.8 * mm
+
+        badge_y = y - badge_h
+        c.setLineWidth(badge_line_w)
+        c.setStrokeColor(stroke_color)
+        c.setFillColor(fill_color)
+        c.roundRect(result_x, badge_y, badge_w, badge_h, 2.2 * mm, stroke=1, fill=1)
+        c.setFillColor(text_color)
+        c.setFont("Helvetica-Bold", 13)
+        c.drawCentredString(result_x + (badge_w / 2.0), badge_y + 2.9 * mm, result_global.upper())
+        c.setLineWidth(1.0)
+        c.setFillColor(colors.black)
+        y = badge_y - 4.6 * mm
+
+        def draw_labeled_text(label: str, value: str) -> None:
+            nonlocal y
+            label_txt = f"{label}: "
+            c.setFont("Helvetica-Bold", 8)
+            label_w = pdfmetrics.stringWidth(label_txt, "Helvetica-Bold", 8)
+            max_w = W - 2 * margin
+            value_w = max(12 * mm, max_w - label_w)
+            wrapped_value = _wrap_text(value or "-", "Helvetica", 8, value_w)
+
+            ensure_space(line_h + 1.5 * mm)
+            c.setFont("Helvetica-Bold", 8)
+            c.drawString(margin, y, label_txt)
+            c.setFont("Helvetica", 8)
+            c.drawString(margin + label_w, y, wrapped_value[0] if wrapped_value else "-")
+            y -= line_h
+
+            for cont in wrapped_value[1:]:
                 ensure_space(line_h + 1.5 * mm)
-                c.drawString(margin, y, wline)
+                c.drawString(margin + label_w, y, cont)
                 y -= line_h
             y -= 0.9 * mm
+
+        draw_labeled_text("Observaciones", _safe_text(report.get("conclusion")) or "-")
+        draw_labeled_text("Instrumentos", _safe_text(report.get("instrumentos")) or "-")
+
+        # Campo intencionalmente en blanco para firma manual.
+        # Lo ubicamos mas abajo y a la derecha para aprovechar mejor el espacio de pagina.
+        sig_w = 58 * mm
+        sig_x = W - margin - sig_w
+        sig_y = margin + footer_h + 16.0 * mm
+        c.line(sig_x, sig_y, sig_x + sig_w, sig_y)
+        c.setFont("Helvetica", 8)
+        c.drawString(sig_x, sig_y - 4.2 * mm, "Firma responsable")
+        y = sig_y - 7 * mm
 
     draw_header()
     draw_reference_block()
@@ -315,3 +409,4 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
     buf.close()
     ingreso_id = _safe_text(report.get("ingreso_id")) or "0"
     return pdf_bytes, f"InformeTest_{ingreso_id}.pdf"
+

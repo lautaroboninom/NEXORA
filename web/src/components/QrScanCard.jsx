@@ -5,6 +5,9 @@ import { lookupScan, postEntregarIngreso } from "../lib/api";
 import { formatOS } from "../lib/ui-helpers";
 
 const emptyEntrega = { remito_salida: "", retira_persona: "", serial_confirm: "" };
+const SCAN_RESET_MS = 120;
+const SCAN_MAX_MS = 1500;
+const SCAN_MIN_LEN = 3;
 
 const safeText = (value, fallback = "-") => (value == null || value === "" ? fallback : String(value));
 
@@ -14,6 +17,15 @@ const estadoLabel = (value) => {
   return raw.replace(/_/g, " ");
 };
 
+function isEditableTarget(target) {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    !!target?.isContentEditable
+  );
+}
+
 export default function QrScanCard() {
   const nav = useNavigate();
   const inputRef = useRef(null);
@@ -21,8 +33,13 @@ export default function QrScanCard() {
   const scanLockRef = useRef(false);
   const startLockRef = useRef(false);
   const fileInputRef = useRef(null);
+  const scanBufferRef = useRef("");
+  const scanStartedAtRef = useRef(0);
+  const scanLastKeyAtRef = useRef(0);
+  const scanResetTimerRef = useRef(null);
   const [open, setOpen] = useState(false);
   const [code, setCode] = useState("");
+  const [pendingScannedCode, setPendingScannedCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [cameraError, setCameraError] = useState("");
@@ -39,6 +56,7 @@ export default function QrScanCard() {
 
   const resetState = () => {
     setCode("");
+    setPendingScannedCode("");
     setErr("");
     setCameraError("");
     setFileDecoding(false);
@@ -56,7 +74,27 @@ export default function QrScanCard() {
 
   const closeModal = () => {
     void stopCamera();
+    setPendingScannedCode("");
     setOpen(false);
+  };
+
+  const clearScanBuffer = () => {
+    scanBufferRef.current = "";
+    scanStartedAtRef.current = 0;
+    scanLastKeyAtRef.current = 0;
+    if (scanResetTimerRef.current) {
+      clearTimeout(scanResetTimerRef.current);
+      scanResetTimerRef.current = null;
+    }
+  };
+
+  const armScanReset = () => {
+    if (scanResetTimerRef.current) {
+      clearTimeout(scanResetTimerRef.current);
+    }
+    scanResetTimerRef.current = setTimeout(() => {
+      clearScanBuffer();
+    }, SCAN_RESET_MS * 2);
   };
 
   const openQrCapture = () => {
@@ -131,6 +169,56 @@ export default function QrScanCard() {
     e.preventDefault();
     await lookupCode(code);
   };
+
+  useEffect(() => {
+    if (!open || !pendingScannedCode || loading) return;
+    const scanned = pendingScannedCode;
+    setPendingScannedCode("");
+    setCode(scanned);
+    void lookupCode(scanned);
+  }, [open, pendingScannedCode, loading]);
+
+  useEffect(() => {
+    const onWindowKeyDown = (event) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing) return;
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+      const target = event.target;
+      if (isEditableTarget(target)) return;
+
+      if (event.key === "Enter") {
+        const scanned = scanBufferRef.current.trim();
+        const elapsed = scanStartedAtRef.current ? Date.now() - scanStartedAtRef.current : 0;
+        if (scanned && scanned.length >= SCAN_MIN_LEN && elapsed <= SCAN_MAX_MS) {
+          event.preventDefault();
+          if (!open) {
+            resetState();
+            setOpen(true);
+          }
+          setPendingScannedCode(scanned);
+        }
+        clearScanBuffer();
+        return;
+      }
+
+      if (event.key.length !== 1) return;
+      const now = Date.now();
+      if (!scanLastKeyAtRef.current || now - scanLastKeyAtRef.current > SCAN_RESET_MS) {
+        scanBufferRef.current = event.key;
+        scanStartedAtRef.current = now;
+      } else {
+        scanBufferRef.current += event.key;
+      }
+      scanLastKeyAtRef.current = now;
+      armScanReset();
+    };
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onWindowKeyDown);
+      clearScanBuffer();
+    };
+  }, [open]);
 
   const stopCamera = async () => {
     startLockRef.current = false;
@@ -228,6 +316,7 @@ export default function QrScanCard() {
   const hoyLabel = new Date().toLocaleDateString("es-AR");
 
   const propiedadLabel = () => {
+    if (flags?.mg_inactivo_venta) return "MG histórico inactivo por venta";
     if (flags?.vendido) return "Cliente";
     if (flags?.es_propietario_mg) {
       return device?.alquilado ? "Propio (alquilado)" : "Propio";
@@ -489,6 +578,11 @@ export default function QrScanCard() {
                       <div>Equipo: {safeText(device.marca)} {safeText(device.modelo)}</div>
                       <div>Alquilado: {device.alquilado ? "Sí" : "No"}</div>
                       <div>Alquiler a: {safeText(device.alquiler_a)}</div>
+                      {flags?.mg_inactivo_venta && (
+                        <div className="md:col-span-2 text-amber-700">
+                          MG histórico inactivo por venta. No operativo para Nuevo Ingreso.
+                        </div>
+                      )}
                     </div>
                     <div className="mt-3 flex items-center gap-2">
                       <button
@@ -496,7 +590,7 @@ export default function QrScanCard() {
                         onClick={() =>
                           goNuevoIngreso({
                             numero_serie: device.numero_serie || result?.normalized || code,
-                            numero_interno: device.numero_interno || "",
+                            numero_interno: flags?.mg_inactivo_venta ? "" : (device.numero_interno || ""),
                             marca_id: device.marca_id,
                             marca: device.marca,
                             model_id: device.model_id,
@@ -523,6 +617,11 @@ export default function QrScanCard() {
                             alquiler_a: device.alquiler_a,
                             es_propietario_mg: flags?.es_propietario_mg,
                             vendido: flags?.vendido,
+                            mg_estado: flags?.mg_estado,
+                            mg_inactivo_venta: !!flags?.mg_inactivo_venta,
+                            mg_context_msg: flags?.mg_inactivo_venta
+                              ? "MG histórico inactivo por venta; no operativo para nuevos ingresos."
+                              : "",
                           })
                         }
                       >

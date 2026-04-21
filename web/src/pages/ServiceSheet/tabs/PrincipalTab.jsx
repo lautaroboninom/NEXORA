@@ -1,9 +1,20 @@
 import Row from "../../../components/Row";
+import StatusChip from "../../../components/StatusChip";
 import { useMemo, useState, useEffect, useCallback } from "react";
 import { formatDateTime as formatDateTimeHelper, resolveFechaIngreso } from "../../../lib/ui-helpers";
-import { resolutionLabel, estadoLabel } from "../../../lib/constants";
+import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
-import { getBlob, postEntregarIngreso, patchIngreso, checkGarantiaFabrica, patchIngresoTecnico, postSolicitarAsignacion, getAccesoriosCatalogo, postAccesorioAlquilerIngreso, deleteAccesorioAlquilerIngreso } from "../../../lib/api";
+import {
+  getBlob,
+  postEntregarIngreso,
+  patchIngreso,
+  checkGarantiaFabrica,
+  patchIngresoTecnico,
+  postSolicitarAsignacion,
+  getAccesoriosCatalogo,
+  postAccesorioAlquilerIngreso,
+  deleteAccesorioAlquilerIngreso,
+} from "../../../lib/api";
 
 export default function PrincipalTab(props) {
   const {
@@ -145,7 +156,38 @@ export default function PrincipalTab(props) {
   const _selUb = (ubicacionId ? Number(ubicacionId) : null);
   const _curUb = (data?.ubicacion_id ?? null);
   const ubDirty = _selUb !== null && _selUb !== _curUb;
-  const isEntregadoOBaja = ["entregado", "baja"].includes((data?.estado || "").toLowerCase());
+  const estadoLower = (data?.estado || "").toLowerCase();
+  const presupuestoLower = (data?.presupuesto_estado || "").toLowerCase();
+  const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower);
+  const presupuestoLabel = useMemo(() => {
+    const v = data?.presupuesto_estado;
+    if (!v) return "-";
+    if (v === "presupuestado") return "Presupuestado";
+    if (v === "no_aplica") return "No aplica";
+    try {
+      const s = String(v);
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    } catch (_) {
+      return String(v);
+    }
+  }, [data?.presupuesto_estado]);
+  const etapaFlujo = useMemo(() => {
+    if (["entregado", "alquilado", "baja"].includes(estadoLower)) return "Cierre";
+    if (estadoLower === "derivado") return "Derivación externa";
+    if (["reparar", "controlado_sin_defecto", "reparado", "liberado"].includes(estadoLower)) return "Reparación / Salida";
+    if (estadoLower === "presupuestado" || ["emitido", "presupuestado", "aprobado", "rechazado"].includes(presupuestoLower)) return "Presupuesto";
+    if (estadoLower === "diagnosticado") return "Diagnóstico";
+    if (estadoLower === "ingresado") return "Ingreso";
+    return "Ingreso";
+  }, [estadoLower, presupuestoLower]);
+  const bajaSolicitadaLabel = useMemo(() => {
+    if (!data?.baja_solicitada_id) return "";
+    const base = data?.baja_solicitada_nombre
+      ? `Solicitud de BAJA pendiente: ${data.baja_solicitada_nombre}`
+      : `Solicitud de BAJA pendiente (ID ${data.baja_solicitada_id})`;
+    const fecha = data?.baja_solicitada_fecha ? formatDateTimeHelper(data.baja_solicitada_fecha) : "";
+    return fecha ? `${base} - ${fecha}` : base;
+  }, [data?.baja_solicitada_fecha, data?.baja_solicitada_id, data?.baja_solicitada_nombre]);
   // Labels auxiliares (evitar expresiones JSX complejas)
   const pendingLabel = (() => {
     if (data?.tecnico_solicitado_nombre) return `Solicitud de asignación pendiente: ${data.tecnico_solicitado_nombre}`;
@@ -601,6 +643,23 @@ export default function PrincipalTab(props) {
         {/* Columna derecha: Estado/Asignación/ubicación */}
         <div className="border rounded p-4">
           <h2 className="font-semibold mb-2">Estado</h2>
+          <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusChip value={data?.estado} title="Estado del equipo" />
+              <StatusChip value={data?.presupuesto_estado} title="Estado de presupuesto" />
+              <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-800">
+                Etapa: {etapaFlujo}
+              </span>
+            </div>
+            {bajaSolicitadaLabel && (
+              <div className="mt-2 text-xs font-medium text-amber-700">{bajaSolicitadaLabel}</div>
+            )}
+            {data?.baja_solicitada_motivo && (
+              <div className="mt-1 text-xs text-amber-800 whitespace-pre-wrap">
+                Motivo: {data.baja_solicitada_motivo}
+              </div>
+            )}
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
             <Row label="Motivo">
               {editBasics ? (
@@ -623,21 +682,8 @@ export default function PrincipalTab(props) {
                 data.motivo || "-"
               )}
             </Row>
-            <Row label="Estado">{estadoLabel(data.estado) || "-"}</Row>
-            <Row label="Presupuesto">
-              {(() => {
-                const v = data.presupuesto_estado;
-                if (!v) return "-";
-                if (v === "presupuestado") return "Presupuestado";
-                if (v === "no_aplica") return "No aplica";
-                try {
-                  const s = String(v);
-                  return s.charAt(0).toUpperCase() + s.slice(1);
-                } catch (_) {
-                  return String(v);
-                }
-              })()}
-            </Row>
+            <Row label="Estado"><StatusChip value={data?.estado} title="Estado del equipo" /></Row>
+            <Row label="Presupuesto"><StatusChip value={data?.presupuesto_estado} title={presupuestoLabel} /></Row>
             <Row label="Resolución">{data.resolucion ? resolutionLabel(data.resolucion) : "-"}</Row>
             <Row label="Fecha ingreso">{formatDateTimeHelper(resolveFechaIngreso(data))}</Row>
             <Row label="Fecha servicio">{data.fecha_servicio ? formatDateTimeHelper(data.fecha_servicio) : "-"}</Row>
@@ -645,7 +691,6 @@ export default function PrincipalTab(props) {
           <div className="mt-1 text-xs text-gray-500">
             Ingresado por: {data?.ingresado_por_nombre || (data?.ingresado_por_id ? `ID ${data.ingresado_por_id}` : "-")}
           </div>
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
             <div>
               <h2 className="font-semibold mb-2">Asignación</h2>
@@ -1114,18 +1159,3 @@ export default function PrincipalTab(props) {
     </>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

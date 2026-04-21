@@ -1,4 +1,4 @@
-from django.db import connection
+﻿from django.db import connection
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -22,8 +22,8 @@ def _q(sql, params=None, one=False):
 def _fix_mojibake(val: str) -> str:
     s = _fix_text_value(val)
     try:
-        # Casos típicos de mojibake UTF-8 visto como Latin-1: 'Ã', 'Â', etc.
-        if any(ch in s for ch in ("Ã", "Â", "â", "€", "™")):
+        # Casos típicos de mojibake UTF-8 visto como Latin-1: 'Ãƒ', 'Ã‚', etc.
+        if any(ch in s for ch in ("Ãƒ", "Ã‚", "Ã¢", "â‚¬", "â„¢")):
             return s.encode("latin1").decode("utf-8")
     except Exception:
         pass
@@ -54,6 +54,7 @@ def _get_motivo_enum_values() -> list:
         "baja alquiler",
         "reparación alquiler",
         "devolución demo",
+        "cotización de equipo",
         "otros",
     ]
 
@@ -64,4 +65,4 @@ class CatalogoMotivosView(APIView):
     def get(self, request):
         vals = _get_motivo_enum_values()
         vals = sorted(set(vals), key=lambda x: (x != "urgente control", x))
-        return Response([{ "value": v, "label": v } for v in vals])
+        return Response([{"value": v, "label": v} for v in vals])

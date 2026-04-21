@@ -1,17 +1,15 @@
   // web/src/lib/api.js
 import { MOTIVO_OPTIONS } from "./constants";
 
-  // === BASE del API robusto ===
-  // 1) Si est definida VITE_API_URL, la usamos.
-  // 2) Si no, caemos al host actual pero en puerto 8000 (til en LAN).
-  const devApiPort = window.location.port === "5175" ? "18100" : "8000";
-  const API_FALLBACK = `${window.location.protocol}//${window.location.hostname}:${devApiPort}`;
-  const isDevVite = window.location.port === "5173" || window.location.port === "5175";
-  const BASE =
-    import.meta.env.VITE_API_URL?.replace(/\/+$/, "") ||
-    (isDevVite
-      ? `${window.location.protocol}//${window.location.hostname}:8000`
-      : ""); // produccin: mismo origen + rutas /api/ relativas
+  // === BASE del API ===
+  // Si VITE_API_URL viene con sufijo /api, lo normalizamos para evitar /api/api.
+  function normalizeApiBase(rawValue) {
+    const value = String(rawValue || "").trim().replace(/\/+$/, "");
+    if (!value) return "";
+    return value.endsWith("/api") ? value.slice(0, -4) : value;
+  }
+
+  const BASE = normalizeApiBase(import.meta.env.VITE_API_URL);
 
   /* ===== Token en memoria (compatibilidad) ===== */
   let token = null;
@@ -301,6 +299,17 @@ export const deleteCatalogVariante = (varianteId) =>
   export const getTiposEquipo = () =>
     api.get("/api/catalogos/tipos-equipo/");
 
+  export const getTestProtocols = () =>
+    api.get("/api/catalogos/tests/protocolos/");
+  export const postTestProtocol = (payload) =>
+    api.post("/api/catalogos/tests/protocolos/", payload);
+  export const getTestProtocol = (protocolId) =>
+    api.get(`/api/catalogos/tests/protocolos/${protocolId}/`);
+  export const patchTestProtocol = (protocolId, payload) =>
+    api.patch(`/api/catalogos/tests/protocolos/${protocolId}/`, payload);
+  export const deleteTestProtocol = (protocolId) =>
+    api.del(`/api/catalogos/tests/protocolos/${protocolId}/`);
+
   // ABM Tipos de equipo (catlogo general)
   export const getTiposEquipoAdmin = () =>
     api.get("/api/catalogos/tipos-equipo-admin/");
@@ -347,6 +356,15 @@ export const postModelo = (brandId, payloadOrNombre) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.limit) qs.set("limit", params.limit);
+    const equipoHints = Array.isArray(params.equipo_hint)
+      ? params.equipo_hint
+      : params.equipo_hint
+      ? [params.equipo_hint]
+      : [];
+    equipoHints
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .forEach((value) => qs.append("equipo_hint", value));
     const qstr = qs.toString();
     return api.get(`/api/catalogos/repuestos/${qstr ? `?${qstr}` : ""}`);
   };
@@ -593,6 +611,18 @@ export const postModelo = (brandId, payloadOrNombre) => {
     api.patch(`/api/equipos/${deviceId}/preventivo-plan/`, payload);
   export const postDevicePreventivoRevision = (deviceId, payload) =>
     api.post(`/api/equipos/${deviceId}/preventivo-revisiones/`, payload);
+  export const getDevicePreventivoRepuestos = (deviceId) =>
+    api.get(`/api/equipos/${deviceId}/preventivo-repuestos/`);
+  export const postDevicePreventivoRepuesto = (deviceId, payload) =>
+    api.post(`/api/equipos/${deviceId}/preventivo-repuestos/`, payload);
+  export const patchDevicePreventivoRepuesto = (deviceId, itemId, payload) =>
+    api.patch(`/api/equipos/${deviceId}/preventivo-repuestos/${itemId}/`, payload);
+  export const deleteDevicePreventivoRepuesto = (deviceId, itemId) =>
+    api.del(`/api/equipos/${deviceId}/preventivo-repuestos/${itemId}/`);
+  export const postDeviceMgVenta = (deviceId, payload) =>
+    api.post(`/api/equipos/${deviceId}/mg/venta/`, payload);
+  export const postDeviceMgReactivar = (deviceId, payload = {}) =>
+    api.post(`/api/equipos/${deviceId}/mg/reactivar/`, payload);
   export const getPreventivosAgenda = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/preventivos/agenda/${qs ? `?${qs}` : ""}`);
@@ -676,31 +706,36 @@ export const postModelo = (brandId, payloadOrNombre) => {
   }
 
   export const patchIngresoTecnico = (ingresoId, tecnico_id) =>
-    api.patch(`/api/ingresos/${ingresoId}/asignar-técnico/`, { tecnico_id });
+    api.patch(`/api/ingresos/${ingresoId}/asignar-tecnico/`, { tecnico_id });
 
   // Solicitud de asignacin por tcnico
   export const postSolicitarAsignacion = (ingresoId) =>
     api.post(`/api/ingresos/${ingresoId}/solicitar-asignacion/`, {});
+  // Solicitud de baja de equipo (sin permiso de baja directa)
+  export const postSolicitarBaja = (ingresoId, payload) =>
+    api.post(`/api/ingresos/${ingresoId}/solicitar-baja/`, payload || {});
+  export const postRechazarSolicitudBaja = (ingresoId) =>
+    api.post(`/api/ingresos/${ingresoId}/solicitar-baja/rechazar/`, {});
 
   export const patchModeloTecnico = (marcaId, modeloId, tecnico_id) =>
     api.patch(
-      `/api/catálogos/marcas/${marcaId}/modelos/${modeloId}/técnico/`,
+      `/api/catalogos/marcas/${marcaId}/modelos/${modeloId}/tecnico/`,
       { tecnico_id }
     );
 
   // Variante simple por modelo (v1)
   export const patchModeloVariante = (marcaId, modeloId, variante) =>
     api.patch(
-      `/api/catálogos/marcas/${marcaId}/modelos/${modeloId}/variante/`,
+      `/api/catalogos/marcas/${marcaId}/modelos/${modeloId}/variante/`,
       { variante }
     );
 
   export const patchMarcaTecnico = (marcaId, tecnico_id) =>
-    api.patch(`/api/catálogos/marcas/${marcaId}/técnico/`, { tecnico_id });
+    api.patch(`/api/catalogos/marcas/${marcaId}/tecnico/`, { tecnico_id });
 
   // Aplica el tcnico de la marca a TODOS los modelos (sobrescribe)
   export const postMarcaAplicarTecnico = (marcaId) =>
-    api.post(`/api/catálogos/marcas/${marcaId}/técnico/aplicar-a-modelos/`);
+    api.post(`/api/catalogos/marcas/${marcaId}/tecnico/aplicar-a-modelos/`);
 
   /* =============== PRESUPUESTOS =============== */
   export const getQuote = (ingresoId) => api.get(`/api/quotes/${ingresoId}/`);
@@ -768,6 +803,10 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export async function postMarcarParaReparar(id) {
     return api.post(`/api/ingresos/${id}/reparar/`);
+  }
+
+  export async function postHabilitarReparacionCotizacion(id) {
+    return api.post(`/api/ingresos/${id}/habilitar-reparacion/`);
   }
 
   export async function postMarcarReparado(id) {

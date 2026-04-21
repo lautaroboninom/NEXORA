@@ -1,4 +1,4 @@
-from django.db import connection, transaction
+﻿from django.db import connection, transaction
 import time
 import json
 import logging
@@ -20,6 +20,7 @@ from .helpers import (
     _get_motivo_enum_values,
     _get_motivo_enum_values_raw,
     _map_motivo_to_db_label,
+    _motivo_is_cotizacion_equipo,
     _norm_txt,
     _rol,
     _set_audit_user,
@@ -34,6 +35,8 @@ from .helpers import (
     require_permission,
     ensure_default_locations,
 )
+from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
+from .mg_state import resolve_mg_flags
 
 logger = logging.getLogger(__name__)
 from ..serializers import (
@@ -41,11 +44,11 @@ from ..serializers import (
     IngresoDetailWithAccesoriosSerializer,
     IngresoListItemSerializer,
 )
-from ..permissions import require_any_permission
+from ..permissions import require_any_permission, user_has_permission
 from ..warranty import compute_warranty
 
 
-# Helpers locales (sin mover módulos por ahora)
+# Helpers locales (sin mover mÃ³dulos por ahora)
 def _equipolabel_row(r):
     try:
         tipo = (r.get("tipo_equipo") or "").strip()
@@ -99,6 +102,79 @@ def _parse_datetime_or_date(value):
             except ValueError:
                 return None
     return None
+
+
+def _has_mg_schema() -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='devices'
+                   AND column_name='mg_estado'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name='devices'
+               AND column_name='mg_estado'
+             LIMIT 1
+            """,
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _ingresos_has_permite_reparacion_col() -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='ingresos'
+                   AND column_name='permite_reparacion'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name='ingresos'
+               AND column_name='permite_reparacion'
+             LIMIT 1
+            """,
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _is_cotizacion_bloqueada_para_reparar(motivo, permite_reparacion) -> bool:
+    return _motivo_is_cotizacion_equipo(motivo) and not bool(permite_reparacion)
+
+
+def _mg_owner_customer_id():
+    row = q(
+        "SELECT id FROM customers WHERE LOWER(razon_social) LIKE %s ORDER BY id ASC LIMIT 1",
+        ["%mg%bio%"],
+        one=True,
+    )
+    return row.get("id") if row else None
 
 
 def _send_mail_with_fallback(subject, body, recipients):
@@ -184,6 +260,48 @@ def _taller_location_id():
         return row and row.get("id")
     except Exception:
         return None
+
+
+def _pending_baja_request(ingreso_id: int):
+    try:
+        return q(
+            """
+            SELECT r.id,
+                   r.usuario_id AS uid,
+                   COALESCE(u.nombre, '') AS nombre,
+                   COALESCE(r.motivo, '') AS motivo,
+                   r.created_at
+              FROM ingreso_baja_requests r
+              LEFT JOIN users u ON u.id = r.usuario_id
+             WHERE r.ingreso_id = %s
+               AND r.accepted_at IS NULL
+               AND r.canceled_at IS NULL
+             ORDER BY r.created_at DESC, r.id DESC
+             LIMIT 1
+            """,
+            [ingreso_id],
+            one=True,
+        )
+    except Exception:
+        return None
+
+
+def _table_exists(table_name: str) -> bool:
+    try:
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.tables
+             WHERE table_schema = ANY(current_schemas(true))
+               AND table_name = %s
+             LIMIT 1
+            """,
+            [table_name],
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
 
 
 class MisPendientesView(APIView):
@@ -357,7 +475,7 @@ class PresupuestadosExportView(APIView):
         try:
             ids = [int(x) for x in ids_raw.split(",") if x.strip()]
         except Exception:
-            return Response({"detail": "Parametro 'ids' inválido"}, status=400)
+            return Response({"detail": "Parametro 'ids' invÃ¡lido"}, status=400)
 
         # Evitar excesos accidentales
         if len(ids) > 1000:
@@ -469,19 +587,51 @@ class MarcarReparadoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def post(self, request, ingreso_id: int):
         require_roles(request, ["tecnico", "jefe", "jefe_veedor"])
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        permite_reparacion_sql = (
+            "COALESCE(permite_reparacion, TRUE) AS permite_reparacion"
+            if has_permite_reparacion
+            else "TRUE AS permite_reparacion"
+        )
         # Solo el tecnico asignado puede marcar como reparado (salvo jefes)
         try:
             if _rol(request) in ("tecnico", "jefe_veedor"):
-                row = q("SELECT asignado_a FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+                row = q(
+                    f"""
+                    SELECT asignado_a, motivo, {permite_reparacion_sql}
+                      FROM ingresos
+                     WHERE id=%s
+                    """,
+                    [ingreso_id],
+                    one=True,
+                )
                 uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
                 if not row or int(row.get("asignado_a") or 0) != int(uid or 0):
                     raise PermissionDenied("Solo el tecnico asignado puede marcar como reparado")
+                if _is_cotizacion_bloqueada_para_reparar(row.get("motivo"), row.get("permite_reparacion")):
+                    raise ValidationError("Ingreso en cotización: primero habilite la reparación.")
         except PermissionDenied:
+            raise
+        except ValidationError:
             raise
         except Exception:
             # En duda, permitir solo a roles superiores
             if _rol(request) in ("tecnico", "jefe_veedor"):
                 raise PermissionDenied("Solo el tecnico asignado puede marcar como reparado")
+        if _rol(request) not in ("tecnico", "jefe_veedor"):
+            row = q(
+                f"""
+                SELECT motivo, {permite_reparacion_sql}
+                  FROM ingresos
+                 WHERE id=%s
+                """,
+                [ingreso_id],
+                one=True,
+            )
+            if not row:
+                raise ValidationError("Ingreso no encontrado")
+            if _is_cotizacion_bloqueada_para_reparar(row.get("motivo"), row.get("permite_reparacion")):
+                raise ValidationError("Ingreso en cotización: primero habilite la reparación.")
         # Leer estado/presupuesto previos para decidir envio (idempotencia)
         try:
             _prev_row = q(
@@ -497,12 +647,12 @@ class MarcarReparadoView(APIView):
         _set_audit_user(request)
         exec_void("UPDATE ingresos SET estado='reparado' WHERE id=%s", [ingreso_id])
 
-        # Movimiento automático a Estanterí­a de Alquiler si el equipo es "MG ####"
+        # Movimiento automÃ¡tico a EstanterÃ­Â­a de Alquiler si el equipo es "MG ####"
         auto_moved = False
         auto_moved_to = None
         new_ubic_id = None
         try:
-            # Leer números para detección MG y ubicación actual
+            # Leer nÃºmeros para detecciÃ³n MG y ubicaciÃ³n actual
             info = q(
                 """
                 SELECT COALESCE(d.numero_serie,'') AS numero_serie,
@@ -523,12 +673,12 @@ class MarcarReparadoView(APIView):
             pat = re.compile(r"\bMG \d{4}\b", re.IGNORECASE)
             is_mg = bool(pat.search(ns) or pat.search(ni)) or (ns.strip().upper().startswith("MG ") or ni.strip().upper().startswith("MG "))
             if is_mg:
-                # Asegurar existencia de ubicaciones por defecto y buscar ID canónico
+                # Asegurar existencia de ubicaciones por defecto y buscar ID canÃ³nico
                 try:
                     ensure_default_locations()
                 except Exception:
                     pass
-                target_name = "Estanterí­a de Alquiler"
+                target_name = "EstanterÃ­Â­a de Alquiler"
                 loc_row = q(
                     "SELECT id, nombre FROM locations WHERE LOWER(nombre)=LOWER(%s) LIMIT 1",
                     [target_name],
@@ -543,7 +693,7 @@ class MarcarReparadoView(APIView):
                         auto_moved_to = loc_row.get("nombre") or target_name
                         new_ubic_id = target_id
         except Exception:
-            # No bloquear el flujo por errores en movimiento automático
+            # No bloquear el flujo por errores en movimiento automÃ¡tico
             pass
         # Disparar correo si paso a 'reparado' y presupuesto esta 'aprobado'
         _should_send_mail = (_prev_estado != "reparado" and _prev_presu == "aprobado")
@@ -645,9 +795,9 @@ class MarcarReparadoView(APIView):
             if auto_moved:
                 resp.update({
                     "auto_moved": True,
-                    "auto_moved_to": auto_moved_to or "Estanterí­a de Alquiler",
+                    "auto_moved_to": auto_moved_to or "EstanterÃ­Â­a de Alquiler",
                     "ubicacion_id": new_ubic_id,
-                    "ubicacion_nombre": auto_moved_to or "Estanterí­a de Alquiler",
+                    "ubicacion_nombre": auto_moved_to or "EstanterÃ­Â­a de Alquiler",
                 })
         except Exception:
             pass
@@ -658,8 +808,23 @@ class MarcarParaRepararView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def post(self, request, ingreso_id: int):
         require_roles(request, ["jefe"])
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        permite_reparacion_sql = (
+            "COALESCE(permite_reparacion, TRUE) AS permite_reparacion"
+            if has_permite_reparacion
+            else "TRUE AS permite_reparacion"
+        )
         row = q(
-            "SELECT estado::text AS estado, COALESCE(presupuesto_estado::text,'') AS presupuesto_estado, asignado_a FROM ingresos WHERE id=%s",
+            f"""
+            SELECT
+              estado::text AS estado,
+              COALESCE(presupuesto_estado::text,'') AS presupuesto_estado,
+              asignado_a,
+              motivo,
+              {permite_reparacion_sql}
+            FROM ingresos
+            WHERE id=%s
+            """,
             [ingreso_id],
             one=True,
         )
@@ -673,9 +838,11 @@ class MarcarParaRepararView(APIView):
             if int(asignado_a or 0) != int(uid or 0):
                 raise PermissionDenied("Solo el tecnico asignado puede editar diagnostico y reparacion")
         if not asignado_a:
-            raise ValidationError("Antes de reparar, asigna un técnico al ingreso")
+            raise ValidationError("Antes de reparar, asigna un tÃ©cnico al ingreso")
         if estado_cur in ("reparado", "liberado", "entregado", "baja", "alquilado", "controlado_sin_defecto"):
             raise ValidationError("No se puede marcar para reparar desde el estado actual")
+        if _is_cotizacion_bloqueada_para_reparar(row.get("motivo"), row.get("permite_reparacion")):
+            raise ValidationError("Ingreso en cotización: primero habilite la reparación.")
 
         _set_audit_user(request)
         try:
@@ -779,6 +946,66 @@ class MarcarParaRepararView(APIView):
             "email_sent": bool(email_sent),
         }
         return Response(resp)
+
+
+class HabilitarReparacionCotizacionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, ingreso_id: int):
+        require_roles(request, ["jefe"])
+        if not _ingresos_has_permite_reparacion_col():
+            return Response(
+                {"detail": "Schema no aplicado: falta columna ingresos.permite_reparacion."},
+                status=400,
+            )
+
+        row = q(
+            """
+            SELECT motivo, COALESCE(permite_reparacion, TRUE) AS permite_reparacion
+              FROM ingresos
+             WHERE id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
+        if not row:
+            raise ValidationError("Ingreso no encontrado")
+
+        motivo = row.get("motivo")
+        if not _motivo_is_cotizacion_equipo(motivo):
+            return Response(
+                {
+                    "ok": True,
+                    "motivo": motivo,
+                    "permite_reparacion": True,
+                    "already_enabled": True,
+                    "not_required": True,
+                }
+            )
+
+        if bool(row.get("permite_reparacion")):
+            return Response(
+                {
+                    "ok": True,
+                    "motivo": motivo,
+                    "permite_reparacion": True,
+                    "already_enabled": True,
+                }
+            )
+
+        _set_audit_user(request)
+        exec_void(
+            "UPDATE ingresos SET permite_reparacion=TRUE WHERE id=%s",
+            [ingreso_id],
+        )
+        return Response(
+            {
+                "ok": True,
+                "motivo": motivo,
+                "permite_reparacion": True,
+                "already_enabled": False,
+            }
+        )
 
 
 class EntregarIngresoView(APIView):
@@ -941,6 +1168,22 @@ class DarBajaIngresoView(APIView):
                     [dash_id, ingreso_id],
                 )
                 marked_baja = True
+        if marked_baja:
+            try:
+                with transaction.atomic():
+                    exec_void(
+                        """
+                        UPDATE ingreso_baja_requests
+                           SET accepted_at = COALESCE(accepted_at, NOW())
+                         WHERE ingreso_id = %s
+                           AND accepted_at IS NULL
+                           AND canceled_at IS NULL
+                        """,
+                        [ingreso_id],
+                    )
+            except Exception:
+                # Tabla opcional / no bloquear la baja real
+                pass
         try:
             exec_void(
                 """
@@ -950,7 +1193,7 @@ class DarBajaIngresoView(APIView):
                 [ingreso_id],
             )
         except Exception:
-            # No bloquear si la tabla o inserción falla
+            # No bloquear si la tabla o inserciÃ³n falla
             pass
         if marked_baja:
             try:
@@ -1001,7 +1244,7 @@ class DarBajaIngresoView(APIView):
                 resolucion_labels = {
                     "reparado": "Reparado",
                     "no_reparado": "No reparado",
-                    "no_se_encontro_falla": "No se encontró falla",
+                    "no_se_encontro_falla": "No se encontrÃ³ falla",
                     "presupuesto_rechazado": "Presupuesto rechazado",
                     "cambio": "Cambio",
                 }
@@ -1009,32 +1252,32 @@ class DarBajaIngresoView(APIView):
                     resolucion,
                     resolucion.replace("_", " ").capitalize() if resolucion else "",
                 )
-                subject = f"Notificación de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
+                subject = f"NotificaciÃ³n de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
                 lines = [
-                    "Se registró la baja de un equipo en el sistema de reparaciones. Por favor reflejar la baja en el sistema patrimonial.",
+                    "Se registrÃ³ la baja de un equipo en el sistema de reparaciones. Por favor reflejar la baja en el sistema patrimonial.",
                     "",
                     "Detalle del ingreso:",
                     f"- OS: {os_txt}",
                     f"- Cliente: {cliente or '-'}",
                     f"- Equipo: {equipo or '-'}",
-                    f"- Número de serie: {numero_serie or '-'}",
-                    f"- Número interno: {numero_interno or '-'}",
-                    f"- Ubicación actual: {ubicacion or '-'}",
+                    f"- NÃºmero de serie: {numero_serie or '-'}",
+                    f"- NÃºmero interno: {numero_interno or '-'}",
+                    f"- UbicaciÃ³n actual: {ubicacion or '-'}",
                     f"- Fecha de baja: {fecha_baja}",
                     f"- Registrado por: {actor_line or '-'}",
                 ]
                 diag_lines = []
-                diag_lines.append(f"- Diagnóstico / descripción del problema: {descripcion_problema or '-'}")
+                diag_lines.append(f"- DiagnÃ³stico / descripciÃ³n del problema: {descripcion_problema or '-'}")
                 diag_lines.append(f"- Trabajos realizados: {trabajos_realizados or '-'}")
                 diag_lines.append(f"- Comentarios: {comentarios or '-'}")
                 if informe_preliminar:
                     diag_lines.append(f"- Informe preliminar: {informe_preliminar}")
                 if resolucion_label:
-                    diag_lines.append(f"- Resolución: {resolucion_label}")
+                    diag_lines.append(f"- ResoluciÃ³n: {resolucion_label}")
                 if motivo:
                     diag_lines.append(f"- Motivo de ingreso: {motivo}")
                 lines.append("")
-                lines.append("Diagnóstico / motivo de baja:")
+                lines.append("DiagnÃ³stico / motivo de baja:")
                 lines.extend(diag_lines)
                 try:
                     url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
@@ -1358,7 +1601,7 @@ class GeneralPorClienteExportView(APIView):
 
     GET /api/clientes/<customer_id>/general/export/
       Parametros opcionales:
-        - ids: lista separada por comas para limitar la exportación a esos ingresos
+        - ids: lista separada por comas para limitar la exportaciÃ³n a esos ingresos
         - ids: lista separada por comas para limitar la exportacion a esos ingresos
     Columnas del Excel:
       OS, Cliente, Equipo, N/S, Estado, Fecha ingreso
@@ -1372,7 +1615,7 @@ class GeneralPorClienteExportView(APIView):
             try:
                 ids = [int(x) for x in ids_raw.split(",") if x.strip()]
             except Exception:
-                return Response({"detail": "Parametro 'ids' inválido"}, status=400)
+                return Response({"detail": "Parametro 'ids' invÃ¡lido"}, status=400)
             if len(ids) > 1000:
                 return Response({"detail": "Demasiados IDs (maximo 1000)"}, status=400)
         with connection.cursor() as cur:
@@ -1508,10 +1751,19 @@ class GeneralPorClienteExportView(APIView):
 class AprobadosParaRepararView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        filtro_cotizacion = ""
+        if has_permite_reparacion:
+            filtro_cotizacion = """
+                  AND NOT (
+                        LOWER(CAST(t.motivo AS TEXT)) IN ('cotización de equipo', 'cotizacion de equipo')
+                    AND COALESCE(t.permite_reparacion, TRUE) = FALSE
+                  )
+            """
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
-                """
+                f"""
                 SELECT
                   t.id,
                   t.estado,
@@ -1544,6 +1796,7 @@ class AprobadosParaRepararView(APIView):
                         OR t.estado = 'reparar'
                       )
                   AND t.estado NOT IN ('reparado','entregado','derivado','liberado','alquilado','baja')
+                  {filtro_cotizacion}
                 ORDER BY COALESCE(q.fecha_aprobado, t.fecha_ingreso) ASC;
             """,
                 ["taller"],
@@ -1697,7 +1950,7 @@ class GeneralEquiposView(APIView):
         numero_serie_raw = (request.GET.get("numero_serie") or "").strip()
         numero_interno_raw = (request.GET.get("numero_interno") or "").strip()
 
-        # paginación opcional (se mantiene respuesta original si no se especifica page_size)
+        # paginaciÃ³n opcional (se mantiene respuesta original si no se especifica page_size)
         page_raw = (request.GET.get("page") or "").strip()
         page_size_raw = (request.GET.get("page_size") or "").strip()
 
@@ -1749,7 +2002,7 @@ class GeneralEquiposView(APIView):
                 wh.append("LOWER(loc.nombre) = LOWER(%s)")
                 params.append(ubic)
             else:
-                # Compat: permitir filtrar por ubicacion_id (numérico)
+                # Compat: permitir filtrar por ubicacion_id (numÃ©rico)
                 try:
                     if ubic_id_raw and str(int(ubic_id_raw)) == ubic_id_raw:
                         wh.append("t.ubicacion_id = %s")
@@ -1890,7 +2143,7 @@ class GeneralEquiposView(APIView):
             """
             cur.execute(sql, params + limit_params)
             rows = _fetchall_dicts(cur)
-        # compat: si no hay paginación pedida, seguir devolviendo lista
+        # compat: si no hay paginaciÃ³n pedida, seguir devolviendo lista
         if page_size == 0:
             return Response(rows)
         has_next = False
@@ -1905,6 +2158,262 @@ class GeneralEquiposView(APIView):
         })
 
 
+class GeneralEquiposExportView(APIView):
+    """
+    Exporta el historico de ingresos en Excel (.xlsx) respetando los mismos
+    filtros de GeneralEquiposView.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        ubic = (request.GET.get("ubicacion") or "").strip()
+        ubic_id_raw = (request.GET.get("ubicacion_id") or "").strip()
+        estado_raw = (request.GET.get("estado") or "").strip()
+        excluir_estados_raw = (request.GET.get("excluir_estados") or "").strip()
+        solo_taller_raw = (request.GET.get("solo_taller") or "").strip().lower()
+        q_raw = (request.GET.get("q") or "").strip()
+        delivered_raw = (request.GET.get("delivered") or "").strip().lower()
+        from_raw = (request.GET.get("from") or "").strip()
+        to_raw = (request.GET.get("to") or "").strip()
+        fecha_ingreso_from_raw = (request.GET.get("fecha_ingreso_from") or "").strip()
+        fecha_ingreso_to_raw = (request.GET.get("fecha_ingreso_to") or "").strip()
+        fecha_liberacion_from_raw = (request.GET.get("fecha_liberacion_from") or "").strip()
+        fecha_liberacion_to_raw = (request.GET.get("fecha_liberacion_to") or "").strip()
+        fecha_entrega_from_raw = (request.GET.get("fecha_entrega_from") or "").strip()
+        fecha_entrega_to_raw = (request.GET.get("fecha_entrega_to") or "").strip()
+        os_raw = (request.GET.get("os") or "").strip()
+        cliente_raw = (request.GET.get("cliente") or "").strip()
+        tipo_equipo_raw = (request.GET.get("tipo_equipo") or "").strip()
+        marca_raw = (request.GET.get("marca") or "").strip()
+        modelo_raw = (request.GET.get("modelo") or "").strip()
+        variante_raw = (request.GET.get("variante") or "").strip()
+        estado_q_raw = (request.GET.get("estado_q") or "").strip()
+        numero_serie_raw = (request.GET.get("numero_serie") or "").strip()
+        numero_interno_raw = (request.GET.get("numero_interno") or "").strip()
+
+        estados = [e.strip().lower() for e in estado_raw.split(",") if e.strip()] if estado_raw else []
+        excluir_estados = [e.strip().lower() for e in excluir_estados_raw.split(",") if e.strip()] if excluir_estados_raw else []
+        solo_taller_param_present = ("solo_taller" in request.GET)
+        solo_taller = solo_taller_raw in ("1", "true", "yes", "y", "t")
+        delivered = delivered_raw in ("1", "true", "yes", "y", "t")
+
+        with connection.cursor() as cur:
+            _set_audit_user(request)
+            wh, params = [], []
+            if delivered and not (fecha_entrega_from_raw or fecha_entrega_to_raw):
+                fecha_entrega_from_raw = from_raw
+                fecha_entrega_to_raw = to_raw
+
+            def _apply_date_range(field_sql, from_val, to_val):
+                if from_val:
+                    try:
+                        f = parse_date(from_val)
+                        if f:
+                            wh.append(f"DATE({field_sql}) >= %s")
+                            params.append(f.isoformat())
+                    except Exception:
+                        pass
+                if to_val:
+                    try:
+                        tdt = parse_date(to_val)
+                        if tdt:
+                            wh.append(f"DATE({field_sql}) <= %s")
+                            params.append(tdt.isoformat())
+                    except Exception:
+                        pass
+
+            def _apply_ilike(field_sql, value):
+                if value:
+                    wh.append(f"{field_sql} ILIKE %s")
+                    params.append(f"%{value}%")
+
+            if ubic:
+                wh.append("LOWER(loc.nombre) = LOWER(%s)")
+                params.append(ubic)
+            else:
+                try:
+                    if ubic_id_raw and str(int(ubic_id_raw)) == ubic_id_raw:
+                        wh.append("t.ubicacion_id = %s")
+                        params.append(int(ubic_id_raw))
+                except Exception:
+                    pass
+
+            if not (ubic or (ubic_id_raw and ubic_id_raw.isdigit())):
+                if solo_taller_param_present and solo_taller:
+                    wh.append("LOWER(loc.nombre) = LOWER(%s)")
+                    params.append("taller")
+
+            if estados:
+                placeholders = ",".join(["%s"] * len(estados))
+                wh.append(f"LOWER(TRIM(COALESCE(t.estado::text,''))) IN ({placeholders})")
+                params.extend(estados)
+            if excluir_estados:
+                placeholders = ",".join(["%s"] * len(excluir_estados))
+                wh.append(f"LOWER(TRIM(COALESCE(t.estado::text,''))) NOT IN ({placeholders})")
+                params.extend(excluir_estados)
+
+            if q_raw:
+                needle = q_raw.strip()
+                if needle:
+                    needle_ns = needle.replace(" ", "").upper()
+                    import re as _re
+                    m_mg = _re.match(r"^MG\s*(\d{4})$", needle, _re.IGNORECASE)
+                    m_os = _re.match(r"^(?:OS\s*)?(\d+)$", needle, _re.IGNORECASE)
+                    if m_mg:
+                        mg_no_space = ("MG" + m_mg.group(1)).upper()
+                        wh.append("("
+                                  "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s OR "
+                                  "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s)")
+                        params.extend([mg_no_space, mg_no_space])
+                    else:
+                        like = f"%{needle}%"
+                        like_ns = f"%{needle_ns}%"
+                        clauses = []
+                        if m_os:
+                            clauses.append("t.id = %s")
+                        clauses.extend([
+                            "t.id::text ILIKE %s",
+                            "COALESCE(c.razon_social,'') ILIKE %s",
+                            "COALESCE(b.nombre,'') ILIKE %s",
+                            "COALESCE(m.nombre,'') ILIKE %s",
+                            "COALESCE(m.tipo_equipo,'') ILIKE %s",
+                            "COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,''), '') ILIKE %s",
+                            "COALESCE(t.estado::text,'') ILIKE %s",
+                            "COALESCE(d.numero_serie,'') ILIKE %s",
+                            "COALESCE(d.numero_interno,'') ILIKE %s",
+                            "COALESCE(loc.nombre,'') ILIKE %s",
+                            "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') LIKE %s",
+                            "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') LIKE %s",
+                        ])
+                        wh.append("(" + " OR ".join(clauses) + ")")
+                        if m_os:
+                            params.append(int(m_os.group(1)))
+                        params.extend([like] * 10 + [like_ns, like_ns])
+
+            if os_raw:
+                try:
+                    import re as _re
+                    m_os = _re.match(r"^(?:OS\s*)?(\d+)$", os_raw, _re.IGNORECASE)
+                except Exception:
+                    m_os = None
+                if m_os:
+                    wh.append("t.id = %s")
+                    params.append(int(m_os.group(1)))
+                else:
+                    wh.append("t.id::text ILIKE %s")
+                    params.append(f"%{os_raw}%")
+
+            _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
+            _apply_ilike("COALESCE(m.tipo_equipo,'')", tipo_equipo_raw)
+            _apply_ilike("COALESCE(b.nombre,'')", marca_raw)
+            _apply_ilike("COALESCE(m.nombre,'')", modelo_raw)
+            _apply_ilike(
+                "COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,''), '')",
+                variante_raw,
+            )
+            _apply_ilike("COALESCE(t.estado::text,'')", estado_q_raw)
+            _apply_ilike("COALESCE(d.numero_serie,'')", numero_serie_raw)
+            _apply_ilike("COALESCE(d.numero_interno,'')", numero_interno_raw)
+
+            _apply_date_range("t.fecha_ingreso", fecha_ingreso_from_raw, fecha_ingreso_to_raw)
+            _apply_date_range("ev_lib.fecha_liberacion", fecha_liberacion_from_raw, fecha_liberacion_to_raw)
+            _apply_date_range("t.fecha_entrega", fecha_entrega_from_raw, fecha_entrega_to_raw)
+
+            if delivered:
+                wh.append("t.fecha_entrega IS NOT NULL")
+
+            where_sql = (" WHERE " + " AND ".join(wh)) if wh else ""
+
+            sql = f"""
+                SELECT
+                  t.id, t.estado, t.presupuesto_estado, t.fecha_ingreso, ev_lib.fecha_liberacion, t.fecha_entrega, t.ubicacion_id,
+                  COALESCE(loc.nombre,'') AS ubicacion_nombre,
+                  c.id AS customer_id, c.razon_social,
+                  d.numero_serie,
+                  COALESCE(d.numero_interno,'') AS numero_interno,
+                  COALESCE(b.nombre,'') AS marca,
+                  COALESCE(m.nombre,'') AS modelo,
+                  COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+                  COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante
+                FROM ingresos t
+                JOIN devices   d ON d.id = t.device_id
+                JOIN customers c ON c.id = d.customer_id
+                LEFT JOIN marcas b ON b.id = d.marca_id
+                LEFT JOIN models m ON m.id = d.model_id
+                LEFT JOIN (
+                  SELECT ingreso_id, MAX(ts) AS fecha_liberacion
+                  FROM ingreso_events
+                  WHERE a_estado = 'liberado'
+                  GROUP BY ingreso_id
+                ) ev_lib ON ev_lib.ingreso_id = t.id
+                LEFT JOIN locations loc ON loc.id = t.ubicacion_id
+                {where_sql}
+                ORDER BY t.id DESC
+            """
+            cur.execute(sql, params)
+            rows = _fetchall_dicts(cur)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Historico ingresos"
+        ws.append([
+            "OS",
+            "Cliente",
+            "Tipo de equipo",
+            "Marca",
+            "Modelo",
+            "Variante",
+            "Estado",
+            "N/S (serie)",
+            "MG",
+            "Fecha ingreso",
+            "Fecha liberacion",
+            "Fecha entrega",
+        ])
+
+        def _dt_txt(value):
+            if value is None:
+                return "-"
+            try:
+                return value.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return str(value)
+
+        for r in rows:
+            ws.append([
+                os_label(r.get("id")),
+                r.get("razon_social") or "-",
+                r.get("tipo_equipo") or "-",
+                r.get("marca") or "-",
+                r.get("modelo") or "-",
+                r.get("equipo_variante") or "-",
+                r.get("estado") or "-",
+                r.get("numero_serie") or "-",
+                r.get("numero_interno") or "-",
+                _dt_txt(r.get("fecha_ingreso")),
+                _dt_txt(r.get("fecha_liberacion")),
+                _dt_txt(r.get("fecha_entrega")),
+            ])
+
+        try:
+            widths = [10, 40, 20, 20, 24, 24, 18, 22, 14, 20, 20, 20]
+            for idx, width in enumerate(widths, start=1):
+                ws.column_dimensions[chr(64 + idx)].width = width
+        except Exception:
+            pass
+
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        fname = f"historico_ingresos_{timezone.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        resp = HttpResponse(
+            bio.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        resp["Content-Disposition"] = f"attachment; filename=\"{fname}\""
+        return resp
+
+
 class IngresoAsignarTecnicoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def patch(self, request, ingreso_id):
@@ -1915,7 +2424,7 @@ class IngresoAsignarTecnicoView(APIView):
         ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
                 [tecnico_id], one=True)
         if not ok:
-            return Response({"detail": "técnico inválido"}, status=400)
+            return Response({"detail": "tÃ©cnico invÃ¡lido"}, status=400)
         try:
             prev = q("SELECT asignado_a FROM ingresos WHERE id=%s", [ingreso_id], one=True)
             logger.info(f"[AsignarTecnico] ingreso={ingreso_id} prev={prev and prev.get('asignado_a')} new={tecnico_id}")
@@ -1954,7 +2463,7 @@ class IngresoAsignarTecnicoView(APIView):
                     [ingreso_id, tecnico_id],
                 )
         except Exception:
-            # si la tabla no existe o falla, no romper la transacción principal
+            # si la tabla no existe o falla, no romper la transacciÃ³n principal
             pass
         try:
             who = q("SELECT COALESCE(nombre,'') AS nombre, COALESCE(email,'') AS email FROM users WHERE id=%s", [tecnico_id], one=True)
@@ -2076,13 +2585,13 @@ class IngresoSolicitarAsignacionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        # Solo técnicos pueden solicitar
+        # Solo tÃ©cnicos pueden solicitar
         require_roles(request, ["tecnico"])
         uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
         if not uid:
-            return Response({"detail": "Usuario inválido"}, status=400)
+            return Response({"detail": "Usuario invÃ¡lido"}, status=400)
 
-        # Si ya está asignado a este técnico, responder OK y no hacer nada
+        # Si ya estÃ¡ asignado a este tÃ©cnico, responder OK y no hacer nada
         try:
             cur = q("SELECT asignado_a FROM ingresos WHERE id=%s", [ingreso_id], one=True)
             if cur and int(cur.get("asignado_a") or 0) == int(uid):
@@ -2101,9 +2610,9 @@ class IngresoSolicitarAsignacionView(APIView):
                 [ingreso_id, uid],
                 )
         except Exception:
-            pass  # tabla puede no existir; continuar con notificación
+            pass  # tabla puede no existir; continuar con notificaciÃ³n
 
-        # Enviar notificación por email (reportar éxito/fracaso)
+        # Enviar notificaciÃ³n por email (reportar Ã©xito/fracaso)
         email_sent = False
         email_debug = {}
         try:
@@ -2227,11 +2736,274 @@ class IngresoSolicitarAsignacionView(APIView):
         return Response(resp)
 
 
+class IngresoSolicitarBajaView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, ingreso_id: int):
+        _set_audit_user(request)
+        if user_has_permission(request, "action.ingreso.baja_alta"):
+            raise PermissionDenied("Tu usuario ya tiene permiso para dar baja directa")
+
+        require_any_permission(
+            request,
+            [
+                "page.ingresos_history",
+                "page.work_queues",
+                "page.budget_queues",
+                "page.logistics",
+                "action.ingreso.edit_basics",
+                "action.ingreso.edit_diagnosis",
+                "action.ingreso.edit_location",
+                "action.ingreso.edit_delivery",
+                "action.ingreso.manage_derivations",
+                "action.ingreso.repair_transitions",
+                "action.presupuesto.manage",
+            ],
+            message="No autorizado para solicitar baja",
+        )
+
+        uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        if not uid:
+            return Response({"detail": "Usuario invalido"}, status=400)
+
+        payload = request.data or {}
+        motivo = str(payload.get("motivo") or "").strip()
+        if not motivo:
+            return Response({"detail": "El motivo es obligatorio"}, status=400)
+
+        row = q("SELECT estado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        if not row:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        estado_actual = (row.get("estado") or "").lower()
+        if estado_actual == "baja":
+            return Response({"ok": True, "already_baja": True, "email_sent": False})
+
+        pending = _pending_baja_request(ingreso_id)
+        if pending:
+            return Response(
+                {
+                    "ok": True,
+                    "already_pending": True,
+                    "email_sent": False,
+                    "solicitud_id": pending.get("id"),
+                    "baja_solicitada_fecha": pending.get("created_at"),
+                }
+            )
+
+        req_row = None
+        try:
+            req_row = q(
+                """
+                INSERT INTO ingreso_baja_requests (ingreso_id, usuario_id, motivo, created_at)
+                VALUES (%s, %s, %s, NOW())
+                RETURNING id, created_at
+                """,
+                [ingreso_id, uid, motivo],
+                one=True,
+            )
+        except Exception:
+            pending = _pending_baja_request(ingreso_id)
+            if pending:
+                return Response(
+                    {
+                        "ok": True,
+                        "already_pending": True,
+                        "email_sent": False,
+                        "solicitud_id": pending.get("id"),
+                        "baja_solicitada_fecha": pending.get("created_at"),
+                    }
+                )
+            logger.exception("baja_request_insert failed", extra={"ingreso_id": ingreso_id, "user_id": uid})
+            return Response({"detail": "No se pudo registrar la solicitud de baja"}, status=500)
+
+        info = q(
+            """
+            SELECT c.razon_social AS cliente,
+                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+                   COALESCE(b.nombre,'') AS marca,
+                   COALESCE(m.nombre,'') AS modelo,
+                   COALESCE(d.numero_serie,'') AS numero_serie,
+                   COALESCE(d.numero_interno,'') AS numero_interno
+              FROM ingresos t
+              JOIN devices d ON d.id = t.device_id
+              JOIN customers c ON c.id = d.customer_id
+              LEFT JOIN marcas b ON b.id = d.marca_id
+              LEFT JOIN models m ON m.id = d.model_id
+             WHERE t.id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        ) or {}
+
+        os_txt = os_label(ingreso_id)
+        cliente = info.get("cliente") or ""
+        equipo = " | ".join(
+            [
+                p
+                for p in [info.get("tipo_equipo") or "", info.get("marca") or "", info.get("modelo") or ""]
+                if p
+            ]
+        )
+        numero_serie = info.get("numero_serie") or ""
+        numero_interno = info.get("numero_interno") or ""
+        actor_nombre = getattr(request.user, "nombre", None) or getattr(request.user, "username", "") or ""
+        actor_email = getattr(request.user, "email", "") or ""
+        actor_line = actor_nombre or "-"
+        if actor_email:
+            actor_line = f"{actor_line} ({actor_email})" if actor_line else actor_email
+
+        subject = f"Solicitud de BAJA {os_txt} - {cliente or 'Sin cliente'}"
+        lines = [
+            "Se solicito dar de baja un equipo en el sistema de reparaciones.",
+            "",
+            "Detalle del ingreso:",
+            f"- OS: {os_txt}",
+            f"- Cliente: {cliente or '-'}",
+            f"- Equipo: {equipo or '-'}",
+            f"- Numero de serie: {numero_serie or '-'}",
+            f"- Numero interno: {numero_interno or '-'}",
+            f"- Solicitado por: {actor_line or '-'}",
+            "",
+            "Motivo de la solicitud:",
+            motivo,
+        ]
+        try:
+            url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
+            lines.append("")
+            lines.append(f"Hoja de servicio: {url}")
+        except Exception:
+            pass
+        body = "\n".join(lines)
+        try:
+            body = _email_append_footer_text(body)
+        except Exception:
+            pass
+
+        email_sent = False
+        email_debug = {}
+        recips = []
+        try:
+            rec_rows = q(
+                """
+                SELECT DISTINCT LOWER(TRIM(CAST(email AS TEXT))) AS email
+                  FROM users
+                 WHERE COALESCE(activo, TRUE) = TRUE
+                   AND LOWER(COALESCE(rol, '')) = 'jefe'
+                   AND NULLIF(TRIM(CAST(email AS TEXT)), '') IS NOT NULL
+                 ORDER BY 1
+                """
+            ) or []
+            recips = [str(r.get("email") or "").strip() for r in rec_rows if str(r.get("email") or "").strip()]
+            try:
+                email_debug.update(
+                    {
+                        "backend": getattr(settings, "EMAIL_BACKEND", None),
+                        "host": getattr(settings, "EMAIL_HOST", None),
+                        "port": getattr(settings, "EMAIL_PORT", None),
+                        "use_tls": getattr(settings, "EMAIL_USE_TLS", None),
+                        "use_ssl": getattr(settings, "EMAIL_USE_SSL", None),
+                        "from": getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                        "recipients": list(recips),
+                    }
+                )
+            except Exception:
+                pass
+            if recips:
+                try:
+                    sent, dbg = _send_mail_with_fallback(subject, body, recips)
+                    email_sent = bool(sent)
+                    try:
+                        email_debug.update(dbg or {})
+                    except Exception:
+                        pass
+                    logger.info(
+                        "baja_request_email sent=%s ingreso_id=%s user_id=%s recipients=%s backend=%s",
+                        email_sent,
+                        ingreso_id,
+                        uid,
+                        recips,
+                        getattr(settings, "EMAIL_BACKEND", ""),
+                    )
+                except Exception as e:
+                    try:
+                        email_debug["error"] = str(e)
+                        email_debug["exception"] = e.__class__.__name__
+                    except Exception:
+                        pass
+                    logger.exception(
+                        "baja_request_email failed",
+                        extra={"ingreso_id": ingreso_id, "user_id": uid, "recipients": recips},
+                    )
+                    email_sent = False
+            else:
+                logger.warning(
+                    "baja_request_email no recipients configured",
+                    extra={"ingreso_id": ingreso_id, "user_id": uid},
+                )
+        except Exception as e:
+            try:
+                email_debug["error"] = str(e)
+                email_debug["exception"] = e.__class__.__name__
+            except Exception:
+                pass
+            email_sent = False
+
+        resp = {
+            "ok": True,
+            "email_sent": bool(email_sent),
+            "solicitud_id": req_row.get("id") if isinstance(req_row, dict) else None,
+            "baja_solicitada_fecha": req_row.get("created_at") if isinstance(req_row, dict) else None,
+        }
+        try:
+            if getattr(settings, "DEBUG", False) or _rol(request) in ("jefe", "admin"):
+                resp["email_debug"] = email_debug
+        except Exception:
+            pass
+        return Response(resp)
+
+
+class IngresoSolicitarBajaRechazarView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, ingreso_id: int):
+        require_roles(request, ["jefe", "jefe_veedor", "admin", "recepcion"])
+        _set_audit_user(request)
+
+        row = q("SELECT id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        if not row:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+
+        try:
+            canceled = q(
+                """
+                UPDATE ingreso_baja_requests
+                   SET canceled_at = COALESCE(canceled_at, NOW())
+                 WHERE ingreso_id = %s
+                   AND accepted_at IS NULL
+                   AND canceled_at IS NULL
+                RETURNING id
+                """,
+                [ingreso_id],
+                one=True,
+            )
+        except Exception:
+            logger.exception(
+                "baja_request_reject failed",
+                extra={"ingreso_id": ingreso_id, "user_id": getattr(request, "user_id", None)},
+            )
+            return Response({"detail": "No se pudo rechazar la solicitud de baja"}, status=500)
+
+        if canceled:
+            return Response({"ok": True, "rejected": True})
+        return Response({"ok": True, "already_processed": True})
+
+
 class PendientesGeneralView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico"])
         tecnico_raw = (request.GET.get("tecnico_id") or "").strip()
+        tecnico_filter = tecnico_raw.lower()
 
         with connection.cursor() as cur:
             _set_audit_user(request)
@@ -2269,6 +3041,8 @@ class PendientesGeneralView(APIView):
             if tecnico_raw.isdigit():
                 sql += " AND t.asignado_a = %s"
                 params.append(int(tecnico_raw))
+            elif tecnico_filter in {"sin_asignar", "unassigned", "none", "null"}:
+                sql += " AND t.asignado_a IS NULL"
 
             sql += """
                 ORDER BY
@@ -2286,7 +3060,7 @@ class IngresoHistorialView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "jefe_veedor", "admin"])
-        # Flag opcional para incluir la auditorí­a HTTP (audit_log) en la respuesta
+        # Flag opcional para incluir la auditorÃ­Â­a HTTP (audit_log) en la respuesta
         def _param_truthy(name: str) -> bool:
             v = (request.query_params.get(name) or "").strip().lower()
             return v in {"1", "true", "yes", "on"}
@@ -2306,7 +3080,7 @@ class IngresoHistorialView(APIView):
             except Exception:
                 rows = []
             if include_audit:
-                # Complementar con auditorí­a HTTP (audit_log), pero sin expandir por clave
+                # Complementar con auditorÃ­Â­a HTTP (audit_log), pero sin expandir por clave
                 pat1 = f"/api/ingresos/{ingreso_id}/%"
                 pat2 = f"/api/ingresos/{ingreso_id}/"
                 pat3 = f"/api/quotes/{ingreso_id}/%"
@@ -2397,7 +3171,7 @@ class IngresoHistorialView(APIView):
                     method = (r.get("method") or "").upper()
                     table_name = "ingresos"
                     record_id = ingreso_id
-                    # Heurí­stica por ruta
+                    # HeurÃ­Â­stica por ruta
                     if "/accesorios/" in path:
                         table_name = "ingreso_accesorios"
                     elif "/fotos/" in path:
@@ -2436,14 +3210,35 @@ class CerrarReparacionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def post(self, request, ingreso_id: int):
         require_roles(request, ["jefe","jefe_veedor","admin"])
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        permite_reparacion_sql = (
+            "COALESCE(permite_reparacion, TRUE) AS permite_reparacion"
+            if has_permite_reparacion
+            else "TRUE AS permite_reparacion"
+        )
+        row_repair = q(
+            f"""
+            SELECT
+              asignado_a,
+              motivo,
+              {permite_reparacion_sql}
+            FROM ingresos
+            WHERE id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
+        if not row_repair:
+            raise ValidationError("Ingreso no encontrado")
+        if _is_cotizacion_bloqueada_para_reparar(row_repair.get("motivo"), row_repair.get("permite_reparacion")):
+            raise ValidationError("Ingreso en cotización: primero habilite la reparación.")
         if _rol(request) == "jefe_veedor":
-            row = q("SELECT asignado_a FROM ingresos WHERE id=%s", [ingreso_id], one=True)
             uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-            if not row or int(row.get("asignado_a") or 0) != int(uid or 0):
+            if int(row_repair.get("asignado_a") or 0) != int(uid or 0):
                 raise PermissionDenied("Solo el tecnico asignado puede editar diagnostico y reparacion")
         r = (request.data or {}).get("resolucion")
         if r not in ("reparado","no_reparado","no_se_encontro_falla","presupuesto_rechazado","cambio"):
-            return Response({"detail": "resolucion inválida"}, status=400)
+            return Response({"detail": "resolucion invÃ¡lida"}, status=400)
 
         serial_cambio = (request.data or {}).get("serial_cambio")
         if r == "cambio":
@@ -2515,7 +3310,7 @@ class NuevoIngresoView(APIView):
         motivo_label_raw = _map_motivo_to_db_label(motivo_raw)
         if not motivo_label_raw:
             valid_motivos = _get_motivo_enum_values()
-            return Response({"detail": "motivo inválido", "valid_values": valid_motivos}, status=400)
+            return Response({"detail": "motivo invÃ¡lido", "valid_values": valid_motivos}, status=400)
 
         raw_vals = _get_motivo_enum_values_raw() or []
         if raw_vals:
@@ -2530,16 +3325,19 @@ class NuevoIngresoView(APIView):
             motivo = target
         else:
             motivo = motivo_label_raw
+        permite_reparacion_default = not _motivo_is_cotizacion_equipo(motivo)
 
         numero_interno = (equipo.get("numero_interno") or "").strip()
         if numero_interno and not numero_interno.upper().startswith(("MG", "NM", "NV", "CE")):
             numero_interno = "MG " + numero_interno
+        has_mg_schema = _has_mg_schema()
+        mg_owner_id = _mg_owner_customer_id()
 
         ubicacion_id = data.get("ubicacion_id")
         if not ubicacion_id:
             t = q("SELECT id FROM locations WHERE LOWER(nombre)=LOWER(%s) LIMIT 1", ["taller"], one=True)
             if not t:
-                return Response({"detail": "No se encontro la ubicación 'Taller' en el catalogo. Creala en 'locations'."}, status=400)
+                return Response({"detail": "No se encontro la ubicaciÃ³n 'Taller' en el catalogo. Creala en 'locations'."}, status=400)
             ubicacion_id = t["id"]
 
         informe_preliminar = (data.get("informe_preliminar") or "").strip()
@@ -2553,7 +3351,7 @@ class NuevoIngresoView(APIView):
         if _fi_raw is not None and str(_fi_raw).strip() != "":
             _dt = _parse_datetime_or_date(_fi_raw)
             if not _dt:
-                return Response({"detail": "fecha_ingreso inválida (use YYYY-MM-DD o DD/MM/AAAA)"}, status=400)
+                return Response({"detail": "fecha_ingreso invÃ¡lida (use YYYY-MM-DD o DD/MM/AAAA)"}, status=400)
             if timezone.is_naive(_dt):
                 _dt = timezone.make_aware(_dt, timezone.get_current_timezone())
             fecha_ingreso_dt = _dt
@@ -2575,9 +3373,9 @@ class NuevoIngresoView(APIView):
             return Response({"detail": "Cliente inexistente"}, status=400)
 
         if cliente.get("cod_empresa") and c["cod_empresa"] != cliente["cod_empresa"]:
-            return Response({"detail": "El código no corresponde a la razón social seleccionada."}, status=400)
+            return Response({"detail": "El cÃ³digo no corresponde a la razÃ³n social seleccionada."}, status=400)
         if cliente.get("razon_social") and c["razon_social"].lower() != (cliente["razon_social"] or "").lower():
-            return Response({"detail": "La razón social no corresponde al código seleccionado."}, status=400)
+            return Response({"detail": "La razÃ³n social no corresponde al cÃ³digo seleccionado."}, status=400)
 
         customer_id = c["id"]
 
@@ -2602,7 +3400,7 @@ class NuevoIngresoView(APIView):
 
         numero_serie = (equipo.get("numero_serie") or "").strip()
         ns_key = (numero_serie or "").replace(" ", "").replace("-", "").upper()
-        # Cálculo preliminar de garantía de fábrica (Parte 1)
+        # CÃ¡lculo preliminar de garantÃ­a de fÃ¡brica (Parte 1)
         try:
             wcalc = compute_warranty(
                 numero_serie,
@@ -2612,9 +3410,64 @@ class NuevoIngresoView(APIView):
         except Exception:
             wcalc = {"garantia": None, "vence_el": None, "fecha_venta": None}
 
-        # Chequeo adicional de duplicado por n§mero interno (MG/NM/NV/CE ####):
+        # Chequeo adicional de duplicado por nÂ§mero interno (MG/NM/NV/CE ####):
         # si existe un ingreso abierto para el mismo MG, se reutiliza ese ingreso.
         if numero_interno:
+            if has_mg_schema:
+                mg_state_sql = "COALESCE(d.mg_estado,'activo') AS mg_estado,"
+                mg_sale_sql = """
+                  d.mg_venta_fecha AS mg_venta_fecha,
+                  COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
+                  COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero
+                """
+            else:
+                mg_state_sql = "'activo' AS mg_estado,"
+                mg_sale_sql = """
+                  NULL AS mg_venta_fecha,
+                  '' AS mg_venta_factura_numero,
+                  '' AS mg_venta_remito_numero
+                """
+
+            mg_device = q(
+                f"""
+                SELECT
+                  d.id,
+                  d.customer_id,
+                  COALESCE(d.numero_interno,'') AS numero_interno,
+                  COALESCE(d.numero_serie,'') AS numero_serie,
+                  COALESCE(d.alquilado,false) AS alquilado,
+                  {mg_state_sql}
+                  {mg_sale_sql}
+                FROM devices d
+                WHERE d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{{1,4}}$'
+                  AND UPPER(REGEXP_REPLACE(d.numero_interno,
+                      '^(MG|NM|NV|CE)\\s*(\\d{{1,4}})$', '\\1 ' || LPAD('\\2',4,'0'))) =
+                      UPPER(REGEXP_REPLACE(%s,
+                      '^(MG|NM|NV|CE)\\s*(\\d{{1,4}})$', '\\1 ' || LPAD('\\2',4,'0')))
+                LIMIT 1
+                """,
+                [numero_interno],
+                one=True,
+            )
+            if mg_device:
+                mg_flags = resolve_mg_flags(mg_device, mg_owner_id)
+                if mg_flags.get("mg_inactivo_venta"):
+                    return Response(
+                        {
+                            "detail": "MG histÃ³rico inactivo por venta; no operativo para nuevos ingresos.",
+                            "conflict_type": "MG_INACTIVO_VENTA",
+                            "payload": {
+                                "device_id": mg_device.get("id"),
+                                "numero_interno": mg_device.get("numero_interno") or numero_interno,
+                                "mg_estado": "inactivo_venta",
+                                "mg_venta_fecha": mg_device.get("mg_venta_fecha"),
+                                "mg_venta_factura_numero": mg_device.get("mg_venta_factura_numero") or "",
+                                "mg_venta_remito_numero": mg_device.get("mg_venta_remito_numero") or "",
+                            },
+                        },
+                        status=400,
+                    )
+
             dup_mg = q(
                 """
                 SELECT t.id,
@@ -2680,10 +3533,10 @@ class NuevoIngresoView(APIView):
                     "fecha_ingreso": fecha_ingreso_iso,
                 })
 
-        # Auto-chequeo de garantí­a de fábrica por N/S si el usuario no la marcó
+        # Auto-chequeo de garantÃ­Â­a de fÃ¡brica por N/S si el usuario no la marcÃ³
         # no auto-calculo de garantia de fabrica por ahora (se toma del payload)
 
-        # Resolución consistente de device por NS / MG con validaciones de conflicto
+        # ResoluciÃ³n consistente de device por NS / MG con validaciones de conflicto
         dev_ns = None
         dev_mg = None
         if ns_key:
@@ -2710,7 +3563,7 @@ class NuevoIngresoView(APIView):
                 one=True,
             )
             if not dev_mg:
-                # Búsqueda por número interno normalizado (MG|NM|NV|CE ####)
+                # BÃºsqueda por nÃºmero interno normalizado (MG|NM|NV|CE ####)
                 dev_mg = q(
                     """
                     SELECT id, COALESCE(numero_serie,'') AS numero_serie, COALESCE(numero_interno,'') AS numero_interno
@@ -2736,9 +3589,9 @@ class NuevoIngresoView(APIView):
         # Clasificar conflictos NS/MG
         if dev_ns and dev_mg and dev_ns["id"] != dev_mg["id"]:
             msg = (
-                "Conflicto entre número de serie y número interno. "
-                "El número de serie ingresado está asociado a un equipo distinto "
-                "del que tiene asignado el número interno ingresado. "
+                "Conflicto entre nÃºmero de serie y nÃºmero interno. "
+                "El nÃºmero de serie ingresado estÃ¡ asociado a un equipo distinto "
+                "del que tiene asignado el nÃºmero interno ingresado. "
                 "Revise que no haya error de tipeo en N/S o MG."
             )
             logger.warning("NS/MG conflict (ids distintos): %s", conflict_payload)
@@ -2756,8 +3609,8 @@ class NuevoIngresoView(APIView):
             ns_dev_mg_key = ns_dev_mg.replace(" ", "").replace("-", "").upper()
             if ns_dev_mg_key != ns_key:
                 msg = (
-                    "El número interno ingresado ya está asociado a otro equipo con "
-                    "un número de serie distinto. Revise que no haya error de tipeo."
+                    "El nÃºmero interno ingresado ya estÃ¡ asociado a otro equipo con "
+                    "un nÃºmero de serie distinto. Revise que no haya error de tipeo."
                 )
                 logger.warning("MG already linked to different NS: %s", conflict_payload)
                 return Response(
@@ -2812,13 +3665,20 @@ class NuevoIngresoView(APIView):
                     [customer_id, equipo["marca_id"], equipo["modelo_id"], numero_serie, numero_interno],
                 )
                 device_id = last_insert_id()
+        # Blindaje: siempre alinear marca/modelo del device con la selecciÃ³n actual.
+        # Evita Ã³rdenes con cruces (marca de un lado y modelo de otra marca).
+        if device_id:
+            exec_void(
+                "UPDATE devices SET marca_id=%s, model_id=%s WHERE id=%s",
+                [equipo["marca_id"], equipo["modelo_id"], device_id],
+            )
         # Actualizar snapshot de cliente del device al del ingreso actual
         if device_id and customer_id:
             try:
                 exec_void("UPDATE devices SET customer_id=%s WHERE id=%s", [customer_id, device_id])
             except Exception:
                 pass
-        # Actualizar fecha de vencimiento de garantía en el device según Excel
+        # Actualizar fecha de vencimiento de garantÃ­a en el device segÃºn Excel
         try:
             vence = wcalc.get("vence_el") if isinstance(wcalc, dict) else None
             if vence is None:
@@ -2834,9 +3694,9 @@ class NuevoIngresoView(APIView):
                     [numero_interno, device_id],
                 )
             except Exception as e:
-                # Seguridad adicional: capturar violaciones de índice único y devolver error entendible
+                # Seguridad adicional: capturar violaciones de Ã­ndice Ãºnico y devolver error entendible
                 msg = (
-                    "No se pudo asignar el número interno al equipo porque ya está "
+                    "No se pudo asignar el nÃºmero interno al equipo porque ya estÃ¡ "
                     "en uso por otro dispositivo. Revise el MG ingresado."
                 )
                 logger.warning("Error al actualizar numero_interno (device_id=%s, MG=%s): %s", device_id, numero_interno, e)
@@ -2902,40 +3762,50 @@ class NuevoIngresoView(APIView):
             tech = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
                      [tecnico_id], one=True)
             if not tech:
-                return Response({"detail": "Técnico inválido o inactivo"}, status=400)
+                return Response({"detail": "TÃ©cnico invÃ¡lido o inactivo"}, status=400)
 
         uid = getattr(request.user, "id", None) or getattr(request, "user_id", None)
         if not uid:
             return Response({"detail": "Usuario no autenticado"}, status=401)
         _set_audit_user(request)
 
-        # PostgreSQL-only build: motivo es texto válido según enum del modelo
+        # PostgreSQL-only build: motivo es texto vÃ¡lido segÃºn enum del modelo
 
         equipo_variante = (request.data.get("equipo_variante") or "").strip() or None
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        permite_col_sql = ", permite_reparacion" if has_permite_reparacion else ""
+        permite_val_sql = ", %s" if has_permite_reparacion else ""
+        insert_params = [
+            device_id, motivo, ubicacion_id, uid, tecnico_id,
+            informe_preliminar, accesorios_text, comentarios_text, equipo_variante,
+            prop_nombre, prop_contacto, prop_doc,
+            garantia_rep_final, wcalc.get("garantia"), etiq_ok,
+        ]
+        if has_permite_reparacion:
+            insert_params.append(bool(permite_reparacion_default))
 
-        # Asegurar que tenemos un device_id válido antes de crear el ingreso
+        # Asegurar que tenemos un device_id vÃ¡lido antes de crear el ingreso
         if not device_id:
             return Response({
-                "detail": "No se pudo identificar el equipo. Ingrese número de serie o número interno válido."
+                "detail": "No se pudo identificar el equipo. Ingrese nÃºmero de serie o nÃºmero interno vÃ¡lido."
             }, status=400)
         ingreso_id = exec_returning(
-            """
+            f"""
             INSERT INTO ingresos (
               device_id, motivo, ubicacion_id, recibido_por, asignado_a,
               informe_preliminar, accesorios, comentarios, equipo_variante,
               propietario_nombre, propietario_contacto, propietario_doc,
               garantia_reparacion, garantia_fabrica, etiq_garantia_ok
+              {permite_col_sql}
             )
             VALUES (%s,%s,%s,%s,%s,
                     %s,%s,%s,%s,
                     NULLIF(%s,''), NULLIF(%s,''), NULLIF(%s,''),
-                    %s, %s, %s)
+                    %s, %s, %s
+                    {permite_val_sql})
             RETURNING id
             """,
-             [device_id, motivo, ubicacion_id, uid, tecnico_id,
-              informe_preliminar, accesorios_text, comentarios_text, equipo_variante,
-              prop_nombre, prop_contacto, prop_doc,
-              garantia_rep_final, wcalc.get("garantia"), etiq_ok]
+             insert_params
         )
 
         # Setear empresa_facturar si la columna existe en la base
@@ -3039,11 +3909,11 @@ class GarantiaReparacionCheckView(APIView):
         within = (timezone.now() - last_out).days <= 90
         return Response({"within_90_days": within, "last_ingreso": last_out})
 
-#TODO: chequear porqué en GarantiaFabricaCheckView hay código muerto
+#TODO: chequear porquÃ© en GarantiaFabricaCheckView hay cÃ³digo muerto
 class GarantiaFabricaCheckView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
-        # Cálculo basado en Excel GENERAL (Parte 1)
+        # CÃ¡lculo basado en Excel GENERAL (Parte 1)
         ns = (request.GET.get("numero_serie") or "").strip()
         mg = (request.GET.get("numero_interno") or request.GET.get("mg") or "").strip()
         if mg and not mg.upper().startswith(("MG", "NM", "NV", "CE")):
@@ -3052,7 +3922,7 @@ class GarantiaFabricaCheckView(APIView):
         if not ns and not mg:
             return Response({"within_365_days": False, "fecha_venta": None, "found": False})
 
-        # Permitir que el front envíe brand_id/model_id explícitos
+        # Permitir que el front envÃ­e brand_id/model_id explÃ­citos
         brand_id_explicit = request.GET.get("brand_id")
         model_id_explicit = request.GET.get("model_id")
         try:
@@ -3079,7 +3949,7 @@ class GarantiaFabricaCheckView(APIView):
             )
 
         numero_serie = (device or {}).get("numero_serie") or ns
-        # Prioridad: IDs explícitos enviados por el front; si no, los del device (si existe)
+        # Prioridad: IDs explÃ­citos enviados por el front; si no, los del device (si existe)
         brand_id = brand_id_explicit if brand_id_explicit is not None else (device or {}).get("marca_id")
         model_id = model_id_explicit if model_id_explicit is not None else (device or {}).get("model_id")
         try:
@@ -3099,7 +3969,7 @@ class GarantiaFabricaCheckView(APIView):
             "found": bool(fecha_venta),
             "meta": meta,
         })
-        # Fuente de verdad: último ingreso del equipo
+        # Fuente de verdad: Ãºltimo ingreso del equipo
         ns = (request.GET.get("numero_serie") or "").strip()
         mg = (request.GET.get("numero_interno") or request.GET.get("mg") or "").strip()
         if mg and not mg.upper().startswith(("MG", "NM", "NV", "CE")):
@@ -3162,17 +4032,45 @@ class IngresoDetalleView(APIView):
             strong = str(request.GET.get("strong", "")).strip().lower() in ("1","true","yes")
         except Exception:
             strong = False
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        permite_reparacion_sql = (
+            "COALESCE(t.permite_reparacion, TRUE) AS permite_reparacion,"
+            if has_permite_reparacion
+            else "TRUE AS permite_reparacion,"
+        )
+        has_mg_schema = _has_mg_schema()
+        if has_mg_schema:
+            mg_select_sql = """
+              COALESCE(d.mg_estado,'activo') AS mg_estado,
+              d.mg_inactivo_desde AS mg_inactivo_desde,
+              d.mg_venta_fecha AS mg_venta_fecha,
+              COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
+              COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
+              COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
+              d.mg_venta_usuario_id AS mg_venta_usuario_id,
+            """
+        else:
+            mg_select_sql = """
+              'activo' AS mg_estado,
+              NULL AS mg_inactivo_desde,
+              NULL AS mg_venta_fecha,
+              '' AS mg_venta_factura_numero,
+              '' AS mg_venta_remito_numero,
+              '' AS mg_venta_observaciones,
+              NULL AS mg_venta_usuario_id,
+            """
         if strong:
-            # Pequeño delay best-effort para evitar carrera read-after-write
+            # PequeÃ±o delay best-effort para evitar carrera read-after-write
             try:
                 time.sleep(0.12)
             except Exception:
                 pass
         row = q(
-            """
+            f"""
             SELECT
               t.id,
               t.motivo,
+              {permite_reparacion_sql}
               t.estado,
               t.presupuesto_estado,
               t.resolucion,
@@ -3207,6 +4105,7 @@ class IngresoDetalleView(APIView):
               d.id AS device_id,
               COALESCE(d.numero_serie,'') AS numero_serie,
               COALESCE(d.numero_interno,'') AS numero_interno,
+              {mg_select_sql}
               COALESCE(t.garantia_fabrica,false) AS garantia,
               d.marca_id,
               COALESCE(b.nombre,'') AS marca,
@@ -3241,6 +4140,7 @@ class IngresoDetalleView(APIView):
             pass
         if not row:
             return Response({"detail": "Ingreso no encontrado"}, status=404)
+        row.update(resolve_mg_flags(row, _mg_owner_customer_id()))
         # Agregar serial_cambio si existe la columna
         try:
             with connection.cursor() as cur:
@@ -3258,7 +4158,7 @@ class IngresoDetalleView(APIView):
                     row["serial_cambio"] = (sc[0] if sc else None)
         except Exception:
             pass
-        # Si está en garantía de reparación, traer trabajos realizados del último servicio entregado
+        # Si estÃ¡ en garantÃ­a de reparaciÃ³n, traer trabajos realizados del Ãºltimo servicio entregado
         if row.get("garantia_reparacion"):
             try:
                 prev = q(
@@ -3318,26 +4218,28 @@ class IngresoDetalleView(APIView):
         except Exception:
             accs_alq = []
         row["alquiler_accesorios_items"] = accs_alq
-        # Resolver técnico solicitado (última solicitud pendiente si existe)
-        try:
-            req = q(
-                """
-                SELECT r.usuario_id AS uid, COALESCE(u.nombre,'') AS nombre
-                  FROM ingreso_assignment_requests r
-                  LEFT JOIN users u ON u.id = r.usuario_id
-                 WHERE r.ingreso_id = %s
-                   AND r.canceled_at IS NULL
-                   AND (r.accepted_at IS NULL)
-                 ORDER BY r.created_at DESC, r.id DESC
-                 LIMIT 1
-                """,
-                [ingreso_id],
-                one=True,
-            )
-        except Exception:
-            req = None
-        if not req:
-            # Fallback: usar audit_log si la auditorí­a está habilitada/cargada
+        # Resolver tecnico solicitado (ultima solicitud pendiente si existe)
+        req = None
+        if _table_exists("ingreso_assignment_requests"):
+            try:
+                req = q(
+                    """
+                    SELECT r.usuario_id AS uid, COALESCE(u.nombre,'') AS nombre
+                      FROM ingreso_assignment_requests r
+                      LEFT JOIN users u ON u.id = r.usuario_id
+                     WHERE r.ingreso_id = %s
+                       AND r.canceled_at IS NULL
+                       AND (r.accepted_at IS NULL)
+                     ORDER BY r.created_at DESC, r.id DESC
+                     LIMIT 1
+                    """,
+                    [ingreso_id],
+                    one=True,
+                )
+            except Exception:
+                req = None
+        if not req and _table_exists("audit_log"):
+            # Fallback: usar audit_log si esta habilitada/cargada
             try:
                 path1 = f"/api/ingresos/{ingreso_id}/solicitar-asignacion/"
                 path2 = f"/api/ingresos/{ingreso_id}/solicitar-asignacion"
@@ -3362,12 +4264,31 @@ class IngresoDetalleView(APIView):
         else:
             row["tecnico_solicitado_id"] = None
             row["tecnico_solicitado_nombre"] = ""
+        baja_req = _pending_baja_request(ingreso_id)
+        if baja_req:
+            row["baja_solicitada_id"] = baja_req.get("id")
+            row["baja_solicitada_nombre"] = baja_req.get("nombre") or ""
+            row["baja_solicitada_motivo"] = baja_req.get("motivo") or ""
+            row["baja_solicitada_fecha"] = baja_req.get("created_at")
+        else:
+            row["baja_solicitada_id"] = None
+            row["baja_solicitada_nombre"] = ""
+            row["baja_solicitada_motivo"] = ""
+            row["baja_solicitada_fecha"] = None
         return Response(IngresoDetailWithAccesoriosSerializer(row).data)
 
     def patch(self, request, ingreso_id: int):
         rol = _rol(request)
         d = request.data or {}
         _set_audit_user(request)
+        sync_actor_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        has_permite_reparacion = _ingresos_has_permite_reparacion_col()
+        permite_reparacion_sql = (
+            "COALESCE(permite_reparacion, TRUE) AS permite_reparacion"
+            if has_permite_reparacion
+            else "TRUE AS permite_reparacion"
+        )
+        should_sync_preventivo = False
         basic_fields = {
             "propietario_nombre", "propietario_contacto", "propietario_doc",
             "customer_id", "cliente_id", "razon_social", "cod_empresa", "telefono",
@@ -3394,12 +4315,21 @@ class IngresoDetalleView(APIView):
         if connection.vendor == "postgresql":
             exec_void("SET LOCAL app.ingreso_id = %s", [ingreso_id])
 
-        row_est = q("SELECT estado, asignado_a, alquilado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        row_est = q(
+            f"""
+            SELECT estado, asignado_a, alquilado, motivo, {permite_reparacion_sql}
+              FROM ingresos
+             WHERE id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
         if not row_est:
             return Response({"detail": "Ingreso no encontrado"}, status=404)
         estado_actual = (row_est["estado"] or "").lower()
         asignado_a = row_est["asignado_a"]
         alquilado_actual = bool(row_est["alquilado"])
+        motivo_actual = row_est.get("motivo")
 
         sets_no_estado, params_no_estado = [], []
         needs_warranty_recompute = False
@@ -3410,7 +4340,7 @@ class IngresoDetalleView(APIView):
                 raise ValidationError("ubicacion_id requerido")
             u = q("SELECT id FROM locations WHERE id=%s", [ubicacion_id], one=True)
             if not u:
-                raise ValidationError("Ubicación inexistente")
+                raise ValidationError("UbicaciÃ³n inexistente")
             sets_no_estado.append("ubicacion_id=%s")
             params_no_estado.append(ubicacion_id)
 
@@ -3430,13 +4360,14 @@ class IngresoDetalleView(APIView):
             sets_no_estado.append("accesorios=%s")
             params_no_estado.append(d.get("accesorios"))
         if "fecha_servicio" in d:
+            should_sync_preventivo = True
             val = d.get("fecha_servicio")
             if val is None or (isinstance(val, str) and val.strip() == ""):
                 sets_no_estado.append("fecha_servicio=NULL")
             else:
                 dt = parse_datetime(val)
                 if not dt:
-                    raise ValidationError("fecha_servicio inválida")
+                    raise ValidationError("fecha_servicio invÃ¡lida")
                 if timezone.is_naive(dt):
                     dt = timezone.make_aware(dt, timezone.get_current_timezone())
                 sets_no_estado.append("fecha_servicio=%s")
@@ -3461,7 +4392,7 @@ class IngresoDetalleView(APIView):
                 else:
                     dt = parse_datetime(val)
                     if not dt:
-                        raise ValidationError("fecha_entrega inválida")
+                        raise ValidationError("fecha_entrega invÃ¡lida")
                     if timezone.is_naive(dt):
                         dt = timezone.make_aware(dt, timezone.get_current_timezone())
                     sets_no_estado.append("fecha_entrega=%s")
@@ -3505,7 +4436,7 @@ class IngresoDetalleView(APIView):
                 if conflict:
                     return Response(
                         {
-                            "detail": "El número interno ya está asignado a otro equipo.",
+                            "detail": "El nÃºmero interno ya estÃ¡ asignado a otro equipo.",
                             "conflict_type": "MG_DUPLICATE",
                             "conflict_device_id": conflict["id"],
                             "numero_interno_input": val,
@@ -3520,7 +4451,7 @@ class IngresoDetalleView(APIView):
             except Exception as e:
                 return Response(
                     {
-                        "detail": "No se pudo asignar el número interno (posible duplicado).",
+                        "detail": "No se pudo asignar el nÃºmero interno (posible duplicado).",
                         "conflict_type": "MG_UNIQUE_CONSTRAINT",
                         "numero_interno_input": val,
                         "error": str(e),
@@ -3537,7 +4468,7 @@ class IngresoDetalleView(APIView):
             if "propietario_doc" in d:
                 sets_no_estado.append("propietario_doc = NULLIF(%s,'')")
                 params_no_estado.append((d.get("propietario_doc") or "").strip())
-            # Fase 2: persistir también en devices
+            # Fase 2: persistir tambiÃ©n en devices
             try:
                 exec_void(
                     "UPDATE devices SET propietario_nombre = NULLIF(%s,''), propietario_contacto = NULLIF(%s,''), propietario_doc = NULLIF(%s,'') WHERE id = (SELECT device_id FROM ingresos WHERE id=%s)",
@@ -3554,9 +4485,9 @@ class IngresoDetalleView(APIView):
             try:
                 new_cid = int(d.get("customer_id") or d.get("cliente_id"))
             except Exception:
-                return Response({"detail": "customer_id inválido"}, status=400)
+                return Response({"detail": "customer_id invÃ¡lido"}, status=400)
             if new_cid <= 0:
-                return Response({"detail": "customer_id inválido"}, status=400)
+                return Response({"detail": "customer_id invÃ¡lido"}, status=400)
             c_row = q("SELECT id FROM customers WHERE id=%s", [new_cid], one=True)
             if not c_row:
                 return Response({"detail": "Cliente inexistente"}, status=404)
@@ -3629,7 +4560,7 @@ class IngresoDetalleView(APIView):
                                 one=True,
                             )
                             if last_old and last_old.get("id"):
-                                # Disparar trigger de snapshot actualizando la misma fila (no-op lógica)
+                                # Disparar trigger de snapshot actualizando la misma fila (no-op lÃ³gica)
                                 exec_void(
                                     "UPDATE ingresos SET fecha_creacion=fecha_creacion WHERE id=%s",
                                     [int(last_old["id"])],
@@ -3644,12 +4575,12 @@ class IngresoDetalleView(APIView):
                         [ns, ingreso_id],
                     )
             else:
-                # Si viene vací­o, limpiar N/S del device actual
+                # Si viene vacÃ­Â­o, limpiar N/S del device actual
                 exec_void(
                     "UPDATE devices SET numero_serie = NULLIF(%s,'') WHERE id = (SELECT device_id FROM ingresos WHERE id=%s)",
                     [ns, ingreso_id],
                 )
-            # Si no vino 'garantia' explí­cito, auto-chequear por N/S
+            # Si no vino 'garantia' explÃ­Â­cito, auto-chequear por N/S
             # removed: auto-chequeo de garantia por N/S (fuente: ultimo ingreso)
                 # (bloque removido)
         # Permitir actualizar variante de equipo (texto libre)
@@ -3669,7 +4600,7 @@ class IngresoDetalleView(APIView):
             motivo_label_raw = _map_motivo_to_db_label(motivo_raw)
             if not motivo_label_raw:
                 valid_motivos = _get_motivo_enum_values()
-                return Response({"detail": "motivo inválido", "valid_values": valid_motivos}, status=400)
+                return Response({"detail": "motivo invÃ¡lido", "valid_values": valid_motivos}, status=400)
             raw_vals = _get_motivo_enum_values_raw() or []
             if raw_vals:
                 target = None
@@ -3685,6 +4616,13 @@ class IngresoDetalleView(APIView):
                 motivo_db = motivo_label_raw
             sets_no_estado.append("motivo=%s")
             params_no_estado.append(motivo_db)
+            if has_permite_reparacion:
+                nuevo_es_cotizacion = _motivo_is_cotizacion_equipo(motivo_db)
+                anterior_es_cotizacion = _motivo_is_cotizacion_equipo(motivo_actual)
+                if nuevo_es_cotizacion and not anterior_es_cotizacion:
+                    sets_no_estado.append("permite_reparacion=FALSE")
+                elif (not nuevo_es_cotizacion) and anterior_es_cotizacion:
+                    sets_no_estado.append("permite_reparacion=TRUE")
         # (actualizacion de garantia en devices removida)
             # bloque removido
 
@@ -3692,7 +4630,7 @@ class IngresoDetalleView(APIView):
 
 
 
-        # Actualizar garantia de fábrica a nivel de ingreso cuando se enví­a en el PATCH
+        # Actualizar garantia de fÃ¡brica a nivel de ingreso cuando se envÃ­Â­a en el PATCH
         if "garantia" in d:
             sets_no_estado.append("garantia_fabrica=%s")
             params_no_estado.append(bool(d.get("garantia")))
@@ -3713,7 +4651,7 @@ class IngresoDetalleView(APIView):
                 # Validar modelo y obtener su marca
                 md = q("SELECT id, marca_id FROM models WHERE id=%s", [modelo_id], one=True)
                 if not md:
-                    raise ValidationError("modelo_id inválido")
+                    raise ValidationError("modelo_id invÃ¡lido")
                 modelo_marca = md["marca_id"]
                 if marca_id is not None and int(marca_id) != int(modelo_marca):
                     raise ValidationError("modelo_id no pertenece a la marca_id indicada")
@@ -3723,7 +4661,7 @@ class IngresoDetalleView(APIView):
                 # Validar marca
                 mk = q("SELECT id FROM marcas WHERE id=%s", [marca_id], one=True)
                 if not mk:
-                    raise ValidationError("marca_id inválida")
+                    raise ValidationError("marca_id invÃ¡lida")
                 # Si el modelo actual no corresponde a la nueva marca, ponerlo en NULL
                 row = q("SELECT model_id FROM devices WHERE id=%s", [device_id], one=True)
                 cur_model = row and row.get("model_id")
@@ -3758,7 +4696,7 @@ class IngresoDetalleView(APIView):
             sets_no_estado.append("alquiler_fecha=%s")
             params_no_estado.append(d.get("alquiler_fecha") or None)
 
-        # Recalcular garantía si cambió N/S o marca/modelo
+        # Recalcular garantÃ­a si cambiÃ³ N/S o marca/modelo
         if needs_warranty_recompute:
             try:
                 row_dev = q(
@@ -3793,20 +4731,28 @@ class IngresoDetalleView(APIView):
         promote_from_asignado = diag_present and estado_actual == "asignado"
         if promote_from_ingresado:
             if not asignado_a:
-                raise ValidationError("Antes de diagnosticar, asigne un técnico al ingreso")
+                raise ValidationError("Antes de diagnosticar, asigne un tÃ©cnico al ingreso")
             with transaction.atomic():
-                # Auto-setear fecha_servicio solo en la transición ingresado -> diagnosticado
-                # si no vino explí­cita en el payload y aún está NULL en DB.
+                # Auto-setear fecha_servicio solo en la transiciÃ³n ingresado -> diagnosticado
+                # si no vino explÃ­Â­cita en el payload y aÃºn estÃ¡ NULL en DB.
                 sets_tmp = list(sets_no_estado)
                 params_tmp = list(params_no_estado)
                 if not fecha_present:
                     # Establecer solo si actualmente es NULL (COALESCE mantiene existente)
                     sets_tmp.append("fecha_servicio=COALESCE(fecha_servicio, %s)")
                     params_tmp.append(timezone.now())
+                    should_sync_preventivo = True
                 if sets_tmp:
                     params_all = list(params_tmp) + [ingreso_id]
                     q(f"UPDATE ingresos SET {', '.join(sets_tmp)} WHERE id=%s", params_all)
                 q("UPDATE ingresos SET estado='diagnosticado' WHERE id=%s AND estado='ingresado'", [ingreso_id])
+            if should_sync_preventivo:
+                sync_result = sync_plan_from_ingreso_fecha_servicio(ingreso_id, sync_actor_id)
+                if (sync_result or {}).get("status") == "error":
+                    logger.warning(
+                        "preventivo sync returned error status after promote_from_ingresado: ingreso_id=%s",
+                        ingreso_id,
+                    )
             return Response({"ok": True})
         if promote_from_asignado:
             sets_no_estado.append("estado='diagnosticado'")
@@ -3814,6 +4760,13 @@ class IngresoDetalleView(APIView):
             return Response({"ok": True})
         params_no_estado.append(ingreso_id)
         q(f"UPDATE ingresos SET {', '.join(sets_no_estado)} WHERE id=%s", params_no_estado)
+        if should_sync_preventivo:
+            sync_result = sync_plan_from_ingreso_fecha_servicio(ingreso_id, sync_actor_id)
+            if (sync_result or {}).get("status") == "error":
+                logger.warning(
+                    "preventivo sync returned error status after ingreso patch: ingreso_id=%s",
+                    ingreso_id,
+                )
         return Response({"ok": True})
 
 
@@ -3822,7 +4775,7 @@ class MarcarControladoSinDefectoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def post(self, request, ingreso_id: int):
         require_roles(request, ["tecnico", "jefe", "jefe_veedor"])
-        # Solo el técnico asignado puede marcar (salvo jefes)
+        # Solo el tÃ©cnico asignado puede marcar (salvo jefes)
         try:
             if _rol(request) in ("tecnico", "jefe_veedor"):
                 row = q("SELECT asignado_a FROM ingresos WHERE id=%s", [ingreso_id], one=True)
@@ -3870,7 +4823,7 @@ class MarcarControladoSinDefectoView(APIView):
                     ensure_default_locations()
                 except Exception:
                     pass
-                target_name = "Estantería de Alquiler"
+                target_name = "EstanterÃ­a de Alquiler"
                 loc_row = q(
                     "SELECT id, nombre FROM locations WHERE LOWER(nombre)=LOWER(%s) LIMIT 1",
                     [target_name],
@@ -3908,10 +4861,14 @@ __all__ = [
     'MarcarControladoSinDefectoView',
     'MarcarParaRepararView',
     'MarcarReparadoView',
+    'HabilitarReparacionCotizacionView',
     'EntregarIngresoView',
     'DarBajaIngresoView',
     'DarAltaIngresoView',
     'IngresoAsignarTecnicoView',
+    'IngresoSolicitarAsignacionView',
+    'IngresoSolicitarBajaView',
+    'IngresoSolicitarBajaRechazarView',
     'PendientesGeneralView',
     'IngresoHistorialView',
     'CerrarReparacionView',

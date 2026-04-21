@@ -11,6 +11,7 @@ import {
   catalogEquipmentLabel,
   nsPreferInternoOf,
   norm,
+  isMotivoCotizacionEquipo,
 } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
 import useQueryState from "../hooks/useQueryState";
@@ -180,6 +181,7 @@ export default function Tecnico() {
                 {displayRows.map((row) => {
                   const urgente = isUrgente(row);
                   const devuelto = !!row?.derivado_devuelto;
+                  const esCotizacion = isMotivoCotizacionEquipo(row?.motivo);
                   const fechaIngreso = resolveFechaIngreso(row);
                   const rowCls = [
                     "hover:bg-gray-50 cursor-pointer",
@@ -210,6 +212,11 @@ export default function Tecnico() {
                         {urgente && (
                           <span className="ml-2 inline-block px-2 py-0.5 text-[10px] rounded bg-red-100 text-red-700 align-middle">
                             URGENTE
+                          </span>
+                        )}
+                        {esCotizacion && (
+                          <span className="ml-2 inline-block px-2 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800 align-middle">
+                            COTIZACIÓN EQUIPO
                           </span>
                         )}
                       </td>

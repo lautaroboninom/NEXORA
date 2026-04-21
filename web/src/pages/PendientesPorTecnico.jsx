@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { getTecnicos } from "../lib/api";
 import api from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel, nsPreferInternoOf, isMotivoCotizacionEquipo } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
 import useQueryState from "../hooks/useQueryState";
+
+const UNASSIGNED_TECHNICIAN_FILTER = "sin_asignar";
 
 
 export default function PendientesPorTecnico() {
@@ -20,10 +22,13 @@ export default function PendientesPorTecnico() {
   useEffect(() => { getTecnicos().then(setTecnicos).catch(e=>setErr(e.message)); }, []);
 
   async function load() {
-    if (!tecnicoId) return;
+    if (!tecnicoId) {
+      setRows([]);
+      return;
+    }
     setLoading(true); setErr("");
     try {
-      const data = await api.get(`/api/ingresos/pendientes/?tecnico_id=${tecnicoId}`);
+      const data = await api.get(`/api/ingresos/pendientes/?tecnico_id=${encodeURIComponent(tecnicoId)}`);
       console.log("Pendientes recibidos:", data?.length, data?.[0]);
       setRows(Array.isArray(data) ? data : []);
     } catch(e) {
@@ -49,12 +54,13 @@ export default function PendientesPorTecnico() {
       <div className="flex gap-2 mb-3 items-center">
         <select className="border rounded p-2" value={tecnicoId} onChange={e=>setTecnicoId(e.target.value)}>
           <option value="">-- Seleccionar técnico --</option>
+          <option value={UNASSIGNED_TECHNICIAN_FILTER}>-- Sin técnico asignado --</option>
           {tecnicos.map(t=> <option key={t.id} value={t.id}>{t.nombre}</option>)}
         </select>
         <input className="border rounded p-2 w-full max-w-md" placeholder="Filtrar por OS, cliente, marca, equipo, serie" value={q} onChange={e=>setQ(e.target.value)} />
       </div>
 
-      {!tecnicoId ? <div className="text-sm text-gray-500">Elija un técnico para ver sus pendientes.</div> :
+      {!tecnicoId ? <div className="text-sm text-gray-500">Elegí un técnico o la opción sin asignar para ver los pendientes.</div> :
       loading ? "Cargando..." :
       filtered.length === 0 ? <div className="text-sm text-gray-500">Sin pendientes.</div> : (
         <div className="overflow-x-auto">
@@ -66,7 +72,14 @@ export default function PendientesPorTecnico() {
             <tbody>
               {filtered.map(row=>(
                 <tr key={ingresoIdOf(row)} className="hover:bg-gray-50 cursor-pointer" onClick={()=>nav(`/ingresos/${ingresoIdOf(row)}`)}>
-                  <td className="p-2 underline">{formatOS(row)}</td>
+                  <td className="p-2 underline">
+                    {formatOS(row)}
+                    {isMotivoCotizacionEquipo(row?.motivo) && (
+                      <span className="ml-2 inline-block px-2 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800 align-middle">
+                        COTIZACIÓN EQUIPO
+                      </span>
+                    )}
+                  </td>
                   <td className="p-2">{row.razon_social}</td>
                   <td className="p-2">{catalogEquipmentLabel(row)}</td>
                   <td className="p-2"><StatusChip value={row.estado} /></td>

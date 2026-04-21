@@ -104,6 +104,54 @@ class Command(BaseCommand):
                         )
                         """
                     )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS preventivo_plan_repuestos (
+                          id                       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                          plan_id                  INTEGER NOT NULL REFERENCES preventivo_planes(id) ON DELETE CASCADE,
+                          repuesto_key             TEXT NOT NULL,
+                          catalogo_repuesto_id     INTEGER NULL REFERENCES catalogo_repuestos(id) ON DELETE SET NULL,
+                          nombre_repuesto          TEXT NOT NULL,
+                          periodicidad_valor       INTEGER NOT NULL,
+                          periodicidad_unidad      preventivo_period_unit NOT NULL,
+                          aviso_anticipacion_dias  INTEGER NOT NULL DEFAULT 30,
+                          ultima_revision_fecha    DATE NULL,
+                          proxima_revision_fecha   DATE NULL,
+                          activa                   BOOLEAN NOT NULL DEFAULT TRUE,
+                          created_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                          updated_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                          created_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                          updated_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                          CONSTRAINT chk_preventivo_plan_repuestos_periodicidad CHECK (periodicidad_valor > 0),
+                          CONSTRAINT chk_preventivo_plan_repuestos_aviso CHECK (aviso_anticipacion_dias >= 0)
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS preventivo_repuesto_plantillas (
+                          id                       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                          signature_key            TEXT NOT NULL,
+                          signature_tipo_equipo    TEXT NULL,
+                          signature_marca          TEXT NULL,
+                          signature_modelo         TEXT NULL,
+                          signature_variante       TEXT NULL,
+                          repuesto_key             TEXT NOT NULL,
+                          catalogo_repuesto_id     INTEGER NULL REFERENCES catalogo_repuestos(id) ON DELETE SET NULL,
+                          nombre_repuesto          TEXT NOT NULL,
+                          periodicidad_valor       INTEGER NOT NULL,
+                          periodicidad_unidad      preventivo_period_unit NOT NULL,
+                          aviso_anticipacion_dias  INTEGER NOT NULL DEFAULT 30,
+                          activa                   BOOLEAN NOT NULL DEFAULT TRUE,
+                          created_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                          updated_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                          created_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                          updated_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                          CONSTRAINT chk_preventivo_plantillas_periodicidad CHECK (periodicidad_valor > 0),
+                          CONSTRAINT chk_preventivo_plantillas_aviso CHECK (aviso_anticipacion_dias >= 0)
+                        )
+                        """
+                    )
                 else:
                     cur.execute(
                         """
@@ -165,6 +213,50 @@ class Command(BaseCommand):
                         )
                         """
                     )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS preventivo_plan_repuestos (
+                          id INTEGER PRIMARY KEY,
+                          plan_id INTEGER NOT NULL,
+                          repuesto_key TEXT NOT NULL,
+                          catalogo_repuesto_id INTEGER NULL,
+                          nombre_repuesto TEXT NOT NULL,
+                          periodicidad_valor INTEGER NOT NULL,
+                          periodicidad_unidad TEXT NOT NULL,
+                          aviso_anticipacion_dias INTEGER NOT NULL DEFAULT 30,
+                          ultima_revision_fecha DATE NULL,
+                          proxima_revision_fecha DATE NULL,
+                          activa BOOLEAN NOT NULL DEFAULT 1,
+                          created_by INTEGER NULL,
+                          updated_by INTEGER NULL,
+                          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS preventivo_repuesto_plantillas (
+                          id INTEGER PRIMARY KEY,
+                          signature_key TEXT NOT NULL,
+                          signature_tipo_equipo TEXT NULL,
+                          signature_marca TEXT NULL,
+                          signature_modelo TEXT NULL,
+                          signature_variante TEXT NULL,
+                          repuesto_key TEXT NOT NULL,
+                          catalogo_repuesto_id INTEGER NULL,
+                          nombre_repuesto TEXT NOT NULL,
+                          periodicidad_valor INTEGER NOT NULL,
+                          periodicidad_unidad TEXT NOT NULL,
+                          aviso_anticipacion_dias INTEGER NOT NULL DEFAULT 30,
+                          activa BOOLEAN NOT NULL DEFAULT 1,
+                          created_by INTEGER NULL,
+                          updated_by INTEGER NULL,
+                          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
 
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_planes_device ON preventivo_planes(device_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_planes_customer ON preventivo_planes(customer_id)")
@@ -172,6 +264,10 @@ class Command(BaseCommand):
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_revisiones_plan_estado ON preventivo_revisiones(plan_id, estado)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_revision_items_revision_orden ON preventivo_revision_items(revision_id, orden)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_revision_items_revision_estado ON preventivo_revision_items(revision_id, estado_item)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_plan_repuestos_plan ON preventivo_plan_repuestos(plan_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_plan_repuestos_key ON preventivo_plan_repuestos(repuesto_key)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_plantillas_signature ON preventivo_repuesto_plantillas(signature_key)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_preventivo_plantillas_repuesto_key ON preventivo_repuesto_plantillas(repuesto_key)")
 
                 if vendor == "postgresql":
                     cur.execute(
@@ -182,6 +278,12 @@ class Command(BaseCommand):
                     )
                     cur.execute(
                         "CREATE UNIQUE INDEX IF NOT EXISTS uq_preventivo_planes_customer_active ON preventivo_planes(customer_id) WHERE activa = TRUE AND customer_id IS NOT NULL"
+                    )
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_preventivo_plan_repuestos_plan_key ON preventivo_plan_repuestos(plan_id, repuesto_key) WHERE activa = TRUE"
+                    )
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_preventivo_plantillas_signature_key ON preventivo_repuesto_plantillas(signature_key, repuesto_key) WHERE activa = TRUE"
                     )
                     cur.execute(
                         """
@@ -200,6 +302,16 @@ class Command(BaseCommand):
                             IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_preventivo_revision_items_updated_at') THEN
                               CREATE TRIGGER trg_preventivo_revision_items_updated_at
                               BEFORE UPDATE ON preventivo_revision_items
+                              FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                            END IF;
+                            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_preventivo_plan_repuestos_updated_at') THEN
+                              CREATE TRIGGER trg_preventivo_plan_repuestos_updated_at
+                              BEFORE UPDATE ON preventivo_plan_repuestos
+                              FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                            END IF;
+                            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_preventivo_plantillas_updated_at') THEN
+                              CREATE TRIGGER trg_preventivo_plantillas_updated_at
+                              BEFORE UPDATE ON preventivo_repuesto_plantillas
                               FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                             END IF;
                           END IF;
@@ -228,6 +340,16 @@ class Command(BaseCommand):
                             IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_preventivo_revision_items') THEN
                               CREATE TRIGGER trg_audit_preventivo_revision_items
                               AFTER INSERT OR UPDATE OR DELETE ON preventivo_revision_items
+                              FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
+                            END IF;
+                            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_preventivo_plan_repuestos') THEN
+                              CREATE TRIGGER trg_audit_preventivo_plan_repuestos
+                              AFTER INSERT OR UPDATE OR DELETE ON preventivo_plan_repuestos
+                              FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
+                            END IF;
+                            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_preventivo_plantillas') THEN
+                              CREATE TRIGGER trg_audit_preventivo_plantillas
+                              AFTER INSERT OR UPDATE OR DELETE ON preventivo_repuesto_plantillas
                               FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
                             END IF;
                           END IF;

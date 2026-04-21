@@ -136,20 +136,23 @@ def _load_test_row(ingreso_id: int) -> dict[str, Any] | None:
     return q(
         """
         SELECT
-          ingreso_id,
-          template_key,
-          template_version,
-          tipo_equipo_snapshot,
-          payload,
-          references_snapshot,
-          resultado_global,
-          conclusion,
-          instrumentos,
-          firmado_por,
-          fecha_ejecucion,
-          tecnico_id
-        FROM ingreso_tests
-        WHERE ingreso_id = %s
+          t.ingreso_id,
+          t.template_key,
+          t.template_version,
+          t.tipo_equipo_snapshot,
+          t.payload,
+          t.schema_snapshot,
+          t.references_snapshot,
+          t.resultado_global,
+          t.conclusion,
+          t.instrumentos,
+          t.firmado_por,
+          t.fecha_ejecucion,
+          t.tecnico_id,
+          COALESCE(u.nombre, '') AS tecnico_nombre
+        FROM ingreso_tests t
+        LEFT JOIN users u ON u.id = t.tecnico_id
+        WHERE t.ingreso_id = %s
         """,
         [ingreso_id],
         one=True,
@@ -229,6 +232,7 @@ def _save_test_row(
     template_version: str,
     tipo_equipo_snapshot: str,
     payload_doc: dict[str, Any],
+    schema_snapshot: dict[str, Any],
     references_snapshot: list[dict[str, Any]],
     resultado_global: str,
     conclusion: str,
@@ -239,6 +243,7 @@ def _save_test_row(
     is_pg = connection.vendor == "postgresql"
     now_dt = timezone.now()
     payload_json = _json_param(payload_doc)
+    schema_json = _json_param(schema_snapshot)
     refs_json = _json_param(references_snapshot)
 
     if is_pg:
@@ -250,6 +255,7 @@ def _save_test_row(
                 template_version,
                 tipo_equipo_snapshot,
                 payload,
+                schema_snapshot,
                 references_snapshot,
                 resultado_global,
                 conclusion,
@@ -261,7 +267,7 @@ def _save_test_row(
                 updated_at
             )
             VALUES (
-                %s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,NULLIF(%s,''),NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s
+                %s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,NULLIF(%s,''),NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s
             )
             ON CONFLICT (ingreso_id)
             DO UPDATE SET
@@ -269,6 +275,7 @@ def _save_test_row(
                 template_version = EXCLUDED.template_version,
                 tipo_equipo_snapshot = EXCLUDED.tipo_equipo_snapshot,
                 payload = EXCLUDED.payload,
+                schema_snapshot = EXCLUDED.schema_snapshot,
                 references_snapshot = EXCLUDED.references_snapshot,
                 resultado_global = EXCLUDED.resultado_global,
                 conclusion = EXCLUDED.conclusion,
@@ -284,6 +291,7 @@ def _save_test_row(
                 template_version,
                 tipo_equipo_snapshot,
                 payload_json,
+                schema_json,
                 refs_json,
                 resultado_global,
                 conclusion,
@@ -307,6 +315,7 @@ def _save_test_row(
                    template_version=%s,
                    tipo_equipo_snapshot=%s,
                    payload=%s,
+                   schema_snapshot=%s,
                    references_snapshot=%s,
                    resultado_global=%s,
                    conclusion=NULLIF(%s,''),
@@ -322,6 +331,7 @@ def _save_test_row(
                 template_version,
                 tipo_equipo_snapshot,
                 payload_json,
+                schema_json,
                 refs_json,
                 resultado_global,
                 conclusion,
@@ -342,6 +352,7 @@ def _save_test_row(
                 template_version,
                 tipo_equipo_snapshot,
                 payload,
+                schema_snapshot,
                 references_snapshot,
                 resultado_global,
                 conclusion,
@@ -352,7 +363,7 @@ def _save_test_row(
                 created_at,
                 updated_at
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,''),NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,''),NULLIF(%s,''),NULLIF(%s,''),%s,%s,%s,%s)
             """,
             [
                 ingreso_id,
@@ -360,6 +371,7 @@ def _save_test_row(
                 template_version,
                 tipo_equipo_snapshot,
                 payload_json,
+                schema_json,
                 refs_json,
                 resultado_global,
                 conclusion,
@@ -390,6 +402,68 @@ def _protocol_sections_with_values(protocol: dict[str, Any], values: dict[str, A
     return sections
 
 
+def _extract_schema_snapshot(row: dict[str, Any] | None) -> dict[str, Any]:
+    doc = _safe_json((row or {}).get("schema_snapshot"), {})
+    if not isinstance(doc, dict):
+        return {}
+    if not isinstance(doc.get("sections"), list):
+        return {}
+    if not isinstance(doc.get("references"), list):
+        doc["references"] = []
+    if not isinstance(doc.get("result_options"), list):
+        doc["result_options"] = []
+    if not isinstance(doc.get("global_result_options"), list):
+        doc["global_result_options"] = []
+    return doc
+
+
+def _build_schema_snapshot(
+    protocol: dict[str, Any],
+    references_snapshot: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "template_key": protocol.get("template_key") or "",
+        "template_version": protocol.get("template_version") or "",
+        "display_name": protocol.get("display_name") or "",
+        "default_instrumentos": protocol.get("default_instrumentos") or "",
+        "references": copy.deepcopy(references_snapshot or []),
+        "sections": copy.deepcopy(protocol.get("sections") or []),
+        "result_options": copy.deepcopy(protocol.get("result_options") or []),
+        "global_result_options": copy.deepcopy(protocol.get("global_result_options") or []),
+    }
+
+
+def _protocol_from_schema_snapshot(
+    snapshot: dict[str, Any],
+    protocol_fallback: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if snapshot and isinstance(snapshot.get("sections"), list):
+        out = {
+            "type_key": (protocol_fallback or {}).get("type_key") or "",
+            "template_key": snapshot.get("template_key") or (protocol_fallback or {}).get("template_key") or "",
+            "template_version": snapshot.get("template_version")
+            or (protocol_fallback or {}).get("template_version")
+            or "",
+            "display_name": snapshot.get("display_name") or (protocol_fallback or {}).get("display_name") or "",
+            "default_instrumentos": snapshot.get("default_instrumentos")
+            or (protocol_fallback or {}).get("default_instrumentos")
+            or "",
+            "references": copy.deepcopy(snapshot.get("references") or []),
+            "sections": copy.deepcopy(snapshot.get("sections") or []),
+            "result_options": copy.deepcopy(
+                snapshot.get("result_options") or (protocol_fallback or {}).get("result_options") or []
+            ),
+            "global_result_options": copy.deepcopy(
+                snapshot.get("global_result_options")
+                or (protocol_fallback or {}).get("global_result_options")
+                or []
+            ),
+            "applied_overrides": [],
+        }
+        return out
+    return protocol_fallback
+
+
 class IngresoTestView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -415,7 +489,9 @@ class IngresoTestView(APIView):
         _set_audit_user(request)
 
         row = _load_test_row(ingreso_id)
-        protocol = _resolve_protocol_for_row(ingreso, row)
+        protocol_live = _resolve_protocol_for_row(ingreso, row)
+        schema_snapshot = _extract_schema_snapshot(row)
+        protocol = _protocol_from_schema_snapshot(schema_snapshot, protocol_live)
         if protocol is None:
             return Response(
                 {"detail": "No hay protocolo de test para este tipo de equipo", "tipo_equipo": ingreso.get("tipo_equipo") or ""},
@@ -427,7 +503,10 @@ class IngresoTestView(APIView):
         references_snapshot = _safe_json((row or {}).get("references_snapshot"), [])
         if not isinstance(references_snapshot, list):
             references_snapshot = []
-        references = references_snapshot if references_snapshot else copy.deepcopy(protocol.get("references") or [])
+        if schema_snapshot and isinstance(schema_snapshot.get("references"), list):
+            references = copy.deepcopy(schema_snapshot.get("references") or [])
+        else:
+            references = references_snapshot if references_snapshot else copy.deepcopy(protocol.get("references") or [])
 
         template_key = (row or {}).get("template_key") or protocol.get("template_key")
         template_version = (row or {}).get("template_version") or protocol.get("template_version")
@@ -452,7 +531,7 @@ class IngresoTestView(APIView):
                 "firmado_por": (row or {}).get("firmado_por") or "",
                 "fecha_ejecucion": (row or {}).get("fecha_ejecucion"),
                 "references_snapshot": references_snapshot,
-                "applied_overrides": protocol.get("applied_overrides") or [],
+                "applied_overrides": [] if schema_snapshot else (protocol.get("applied_overrides") or []),
             }
         )
 
@@ -469,7 +548,9 @@ class IngresoTestView(APIView):
         _set_audit_user(request)
 
         row = _load_test_row(ingreso_id)
-        protocol = _resolve_protocol_for_row(ingreso, row)
+        protocol_live = _resolve_protocol_for_row(ingreso, row)
+        schema_snapshot = _extract_schema_snapshot(row)
+        protocol = _protocol_from_schema_snapshot(schema_snapshot, protocol_live)
         if protocol is None:
             return Response(
                 {"detail": "No hay protocolo de test para este tipo de equipo", "tipo_equipo": ingreso.get("tipo_equipo") or ""},
@@ -497,6 +578,8 @@ class IngresoTestView(APIView):
         references_snapshot = _safe_json((row or {}).get("references_snapshot"), [])
         if not isinstance(references_snapshot, list):
             references_snapshot = []
+        if not references_snapshot and schema_snapshot and isinstance(schema_snapshot.get("references"), list):
+            references_snapshot = copy.deepcopy(schema_snapshot.get("references") or [])
         if not references_snapshot:
             references_snapshot = copy.deepcopy(protocol.get("references") or [])
 
@@ -506,8 +589,22 @@ class IngresoTestView(APIView):
                 status=400,
             )
 
-        template_key = (row or {}).get("template_key") or protocol.get("template_key") or ""
-        template_version = (row or {}).get("template_version") or protocol.get("template_version") or ""
+        if not schema_snapshot:
+            source_protocol = protocol_live or protocol
+            schema_snapshot = _build_schema_snapshot(source_protocol, references_snapshot)
+
+        template_key = (
+            (row or {}).get("template_key")
+            or schema_snapshot.get("template_key")
+            or protocol.get("template_key")
+            or ""
+        )
+        template_version = (
+            (row or {}).get("template_version")
+            or schema_snapshot.get("template_version")
+            or protocol.get("template_version")
+            or ""
+        )
         tipo_equipo_snapshot = (row or {}).get("tipo_equipo_snapshot") or (ingreso.get("tipo_equipo") or "")
         tecnico_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
 
@@ -517,6 +614,7 @@ class IngresoTestView(APIView):
             template_version=template_version,
             tipo_equipo_snapshot=tipo_equipo_snapshot,
             payload_doc={"values": merged_values},
+            schema_snapshot=schema_snapshot,
             references_snapshot=references_snapshot,
             resultado_global=resultado_global,
             conclusion=conclusion,
@@ -555,16 +653,20 @@ class IngresoTestPdfView(APIView):
         if not row:
             return Response({"detail": "No existe test guardado para este ingreso"}, status=404)
 
-        protocol = _resolve_protocol_for_row(ingreso, row)
+        protocol_live = _resolve_protocol_for_row(ingreso, row)
+        schema_snapshot = _extract_schema_snapshot(row)
+        protocol = _protocol_from_schema_snapshot(schema_snapshot, protocol_live)
         if protocol is None:
             return Response({"detail": "No se pudo resolver protocolo de test"}, status=409)
 
         references_snapshot = _safe_json(row.get("references_snapshot"), [])
         if not isinstance(references_snapshot, list):
             references_snapshot = []
+        if not references_snapshot and schema_snapshot and isinstance(schema_snapshot.get("references"), list):
+            references_snapshot = copy.deepcopy(schema_snapshot.get("references") or [])
         if not references_snapshot:
             return Response(
-                {"detail": "No hay references_snapshot para este test. Guarda el test antes de imprimir."},
+                {"detail": "No hay referencias congeladas para este test. Guarda el test antes de imprimir."},
                 status=409,
             )
 
@@ -583,8 +685,8 @@ class IngresoTestPdfView(APIView):
             "modelo": ingreso.get("modelo") or "",
             "numero_serie": ingreso.get("numero_serie") or "",
             "numero_interno": ingreso.get("numero_interno") or "",
-            "template_key": row.get("template_key") or protocol.get("template_key") or "",
-            "template_version": row.get("template_version") or protocol.get("template_version") or "",
+            "template_key": row.get("template_key") or schema_snapshot.get("template_key") or protocol.get("template_key") or "",
+            "template_version": row.get("template_version") or schema_snapshot.get("template_version") or protocol.get("template_version") or "",
             "resultado_global": resultado_global or "pendiente",
             "conclusion": row.get("conclusion") or "",
             "instrumentos": row.get("instrumentos") or _default_instrumentos_for_protocol(protocol),

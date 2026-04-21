@@ -1,9 +1,73 @@
+from datetime import datetime
+
 from django.db import connection, transaction
+from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import q, exec_void, exec_returning, require_roles, _fetchall_dicts, _set_audit_user
+from .mg_state import normalize_mg, resolve_mg_flags
+
+
+def _has_mg_schema() -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='devices'
+                   AND column_name='mg_estado'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name='devices'
+               AND column_name='mg_estado'
+             LIMIT 1
+            """,
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _mg_owner_customer_id():
+    row = q(
+        "SELECT id FROM customers WHERE LOWER(razon_social) LIKE %s ORDER BY id ASC LIMIT 1",
+        ["%mg%bio%"],
+        one=True,
+    )
+    return row.get("id") if row else None
+
+
+def _parse_sale_datetime(raw):
+    if raw is None or str(raw).strip() == "":
+        return timezone.now()
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        s = str(raw).strip()
+        s_norm = s[:-1] + "+00:00" if s.endswith("Z") else s
+        dt = parse_datetime(s_norm) or parse_datetime(s)
+        if not dt:
+            d = parse_date(s)
+            if d:
+                dt = datetime(d.year, d.month, d.day, 0, 0, 0)
+    if not dt:
+        return None
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    return dt
 
 
 class DeviceIdentificadoresView(APIView):
@@ -148,6 +212,7 @@ class DevicesListView(APIView):
                 one=True,
             )
         )
+        has_mg_schema = _has_mg_schema()
 
         if preventivo_estado_raw and preventivo_estado_raw not in ("sin_plan", "al_dia", "proximo", "vencido"):
             return Response({"detail": "preventivo_estado inválido"}, status=400)
@@ -354,7 +419,7 @@ class DevicesListView(APIView):
                   (CASE
                     WHEN pp.proxima_revision_fecha IS NULL THEN NULL
                     ELSE (pp.proxima_revision_fecha - CURRENT_DATE)
-                  END) AS preventivo_dias_restantes,
+                  END) AS preventivo_dias_restantes
                 """
             else:
                 preventivo_select_sql = """
@@ -365,7 +430,28 @@ class DevicesListView(APIView):
                   NULL::date AS preventivo_proxima_revision,
                   NULL::integer AS preventivo_aviso_dias,
                   'sin_plan'::text AS preventivo_estado,
-                  NULL::integer AS preventivo_dias_restantes,
+                  NULL::integer AS preventivo_dias_restantes
+                """
+
+            if has_mg_schema:
+                mg_select_sql = """
+                  COALESCE(d.mg_estado, 'activo') AS mg_estado,
+                  d.mg_inactivo_desde AS mg_inactivo_desde,
+                  d.mg_venta_fecha AS mg_venta_fecha,
+                  COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
+                  COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
+                  COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
+                  d.mg_venta_usuario_id AS mg_venta_usuario_id,
+                """
+            else:
+                mg_select_sql = """
+                  'activo' AS mg_estado,
+                  NULL AS mg_inactivo_desde,
+                  NULL AS mg_venta_fecha,
+                  '' AS mg_venta_factura_numero,
+                  '' AS mg_venta_remito_numero,
+                  '' AS mg_venta_observaciones,
+                  NULL AS mg_venta_usuario_id,
                 """
 
             sql = f"""
@@ -390,27 +476,21 @@ class DevicesListView(APIView):
                   d.propietario_nombre,
                   d.propietario_contacto,
                   d.propietario_doc,
+                  {mg_select_sql}
                   lasti.ingreso_id AS last_ingreso_id,
                   NULL::integer AS last_customer_id,
                   ''::text AS last_customer_nombre,
                   lasti.fecha_ingreso AS last_fecha_ingreso,
                   {preventivo_select_sql}
-                  (CASE WHEN (d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{{1,4}}$'
-                              OR d.numero_serie ~* '^(MG|NM|NV|CE)\\s*\\d{{1,4}}$')
-                        THEN TRUE ELSE FALSE END) AS es_propietario_mg,
-                  (CASE WHEN (d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{{1,4}}$'
-                              OR d.numero_serie ~* '^(MG|NM|NV|CE)\\s*\\d{{1,4}}$')
-                             AND COALESCE(d.alquilado,false) = false
-                             AND d.customer_id IS NOT NULL
-                             AND (%s IS NULL OR d.customer_id <> %s)
-                        THEN TRUE ELSE FALSE END) AS vendido
                 {from_sql}
                 {where_sql}
                 ORDER BY {order_sql}
                 {limit_sql}
             """
-            cur.execute(sql, [mg_owner_id, mg_owner_id] + params + limit_params)
+            cur.execute(sql, params + limit_params)
             rows = _fetchall_dicts(cur)
+            for row in rows:
+                row.update(resolve_mg_flags(row, mg_owner_id))
 
         with connection.cursor() as cur2:
             cur2.execute(
@@ -634,14 +714,7 @@ class DeviceDirectCreateView(APIView):
 
 
 def _norm_mg(value: str):
-    import re
-    s = (value or "").strip().upper()
-    m = re.match(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", s, re.IGNORECASE)
-    if not m:
-        return None
-    pref = m.group(1).upper()
-    num = m.group(2).zfill(4)
-    return f"{pref} {num}"
+    return normalize_mg(value)
 
 
 class DevicesMergeView(APIView):
@@ -817,9 +890,298 @@ class DevicesMergeView(APIView):
         })
 
 
+class DeviceMgVentaView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, device_id: int):
+        require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
+        _set_audit_user(request)
+
+        if not _has_mg_schema():
+            return Response(
+                {"detail": "Schema MG venta no aplicado. Ejecuta apply_mg_sale_schema."},
+                status=500,
+            )
+
+        data = request.data or {}
+        factura_numero = (data.get("factura_numero") or "").strip()
+        remito_numero = (data.get("remito_numero") or "").strip()
+        if not factura_numero and not remito_numero:
+            return Response(
+                {
+                    "detail": "Debe informar factura o remito para marcar venta.",
+                    "conflict_type": "MG_VENTA_COMPROBANTE_REQUERIDO",
+                },
+                status=400,
+            )
+
+        source = (data.get("source") or "equipos").strip().lower()
+        if source not in ("equipos", "service_sheet"):
+            return Response({"detail": "source inválido"}, status=400)
+
+        fecha_venta = _parse_sale_datetime(data.get("fecha_venta"))
+        if not fecha_venta:
+            return Response({"detail": "fecha_venta inválida"}, status=400)
+
+        observaciones = (data.get("observaciones") or "").strip()
+        ingreso_id_raw = data.get("ingreso_id")
+        ingreso_id = None
+        if ingreso_id_raw not in (None, ""):
+            try:
+                ingreso_id = int(ingreso_id_raw)
+            except Exception:
+                return Response({"detail": "ingreso_id inválido"}, status=400)
+
+        uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+
+        device = q(
+            """
+            SELECT
+              id, customer_id,
+              COALESCE(numero_interno,'') AS numero_interno,
+              COALESCE(numero_serie,'') AS numero_serie,
+              COALESCE(alquilado,false) AS alquilado,
+              COALESCE(mg_estado,'activo') AS mg_estado
+            FROM devices
+            WHERE id=%s
+            """,
+            [device_id],
+            one=True,
+        )
+        if not device:
+            return Response({"detail": "Equipo inexistente"}, status=404)
+
+        mg_owner_id = _mg_owner_customer_id()
+        mg_norm = _norm_mg(device.get("numero_interno") or "")
+        if not mg_norm:
+            return Response(
+                {
+                    "detail": "El equipo no tiene un número interno MG válido.",
+                    "conflict_type": "MG_NUMERO_INTERNO_REQUERIDO",
+                },
+                status=400,
+            )
+
+        mg_flags = resolve_mg_flags(device, mg_owner_id)
+        if mg_flags.get("mg_inactivo_venta"):
+            return Response(
+                {
+                    "detail": "El MG ya está inactivo por venta.",
+                    "conflict_type": "MG_YA_INACTIVO_VENTA",
+                },
+                status=400,
+            )
+
+        if ingreso_id is not None:
+            ing = q("SELECT id, device_id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+            if not ing:
+                return Response({"detail": "ingreso_id inexistente"}, status=404)
+            if int(ing.get("device_id") or 0) != int(device_id):
+                return Response({"detail": "ingreso_id no corresponde al equipo"}, status=400)
+
+        exec_void(
+            """
+            UPDATE devices
+               SET mg_estado = 'inactivo_venta',
+                   mg_inactivo_desde = %s,
+                   mg_venta_fecha = %s,
+                   mg_venta_factura_numero = NULLIF(%s,''),
+                   mg_venta_remito_numero = NULLIF(%s,''),
+                   mg_venta_observaciones = NULLIF(%s,''),
+                   mg_venta_usuario_id = %s
+             WHERE id = %s
+            """,
+            [
+                fecha_venta,
+                fecha_venta,
+                factura_numero,
+                remito_numero,
+                observaciones,
+                uid,
+                device_id,
+            ],
+        )
+        exec_void(
+            """
+            INSERT INTO device_mg_events(
+              device_id, accion, numero_interno_snapshot, fecha_evento,
+              factura_numero, remito_numero, observaciones, usuario_id, ingreso_id, source
+            )
+            VALUES (%s, 'venta', %s, %s, NULLIF(%s,''), NULLIF(%s,''), NULLIF(%s,''), %s, %s, %s)
+            """,
+            [
+                device_id,
+                mg_norm,
+                fecha_venta,
+                factura_numero,
+                remito_numero,
+                observaciones,
+                uid,
+                ingreso_id,
+                source,
+            ],
+        )
+
+        row = q(
+            """
+            SELECT
+              d.id,
+              COALESCE(d.numero_interno,'') AS numero_interno,
+              COALESCE(d.numero_serie,'') AS numero_serie,
+              COALESCE(d.mg_estado,'activo') AS mg_estado,
+              d.mg_inactivo_desde,
+              d.mg_venta_fecha,
+              COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
+              COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
+              COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
+              d.mg_venta_usuario_id
+            FROM devices d
+            WHERE d.id=%s
+            """,
+            [device_id],
+            one=True,
+        ) or {}
+        row.update(resolve_mg_flags(row, mg_owner_id))
+        return Response({"ok": True, "device": row})
+
+
+class DeviceMgReactivarView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, device_id: int):
+        require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
+        _set_audit_user(request)
+
+        if not _has_mg_schema():
+            return Response(
+                {"detail": "Schema MG venta no aplicado. Ejecuta apply_mg_sale_schema."},
+                status=500,
+            )
+
+        data = request.data or {}
+        source = (data.get("source") or "equipos").strip().lower()
+        if source not in ("equipos", "service_sheet"):
+            return Response({"detail": "source inválido"}, status=400)
+        observaciones = (data.get("observaciones") or "").strip()
+        ingreso_id_raw = data.get("ingreso_id")
+        ingreso_id = None
+        if ingreso_id_raw not in (None, ""):
+            try:
+                ingreso_id = int(ingreso_id_raw)
+            except Exception:
+                return Response({"detail": "ingreso_id inválido"}, status=400)
+
+        uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+
+        device = q(
+            """
+            SELECT
+              id, customer_id,
+              COALESCE(numero_interno,'') AS numero_interno,
+              COALESCE(numero_serie,'') AS numero_serie,
+              COALESCE(alquilado,false) AS alquilado,
+              COALESCE(mg_estado,'activo') AS mg_estado
+            FROM devices
+            WHERE id=%s
+            """,
+            [device_id],
+            one=True,
+        )
+        if not device:
+            return Response({"detail": "Equipo inexistente"}, status=404)
+
+        mg_owner_id = _mg_owner_customer_id()
+        mg_norm = _norm_mg(device.get("numero_interno") or "")
+        if not mg_norm:
+            return Response(
+                {
+                    "detail": "El equipo no tiene un número interno MG válido.",
+                    "conflict_type": "MG_NUMERO_INTERNO_REQUERIDO",
+                },
+                status=400,
+            )
+
+        mg_flags = resolve_mg_flags(device, mg_owner_id)
+        if not mg_flags.get("mg_inactivo_venta"):
+            return Response(
+                {
+                    "detail": "El MG ya está activo.",
+                    "conflict_type": "MG_YA_ACTIVO",
+                },
+                status=400,
+            )
+
+        if ingreso_id is not None:
+            ing = q("SELECT id, device_id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+            if not ing:
+                return Response({"detail": "ingreso_id inexistente"}, status=404)
+            if int(ing.get("device_id") or 0) != int(device_id):
+                return Response({"detail": "ingreso_id no corresponde al equipo"}, status=400)
+
+        now_ts = timezone.now()
+        exec_void(
+            """
+            UPDATE devices
+               SET mg_estado = 'activo',
+                   mg_inactivo_desde = NULL,
+                   mg_venta_fecha = NULL,
+                   mg_venta_factura_numero = NULL,
+                   mg_venta_remito_numero = NULL,
+                   mg_venta_observaciones = NULL,
+                   mg_venta_usuario_id = NULL
+             WHERE id = %s
+            """,
+            [device_id],
+        )
+        exec_void(
+            """
+            INSERT INTO device_mg_events(
+              device_id, accion, numero_interno_snapshot, fecha_evento,
+              factura_numero, remito_numero, observaciones, usuario_id, ingreso_id, source
+            )
+            VALUES (%s, 'reactivacion', %s, %s, NULL, NULL, NULLIF(%s,''), %s, %s, %s)
+            """,
+            [
+                device_id,
+                mg_norm,
+                now_ts,
+                observaciones,
+                uid,
+                ingreso_id,
+                source,
+            ],
+        )
+
+        row = q(
+            """
+            SELECT
+              d.id,
+              COALESCE(d.numero_interno,'') AS numero_interno,
+              COALESCE(d.numero_serie,'') AS numero_serie,
+              COALESCE(d.mg_estado,'activo') AS mg_estado,
+              d.mg_inactivo_desde,
+              d.mg_venta_fecha,
+              COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
+              COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
+              COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
+              d.mg_venta_usuario_id
+            FROM devices d
+            WHERE d.id=%s
+            """,
+            [device_id],
+            one=True,
+        ) or {}
+        row.update(resolve_mg_flags(row, mg_owner_id))
+        return Response({"ok": True, "device": row})
+
+
 __all__ = [
     "DeviceDirectCreateView",
     "DeviceIdentificadoresView",
     "DevicesListView",
     "DevicesMergeView",
+    "DeviceMgVentaView",
+    "DeviceMgReactivarView",
 ]

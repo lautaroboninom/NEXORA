@@ -28,6 +28,7 @@ export const PERMISSION_CODES = {
   ACTION_USERS_MANAGE: "action.users.manage",
   ACTION_USERS_MANAGE_PERMISSIONS: "action.users.manage_permissions",
   ACTION_CATALOGS_MANAGE: "action.catalogs.manage",
+  ACTION_TESTS_PROTOCOL_MANAGE: "action.tests_protocol.manage",
   ACTION_SPARE_PARTS_MANAGE: "action.spare_parts.manage",
   ACTION_SPARE_PARTS_MANAGE_24H_PERMISSIONS: "action.spare_parts.manage_24h_permissions",
   ACTION_DEVICES_PREVENTIVOS_MANAGE: "action.devices_preventivos.manage",
@@ -69,6 +70,7 @@ const ROLE_DEFAULT_PERMISSIONS = {
     PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA,
     PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER,
     PERMISSION_CODES.ACTION_CATALOGS_MANAGE,
+    PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE,
     PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_MANAGE,
   ]),
   jefe_veedor: new Set([

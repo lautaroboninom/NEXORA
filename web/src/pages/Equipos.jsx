@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/Tabs";
 import {
@@ -16,8 +16,13 @@ import {
   postDevicePreventivoPlan,
   patchDevicePreventivoPlan,
   postDevicePreventivoRevision,
+  getDevicePreventivoRepuestos,
+  postDevicePreventivoRepuesto,
+  patchDevicePreventivoRepuesto,
+  deleteDevicePreventivoRepuesto,
   getPreventivosAgenda,
   getPreventivosClientes,
+  getRepuestosCatalogo,
   postCustomerPreventivoPlan,
   patchCustomerPreventivoPlan,
   getCustomerPreventivoRevisiones,
@@ -27,6 +32,8 @@ import {
   patchPreventivoRevisionItem,
   postPreventivoRevisionCerrar,
   postCliente,
+  postDeviceMgVenta,
+  postDeviceMgReactivar,
 } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
@@ -93,10 +100,14 @@ function PreventivoBadge({ estado, dias }) {
 
 function PropiedadBadge({ row }) {
   const isMg = !!row?.es_propietario_mg;
-  const vendido = !!row?.vendido;
+  const mgInactivoVenta = !!row?.mg_inactivo_venta;
   const alquilado = !!row?.alquilado;
+  const hasNumeroInterno = !!String(row?.numero_interno || "").trim();
+  if (mgInactivoVenta) {
+    return <span className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700">Cliente (Ex MG)</span>;
+  }
   if (isMg) {
-    if (vendido) return <span className="px-2 py-1 text-xs rounded bg-amber-100 text-amber-800">Propio</span>;
+    if (hasNumeroInterno) return <span className="px-2 py-1 text-xs rounded bg-emerald-100 text-emerald-800">Propio (MG)</span>;
     if (alquilado) return <span className="px-2 py-1 text-xs rounded bg-blue-100 text-blue-800">Propio (alquilado)</span>;
     return <span className="px-2 py-1 text-xs rounded bg-emerald-100 text-emerald-800">Propio (MG/BIO)</span>;
   }
@@ -168,6 +179,130 @@ function EditModal({ row, onClose, onSaved, canEdit }) {
               Guardar
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
+  const isVenta = mode === "venta";
+  const [factura, setFactura] = useState("");
+  const [remito, setRemito] = useState("");
+  const [fechaVenta, setFechaVenta] = useState(todayISO());
+  const [observaciones, setObservaciones] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  if (!row) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+      <div className="bg-white rounded shadow-lg w-full max-w-lg p-4">
+        <div className="text-lg font-semibold mb-2">
+          {isVenta ? "Marcar MG vendido" : "Reactivar MG"}
+        </div>
+        <div className="text-sm text-gray-600 mb-3">
+          Equipo #{row.id} - MG: {row.numero_interno || "-"}
+        </div>
+        {err && <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mb-3">{err}</div>}
+
+        {isVenta ? (
+          <div className="space-y-3">
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Factura de venta</div>
+              <input
+                type="text"
+                className="border rounded p-2 w-full"
+                value={factura}
+                onChange={(e) => setFactura(e.target.value)}
+                disabled={saving}
+              />
+            </label>
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Remito de venta</div>
+              <input
+                type="text"
+                className="border rounded p-2 w-full"
+                value={remito}
+                onChange={(e) => setRemito(e.target.value)}
+                disabled={saving}
+              />
+            </label>
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Fecha de venta</div>
+              <input
+                type="date"
+                className="border rounded p-2 w-full"
+                value={fechaVenta}
+                onChange={(e) => setFechaVenta(e.target.value)}
+                disabled={saving}
+              />
+            </label>
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Observaciones</div>
+              <textarea
+                className="border rounded p-2 w-full min-h-[90px]"
+                value={observaciones}
+                onChange={(e) => setObservaciones(e.target.value)}
+                disabled={saving}
+              />
+            </label>
+            <div className="text-xs text-gray-500">Debes informar al menos factura o remito.</div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="text-sm text-gray-700">
+              Esta acción vuelve el MG a estado operativo y conserva trazabilidad en el historial de eventos.
+            </div>
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Observaciones</div>
+              <textarea
+                className="border rounded p-2 w-full min-h-[90px]"
+                value={observaciones}
+                onChange={(e) => setObservaciones(e.target.value)}
+                disabled={saving}
+              />
+            </label>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 mt-4">
+          <button className="px-3 py-1.5 rounded border" onClick={onClose} disabled={saving}>
+            Cancelar
+          </button>
+          <button
+            className={`px-3 py-1.5 rounded text-white disabled:opacity-50 ${isVenta ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-600 hover:bg-emerald-700"}`}
+            disabled={saving || (isVenta && !(factura.trim() || remito.trim()))}
+            onClick={async () => {
+              setErr("");
+              try {
+                setSaving(true);
+                if (isVenta) {
+                  await postDeviceMgVenta(row.id, {
+                    factura_numero: factura.trim() || null,
+                    remito_numero: remito.trim() || null,
+                    fecha_venta: fechaVenta || null,
+                    observaciones: observaciones.trim() || null,
+                    source: "equipos",
+                  });
+                } else {
+                  await postDeviceMgReactivar(row.id, {
+                    observaciones: observaciones.trim() || null,
+                    source: "equipos",
+                  });
+                }
+                onSaved && onSaved();
+                onClose();
+              } catch (e) {
+                setErr(e?.message || "No se pudo guardar el estado MG.");
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            {saving ? "Guardando..." : isVenta ? "Marcar vendido" : "Reactivar MG"}
+          </button>
         </div>
       </div>
     </div>
@@ -417,6 +552,270 @@ function DeviceRevisionModal({ row, onClose, onSubmit, saving = false, error = "
             className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
             onClick={() => onSubmit(form)}
             disabled={saving}
+          >
+            Guardar revisión
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreventivoRepuestoModal({
+  title,
+  initialItem = null,
+  catalogOptions = [],
+  onClose,
+  onSubmit,
+  saving = false,
+  error = "",
+}) {
+  const [form, setForm] = useState({
+    catalogo_repuesto_id: initialItem?.catalogo_repuesto_id ? String(initialItem.catalogo_repuesto_id) : "",
+    nombre_repuesto: initialItem?.nombre_repuesto || "",
+    periodicidad_valor: initialItem?.periodicidad_valor != null ? String(initialItem.periodicidad_valor) : "1",
+    periodicidad_unidad: initialItem?.periodicidad_unidad || "meses",
+    aviso_anticipacion_dias: initialItem?.aviso_anticipacion_dias != null ? String(initialItem.aviso_anticipacion_dias) : "30",
+    ultima_revision_fecha: initialItem?.ultima_revision_fecha || "",
+    proxima_revision_fecha: initialItem?.proxima_revision_fecha || "",
+  });
+
+  useEffect(() => {
+    setForm({
+      catalogo_repuesto_id: initialItem?.catalogo_repuesto_id ? String(initialItem.catalogo_repuesto_id) : "",
+      nombre_repuesto: initialItem?.nombre_repuesto || "",
+      periodicidad_valor: initialItem?.periodicidad_valor != null ? String(initialItem.periodicidad_valor) : "1",
+      periodicidad_unidad: initialItem?.periodicidad_unidad || "meses",
+      aviso_anticipacion_dias: initialItem?.aviso_anticipacion_dias != null ? String(initialItem.aviso_anticipacion_dias) : "30",
+      ultima_revision_fecha: initialItem?.ultima_revision_fecha || "",
+      proxima_revision_fecha: initialItem?.proxima_revision_fecha || "",
+    });
+  }, [initialItem]);
+
+  const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  const selectedCatalog = catalogOptions.find((it) => String(it.id) === String(form.catalogo_repuesto_id));
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+      <div className="bg-white rounded shadow-lg w-full max-w-2xl p-4">
+        <div className="text-lg font-semibold mb-2">{title}</div>
+        {error && <div className="bg-red-100 border border-red-300 text-red-800 rounded p-2 mb-3">{error}</div>}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <label className="block md:col-span-2">
+            <div className="text-sm text-gray-700 mb-1">Repuesto de catálogo (opcional)</div>
+            <select
+              className="border rounded p-2 w-full"
+              value={form.catalogo_repuesto_id}
+              onChange={(e) => {
+                const nextId = e.target.value;
+                const opt = catalogOptions.find((it) => String(it.id) === String(nextId));
+                setForm((prev) => ({
+                  ...prev,
+                  catalogo_repuesto_id: nextId,
+                  nombre_repuesto: prev.nombre_repuesto || (opt?.nombre || ""),
+                }));
+              }}
+              disabled={saving || !!initialItem?.id}
+            >
+              <option value="">Texto libre</option>
+              {catalogOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.codigo ? `${opt.codigo} - ` : ""}{opt.nombre}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block md:col-span-2">
+            <div className="text-sm text-gray-700 mb-1">Nombre del repuesto</div>
+            <input
+              type="text"
+              className="border rounded p-2 w-full"
+              value={form.nombre_repuesto}
+              onChange={(e) => setField("nombre_repuesto", e.target.value)}
+              placeholder={selectedCatalog?.nombre || "Ej: filtros, cooler, batería"}
+              disabled={saving}
+            />
+          </label>
+          <label className="block">
+            <div className="text-sm text-gray-700 mb-1">Periodicidad valor</div>
+            <input
+              type="number"
+              min="1"
+              className="border rounded p-2 w-full"
+              value={form.periodicidad_valor}
+              onChange={(e) => setField("periodicidad_valor", e.target.value)}
+              disabled={saving}
+            />
+          </label>
+          <label className="block">
+            <div className="text-sm text-gray-700 mb-1">Unidad</div>
+            <select
+              className="border rounded p-2 w-full"
+              value={form.periodicidad_unidad}
+              onChange={(e) => setField("periodicidad_unidad", e.target.value)}
+              disabled={saving}
+            >
+              {PERIODICIDAD_UNIDADES.map((u) => (
+                <option key={u.value} value={u.value}>{u.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <div className="text-sm text-gray-700 mb-1">Aviso (días)</div>
+            <input
+              type="number"
+              min="0"
+              className="border rounded p-2 w-full"
+              value={form.aviso_anticipacion_dias}
+              onChange={(e) => setField("aviso_anticipacion_dias", e.target.value)}
+              disabled={saving}
+            />
+          </label>
+          <label className="block">
+            <div className="text-sm text-gray-700 mb-1">Última vez</div>
+            <input
+              type="date"
+              className="border rounded p-2 w-full"
+              value={form.ultima_revision_fecha}
+              onChange={(e) => setField("ultima_revision_fecha", e.target.value)}
+              disabled={saving}
+            />
+          </label>
+          <label className="block">
+            <div className="text-sm text-gray-700 mb-1">Próxima</div>
+            <input
+              type="date"
+              className="border rounded p-2 w-full"
+              value={form.proxima_revision_fecha}
+              onChange={(e) => setField("proxima_revision_fecha", e.target.value)}
+              disabled={saving}
+            />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <button className="px-3 py-1.5 rounded border" onClick={onClose} disabled={saving}>Cancelar</button>
+          <button
+            className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+            disabled={saving}
+            onClick={() =>
+              onSubmit({
+                catalogo_repuesto_id: form.catalogo_repuesto_id ? Number(form.catalogo_repuesto_id) : null,
+                nombre_repuesto: form.nombre_repuesto || "",
+                periodicidad_valor: Number(form.periodicidad_valor || 0),
+                periodicidad_unidad: form.periodicidad_unidad,
+                aviso_anticipacion_dias: Number(form.aviso_anticipacion_dias || 0),
+                ultima_revision_fecha: form.ultima_revision_fecha || null,
+                proxima_revision_fecha: form.proxima_revision_fecha || null,
+              })
+            }
+          >
+            Guardar repuesto
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeviceRepuestosRevisionModal({
+  row,
+  repuestos = [],
+  onClose,
+  onSubmit,
+  saving = false,
+  loading = false,
+  error = "",
+}) {
+  const [fechaRealizada, setFechaRealizada] = useState(todayISO());
+  const [resumen, setResumen] = useState("");
+  const [selected, setSelected] = useState({});
+
+  useEffect(() => {
+    const next = {};
+    (repuestos || []).forEach((it) => {
+      if (it?.id != null) next[it.id] = true;
+    });
+    setSelected(next);
+    setFechaRealizada(todayISO());
+    setResumen("");
+  }, [row?.id, repuestos]);
+
+  const selectedIds = Object.entries(selected)
+    .filter(([, checked]) => !!checked)
+    .map(([id]) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+      <div className="bg-white rounded shadow-lg w-full max-w-3xl p-4">
+        <div className="text-lg font-semibold mb-2">Registrar revisión por repuestos</div>
+        <div className="text-sm text-gray-600 mb-3">
+          Equipo #{row?.id} - {row?.marca || "-"} {row?.modelo || ""}
+        </div>
+        {error && <div className="bg-red-100 border border-red-300 text-red-800 rounded p-2 mb-3">{error}</div>}
+        {loading ? (
+          <div className="text-sm text-gray-500 py-3">Cargando repuestos...</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+              <label className="block">
+                <div className="text-sm text-gray-700 mb-1">Fecha realizada</div>
+                <input type="date" className="border rounded p-2 w-full" value={fechaRealizada} onChange={(e) => setFechaRealizada(e.target.value)} />
+              </label>
+              <label className="block">
+                <div className="text-sm text-gray-700 mb-1">Resumen</div>
+                <input type="text" className="border rounded p-2 w-full" value={resumen} onChange={(e) => setResumen(e.target.value)} />
+              </label>
+            </div>
+            <div className="border rounded max-h-72 overflow-auto mb-3">
+              {(repuestos || []).length === 0 ? (
+                <div className="text-sm text-gray-500 p-3">Este plan no tiene repuestos.</div>
+              ) : (
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-left">
+                      <th className="p-2 w-10"></th>
+                      <th className="p-2">Repuesto</th>
+                      <th className="p-2">Última</th>
+                      <th className="p-2">Próxima</th>
+                      <th className="p-2">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {repuestos.map((it) => (
+                      <tr key={it.id} className="border-t">
+                        <td className="p-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={!!selected[it.id]}
+                            onChange={(e) => setSelected((prev) => ({ ...prev, [it.id]: e.target.checked }))}
+                          />
+                        </td>
+                        <td className="p-2">{it.nombre_repuesto || "-"}</td>
+                        <td className="p-2">{fmtDate(it.ultima_revision_fecha)}</td>
+                        <td className="p-2">{fmtDate(it.proxima_revision_fecha)}</td>
+                        <td className="p-2"><PreventivoBadge estado={it.preventivo_estado} dias={it.preventivo_dias_restantes} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        )}
+        <div className="flex justify-end gap-2">
+          <button className="px-3 py-1.5 rounded border" onClick={onClose} disabled={saving}>Cancelar</button>
+          <button
+            className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+            disabled={saving || loading || selectedIds.length === 0}
+            onClick={() =>
+              onSubmit({
+                fecha_realizada: fechaRealizada || null,
+                resumen: resumen || "",
+                repuesto_ids: selectedIds,
+              })
+            }
           >
             Guardar revisión
           </button>
@@ -1007,6 +1406,8 @@ export default function Equipos() {
   const [q, setQ] = useState(searchParams.get("q") || "");
   const [qDebounced, setQDebounced] = useState(searchParams.get("q") || "");
   const [editRow, setEditRow] = useState(null);
+  const [mgModalRow, setMgModalRow] = useState(null);
+  const [mgModalMode, setMgModalMode] = useState("venta");
   const [reloadDevicesKey, setReloadDevicesKey] = useState(0);
   const [sort, setSort] = useState("-id");
 
@@ -1034,10 +1435,20 @@ export default function Equipos() {
   const [agendaLoading, setAgendaLoading] = useState(false);
   const [agendaErr, setAgendaErr] = useState("");
   const [agendaItems, setAgendaItems] = useState([]);
+  const [agendaExpanded, setAgendaExpanded] = useState({});
+  const [agendaRepuestosByDevice, setAgendaRepuestosByDevice] = useState({});
   const [agendaCounts, setAgendaCounts] = useState({ total: 0, vencido: 0, proximo: 0, sin_plan: 0, al_dia: 0 });
   const [agendaEstado, setAgendaEstado] = useState("");
   const [agendaQ, setAgendaQ] = useState("");
   const [agendaCustomerId, setAgendaCustomerId] = useState("");
+  const [repuestosCatalogOptions, setRepuestosCatalogOptions] = useState([]);
+  const [repuestoModalCtx, setRepuestoModalCtx] = useState(null);
+  const [repuestoModalSaving, setRepuestoModalSaving] = useState(false);
+  const [repuestoModalErr, setRepuestoModalErr] = useState("");
+  const [repuestoDeleteBusyId, setRepuestoDeleteBusyId] = useState(null);
+  const [repuestoRevisionCtx, setRepuestoRevisionCtx] = useState(null);
+  const [repuestoRevisionSaving, setRepuestoRevisionSaving] = useState(false);
+  const [repuestoRevisionErr, setRepuestoRevisionErr] = useState("");
 
   const [institucionesLoading, setInstitucionesLoading] = useState(false);
   const [institucionesErr, setInstitucionesErr] = useState("");
@@ -1202,6 +1613,124 @@ export default function Equipos() {
       setAgendaLoading(false);
     }
   }
+
+  async function loadRepuestosCatalogOptions(force = false) {
+    if (!force && repuestosCatalogOptions.length > 0) return repuestosCatalogOptions;
+    try {
+      const res = await getRepuestosCatalogo({ limit: 500 });
+      const rows = Array.isArray(res) ? res : [];
+      setRepuestosCatalogOptions(rows);
+      return rows;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async function loadAgendaRepuestos(deviceId, { force = false } = {}) {
+    if (!deviceId) return [];
+    const key = String(deviceId);
+    if (!force && Array.isArray(agendaRepuestosByDevice[key]?.items)) {
+      return agendaRepuestosByDevice[key].items || [];
+    }
+    setAgendaRepuestosByDevice((prev) => ({
+      ...prev,
+      [key]: { loading: true, err: "", items: prev[key]?.items || [] },
+    }));
+    try {
+      const res = await getDevicePreventivoRepuestos(deviceId);
+      const items = Array.isArray(res?.items) ? res.items : [];
+      setAgendaRepuestosByDevice((prev) => ({
+        ...prev,
+        [key]: { loading: false, err: "", items },
+      }));
+      return items;
+    } catch (e) {
+      setAgendaRepuestosByDevice((prev) => ({
+        ...prev,
+        [key]: { loading: false, err: e?.message || "No se pudieron cargar los repuestos.", items: [] },
+      }));
+      return [];
+    }
+  }
+
+  async function toggleAgendaExpand(item) {
+    const did = item?.device_id;
+    if (!did) return;
+    const key = String(did);
+    const nextOpen = !agendaExpanded[key];
+    setAgendaExpanded((prev) => ({ ...prev, [key]: nextOpen }));
+    if (nextOpen) {
+      await loadRepuestosCatalogOptions();
+      await loadAgendaRepuestos(did);
+    }
+  }
+
+  const openCreateRepuestoModal = async (item) => {
+    if (!item?.device_id) return;
+    setRepuestoModalErr("");
+    await loadRepuestosCatalogOptions();
+    setRepuestoModalCtx({ mode: "create", deviceId: item.device_id, item: null });
+  };
+
+  const openEditRepuestoModal = async (deviceId, repuesto) => {
+    if (!deviceId || !repuesto?.id) return;
+    setRepuestoModalErr("");
+    await loadRepuestosCatalogOptions();
+    setRepuestoModalCtx({ mode: "edit", deviceId, item: repuesto });
+  };
+
+  const saveRepuestoModal = async (payload) => {
+    if (!repuestoModalCtx?.deviceId) return;
+    try {
+      setRepuestoModalSaving(true);
+      setRepuestoModalErr("");
+      if (repuestoModalCtx.mode === "edit" && repuestoModalCtx.item?.id) {
+        await patchDevicePreventivoRepuesto(repuestoModalCtx.deviceId, repuestoModalCtx.item.id, payload);
+      } else {
+        await postDevicePreventivoRepuesto(repuestoModalCtx.deviceId, payload);
+      }
+      await loadAgendaRepuestos(repuestoModalCtx.deviceId, { force: true });
+      await loadAgenda();
+      setRepuestoModalCtx(null);
+    } catch (e) {
+      setRepuestoModalErr(e?.message || "No se pudo guardar el repuesto preventivo.");
+    } finally {
+      setRepuestoModalSaving(false);
+    }
+  };
+
+  const deleteAgendaRepuesto = async (deviceId, repuesto) => {
+    if (!deviceId || !repuesto?.id) return;
+    if (!confirm(`Eliminar "${repuesto.nombre_repuesto || "repuesto"}" de este mantenimiento y equivalentes?`)) return;
+    try {
+      setRepuestoDeleteBusyId(repuesto.id);
+      await deleteDevicePreventivoRepuesto(deviceId, repuesto.id);
+      await loadAgendaRepuestos(deviceId, { force: true });
+      await loadAgenda();
+    } catch (e) {
+      setAgendaErr(e?.message || "No se pudo eliminar el repuesto preventivo.");
+    } finally {
+      setRepuestoDeleteBusyId(null);
+    }
+  };
+
+  const startAgendaDeviceRevision = async (item) => {
+    const row =
+      rows.find((r) => String(r.id) === String(item.device_id)) || {
+        id: item.device_id,
+        marca: item.marca,
+        modelo: item.modelo,
+        preventivo_plan_id: item.plan_id,
+      };
+    if (Number(item?.repuestos_total || 0) <= 0) {
+      setDeviceRevisionCtx(row);
+      return;
+    }
+    setRepuestoRevisionErr("");
+    setRepuestoRevisionCtx({ row, repuestos: [], loading: true });
+    const items = await loadAgendaRepuestos(item.device_id, { force: true });
+    setRepuestoRevisionCtx({ row, repuestos: items, loading: false });
+  };
 
   async function loadInstituciones() {
     try {
@@ -1410,6 +1939,25 @@ export default function Equipos() {
     }
   };
 
+  const saveDeviceRepuestoRevision = async (form) => {
+    if (!repuestoRevisionCtx?.row?.id) return;
+    try {
+      setRepuestoRevisionSaving(true);
+      setRepuestoRevisionErr("");
+      await postDevicePreventivoRevision(repuestoRevisionCtx.row.id, form);
+      setRepuestoRevisionCtx(null);
+      setReloadDevicesKey(Date.now());
+      if (activeTab === "preventivos") {
+        await loadAgendaRepuestos(repuestoRevisionCtx.row.id, { force: true });
+        await loadAgenda();
+      }
+    } catch (e) {
+      setRepuestoRevisionErr(e?.message || "No se pudo registrar la revisión por repuestos.");
+    } finally {
+      setRepuestoRevisionSaving(false);
+    }
+  };
+
   const onSelectExistingPreventivoDevice = (row) => {
     setAddPreventivoEquipoOpen(false);
     openDevicePlanModal(row);
@@ -1576,7 +2124,7 @@ export default function Equipos() {
                         <td className="p-2">
                           <div className="font-medium">{row.last_customer_nombre || row.customer_nombre || "-"}</div>
                           {row.last_ingreso_id ? <div className="text-xs text-gray-500">Último ingreso #{row.last_ingreso_id}</div> : null}
-                          {row.es_propietario_mg && <div className="text-xs text-gray-500">Dueño base (propio MG/BIO)</div>}
+                          {row.es_propietario_mg && !row.mg_inactivo_venta && <div className="text-xs text-gray-500">Dueño base (propio MG/BIO)</div>}
                         </td>
                         <td className="p-2">{row.numero_serie || "-"}</td>
                         <td className="p-2">{row.numero_interno || "-"}</td>
@@ -1622,6 +2170,18 @@ export default function Equipos() {
                                       }}
                                     >
                                       Editar IDs
+                                    </button>
+                                  )}
+                                  {canEdit && row?.es_propietario_mg && row?.numero_interno && (
+                                    <button
+                                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                                      onClick={() => {
+                                        close();
+                                        setMgModalMode(row?.mg_inactivo_venta ? "reactivar" : "venta");
+                                        setMgModalRow(row);
+                                      }}
+                                    >
+                                      {row?.mg_inactivo_venta ? "Reactivar MG" : "Marcar vendido"}
                                     </button>
                                   )}
                                   {canEdit && (
@@ -1710,60 +2270,160 @@ export default function Equipos() {
                   <tr className="text-left">
                     <th className="p-2">Cliente</th>
                     <th className="p-2">Equipo</th>
+                    <th className="p-2">N/S</th>
+                    <th className="p-2">Numero interno</th>
+                    <th className="p-2">Ultima revision</th>
                     <th className="p-2">Próxima</th>
                     <th className="p-2">Estado</th>
                     <th className="p-2">Acción</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {agendaItems.map((item, idx) => (
-                    <tr key={`${item.plan_id || "sp"}-${item.device_id || idx}-${idx}`} className="border-t">
-                      <td className="p-2">{item.customer_nombre || "-"}</td>
-                      <td className="p-2">{item.equipo_label || `${item.marca || ""} ${item.modelo || ""}`.trim() || "-"}</td>
-                      <td className="p-2">{fmtDate(item.proxima_revision_fecha)}</td>
-                      <td className="p-2"><PreventivoBadge estado={item.preventivo_estado} dias={item.preventivo_dias_restantes} /></td>
-                      <td className="p-2">
-                        {item.plan_id ? (
-                          <button
-                            className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
-                            onClick={() => {
-                              const row =
-                                rows.find((r) => String(r.id) === String(item.device_id)) || {
-                                  id: item.device_id,
-                                  marca: item.marca,
-                                  modelo: item.modelo,
-                                  preventivo_plan_id: item.plan_id,
-                                };
-                              setDeviceRevisionCtx(row);
-                            }}
-                          >
-                            Registrar revisión
-                          </button>
-                        ) : (
-                          <div className="flex items-center gap-1">
-                            {canPlanEdit && (
+                  {agendaItems.map((item, idx) => {
+                    const rowKey = `${item.plan_id || "sp"}-${item.device_id || idx}-${idx}`;
+                    const did = String(item.device_id || "");
+                    const expanded = !!agendaExpanded[did];
+                    const repState = agendaRepuestosByDevice[did] || { loading: false, err: "", items: [] };
+                    return (
+                      <Fragment key={rowKey}>
+                        <tr
+                          className={`border-t ${item.plan_id ? "cursor-pointer hover:bg-gray-50" : ""}`}
+                          onClick={() => {
+                            if (!item.plan_id) return;
+                            toggleAgendaExpand(item);
+                          }}
+                        >
+                          <td className="p-2">{item.customer_nombre || "-"}</td>
+                          <td className="p-2">
+                            <div>{item.equipo_label || `${item.marca || ""} ${item.modelo || ""}`.trim() || "-"}</div>
+                            {item.plan_id ? (
+                              <div className="text-xs text-gray-500">
+                                {expanded ? "v" : ">"} Repuestos: {Number(item.repuestos_total || 0)} {item.repuesto_proximo_nombre ? `| Próximo: ${item.repuesto_proximo_nombre}` : ""}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="p-2">{item.numero_serie || "-"}</td>
+                          <td className="p-2">{item.numero_interno || "-"}</td>
+                          <td className="p-2">{fmtDate(item.ultima_revision_fecha)}</td>
+                          <td className="p-2">{fmtDate(item.proxima_revision_fecha)}</td>
+                          <td className="p-2"><PreventivoBadge estado={item.preventivo_estado} dias={item.preventivo_dias_restantes} /></td>
+                          <td className="p-2">
+                            {item.plan_id ? (
                               <button
                                 className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
-                                onClick={() =>
-                                  openDevicePlanModal({
-                                    id: item.device_id,
-                                    marca: item.marca,
-                                    modelo: item.modelo,
-                                    preventivo_plan_id: null,
-                                  })
-                                }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startAgendaDeviceRevision(item);
+                                }}
                               >
-                                Configurar plan
+                                Registrar revisión
                               </button>
+                            ) : (
+                              <div className="flex items-center gap-1">
+                                {canPlanEdit && (
+                                  <button
+                                    className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openDevicePlanModal({
+                                        id: item.device_id,
+                                        marca: item.marca,
+                                        modelo: item.modelo,
+                                        preventivo_plan_id: null,
+                                      });
+                                    }}
+                                  >
+                                    Configurar plan
+                                  </button>
+                                )}
+                                <button
+                                  className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveTab("equipos");
+                                  }}
+                                >
+                                  Ir a equipo
+                                </button>
+                              </div>
                             )}
-                            <button className="px-2 py-1 rounded border text-xs hover:bg-gray-50" onClick={() => setActiveTab("equipos")}>
-                              Ir a equipo
-                            </button>
-                          </div>
+                          </td>
+                        </tr>
+                        {item.plan_id && expanded && (
+                          <tr className="border-t bg-gray-50/60">
+                            <td className="p-3" colSpan={8}>
+                              {repState.loading ? (
+                                <div className="text-sm text-gray-500">Cargando repuestos...</div>
+                              ) : repState.err ? (
+                                <div className="text-sm text-red-700">{repState.err}</div>
+                              ) : (
+                                <div className="space-y-2">
+                                  <div className="text-sm font-medium">Detalle de repuestos preventivos</div>
+                                  {!repState.items?.length ? (
+                                    <div className="text-sm text-gray-500">Sin repuestos configurados.</div>
+                                  ) : (
+                                    <div className="overflow-x-auto">
+                                      <table className="min-w-full text-xs">
+                                        <thead>
+                                          <tr className="text-left">
+                                            <th className="p-2">Repuesto</th>
+                                            <th className="p-2">Periodicidad</th>
+                                            <th className="p-2">Última</th>
+                                            <th className="p-2">Próxima</th>
+                                            <th className="p-2">Estado</th>
+                                            <th className="p-2">Acciones</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {repState.items.map((rep) => (
+                                            <tr key={rep.id} className="border-t">
+                                              <td className="p-2">{rep.nombre_repuesto || "-"}</td>
+                                              <td className="p-2">{rep.periodicidad_valor} {rep.periodicidad_unidad}</td>
+                                              <td className="p-2">{fmtDate(rep.ultima_revision_fecha)}</td>
+                                              <td className="p-2">{fmtDate(rep.proxima_revision_fecha)}</td>
+                                              <td className="p-2"><PreventivoBadge estado={rep.preventivo_estado} dias={rep.preventivo_dias_restantes} /></td>
+                                              <td className="p-2">
+                                                {canPlanEdit ? (
+                                                  <div className="flex items-center gap-1">
+                                                    <button
+                                                      className="px-2 py-1 rounded border hover:bg-gray-100"
+                                                      onClick={() => openEditRepuestoModal(item.device_id, rep)}
+                                                    >
+                                                      Editar
+                                                    </button>
+                                                    <button
+                                                      className="px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                                                      disabled={repuestoDeleteBusyId === rep.id}
+                                                      onClick={() => deleteAgendaRepuesto(item.device_id, rep)}
+                                                    >
+                                                      Eliminar
+                                                    </button>
+                                                  </div>
+                                                ) : (
+                                                  <span className="text-gray-400">-</span>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                  {canPlanEdit && (
+                                    <div className="pt-1">
+                                      <button className="px-2 py-1 rounded border text-xs hover:bg-white" onClick={() => openCreateRepuestoModal(item)}>
+                                        + Agregar repuesto
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                    </tr>
-                  ))}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -2085,6 +2745,14 @@ export default function Equipos() {
       {editRow && (
         <EditModal row={editRow} canEdit={canEdit} onClose={() => setEditRow(null)} onSaved={() => setReloadDevicesKey(Date.now())} />
       )}
+      {mgModalRow && (
+        <MgVentaModal
+          row={mgModalRow}
+          mode={mgModalMode}
+          onClose={() => setMgModalRow(null)}
+          onSaved={() => setReloadDevicesKey(Date.now())}
+        />
+      )}
 
       {planModalCtx && (
         <PreventivoPlanModal
@@ -2104,6 +2772,30 @@ export default function Equipos() {
           onSubmit={saveDeviceRevision}
           saving={deviceRevisionSaving}
           error={deviceRevisionErr}
+        />
+      )}
+
+      {repuestoRevisionCtx && (
+        <DeviceRepuestosRevisionModal
+          row={repuestoRevisionCtx.row}
+          repuestos={repuestoRevisionCtx.repuestos || []}
+          onClose={() => setRepuestoRevisionCtx(null)}
+          onSubmit={saveDeviceRepuestoRevision}
+          saving={repuestoRevisionSaving}
+          loading={!!repuestoRevisionCtx.loading}
+          error={repuestoRevisionErr}
+        />
+      )}
+
+      {repuestoModalCtx && (
+        <PreventivoRepuestoModal
+          title={repuestoModalCtx.mode === "edit" ? "Editar repuesto preventivo" : "Agregar repuesto preventivo"}
+          initialItem={repuestoModalCtx.item || null}
+          catalogOptions={repuestosCatalogOptions}
+          onClose={() => setRepuestoModalCtx(null)}
+          onSubmit={saveRepuestoModal}
+          saving={repuestoModalSaving}
+          error={repuestoModalErr}
         />
       )}
 
@@ -2333,3 +3025,7 @@ function SortableTh({ label, field, sort, setSort }) {
     </th>
   );
 }
+
+
+
+

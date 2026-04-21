@@ -31,6 +31,7 @@ PERMISSION_CATALOG = [
     {"code": "action.users.manage", "label": "Gestionar usuarios", "type": "action", "group": "Usuarios"},
     {"code": "action.users.manage_permissions", "label": "Editar permisos por usuario", "type": "action", "group": "Usuarios"},
     {"code": "action.catalogs.manage", "label": "Gestionar catalogos y garantias", "type": "action", "group": "Sistema"},
+    {"code": "action.tests_protocol.manage", "label": "Gestionar protocolos de test", "type": "action", "group": "Sistema"},
     {"code": "action.spare_parts.manage", "label": "Gestionar repuestos y stock", "type": "action", "group": "Repuestos"},
     {"code": "action.spare_parts.manage_24h_permissions", "label": "Gestionar permisos 24h de repuestos", "type": "action", "group": "Repuestos"},
     {"code": "action.devices_preventivos.manage", "label": "Gestionar edicion de equipos/preventivos", "type": "action", "group": "Equipos"},
@@ -100,6 +101,7 @@ _grant(
     "action.ingreso.baja_alta",
     "action.ingreso.print_exit_order",
     "action.catalogs.manage",
+    "action.tests_protocol.manage",
     "action.devices_preventivos.manage",
 )
 

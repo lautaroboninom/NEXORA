@@ -1,4 +1,4 @@
-// web/src/lib/constants.js
+﻿// web/src/lib/constants.js
 // Catlogos/constantes de dominio (nica fuente de verdad).
 
 // =========================
@@ -15,7 +15,7 @@ export const RESOLUCION = {
 export const RESOLUCION_LABELS = {
   [RESOLUCION.REPARADO]: "Reparado",
   [RESOLUCION.NO_REPARADO]: "No reparado",
-  [RESOLUCION.NO_SE_ENCONTRO_FALLA]: "No se encontró falla",
+  [RESOLUCION.NO_SE_ENCONTRO_FALLA]: "No se encontrÃ³ falla",
   [RESOLUCION.PRESUPUESTO_RECHAZADO]: "Presupuesto rechazado",
   [RESOLUCION.CAMBIO]: "Cambio",
 };
@@ -103,6 +103,7 @@ export const MOTIVO = {
   SERVICE_PREVENTIVO: "service preventivo",
   URGENTE_CONTROL: "urgente control",
   DEVOLUCION_DEMO: "devolución demo",
+  COTIZACION_EQUIPO: "cotización de equipo",
   OTROS: "otros",
 };
 
@@ -113,6 +114,7 @@ export const MOTIVO_LABELS = {
   [MOTIVO.SERVICE_PREVENTIVO]: "Service preventivo",
   [MOTIVO.URGENTE_CONTROL]: "Urgente control",
   [MOTIVO.DEVOLUCION_DEMO]: "Devolución demo",
+  [MOTIVO.COTIZACION_EQUIPO]: "Cotización de equipo",
   [MOTIVO.OTROS]: "Otros",
 };
 
@@ -124,7 +126,7 @@ export const motivoLabel = (value) =>
   MOTIVO_LABELS[value] ?? String(value ?? "");
 
 // =========================
-// Métricas - Fecha mínima de corte (unificada)
+// MÃ©tricas - Fecha mÃ­nima de corte (unificada)
 // =========================
 // Solo considerar ingresos con fecha_ingreso >= METRICAS_DESDE_MIN (inclusive)
 export const METRICAS_DESDE_MIN = '2025-06-26';
@@ -132,3 +134,4 @@ export const clampDesdeMin = (s) => {
   if (!s) return METRICAS_DESDE_MIN;
   return s < METRICAS_DESDE_MIN ? METRICAS_DESDE_MIN : s;
 };
+

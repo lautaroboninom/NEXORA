@@ -58,11 +58,11 @@ services:
       context: ./web
       dockerfile: Dockerfile.prod
       args:
-        - VITE_API_URL=${VITE_API_URL:-}
+        - VITE_API_URL=
         - VITE_SOURCEMAP=${VITE_SOURCEMAP:-1}
         - VITE_SW=${VITE_SW:-0}
     container_name: sistemadereparaciones-web
-    command: ["nginx", "-g", "daemon off;"]
+    command: ["/usr/local/bin/start-nginx.sh"]
     environment:
       - TZ=${TZ:-America/Argentina/Buenos_Aires}
     depends_on:
@@ -73,7 +73,7 @@ services:
       - "443:443"
     volumes:
       - staticfiles:/static:ro
-      - C:/sepid_certs:/etc/nginx/certs:ro
+      - ${SEPID_CERTS_DIR:-C:/sepid_certs}:/etc/nginx/certs:ro
     restart: unless-stopped
 
   nginx:

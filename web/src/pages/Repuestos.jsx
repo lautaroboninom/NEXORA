@@ -150,17 +150,24 @@ const EMPTY_ADD_FORM = {
   categoria: "",
   nro_parte: "",
   ubicacion_deposito: "",
+  fecha_vencimiento: "",
   estado: "",
   stock_on_hand: "",
   stock_min: "",
   multiplicador: "",
-  costo_usd: "",
+  costo_valor: "",
+  costo_moneda: "USD",
 };
 
 const EMPTY_SUBRUBRO_FORM = {
   codigo: "",
   nombre: "",
 };
+
+const COST_CURRENCY_OPTIONS = [
+  { value: "USD", label: "U$D" },
+  { value: "ARS", label: "$" },
+];
 
 const buildEmptyCompraForm = () => ({
   repuesto_input: "",
@@ -603,7 +610,9 @@ export default function Repuestos() {
     DETAIL_FIELDS.forEach((field) => {
       out[field] = data?.[field] ?? "";
     });
-    out.costo_usd = data?.costo_usd != null ? String(data.costo_usd) : "";
+    out.costo_valor = data?.costo_valor != null ? String(data.costo_valor) : "";
+    out.costo_moneda = data?.costo_moneda || "USD";
+    out.multiplicador = data?.multiplicador != null ? String(data.multiplicador) : "";
     return out;
   }
 
@@ -651,7 +660,7 @@ export default function Repuestos() {
   }
 
   async function saveDetalle(id) {
-    if (!canEditDetalle && !canEditCost) return;
+    if (!canEditDetalle && !canEditCost && !canManage) return;
     const st = detalles[id];
     if (!st?.data || !st?.draft) return;
     const payload = {};
@@ -663,11 +672,24 @@ export default function Repuestos() {
         payload[field] = nextVal === "" ? null : nextVal;
       }
     });
-    if (canEditCost && "costo_usd" in st.draft) {
-      const prevCost = st.data?.costo_usd ?? "";
-      const nextCost = st.draft?.costo_usd ?? "";
-      if (String(prevCost ?? "") !== String(nextCost ?? "")) {
-        payload.costo_usd = nextCost === "" ? null : nextCost;
+    if (canEditCost) {
+      const prevCost = st.data?.costo_valor ?? "";
+      const nextCost = st.draft?.costo_valor ?? "";
+      const prevCurrency = st.data?.costo_moneda || "USD";
+      const nextCurrency = st.draft?.costo_moneda || "USD";
+      if (
+        String(prevCost ?? "") !== String(nextCost ?? "") ||
+        String(prevCurrency) !== String(nextCurrency)
+      ) {
+        payload.costo_valor = nextCost === "" ? null : nextCost;
+        payload.costo_moneda = nextCurrency;
+      }
+    }
+    if (canManage) {
+      const prevMult = st.data?.multiplicador ?? "";
+      const nextMult = st.draft?.multiplicador ?? "";
+      if (String(prevMult ?? "") !== String(nextMult ?? "")) {
+        payload.multiplicador = nextMult === "" ? null : nextMult;
       }
     }
     if (!Object.keys(payload).length) return;
@@ -979,7 +1001,7 @@ export default function Repuestos() {
         "multiplicador",
         "stock",
         "stock_min",
-        ...(canSeeCosts ? ["costo_usd"] : []),
+        ...(canSeeCosts ? ["costo_valor", "costo_moneda"] : []),
       ],
       ...(filtered || []).map((it) => [
         it.codigo || "",
@@ -987,7 +1009,7 @@ export default function Repuestos() {
         numOrBlank(it.multiplicador_aplicado ?? it.multiplicador ?? ""),
         numOrBlank(it.stock_on_hand ?? ""),
         numOrBlank(it.stock_min ?? ""),
-        ...(canSeeCosts ? [numOrBlank(it.costo_usd ?? "")] : []),
+        ...(canSeeCosts ? [numOrBlank(it.costo_valor ?? ""), it.costo_moneda || ""] : []),
       ]),
     ];
     downloadXLSX("repuestos_filtrados.xlsx", rows, "Repuestos");
@@ -1195,11 +1217,13 @@ export default function Repuestos() {
       if (addForm.ubicacion_deposito.trim()) {
         payload.ubicacion_deposito = addForm.ubicacion_deposito.trim();
       }
+      if (addForm.fecha_vencimiento) payload.fecha_vencimiento = addForm.fecha_vencimiento;
       const equipos = parseEquipoLines(addForm.estado);
       if (equipos.length) payload.estado = equipos.join("\n");
     }
-    if (canEditCost && addForm.costo_usd !== "") {
-      payload.costo_usd = addForm.costo_usd;
+    if (canEditCost && addForm.costo_valor !== "") {
+      payload.costo_valor = addForm.costo_valor;
+      payload.costo_moneda = addForm.costo_moneda || "USD";
     }
 
     try {
@@ -1535,7 +1559,7 @@ export default function Repuestos() {
         </div>
       </div>
       <p className="text-sm text-gray-600 mb-4">
-        Stock con alerta y precios de venta basados en costo USD * dolar *
+        Stock con alerta y precios de venta basados en costo normalizado a ARS *
         multiplicador. El stock puede quedar negativo.
       </p>
 
@@ -1924,16 +1948,31 @@ export default function Repuestos() {
               </div>
               {canEditCost && (
                 <div>
-                  <label className="text-xs text-gray-500">Costo USD (opcional)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    className="border rounded p-2 w-full"
-                    value={addForm.costo_usd}
-                    onChange={(e) =>
-                      setAddForm((s) => ({ ...s, costo_usd: e.target.value }))
-                    }
-                  />
+                  <label className="text-xs text-gray-500">Costo (opcional)</label>
+                  <div className="flex gap-2">
+                    <select
+                      className="border rounded p-2"
+                      value={addForm.costo_moneda}
+                      onChange={(e) =>
+                        setAddForm((s) => ({ ...s, costo_moneda: e.target.value }))
+                      }
+                    >
+                      {COST_CURRENCY_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="border rounded p-2 w-full"
+                      value={addForm.costo_valor}
+                      onChange={(e) =>
+                        setAddForm((s) => ({ ...s, costo_valor: e.target.value }))
+                      }
+                    />
+                  </div>
                 </div>
               )}
               {canManage && (
@@ -2129,6 +2168,20 @@ export default function Repuestos() {
                       }
                     />
                   </div>
+                  <div>
+                    <label className="text-xs text-gray-500">Fecha vencimiento</label>
+                    <input
+                      type="date"
+                      className="border rounded p-2 w-full"
+                      value={addForm.fecha_vencimiento}
+                      onChange={(e) =>
+                        setAddForm((s) => ({
+                          ...s,
+                          fecha_vencimiento: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
                 </>
               )}
             </div>
@@ -2215,7 +2268,13 @@ export default function Repuestos() {
                       const nextVal = field === "nombre" ? nextRaw.trim() : nextRaw;
                       return prevVal !== nextVal;
                     })) ||
-                  (canEditCost && String(detail.data?.costo_usd ?? "") !== String(detailDraft?.costo_usd ?? ""));
+                  (canEditCost &&
+                    (
+                      String(detail.data?.costo_valor ?? "") !== String(detailDraft?.costo_valor ?? "") ||
+                      String(detail.data?.costo_moneda || "USD") !== String(detailDraft?.costo_moneda || "USD")
+                    )) ||
+                  (canManage &&
+                    String(detail.data?.multiplicador ?? "") !== String(detailDraft?.multiplicador ?? ""));
                 const setTab = (tab) => {
                   updateDetalleState(it.id, { tab });
                   if (
@@ -2413,28 +2472,75 @@ export default function Repuestos() {
                                   {canSeeCosts && (
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                       <div className="border rounded p-2 bg-white">
-                                        <div className="text-xs text-gray-500">Costo USD</div>
+                                        <div className="text-xs text-gray-500">Costo</div>
                                         {canEditCost ? (
-                                          <input
-                                            type="number"
-                                            step="0.01"
-                                            className="border rounded p-1 w-full text-right"
-                                            value={detailDraft.costo_usd || ""}
-                                            onChange={(e) =>
-                                              updateDetalleDraft(it.id, "costo_usd", e.target.value)
-                                            }
-                                          />
+                                          <div className="space-y-2">
+                                            <div className="flex gap-2">
+                                              <select
+                                                className="border rounded p-1"
+                                                value={detailDraft.costo_moneda || "USD"}
+                                                onChange={(e) =>
+                                                  updateDetalleDraft(it.id, "costo_moneda", e.target.value)
+                                                }
+                                              >
+                                                {COST_CURRENCY_OPTIONS.map((opt) => (
+                                                  <option key={opt.value} value={opt.value}>
+                                                    {opt.label}
+                                                  </option>
+                                                ))}
+                                              </select>
+                                              <input
+                                                type="number"
+                                                step="0.01"
+                                                className="border rounded p-1 w-full text-right"
+                                                value={detailDraft.costo_valor || ""}
+                                                onChange={(e) =>
+                                                  updateDetalleDraft(it.id, "costo_valor", e.target.value)
+                                                }
+                                              />
+                                            </div>
+                                            <div className="text-xs text-gray-400">
+                                              Equiv. ARS: {formatMoney(detail.data?.costo_ars)}
+                                            </div>
+                                          </div>
                                         ) : (
-                                          <div className="font-medium">
-                                            {formatMoney(detail.data?.costo_usd, "USD")}
+                                          <div className="space-y-1">
+                                            <div className="font-medium">
+                                              {formatMoney(detail.data?.costo_valor, detail.data?.costo_moneda || "USD")}
+                                            </div>
+                                            <div className="text-xs text-gray-400">
+                                              Equiv. ARS: {formatMoney(detail.data?.costo_ars)}
+                                            </div>
                                           </div>
                                         )}
                                       </div>
                                       <div className="border rounded p-2 bg-white">
                                         <div className="text-xs text-gray-500">Multiplicador</div>
-                                        <div className="font-medium">
-                                          {detail.data?.multiplicador_aplicado ?? "-"}
-                                        </div>
+                                        {canManage ? (
+                                          <div className="space-y-2">
+                                            <input
+                                              type="number"
+                                              step="0.0001"
+                                              className="border rounded p-1 w-full text-right"
+                                              value={detailDraft.multiplicador || ""}
+                                              placeholder={
+                                                config?.multiplicador_general != null
+                                                  ? String(config.multiplicador_general)
+                                                  : ""
+                                              }
+                                              onChange={(e) =>
+                                                updateDetalleDraft(it.id, "multiplicador", e.target.value)
+                                              }
+                                            />
+                                            <div className="text-xs text-gray-400">
+                                              Aplicado: {detail.data?.multiplicador_aplicado ?? "-"}
+                                            </div>
+                                          </div>
+                                        ) : (
+                                          <div className="font-medium">
+                                            {detail.data?.multiplicador_aplicado ?? "-"}
+                                          </div>
+                                        )}
                                       </div>
                                       <div className="border rounded p-2 bg-white">
                                         <div className="text-xs text-gray-500">Precio venta</div>

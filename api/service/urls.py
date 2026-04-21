@@ -10,6 +10,7 @@ from .views import (
     NoAplicaPresupuestoView, QuitarNoAplicaPresupuestoView,
     PendientesPresupuestoView, PresupuestadosView, PresupuestadosExportView,
     MarcarReparadoView, MarcarParaRepararView, MarcarControladoSinDefectoView, EntregarIngresoView, GarantiaReparacionCheckView, GarantiaFabricaCheckView,
+    HabilitarReparacionCotizacionView,
     DarBajaIngresoView, DarAltaIngresoView,
     ListosParaRetiroView,
     ScanLookupView,
@@ -17,7 +18,7 @@ from .views import (
     # listados / generales
     CustomersListView, PendientesGeneralView,
     AprobadosParaRepararView, AprobadosYReparadosView, AprobadosView, LiberadosView,
-    GeneralEquiposView, GeneralPorClienteView, GeneralPorClienteExportView,
+    GeneralEquiposView, GeneralEquiposExportView, GeneralPorClienteView, GeneralPorClienteExportView,
 
     # ingresos nuevos + derivación
     NuevoIngresoView, DerivarIngresoView, DerivacionesPorIngresoView, DevolverDerivacionView,
@@ -57,7 +58,8 @@ from .views import (
     # detalle de ingreso
     IngresoDetalleView, IngresoAsignarTecnicoView, CatalogoTecnicosView,
     IngresoTestView, IngresoTestPdfView,
-    IngresoSolicitarAsignacionView,
+    TestProtocolCatalogView, TestProtocolDetailView,
+    IngresoSolicitarAsignacionView, IngresoSolicitarBajaView, IngresoSolicitarBajaRechazarView,
     MarcaTecnicoView,MarcaAplicarTecnicoAModelosView,ModeloTecnicoView,
     EquiposDerivadosView,
     IngresoMediaListCreateView, IngresoMediaDetailView, IngresoMediaFileView, IngresoMediaThumbnailView,
@@ -69,10 +71,18 @@ from .views import (
     WarrantyRulesView, WarrantyRuleDetailView, DevicesMergeView,
 )
 
-from .views.devices_views import DeviceDirectCreateView, DeviceIdentificadoresView, DevicesListView
+from .views.devices_views import (
+    DeviceDirectCreateView,
+    DeviceIdentificadoresView,
+    DevicesListView,
+    DeviceMgVentaView,
+    DeviceMgReactivarView,
+)
 from .views.preventivos_views import (
     DevicePreventivoPlanView,
     DevicePreventivoRevisionCreateView,
+    DevicePreventivoRepuestosView,
+    DevicePreventivoRepuestoDetailView,
     PreventivoAgendaView,
     PreventivoClientesListView,
     CustomerPreventivoPlanView,
@@ -97,6 +107,7 @@ urlpatterns = [
     # ténico / ingresos (acciones)
     path("tecnico/mis-pendientes/", MisPendientesView.as_view()),
     path("ingresos/<int:ingreso_id>/reparar/", MarcarParaRepararView.as_view()),
+    path("ingresos/<int:ingreso_id>/habilitar-reparacion/", HabilitarReparacionCotizacionView.as_view()),
     path("ingresos/<int:ingreso_id>/reparado/", MarcarReparadoView.as_view()),
     path("ingresos/<int:ingreso_id>/controlado-sin-defecto/", MarcarControladoSinDefectoView.as_view()),
     path("ingresos/<int:ingreso_id>/entregar/", EntregarIngresoView.as_view()),
@@ -130,11 +141,16 @@ urlpatterns = [
     # Histórico de ingresos (antes /equipos/)
     path("ingresos/", GeneralEquiposView.as_view()),
     path("ingresos/historico/", GeneralEquiposView.as_view()),
+    path("ingresos/historico/export/", GeneralEquiposExportView.as_view()),
     # Equipos (tabla devices)
     path("equipos/", DevicesListView.as_view()),
+    path("equipos/<int:device_id>/mg/venta/", DeviceMgVentaView.as_view()),
+    path("equipos/<int:device_id>/mg/reactivar/", DeviceMgReactivarView.as_view()),
     path("devices/alta-directa/", DeviceDirectCreateView.as_view()),
     path("equipos/<int:device_id>/preventivo-plan/", DevicePreventivoPlanView.as_view()),
     path("equipos/<int:device_id>/preventivo-revisiones/", DevicePreventivoRevisionCreateView.as_view()),
+    path("equipos/<int:device_id>/preventivo-repuestos/", DevicePreventivoRepuestosView.as_view()),
+    path("equipos/<int:device_id>/preventivo-repuestos/<int:item_id>/", DevicePreventivoRepuestoDetailView.as_view()),
     path("devices/merge/", DevicesMergeView.as_view()),
     path("preventivos/agenda/", PreventivoAgendaView.as_view()),
     path("preventivos/clientes/", PreventivoClientesListView.as_view()),
@@ -165,6 +181,8 @@ urlpatterns = [
     path("catalogos/ubicaciones/", CatalogoUbicacionesView.as_view()),
     path("catalogos/motivos/", CatalogoMotivosView.as_view()),
     path("catalogos/accesorios/", CatalogoAccesoriosView.as_view()),
+    path("catalogos/tests/protocolos/", TestProtocolCatalogView.as_view()),
+    path("catalogos/tests/protocolos/<int:protocol_id>/", TestProtocolDetailView.as_view()),
     path("catalogos/repuestos/", CatalogoRepuestosView.as_view()),
     path("repuestos/", RepuestosView.as_view()),
     path("repuestos/subrubros/", RepuestosSubrubrosView.as_view()),
@@ -207,6 +225,8 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/test/", IngresoTestView.as_view()),
     path("ingresos/<int:ingreso_id>/test/pdf/", IngresoTestPdfView.as_view()),
     path("ingresos/<int:ingreso_id>/solicitar-asignacion/", IngresoSolicitarAsignacionView.as_view()),
+    path("ingresos/<int:ingreso_id>/solicitar-baja/", IngresoSolicitarBajaView.as_view()),
+    path("ingresos/<int:ingreso_id>/solicitar-baja/rechazar/", IngresoSolicitarBajaRechazarView.as_view()),
     # accesorios por ingreso
     path("ingresos/<int:ingreso_id>/accesorios/", IngresoAccesoriosView.as_view()),
     path("ingresos/<int:ingreso_id>/accesorios/<int:item_id>/", IngresoAccesorioDetailView.as_view()),

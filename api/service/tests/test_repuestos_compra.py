@@ -11,7 +11,6 @@ from service.models import User
 class RepuestosCompraMovimientoAPITest(TestCase):
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         vendor = connection.vendor
         auto_inc = "INT AUTO_INCREMENT PRIMARY KEY" if vendor != "sqlite" else "INTEGER PRIMARY KEY AUTOINCREMENT"
         bool_type = "BOOLEAN" if vendor != "sqlite" else "INTEGER"
@@ -34,7 +33,9 @@ class RepuestosCompraMovimientoAPITest(TestCase):
                 id {auto_inc},
                 codigo VARCHAR(64) UNIQUE,
                 nombre TEXT,
+                costo_neto NUMERIC(12,2) NOT NULL DEFAULT 0,
                 costo_usd NUMERIC(12,2) NULL,
+                costo_moneda VARCHAR(3) DEFAULT 'USD',
                 multiplicador NUMERIC(10,4) NULL,
                 stock_on_hand NUMERIC(12,2) NOT NULL DEFAULT 0,
                 stock_min NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -126,6 +127,7 @@ class RepuestosCompraMovimientoAPITest(TestCase):
             cur.execute(repuestos_movimientos_sql)
             cur.execute(repuestos_stock_permisos_sql)
             cur.execute(repuestos_config_sql)
+        super().setUpClass()
 
     @classmethod
     def _last_insert_id(cls, cur):

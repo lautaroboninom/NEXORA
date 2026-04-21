@@ -162,6 +162,13 @@ class Command(BaseCommand):
 
                     chosen_marca = _majority(list(marca_ids)) or None
                     chosen_model = _majority(list(model_ids)) or None
+                    if chosen_model is not None:
+                        # Si hay modelo, la marca final debe ser la del modelo para no dejar cruces inválidos.
+                        cur.execute("SELECT marca_id FROM models WHERE id=%s", [chosen_model])
+                        model_row = cur.fetchone()
+                        model_marca_id = model_row[0] if model_row else None
+                        if model_marca_id is not None:
+                            chosen_marca = int(model_marca_id)
 
                     # 4) Determinar si propio (numero_serie con prefijo MG/NM/NV)
                     series_list = [s or "" for s in series]

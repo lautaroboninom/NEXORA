@@ -15,25 +15,36 @@ export default function BuscarNS() {
     (async () => {
       setLoading(true); setErr("");
       try {
-        // Normalizar consulta: si es MG vlido (MG ####), enviarlo tal cual al back
-        const mgMatch = /^mg\s*\d{4}$/i.test(String(ns || "").trim());
+        const normalizeToken = (value) =>
+          String(value || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "");
+
         const data = await getGeneralEquipos(ns ? { q: ns } : {});
         const safe = Array.isArray(data) ? data : [];
-        // Filtrar por coincidencia exacta de N/S o MG y ordenar por fecha de creacion (desc)
+
+        // Filtrar por coincidencia exacta normalizada de N/S o MG y ordenar por fecha de creacion (desc)
         const needle = String(ns || "").trim();
-        const compact = needle.replace(/\s+/g, "").toLowerCase();
+        const compact = normalizeToken(needle);
+        const mgMatch = /^mg\d{1,4}$/.test(compact);
         const onlyMatches = safe
           .filter(r => {
-            const serieCompact = String(r?.numero_serie || "").trim().replace(/\s+/g, "").toLowerCase();
-            const internoCompact = String(r?.numero_interno || "").trim().replace(/\s+/g, "").toLowerCase();
+            const serieCompact = normalizeToken(r?.numero_serie);
+            const internoCompact = normalizeToken(r?.numero_interno);
             if (mgMatch) {
               // Aceptar solo MG exacto (MG ####)
               const mgDigits = compact.replace(/^mg/, "");
-              const mgNoSpace = `mg${mgDigits}`;
-              return serieCompact === mgNoSpace || internoCompact === mgNoSpace;
+              const mgRaw = `mg${mgDigits}`;
+              const mgPadded = `mg${mgDigits.padStart(4, "0")}`;
+              return (
+                serieCompact === mgRaw ||
+                internoCompact === mgRaw ||
+                serieCompact === mgPadded ||
+                internoCompact === mgPadded
+              );
             }
-            // De lo contrario, buscar por N/S exacto (no interpretar como MG)
-            return serieCompact === compact;
+            return serieCompact === compact || internoCompact === compact;
           })
           .sort((a, b) => {
             const tb = resolveFechaCreacion(b);

@@ -1,9 +1,12 @@
 ﻿from __future__ import annotations
 
 import copy
+import json
 import re
 import unicodedata
 from typing import Any
+
+from django.db import connection
 
 
 RESULT_OPTIONS = [
@@ -48,6 +51,7 @@ BASE_TEMPLATES: dict[str, dict[str, Any]] = {
             {
                 "id": "seguridad",
                 "title": "Seguridad y verificación inicial",
+                "entry_mode": "result_only",
                 "items": [
                     {
                         "key": "asp_inspeccion_visual",
@@ -56,38 +60,32 @@ BASE_TEMPLATES: dict[str, dict[str, Any]] = {
                         "unit": "",
                         "ref_ids": ["REF-01"],
                     },
-                    {
-                        "key": "asp_alarma_obstruccion",
-                        "label": "Alarma/indicador de obstrucción",
-                        "target": "Activa según diseño del fabricante",
-                        "unit": "",
-                        "ref_ids": ["REF-01"],
-                    },
                 ],
             },
             {
                 "id": "performance",
                 "title": "Rendimiento",
+                "entry_mode": "measured_only",
                 "items": [
                     {
                         "key": "asp_vacio_max",
                         "label": "Vacío máximo",
-                        "target": "Dentro de especificación del fabricante",
+                        "target": ">= 500 mmHg",
                         "unit": "mmHg",
                         "ref_ids": ["REF-01"],
                     },
                     {
                         "key": "asp_caudal_libre",
                         "label": "Caudal libre",
-                        "target": "Dentro de especificación del fabricante",
+                        "target": ">= 15 L/min",
                         "unit": "L/min",
                         "ref_ids": ["REF-01"],
                     },
                     {
                         "key": "asp_duracion_bateria",
                         "label": "Duración de batería",
-                        "target": "Según especificación del fabricante",
-                        "unit": "min",
+                        "target": "Tensión de batería > 11 V luego de 15 min de prueba continua",
+                        "unit": "V",
                         "ref_ids": ["REF-01"],
                     },
                 ],
@@ -394,6 +392,80 @@ BASE_TEMPLATES: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "alto_flujo": {
+        "type_key": "alto_flujo",
+        "template_key": "alto_flujo_v1",
+        "template_version": "1.0.0",
+        "display_name": "Alto flujo",
+        "references": [
+            {
+                "ref_id": "REF-01",
+                "tipo": "norma",
+                "titulo": "ISO 80601-2-74:2021",
+                "edicion": "2021",
+                "anio": 2021,
+                "organismo_o_fabricante": "ISO",
+                "url": "https://www.iso.org/standard/81613.html",
+                "aplica_a": "Sistemas de terapia respiratoria de alto flujo con humidificación activa",
+            }
+        ],
+        "sections": [
+            {
+                "id": "parametros_terapia",
+                "title": "Parámetros de terapia",
+                "items": [
+                    {
+                        "key": "af_flujo_setpoint",
+                        "label": "Flujo real vs setpoint",
+                        "target": "Dentro de tolerancia del fabricante",
+                        "unit": "L/min",
+                        "ref_ids": ["REF-01"],
+                    },
+                    {
+                        "key": "af_fio2_setpoint",
+                        "label": "FiO2 real vs setpoint",
+                        "target": "Dentro de tolerancia del fabricante",
+                        "unit": "%",
+                        "ref_ids": ["REF-01"],
+                    },
+                    {
+                        "key": "af_temperatura_salida",
+                        "label": "Temperatura del gas entregado",
+                        "target": "Dentro del rango configurado y tolerancia del fabricante",
+                        "unit": "°C",
+                        "ref_ids": ["REF-01"],
+                    },
+                ],
+            },
+            {
+                "id": "alarmas_seguridad",
+                "title": "Alarmas y seguridad",
+                "items": [
+                    {
+                        "key": "af_alarma_desconexion",
+                        "label": "Alarma de desconexión/circuito abierto",
+                        "target": "Activa según especificación",
+                        "unit": "",
+                        "ref_ids": ["REF-01"],
+                    },
+                    {
+                        "key": "af_alarma_fio2_baja",
+                        "label": "Alarma de FiO2 fuera de rango",
+                        "target": "Activa según especificación",
+                        "unit": "",
+                        "ref_ids": ["REF-01"],
+                    },
+                    {
+                        "key": "af_alarma_sobretemperatura",
+                        "label": "Alarma de sobretemperatura",
+                        "target": "Activa según especificación",
+                        "unit": "",
+                        "ref_ids": ["REF-01"],
+                    },
+                ],
+            },
+        ],
+    },
     "calentador_humidificador": {
         "type_key": "calentador_humidificador",
         "template_key": "calentador_humidificador_v1",
@@ -493,6 +565,13 @@ TYPE_ALIASES: dict[str, list[str]] = {
         "bilevel",
         "bipap",
     ],
+    "alto_flujo": [
+        "alto flujo",
+        "dispositivo de alto flujo",
+        "canula nasal de alto flujo",
+        "cánula nasal de alto flujo",
+        "hfnc",
+    ],
     "calentador_humidificador": [
         "calentador humidificador",
         "humidificador",
@@ -501,7 +580,344 @@ TYPE_ALIASES: dict[str, list[str]] = {
 }
 
 
-MODEL_OVERRIDES: list[dict[str, Any]] = []
+MODEL_OVERRIDES: list[dict[str, Any]] = [
+    {
+        "name": "covidien_pb560_ch6_performance_verification",
+        "type_key": "respirador",
+        "match": {
+            "marca_contains": "covidien",
+            "modelo_contains": "pb 560",
+        },
+        "set_fields": {
+            "template_key": "respirador_pb560_v1",
+            "template_version": "1.0.0",
+            "display_name": "Respirador Covidien PB 560",
+            "default_instrumentos": (
+                "VentMeter pneumatic calibration analyzer\n"
+                "Circuito dual-limb adulto + valvula exhalatoria\n"
+                "Pulmon de prueba 1.0 L y 4 L\n"
+                "Tubo patron 22 mm, shell de calibracion, tuberia 1/8, 3/16 y 7/32, acoples y tee\n"
+                "Multimetro digital, fuente DC externa >= 2 A, cable de test DC"
+            ),
+            "sections": [
+                {
+                    "id": "pb560_precondiciones",
+                    "title": "Precondiciones de verificacion (Cap. 6)",
+                    "entry_mode": "result_only",
+                    "items": [
+                        {
+                            "key": "pb560_pre_sin_paciente",
+                            "label": "Seguridad: ensayos sin paciente conectado",
+                            "target": "Cumple durante toda la Performance Verification",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_pre_warmup",
+                            "label": "Warm-up de equipo e instrumento",
+                            "target": (
+                                "Ventilador y VentMeter energizados >=10 min; en Measurements Check, "
+                                "blower a maxima con shell previo al test"
+                            ),
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_pre_setup",
+                            "label": "SETUP y preferencias requeridas",
+                            "target": (
+                                "ENGLISH (US), fecha/hora actual, Key Sound=Accept tone, "
+                                "Pressure Unit=cmH2O, relative pressure=YES"
+                            ),
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                    ],
+                },
+                {
+                    "id": "pb560_mediciones",
+                    "title": "Measurements Check (Table 6-3)",
+                    "entry_mode": "measured_only",
+                    "items": [
+                        {
+                            "key": "pb560_24v_check",
+                            "label": "24 V check",
+                            "target": "23.5 V a 24.5 V",
+                            "unit": "V",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_watchdog",
+                            "label": "Watchdog",
+                            "target": "23.5 V a 24.5 V",
+                            "unit": "V",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_baro",
+                            "label": "Barometric pressure",
+                            "target": "Lectura del ventilador dentro de ±11 mmHg respecto de VentMeter",
+                            "unit": "mmHg",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_temp_interna",
+                            "label": "Internal temperature",
+                            "target": "30 C a 55 C",
+                            "unit": "C",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_temp_blower",
+                            "label": "Blower temperature",
+                            "target": "35 C a 65 C",
+                            "unit": "C",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_buzzer",
+                            "label": "Buzzer principal",
+                            "target": "Beep largo + tension 1.7 V a 2.1 V",
+                            "unit": "V",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_backup_buzzer",
+                            "label": "Back-up buzzer",
+                            "target": "Beep largo audible",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_supplier_bateria",
+                            "label": "Supplier bateria interna",
+                            "target": "Approved supplier mostrado en Internal battery menu",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_cap_teorica",
+                            "label": "Theoretical capacity bateria",
+                            "target": "4800 mAh",
+                            "unit": "mAh",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_cap_min",
+                            "label": "Capacity bateria",
+                            "target": ">= 3840 mAh",
+                            "unit": "mAh",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_bat_v",
+                            "label": "Battery voltage",
+                            "target": "23.5 V a 29.7 V",
+                            "unit": "V",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_bat_temp",
+                            "label": "Battery temperature",
+                            "target": "0 C a 40 C",
+                            "unit": "C",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_altitude_comp",
+                            "label": "Altitude Compensation",
+                            "target": "YES (obligatorio para calculo correcto de volumen a toda elevacion)",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                    ],
+                },
+                {
+                    "id": "pb560_calibraciones",
+                    "title": "Calibraciones de sensores",
+                    "entry_mode": "measured_only",
+                    "items": [
+                        {
+                            "key": "pb560_pp_zero",
+                            "label": "Paciente pressure sensor - cero",
+                            "target": "VentMeter low pressure en 0.0 ± 0.1 cmH2O",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_pp_cal",
+                            "label": "Patient pressure calibration point",
+                            "target": "Ajuste en 39.80 a 40.20 cmH2O",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_pp_verif",
+                            "label": "Patient pressure verificacion post-calibracion",
+                            "target": "39.60 a 40.40 cmH2O",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_insp_flow_cal",
+                            "label": "Inspiratory flow calibration (8 puntos)",
+                            "target": (
+                                "0±0.10; 4.90-5.10; 11.76-12.24; 19.6-20.4; 36.26-37.74; "
+                                "58.8-61.2; 88.2-91.8; 127.4-132.6"
+                            ),
+                            "unit": "slpm",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_insp_flow_verif",
+                            "label": "Inspiratory flow verificacion (8 puntos)",
+                            "target": (
+                                "0±0.10; 4.50-5.50; 11.1-12.9; 19.0-21.0; 35.1-38.9; "
+                                "57.0-63.0; 85.5-94.5; 123.5-136.5"
+                            ),
+                            "unit": "slpm",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_exh_flow_verif",
+                            "label": "Exhalation flow verificacion (8 puntos)",
+                            "target": (
+                                "0±0.10; 4.50-5.50; 11.1-12.9; 19.0-21.0; 35.1-38.9; "
+                                "57.0-63.0; 85.5-94.5; 123.5-136.5"
+                            ),
+                            "unit": "slpm",
+                            "ref_ids": ["REF-01"],
+                        },
+                    ],
+                },
+                {
+                    "id": "pb560_funcionales",
+                    "title": "Pruebas funcionales (6.8)",
+                    "entry_mode": "measured_only",
+                    "items": [
+                        {
+                            "key": "pb560_flow_capacity",
+                            "label": "Flow sensor capacity",
+                            "target": "Inspiratory flow > 145 slpm",
+                            "unit": "slpm",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_turbine_peak",
+                            "label": "Turbine performance - pico de presion",
+                            "target": "> 70 cmH2O con orificio bloqueado (max 3 s)",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_turbine_return",
+                            "label": "Turbine performance - retorno",
+                            "target": "0 ± 0.5 cmH2O luego de desbloquear",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                    ],
+                },
+                {
+                    "id": "pb560_accuracy",
+                    "title": "Breath delivery accuracy (6.9)",
+                    "entry_mode": "measured_only",
+                    "items": [
+                        {
+                            "key": "pb560_adult_vol",
+                            "label": "Adult volume accuracy (Vt 500 mL)",
+                            "target": "VTI en menu alarmas: 440 mL a 560 mL",
+                            "unit": "mL",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_adult_vol_pts",
+                            "label": "Adult volume vs VentMeter",
+                            "target": "Dentro de ±(8% + 10 mL) respecto de VentMeter",
+                            "unit": "mL",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_adult_press",
+                            "label": "Adult pressure accuracy (Pi 20 cmH2O)",
+                            "target": "Pi en menu alarmas: 17 cmH2O a 23 cmH2O",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_adult_press_pts",
+                            "label": "Adult pressure vs VentMeter",
+                            "target": "Dentro de ±(8.75% + 2.04 cmH2O) respecto de VentMeter",
+                            "unit": "cmH2O",
+                            "ref_ids": ["REF-01"],
+                        },
+                    ],
+                },
+                {
+                    "id": "pb560_alarmas_interfaces",
+                    "title": "Alarmas e interfaces",
+                    "entry_mode": "result_only",
+                    "items": [
+                        {
+                            "key": "pb560_alarm_ac_disconnect",
+                            "label": "AC power disconnection alarm",
+                            "target": (
+                                "Alarma media + LED amarillo + mensaje AC POWER DISCONNECTION; "
+                                "auto-reset al reconectar AC"
+                            ),
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_alarm_patient_disconnect",
+                            "label": "Patient disconnect alarm",
+                            "target": (
+                                "Alarma alta en <=15 s + LED rojo + mensaje LOW PRESSURE DISCONNECT; "
+                                "auto-reset al reconectar"
+                            ),
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_power_off_while_vent",
+                            "label": "Power off while ventilating",
+                            "target": "VHP continuo >=120 s y reanudacion inmediata de ventilacion al reencender",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_default_settings",
+                            "label": "Default settings (Tables 6-4, 6-5, 6-6)",
+                            "target": "Parametros, alarmas y preferencias en valores por defecto; fecha y hora actuales",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                        {
+                            "key": "pb560_reset_hours",
+                            "label": "Reset patient hours",
+                            "target": "Contador reiniciado a 00000 h y 00 min",
+                            "unit": "",
+                            "ref_ids": ["REF-01"],
+                        },
+                    ],
+                },
+            ],
+        },
+        "references": [
+            {
+                "ref_id": "REF-PB560-CH6",
+                "tipo": "manual_fabricante",
+                "titulo": "Puritan Bennett 560 Ventilator Service Manual - Chapter 6 Performance Verification",
+                "edicion": "2017",
+                "anio": 2017,
+                "organismo_o_fabricante": "Covidien",
+                "url": "",
+                "aplica_a": "Respirador Covidien PB 560",
+            }
+        ],
+        "append_ref_to_all_items": "REF-PB560-CH6",
+    }
+]
 
 
 def _norm(value: str) -> str:
@@ -512,18 +928,109 @@ def _norm(value: str) -> str:
     return s
 
 
-def resolve_type_key(tipo_equipo: str) -> str:
+def _safe_json_doc(value: Any, default: Any):
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8", errors="ignore")
+        except Exception:
+            return default
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except Exception:
+            return default
+    return default
+
+
+def _has_protocol_catalog_table() -> bool:
+    try:
+        with connection.cursor() as cur:
+            if connection.vendor == "postgresql":
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM information_schema.tables
+                     WHERE table_name='test_protocol_templates'
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """
+                )
+            elif connection.vendor == "sqlite":
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='test_protocol_templates' LIMIT 1"
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM information_schema.tables
+                     WHERE table_name='test_protocol_templates'
+                     LIMIT 1
+                    """
+                )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _fetch_active_protocol_docs_from_db() -> list[dict[str, Any]]:
+    if not _has_protocol_catalog_table():
+        return []
+    where_sql = "WHERE active = TRUE" if connection.vendor == "postgresql" else "WHERE active = 1"
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT type_key, template_key, doc
+                  FROM test_protocol_templates
+                  {where_sql}
+                 ORDER BY type_key ASC, id ASC
+                """
+            )
+            rows = cur.fetchall() or []
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for type_key, template_key, raw_doc in rows:
+        doc = _safe_json_doc(raw_doc, {})
+        if not isinstance(doc, dict):
+            continue
+        doc = copy.deepcopy(doc)
+        if not doc.get("type_key"):
+            doc["type_key"] = type_key
+        if not doc.get("template_key"):
+            doc["template_key"] = template_key
+        if not isinstance(doc.get("aliases"), list):
+            doc["aliases"] = []
+        if not isinstance(doc.get("references"), list):
+            doc["references"] = []
+        if not isinstance(doc.get("sections"), list):
+            doc["sections"] = []
+        if not isinstance(doc.get("overrides"), list):
+            doc["overrides"] = []
+        out.append(doc)
+    return out
+
+
+def _resolve_type_key_from_alias_map(tipo_equipo: str, alias_map: dict[str, list[str]]) -> str:
     raw = _norm(tipo_equipo)
     if not raw:
         return ""
     # Prefer exact alias match first.
-    for key, aliases in TYPE_ALIASES.items():
+    for key, aliases in alias_map.items():
         for alias in aliases:
             if raw == _norm(alias):
                 return key
     # Then fallback to "contains" matching, longest aliases first.
     contains_candidates: list[tuple[int, str, str]] = []
-    for key, aliases in TYPE_ALIASES.items():
+    for key, aliases in alias_map.items():
         for alias in aliases:
             a = _norm(alias)
             if not a:
@@ -534,6 +1041,23 @@ def resolve_type_key(tipo_equipo: str) -> str:
         contains_candidates.sort(reverse=True)
         return contains_candidates[0][1]
     return ""
+
+
+def resolve_type_key(tipo_equipo: str) -> str:
+    db_docs = _fetch_active_protocol_docs_from_db()
+    if db_docs:
+        alias_map: dict[str, list[str]] = {}
+        for doc in db_docs:
+            type_key = str(doc.get("type_key") or "").strip().lower()
+            if not type_key:
+                continue
+            aliases = doc.get("aliases") if isinstance(doc.get("aliases"), list) else []
+            merged = [type_key, doc.get("display_name") or "", *aliases]
+            alias_map[type_key] = [str(a or "").strip() for a in merged if str(a or "").strip()]
+        resolved = _resolve_type_key_from_alias_map(tipo_equipo, alias_map)
+        if resolved:
+            return resolved
+    return _resolve_type_key_from_alias_map(tipo_equipo, TYPE_ALIASES)
 
 
 def _add_reference(protocol: dict[str, Any], ref: dict[str, Any]) -> None:
@@ -577,21 +1101,41 @@ def _match_override(override: dict[str, Any], marca: str, modelo: str) -> bool:
     modelo_contains = _norm(match.get("modelo_contains") or "")
     marca_n = _norm(marca)
     modelo_n = _norm(modelo)
-    if marca_contains and marca_contains not in marca_n:
+    marca_compact = re.sub(r"[^a-z0-9]", "", marca_n)
+    modelo_compact = re.sub(r"[^a-z0-9]", "", modelo_n)
+    marca_contains_compact = re.sub(r"[^a-z0-9]", "", marca_contains)
+    modelo_contains_compact = re.sub(r"[^a-z0-9]", "", modelo_contains)
+    if marca_contains and marca_contains not in marca_n and marca_contains_compact not in marca_compact:
         return False
-    if modelo_contains and modelo_contains not in modelo_n:
+    if modelo_contains and modelo_contains not in modelo_n and modelo_contains_compact not in modelo_compact:
         return False
     return True
 
 
-def _apply_overrides(protocol: dict[str, Any], marca: str, modelo: str) -> None:
+def _apply_overrides(
+    protocol: dict[str, Any],
+    marca: str,
+    modelo: str,
+    overrides: list[dict[str, Any]] | None = None,
+) -> None:
     type_key = protocol.get("type_key")
     applied = []
-    for override in MODEL_OVERRIDES:
-        if override.get("type_key") != type_key:
+    source = overrides if overrides is not None else MODEL_OVERRIDES
+    ordered = sorted(
+        [ov for ov in (source or []) if isinstance(ov, dict)],
+        key=lambda ov: int(ov.get("priority") if ov.get("priority") is not None else 0),
+    )
+    for override in ordered:
+        if "type_key" in override and override.get("type_key") != type_key:
+            continue
+        if not bool(override.get("active", True)):
             continue
         if not _match_override(override, marca, modelo):
             continue
+        set_fields = override.get("set_fields") or {}
+        if isinstance(set_fields, dict):
+            for field, value in set_fields.items():
+                protocol[field] = copy.deepcopy(value)
         for ref in override.get("references") or []:
             _add_reference(protocol, ref)
         _append_ref_to_all_items(protocol, (override.get("append_ref_to_all_items") or "").strip())
@@ -601,7 +1145,25 @@ def _apply_overrides(protocol: dict[str, Any], marca: str, modelo: str) -> None:
 
 
 def get_protocol_by_type_key(type_key: str, marca: str = "", modelo: str = "") -> dict[str, Any] | None:
-    base = BASE_TEMPLATES.get(type_key)
+    type_key_n = str(type_key or "").strip().lower()
+    if not type_key_n:
+        return None
+
+    db_docs = _fetch_active_protocol_docs_from_db()
+    for doc in db_docs:
+        if str(doc.get("type_key") or "").strip().lower() != type_key_n:
+            continue
+        protocol = copy.deepcopy(doc)
+        if not protocol.get("type_key"):
+            protocol["type_key"] = type_key_n
+        overrides = copy.deepcopy(protocol.pop("overrides", []))
+        protocol.pop("aliases", None)
+        _apply_overrides(protocol, marca=marca, modelo=modelo, overrides=overrides)
+        protocol["result_options"] = copy.deepcopy(RESULT_OPTIONS)
+        protocol["global_result_options"] = copy.deepcopy(GLOBAL_RESULT_OPTIONS)
+        return protocol
+
+    base = BASE_TEMPLATES.get(type_key_n)
     if not base:
         return None
     protocol = copy.deepcopy(base)
@@ -615,9 +1177,24 @@ def get_protocol_by_template_key(template_key: str, marca: str = "", modelo: str
     needle = (template_key or "").strip().lower()
     if not needle:
         return None
-    for key, tpl in BASE_TEMPLATES.items():
-        if (tpl.get("template_key") or "").strip().lower() == needle:
-            return get_protocol_by_type_key(key, marca=marca, modelo=modelo)
+
+    db_docs = _fetch_active_protocol_docs_from_db()
+    if db_docs:
+        type_keys = [str(doc.get("type_key") or "").strip().lower() for doc in db_docs if doc.get("type_key")]
+        type_keys.extend([str(key).strip().lower() for key in BASE_TEMPLATES.keys()])
+    else:
+        type_keys = [str(key).strip().lower() for key in BASE_TEMPLATES.keys()]
+
+    seen = set()
+    for type_key in type_keys:
+        if not type_key or type_key in seen:
+            continue
+        seen.add(type_key)
+        protocol = get_protocol_by_type_key(type_key, marca=marca, modelo=modelo)
+        if not protocol:
+            continue
+        if (protocol.get("template_key") or "").strip().lower() == needle:
+            return protocol
     return None
 
 
@@ -649,5 +1226,24 @@ def default_values_for_protocol(protocol: dict[str, Any]) -> dict[str, dict[str,
             "observaciones": "",
         }
     return defaults
+
+
+def build_seed_protocol_documents() -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for type_key, base in BASE_TEMPLATES.items():
+        doc = copy.deepcopy(base)
+        doc["type_key"] = str(doc.get("type_key") or type_key).strip().lower()
+        doc["aliases"] = copy.deepcopy(TYPE_ALIASES.get(type_key) or [])
+        doc["overrides"] = []
+        for idx, override in enumerate(MODEL_OVERRIDES):
+            if str(override.get("type_key") or "").strip().lower() != doc["type_key"]:
+                continue
+            item = copy.deepcopy(override)
+            item["active"] = bool(item.get("active", True))
+            item["priority"] = int(item.get("priority", idx))
+            doc["overrides"].append(item)
+        doc["active"] = True
+        docs.append(doc)
+    return docs
 
 
