@@ -5,7 +5,9 @@ from rest_framework.response import Response
 from rest_framework import permissions
 import logging
 
-from .helpers import _email_append_footer_text, _set_audit_user, exec_void, q, require_roles
+from .helpers import _email_append_footer_text, _set_audit_user, exec_void, q
+from ..permissions import require_any_permission, require_permission
+from ..notifications import notify_derivacion_devuelta
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +16,7 @@ class DerivarIngresoView(APIView):
 
     @transaction.atomic
     def post(self, request, ingreso_id: int):
-        require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"])
+        require_permission(request, "action.ingreso.manage_derivations")
         _set_audit_user(request)
         # Serializar concurrencia por ingreso para evitar inserts duplicados en carreras
         try:
@@ -87,7 +89,7 @@ class DevolverDerivacionView(APIView):
 
     @transaction.atomic
     def post(self, request, ingreso_id: int, deriv_id: int):
-        require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"])
+        require_permission(request, "action.ingreso.manage_derivations")
         _set_audit_user(request)
 
         row = q(
@@ -155,13 +157,16 @@ class DevolverDerivacionView(APIView):
             )
             email = (info or {}).get("tech_email")
             if email:
+                ns_text = " ".join(
+                    p for p in [info.get("numero_interno", ""), info.get("numero_serie", "")] if p
+                ).strip()
                 subj = f"Aviso: equipo devuelto de externo - OS #{ingreso_id}"
                 txt = (
                     f"Hola {info.get('tech_nombre','')},\n\n"
-                    f"El equipo derivado fue devuelto del servicio externo y se reencolo como 'ingresado'.\n\n"
+                    f"El equipo derivado fue devuelto del servicio externo y se reencoló como 'ingresado'.\n\n"
                     f"Cliente: {info.get('razon_social','')}\n"
                     f"Equipo: {info.get('marca','')} {info.get('modelo','')}\n"
-                    f"Numero de serie: {info.get('numero_interno','') + " " + info.get('numero_serie','')}\n\n"
+                    f"Número de serie: {ns_text}\n\n"
                     f"Hoja de servicio: /ingresos/{ingreso_id}\n"
                 )
                 try:
@@ -170,6 +175,10 @@ class DevolverDerivacionView(APIView):
                     send_mail(subj, txt, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=True)
                 except Exception:
                     pass
+            try:
+                notify_derivacion_devuelta(ingreso_id)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -180,6 +189,7 @@ class DerivacionesPorIngresoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, ingreso_id: int):
+        require_any_permission(request, ["page.logistics", "action.ingreso.manage_derivations"])
         rows = q(
             """
             SELECT ed.id,
@@ -205,6 +215,7 @@ class EquiposDerivadosView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        require_permission(request, "page.logistics")
         rows = q(
             """
             SELECT ed.id AS deriv_id,

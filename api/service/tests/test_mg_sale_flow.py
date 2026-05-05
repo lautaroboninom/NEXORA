@@ -13,7 +13,6 @@ from service.models import User
 class MgSaleFlowAPITest(TestCase):
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -24,6 +23,22 @@ class MgSaleFlowAPITest(TestCase):
                     hash_pw TEXT,
                     rol TEXT,
                     activo BOOLEAN DEFAULT TRUE
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    user_id INTEGER NULL,
+                    role TEXT,
+                    method TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    ip TEXT,
+                    user_agent TEXT,
+                    status_code INTEGER NOT NULL,
+                    body JSONB
                 )
                 """
             )
@@ -96,6 +111,8 @@ class MgSaleFlowAPITest(TestCase):
                 """
             )
         call_command("apply_mg_sale_schema")
+        call_command("apply_historical_corrections_schema")
+        super().setUpClass()
 
     @classmethod
     def _last_id(cls, cur):
@@ -202,7 +219,11 @@ class MgSaleFlowAPITest(TestCase):
     def test_mg_venta_acepta_solo_factura(self):
         resp = self.client.post(
             self._url_venta(self.device_id),
-            {"factura_numero": "FAC-001", "source": "equipos"},
+            {
+                "factura_numero": "FAC-001",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, 200)
@@ -212,16 +233,29 @@ class MgSaleFlowAPITest(TestCase):
     def test_mg_venta_acepta_solo_remito(self):
         resp = self.client.post(
             self._url_venta(self.device_id_2),
-            {"remito_numero": "REM-001", "source": "equipos"},
+            {
+                "remito_numero": "REM-001",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["device"]["mg_estado"], "inactivo_venta")
 
+    def test_mg_venta_rechaza_sin_comprador(self):
+        resp = self.client.post(
+            self._url_venta(self.device_id),
+            {"factura_numero": "FAC-001", "source": "equipos"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data.get("conflict_type"), "MG_VENTA_COMPRADOR_REQUERIDO")
+
     def test_mg_venta_rechaza_sin_comprobante(self):
         resp = self.client.post(
             self._url_venta(self.device_id),
-            {"source": "equipos"},
+            {"venta_customer_id": self.customer_cli_id, "source": "equipos"},
             format="json",
         )
         self.assertEqual(resp.status_code, 400)
@@ -230,22 +264,77 @@ class MgSaleFlowAPITest(TestCase):
     def test_mg_venta_rechaza_doble_venta(self):
         first = self.client.post(
             self._url_venta(self.device_id),
-            {"factura_numero": "FAC-111", "source": "equipos"},
+            {
+                "factura_numero": "FAC-111",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(first.status_code, 200)
         second = self.client.post(
             self._url_venta(self.device_id),
-            {"factura_numero": "FAC-112", "source": "equipos"},
+            {
+                "factura_numero": "FAC-112",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(second.status_code, 400)
         self.assertEqual(second.data.get("conflict_type"), "MG_YA_INACTIVO_VENTA")
 
+    def test_mg_venta_guarda_comprador_y_numero_alternativo(self):
+        resp = self.client.post(
+            self._url_venta(self.device_id),
+            {
+                "factura_numero": "FAC-ALT-1",
+                "venta_customer_id": self.customer_cli_id,
+                "venta_numero_alternativo": "INT-COMP-123",
+                "source": "equipos",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["device"].get("mg_venta_customer_id"), self.customer_cli_id)
+        self.assertEqual(resp.data["device"].get("mg_venta_numero_alternativo"), "INT-COMP-123")
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT mg_venta_customer_id, mg_venta_numero_alternativo
+                  FROM devices
+                 WHERE id=%s
+                """,
+                [self.device_id],
+            )
+            drow = cur.fetchone()
+            cur.execute(
+                """
+                SELECT venta_customer_id, venta_numero_alternativo
+                  FROM device_mg_events
+                 WHERE device_id=%s AND accion='venta'
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                [self.device_id],
+            )
+            erow = cur.fetchone()
+        self.assertIsNotNone(drow)
+        self.assertEqual(int(drow[0]), self.customer_cli_id)
+        self.assertEqual(drow[1], "INT-COMP-123")
+        self.assertIsNotNone(erow)
+        self.assertEqual(int(erow[0]), self.customer_cli_id)
+        self.assertEqual(erow[1], "INT-COMP-123")
+
     def test_mg_reactivacion_registra_evento(self):
         sold = self.client.post(
             self._url_venta(self.device_id),
-            {"factura_numero": "FAC-200", "source": "equipos"},
+            {
+                "factura_numero": "FAC-200",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(sold.status_code, 200)
@@ -268,7 +357,11 @@ class MgSaleFlowAPITest(TestCase):
     def test_nuevo_ingreso_rechaza_mg_inactivo(self):
         sold = self.client.post(
             self._url_venta(self.device_id),
-            {"factura_numero": "FAC-300", "source": "equipos"},
+            {
+                "factura_numero": "FAC-300",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(sold.status_code, 200)
@@ -281,7 +374,11 @@ class MgSaleFlowAPITest(TestCase):
     def test_nuevo_ingreso_por_ns_sigue_funcionando(self):
         sold = self.client.post(
             self._url_venta(self.device_id),
-            {"remito_numero": "REM-301", "source": "equipos"},
+            {
+                "remito_numero": "REM-301",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "equipos",
+            },
             format="json",
         )
         self.assertEqual(sold.status_code, 200)

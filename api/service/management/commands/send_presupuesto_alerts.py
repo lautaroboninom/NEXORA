@@ -5,6 +5,7 @@ from django.core.mail import EmailMessage, get_connection, send_mail
 from django.utils import timezone
 
 from service.views.helpers import _email_append_footer_text, exec_void, os_label, q
+from service.notifications import emit_notification
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,29 @@ class Command(BaseCommand):
             if dry_run:
                 self.stdout.write(f"[DRY] {os_txt} -> {', '.join(recipients)}")
                 continue
+
+            try:
+                emit_notification(
+                    "presupuesto_pendiente",
+                    emails=recipients,
+                    title=f"Presupuesto pendiente - {os_txt}",
+                    body="\n".join(
+                        [
+                            f"El presupuesto lleva {dias} días sin aprobación.",
+                            f"Cliente: {cliente}",
+                            f"Equipo: {equipo}",
+                            f"N/S: {ns_val}",
+                        ]
+                    ),
+                    href=f"/ingresos/{ingreso_id}?tab=presupuesto",
+                    severity="critical",
+                    entity_type="ingreso",
+                    entity_id=ingreso_id,
+                    dedupe_key=f"ingreso:{ingreso_id}:presupuesto_pendiente:{timezone.localdate().isoformat()}",
+                    payload={"ingreso_id": ingreso_id, "dias": dias},
+                )
+            except Exception:
+                pass
 
             ok, debug = _send_mail_with_fallback(subject, body, recipients)
             if ok:

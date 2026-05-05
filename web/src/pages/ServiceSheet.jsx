@@ -13,9 +13,11 @@ import {
   postRechazarSolicitudBaja,
   getClientes,
   getClientesBasico,
+  postCliente,
   getMotivos,
   postDeviceMgVenta,
   postDeviceMgReactivar,
+  postIngresoCorreccionHistorica,
 } from "../lib/api";
 import { getMarcas, getModelosByBrand, getVariantesPorMarca, checkGarantiaFabrica, patchModeloTipoEquipo } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -25,6 +27,7 @@ import {
   resolveFechaIngreso,
   resolveFechaCreacion,
   isMotivoCotizacionEquipo,
+  nsPreferInternoOf,
 } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
 import { canActAsTech, ROLES } from "../lib/authz";
@@ -36,6 +39,7 @@ import DiagnosticoTab from "./ServiceSheet/tabs/DiagnosticoTab";
 import TestTab from "./ServiceSheet/tabs/TestTab";
 import PrincipalTab from "./ServiceSheet/tabs/PrincipalTab";
 import DerivacionesTab from "./ServiceSheet/tabs/DerivacionesTab";
+import ServiceCriticalStrip from "../components/ServiceCriticalStrip.jsx";
 
 const TAB_VALUES = ["principal", "diagnostico", "test", "presupuesto", "derivaciones", "historial", "archivos"];
 const isValidTab = (value) => TAB_VALUES.includes((value || "").toString().trim());
@@ -76,7 +80,16 @@ export default function ServiceSheet() {
   const canRepairTransitions = can(user, PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS);
   const canReleaseOrder = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
   const canBajaAltaPermission = can(user, PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA);
+  const canForceHistorical = can(user, PERMISSION_CODES.ACTION_INGRESO_FORCE_HISTORICAL);
   const canManageDevices = can(user, PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_MANAGE);
+  const canEditLocation = can(user, PERMISSION_CODES.ACTION_INGRESO_EDIT_LOCATION);
+  const canManageDerivations = can(user, PERMISSION_CODES.ACTION_INGRESO_MANAGE_DERIVATIONS);
+  const canViewDiagnosticoTab = canEditDiagPermission || canRepairTransitions;
+  const canViewTestTab = canEditDiagPermission;
+  const canViewPresupuestoTab = canManagePresupuesto || canSeeCosts;
+  const canViewDerivacionesTab = canManageDerivations;
+  const canViewArchivosTab = canEditDiagPermission;
+  const canViewHistorialTab = canSeeHistory;
 
   // pestañas
   const [tab, setTab] = useState("principal");
@@ -95,13 +108,37 @@ export default function ServiceSheet() {
       );
     } catch {}
   }, [location?.pathname, location?.search, location?.state, navigate]);
+  const isTabAllowed = useCallback(
+    (value) => {
+      const t = (value || "").toString().trim();
+      if (t === "principal") return true;
+      if (t === "diagnostico") return canViewDiagnosticoTab;
+      if (t === "test") return canViewTestTab;
+      if (t === "presupuesto") return canViewPresupuestoTab;
+      if (t === "derivaciones") return canViewDerivacionesTab;
+      if (t === "archivos") return canViewArchivosTab;
+      if (t === "historial") return canViewHistorialTab;
+      return false;
+    },
+    [
+      canViewArchivosTab,
+      canViewDerivacionesTab,
+      canViewDiagnosticoTab,
+      canViewHistorialTab,
+      canViewPresupuestoTab,
+      canViewTestTab,
+    ],
+  );
+  useEffect(() => {
+    if (!isTabAllowed(tab)) setTabPersisted("principal");
+  }, [isTabAllowed, setTabPersisted, tab]);
   useEffect(() => {
     try {
       const t = location?.state?.tab;
-      if (isValidTab(t)) setTabPersisted(t);
+      if (isValidTab(t) && isTabAllowed(t)) setTabPersisted(t);
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location?.state]);
+  }, [location?.state, isTabAllowed]);
 
   // Leer tab/tecnico_id desde el querystring (enlaces del mail)
   useEffect(() => {
@@ -110,7 +147,7 @@ export default function ServiceSheet() {
       if (!search) return;
       const sp = new URLSearchParams(search);
       const t = (sp.get("tab") || "").trim();
-      if (isValidTab(t)) {
+      if (isValidTab(t) && isTabAllowed(t)) {
         setTab(t);
       }
       if (canAssignTecnico) {
@@ -121,7 +158,7 @@ export default function ServiceSheet() {
         }
       }
     } catch {}
-  }, [location?.search, canAssignTecnico]);
+  }, [location?.search, canAssignTecnico, isTabAllowed]);
 
   // datos generales
   const [data, setData] = useState(null);
@@ -130,6 +167,7 @@ export default function ServiceSheet() {
   // entrega
   const [entrega, setEntrega] = useState({ remito_salida: "", factura_numero: "", fecha_entrega: "", serial_confirm: "" });
   const canEditEntrega = can(user, PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY);
+  const canEditAlquiler = canEditEntrega || canEditLocation || canManageDevices;
   const [editEntrega, setEditEntrega] = useState(false);
   const [savingEntrega, setSavingEntrega] = useState(false);
 
@@ -203,11 +241,37 @@ export default function ServiceSheet() {
   const [rejectingBajaRequest, setRejectingBajaRequest] = useState(false);
   const [mgModalOpen, setMgModalOpen] = useState(false);
   const [mgSaving, setMgSaving] = useState(false);
+  const [mgAddCustomerOpen, setMgAddCustomerOpen] = useState(false);
+  const [mgAddCustomerSaving, setMgAddCustomerSaving] = useState(false);
+  const [mgAddCustomerErr, setMgAddCustomerErr] = useState("");
+  const [mgAddCustomerForm, setMgAddCustomerForm] = useState({
+    razon_social: "",
+    cod_empresa: "",
+    telefono: "",
+    telefono_2: "",
+    email: "",
+  });
+  const [histModalOpen, setHistModalOpen] = useState(false);
+  const [histSaving, setHistSaving] = useState(false);
+  const [histForm, setHistForm] = useState({
+    accion: "entrega",
+    fecha_efectiva: toDatetimeLocalStr(new Date()),
+    motivo: "",
+    notificar: true,
+    remito_salida: "",
+    factura_numero: "",
+    fecha_entrega: "",
+    alquiler_a: "",
+    alquiler_remito: "",
+    alquiler_fecha: "",
+  });
   const [mgForm, setMgForm] = useState({
     factura_numero: "",
     remito_numero: "",
     fecha_venta: "",
     observaciones: "",
+    venta_customer_id: "",
+    venta_numero_alternativo: "",
   });
 
   // Helpers de clientes (validación de selección)
@@ -334,7 +398,7 @@ export default function ServiceSheet() {
 
   // cargar historial solo cuando se selecciona la pestaña
   useEffect(() => {
-    if (tab !== "historial") return;
+    if (tab !== "historial" || !canViewHistorialTab) return;
     (async () => {
       try {
         setHErr(""); setHLoading(true);
@@ -347,7 +411,7 @@ export default function ServiceSheet() {
         setHLoading(false);
       }
     })();
-  }, [tab, id]);
+  }, [tab, id, canViewHistorialTab]);
 
   // limpiar modal relacionados al cambiar id
   useEffect(() => {
@@ -359,8 +423,32 @@ export default function ServiceSheet() {
     setSolicitarBajaMotivo("");
     setSavingSolicitarBaja(false);
     setRejectingBajaRequest(false);
+    setHistModalOpen(false);
+    setHistSaving(false);
+    setHistForm({
+      accion: "entrega",
+      fecha_efectiva: toDatetimeLocalStr(new Date()),
+      motivo: "",
+      notificar: true,
+      remito_salida: "",
+      factura_numero: "",
+      fecha_entrega: "",
+      alquiler_a: "",
+      alquiler_remito: "",
+      alquiler_fecha: "",
+    });
     setMgModalOpen(false);
     setMgSaving(false);
+    setMgAddCustomerOpen(false);
+    setMgAddCustomerSaving(false);
+    setMgAddCustomerErr("");
+    setMgAddCustomerForm({
+      razon_social: "",
+      cod_empresa: "",
+      telefono: "",
+      telefono_2: "",
+      email: "",
+    });
   }, [id]);
 
   useEffect(() => {
@@ -375,13 +463,23 @@ export default function ServiceSheet() {
       factura_numero: data?.mg_venta_factura_numero || "",
       remito_numero: data?.mg_venta_remito_numero || "",
       fecha_venta: defaultFecha,
-      observaciones: "",
+      observaciones: data?.mg_venta_observaciones || "",
+      venta_customer_id: data?.mg_venta_customer_id ? String(data.mg_venta_customer_id) : "",
+      venta_numero_alternativo: data?.mg_venta_numero_alternativo || "",
     });
-  }, [data?.id, data?.mg_venta_fecha, data?.mg_venta_factura_numero, data?.mg_venta_remito_numero]);
+  }, [
+    data?.id,
+    data?.mg_venta_fecha,
+    data?.mg_venta_factura_numero,
+    data?.mg_venta_remito_numero,
+    data?.mg_venta_observaciones,
+    data?.mg_venta_customer_id,
+    data?.mg_venta_numero_alternativo,
+  ]);
 
   // cargar relacionados cuando se abre el modal
   useEffect(() => {
-    if (!relatedOpen) return;
+    if (!relatedOpen || !canSeeHistory) return;
     const serie = (data?.numero_serie || "").trim();
     if (!serie) {
       setRelatedErr("Este equipo no tiene Número de serie registrado.");
@@ -417,7 +515,7 @@ export default function ServiceSheet() {
       }
     })();
     return () => { cancelled = true; };
-  }, [relatedOpen, data?.numero_serie, id]);
+  }, [relatedOpen, data?.numero_serie, id, canSeeHistory]);
 
   // close modal with Escape
   useEffect(() => {
@@ -716,12 +814,131 @@ export default function ServiceSheet() {
     }
   }
 
+  function resetHistForm(nextAccion = "entrega") {
+    setHistForm({
+      accion: nextAccion,
+      fecha_efectiva: toDatetimeLocalStr(new Date()),
+      motivo: "",
+      notificar: true,
+      remito_salida: "",
+      factura_numero: "",
+      fecha_entrega: "",
+      alquiler_a: "",
+      alquiler_remito: "",
+      alquiler_fecha: "",
+    });
+  }
+
+  function abrirCorreccionHistorica() {
+    if (!canForceHistorical) return;
+    resetHistForm("entrega");
+    setHistModalOpen(true);
+    setActionsOpen(false);
+  }
+
+  async function guardarCorreccionHistorica() {
+    if (!id || histSaving) return;
+    const accion = String(histForm.accion || "").trim();
+    const motivo = String(histForm.motivo || "").trim();
+    const fechaEfectiva = String(histForm.fecha_efectiva || "").trim();
+    if (!accion) {
+      setErr("Debes seleccionar una acción.");
+      return;
+    }
+    if (!fechaEfectiva) {
+      setErr("Debes indicar la fecha efectiva.");
+      return;
+    }
+    if (!motivo) {
+      setErr("Debes indicar el motivo.");
+      return;
+    }
+
+    const payload = {
+      accion,
+      fecha_efectiva: fechaEfectiva,
+      motivo,
+      notificar: !!histForm.notificar,
+    };
+    if (accion === "entrega") {
+      payload.remito_salida = String(histForm.remito_salida || "").trim() || null;
+      payload.factura_numero = String(histForm.factura_numero || "").trim() || null;
+      payload.fecha_entrega = String(histForm.fecha_entrega || "").trim() || null;
+    } else if (accion === "alta_alquiler") {
+      payload.alquiler_a = String(histForm.alquiler_a || "").trim() || null;
+      payload.alquiler_remito = String(histForm.alquiler_remito || "").trim() || null;
+      payload.alquiler_fecha = String(histForm.alquiler_fecha || "").trim() || null;
+    }
+
+    try {
+      setHistSaving(true);
+      await postIngresoCorreccionHistorica(id, payload);
+      await refreshIngreso({ strong: 1 });
+      setErr("");
+      setHistModalOpen(false);
+    } catch (e) {
+      setErr(e?.message || "No se pudo registrar la corrección histórica.");
+    } finally {
+      setHistSaving(false);
+    }
+  }
+
+  function abrirAltaRapidaClienteMg() {
+    setMgAddCustomerErr("");
+    setMgAddCustomerForm({
+      razon_social: "",
+      cod_empresa: "",
+      telefono: "",
+      telefono_2: "",
+      email: "",
+    });
+    setMgAddCustomerOpen(true);
+  }
+
+  async function crearClienteRapidoMg() {
+    if (mgAddCustomerSaving) return;
+    const razon_social = String(mgAddCustomerForm.razon_social || "").trim();
+    const cod_empresa = String(mgAddCustomerForm.cod_empresa || "").trim();
+    if (!razon_social || !cod_empresa) {
+      setMgAddCustomerErr("Razón social y código de empresa son obligatorios.");
+      return;
+    }
+    try {
+      setMgAddCustomerSaving(true);
+      setMgAddCustomerErr("");
+      await postCliente({
+        razon_social,
+        cod_empresa,
+        telefono: String(mgAddCustomerForm.telefono || "").trim() || null,
+        telefono_2: String(mgAddCustomerForm.telefono_2 || "").trim() || null,
+        email: String(mgAddCustomerForm.email || "").trim() || null,
+      });
+      const rows = await loadClientesCatalogo();
+      const match = (rows || []).find(
+        (c) => String(c?.razon_social || "").trim().toLowerCase() === razon_social.toLowerCase()
+      );
+      if (match?.id) {
+        setMgForm((s) => ({ ...s, venta_customer_id: String(match.id) }));
+      }
+      setMgAddCustomerOpen(false);
+    } catch (e) {
+      setMgAddCustomerErr(e?.message || "No se pudo crear el cliente.");
+    } finally {
+      setMgAddCustomerSaving(false);
+    }
+  }
+
   async function guardarVentaMgMenu() {
     if (!data?.device_id) return;
     const factura = (mgForm.factura_numero || "").trim();
     const remito = (mgForm.remito_numero || "").trim();
+    const ventaCustomerId = Number(mgForm.venta_customer_id || 0);
     if (!factura && !remito) {
       setErr("Debes informar factura o remito para marcar venta.");
+      return;
+    }
+    if (!ventaCustomerId) {
+      setErr("Debes seleccionar a quién se vendió.");
       return;
     }
     try {
@@ -731,6 +948,8 @@ export default function ServiceSheet() {
         remito_numero: remito || null,
         fecha_venta: mgForm.fecha_venta || null,
         observaciones: (mgForm.observaciones || "").trim() || null,
+        venta_customer_id: ventaCustomerId,
+        venta_numero_alternativo: (mgForm.venta_numero_alternativo || "").trim() || null,
         ingreso_id: Number(id),
         source: "service_sheet",
       });
@@ -764,10 +983,20 @@ export default function ServiceSheet() {
   }
 
   // cargar catalogos base
-  useEffect(() => { (async () => { try { setAccesCatalogo(await getAccesoriosCatalogo()); } catch {} })(); }, []);
-  useEffect(() => { (async () => { try { setMarcas(await getMarcas()); } catch {} })(); }, []);
-  useEffect(() => { (async () => { try { const list = await getMotivos(); setMotivos(Array.isArray(list) ? list : []); } catch { setMotivos([]); } })(); }, []);
   useEffect(() => {
+    if (!canEditDiagPermission && !canEditAlquiler) return;
+    (async () => { try { setAccesCatalogo(await getAccesoriosCatalogo()); } catch {} })();
+  }, [canEditAlquiler, canEditDiagPermission]);
+  useEffect(() => {
+    if (!canEditBasics) return;
+    (async () => { try { setMarcas(await getMarcas()); } catch {} })();
+  }, [canEditBasics]);
+  useEffect(() => {
+    if (!canEditBasics) return;
+    (async () => { try { const list = await getMotivos(); setMotivos(Array.isArray(list) ? list : []); } catch { setMotivos([]); } })();
+  }, [canEditBasics]);
+  useEffect(() => {
+    if (!canEditBasics && !canEditAlquiler) return;
     if (clientesLoadedRef.current) return;
     clientesLoadedRef.current = true;
     (async () => {
@@ -777,7 +1006,7 @@ export default function ServiceSheet() {
         setClientesPerm(false);
       }
     })();
-  }, [loadClientesCatalogo]);
+  }, [canEditAlquiler, canEditBasics, loadClientesCatalogo]);
   useEffect(() => {
     if (!editBasics) return;
     if (!marcaIdSel) { setModelos([]); setModeloIdSel(null); setVarSugeridas([]); return; }
@@ -809,7 +1038,10 @@ export default function ServiceSheet() {
   useEffect(() => {
     (async () => {
       try {
-        const [ing, ubs] = await Promise.all([getIngreso(id, { strong: 1 }), getUbicaciones()]);
+        const [ing, ubs] = await Promise.all([
+          getIngreso(id, { strong: 1 }),
+          canEditLocation ? getUbicaciones() : Promise.resolve([]),
+        ]);
         setData(ing);
         setUbicaciones(ubs);
         setUbicacionId(ing?.ubicacion_id != null ? String(ing.ubicacion_id) : "");
@@ -841,7 +1073,7 @@ export default function ServiceSheet() {
         setErr(e?.message || "Error cargando datos");
       }
     })();
-  }, [id, canAssignTecnico, tecnicoIdQS]);
+  }, [id, canAssignTecnico, canEditLocation, tecnicoIdQS]);
 
   // Auto-guardado de diagnóstico y trabajos (con debounce)
   useEffect(() => {
@@ -892,6 +1124,15 @@ export default function ServiceSheet() {
   const canResolve = canRepairTransitions && (canAssignTecnico || assignedToMe);
   const canAutorizarReparar = canRepairTransitions && (canAssignTecnico || assignedToMe);
   const canDarBaja = canBajaAltaPermission;
+  const canRequestBaja = Boolean(
+    canEditBasics
+      || canEditDiagPermission
+      || canEditLocation
+      || canEditEntrega
+      || canManageDerivations
+      || canRepairTransitions
+      || canManagePresupuesto
+  );
   const hasPendingBajaRequest = Boolean(
     data?.baja_solicitada_id
       || String(data?.baja_solicitada_motivo || "").trim()
@@ -899,11 +1140,25 @@ export default function ServiceSheet() {
       || String(data?.baja_solicitada_nombre || "").trim()
   );
   const showDecisionBajaModal = canDarBaja && hasPendingBajaRequest && estadoLower !== "baja";
-  const canSolicitarBaja = !canDarBaja && estadoLower !== "baja";
+  const canSolicitarBaja = !canDarBaja && canRequestBaja && estadoLower !== "baja";
   const canOpenSolicitarBaja = canSolicitarBaja && !hasPendingBajaRequest;
   const canEditAccesorios = canEditDiag;
   const canManageMgFromMenu = Boolean(canManageDevices && data?.es_propietario_mg);
-  const hasMenuActions = Boolean(canSeeHistory || numeroSerie || canDarBaja || canSolicitarBaja || canManageMgFromMenu);
+  const maxDateOnly = maxLocalNow.slice(0, 10);
+  const hasMenuActions = Boolean(
+    (canSeeHistory && numeroSerie) || canDarBaja || canSolicitarBaja || canManageMgFromMenu || canForceHistorical
+  );
+  const serialLabel = nsPreferInternoOf(data, "-");
+  const activeTab = isTabAllowed(tab) ? tab : "principal";
+  const serviceTabItems = [
+    { value: "principal", label: "Principal" },
+    ...(canViewDiagnosticoTab ? [{ value: "diagnostico", label: "Diagnóstico y Reparación" }] : []),
+    ...(canViewTestTab ? [{ value: "test", label: "Tests" }] : []),
+    ...(canViewPresupuestoTab ? [{ value: "presupuesto", label: isCotizacion ? "Cotización" : "Presupuesto" }] : []),
+    ...(canViewDerivacionesTab ? [{ value: "derivaciones", label: "Derivaciones" }] : []),
+    ...(canViewArchivosTab ? [{ value: "archivos", label: "Archivos" }] : []),
+    ...(canViewHistorialTab ? [{ value: "historial", label: "Historial" }] : []),
+  ];
 
   return (
     <div className="max-w-none p-4">
@@ -912,7 +1167,7 @@ export default function ServiceSheet() {
       </button>
       <div className="flex items-start justify-between gap-3 mb-2">
         <h1 className="text-2xl font-bold">
-          Hoja de servicio - OS: {formatOSHelper(data, id)} - NS: {data?.numero_interno || data?.numero_serie}
+          Hoja de servicio - OS: {formatOSHelper(data, id)} - NS: {serialLabel}
         </h1>
         {hasMenuActions && (
           <div className="relative" ref={actionsMenuRef}>
@@ -927,9 +1182,9 @@ export default function ServiceSheet() {
               <span aria-hidden className="text-xl leading-none">{"\u22EE"}</span>
             </button>
             {actionsOpen && (
-              <div className="absolute right-0 mt-2 w-56 rounded border bg-white shadow-lg z-20">
+              <div className="absolute right-0 mt-2 w-56 rounded border bg-white shadow-lg z-50">
                 <div className="py-1">
-                  {numeroSerie && (
+                  {canSeeHistory && numeroSerie && (
                     <button
                       type="button"
                       onClick={() => { setRelatedOpen(true); setActionsOpen(false); }}
@@ -945,6 +1200,15 @@ export default function ServiceSheet() {
                       className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                     >
                       Historial de cambios
+                    </button>
+                  )}
+                  {canForceHistorical && (
+                    <button
+                      type="button"
+                      onClick={abrirCorreccionHistorica}
+                      className="w-full text-left px-3 py-2 text-sm text-indigo-700 hover:bg-indigo-50"
+                    >
+                      Corrección histórica
                     </button>
                   )}
                   {canManageMgFromMenu && (
@@ -1008,27 +1272,20 @@ export default function ServiceSheet() {
           </div>
         )}
       </div>
-      <div className="text-sm text-gray-700 mb-3">{(data?.tipo_equipo_nombre || data?.tipo_equipo || "-").toString()} - {(data?.marca || "-").toString()} - {(data?.modelo || "-").toString()} {(data?.equipo_variante || "").toString()}</div>
+      <ServiceCriticalStrip data={data} isCotizacion={isCotizacion} />
       
 
       {err && <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-4">{err}</div>}
       <Tabs
-        value={tab}
+        value={activeTab}
         onChange={setTabPersisted}
-        items={[
-          { value: "principal", label: "Principal" },
-          { value: "diagnostico", label: "Diagnóstico y Reparación" },
-          { value: "test", label: "Tests" },
-          { value: "presupuesto", label: isCotizacion ? "Cotización" : "Presupuesto" },
-          { value: "derivaciones", label: "Derivaciones" },
-          { value: "archivos", label: "Archivos" },
-        ]}
+        items={serviceTabItems}
       />
       {/* ARCHIVOS */}
-      {tab === "archivos" && (<ArchivosTab id={id} canManagePhotos={canManagePhotos} />)}
+      {activeTab === "archivos" && canViewArchivosTab && (<ArchivosTab id={id} canManagePhotos={canManagePhotos} />)}
 
       {/* PRINCIPAL */}
-      {tab === "principal" && (
+      {activeTab === "principal" && (
         <PrincipalTab
           id={id}
           data={data}
@@ -1058,6 +1315,8 @@ export default function ServiceSheet() {
           ubicaciones={ubicaciones}
           ubicacionId={ubicacionId}
           setUbicacionId={setUbicacionId}
+          canEditLocation={canEditLocation}
+          canEditAlquiler={canEditAlquiler}
           tecnicos={tecnicos}
           tecnicoId={tecnicoId}
           setTecnicoId={setTecnicoId}
@@ -1080,7 +1339,7 @@ export default function ServiceSheet() {
       )}
 
       {/* Diagnóstico */}
-      {tab === "diagnostico" && (
+      {activeTab === "diagnostico" && canViewDiagnosticoTab && (
         <DiagnosticoTab
           id={id}
           data={data}
@@ -1116,7 +1375,7 @@ export default function ServiceSheet() {
       )}
 
       {/* TEST */}
-      {tab === "test" && (
+      {activeTab === "test" && canViewTestTab && (
         <TestTab
           id={id}
           setErr={setErr}
@@ -1124,7 +1383,7 @@ export default function ServiceSheet() {
       )}
 
       {/* PRESUPUESTO */}
-      {tab === "presupuesto" && (
+      {activeTab === "presupuesto" && canViewPresupuestoTab && (
         <PresupuestoTab
           id={id}
           data={data}
@@ -1138,7 +1397,7 @@ export default function ServiceSheet() {
       )}
 
       {/* DERIVACIONES */}
-      {tab === "derivaciones" && (
+      {activeTab === "derivaciones" && canViewDerivacionesTab && (
         <DerivacionesTab id={id} setErr={setErr} refreshIngreso={refreshIngreso} />
       )}
 
@@ -1211,7 +1470,7 @@ export default function ServiceSheet() {
           <div className="bg-white rounded shadow-xl max-w-xl w-full p-5">
             <h2 className="text-lg font-semibold">Solicitud de BAJA pendiente</h2>
             <div className="text-sm text-gray-600 mt-1">
-              OS: {formatOSHelper(data, id)} - NS: {data?.numero_interno || data?.numero_serie || "-"}
+              OS: {formatOSHelper(data, id)} - NS: {serialLabel}
             </div>
             <div className="mt-4">
               <div className="text-xs text-gray-600 mb-1">Motivo de la solicitud</div>
@@ -1253,7 +1512,7 @@ export default function ServiceSheet() {
               <div>
                 <h2 className="text-lg font-semibold">Solicitar BAJA</h2>
                 <div className="text-sm text-gray-600">
-                  OS: {formatOSHelper(data, id)} - NS: {data?.numero_interno || data?.numero_serie || "-"}
+                  OS: {formatOSHelper(data, id)} - NS: {serialLabel}
                 </div>
               </div>
               <button
@@ -1307,6 +1566,176 @@ export default function ServiceSheet() {
         </div>
       )}
 
+      {histModalOpen && canForceHistorical && (
+        <div
+          className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!histSaving) setHistModalOpen(false); }}
+        >
+          <div className="bg-white rounded shadow-xl max-w-2xl w-full p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h2 className="text-lg font-semibold">Corrección histórica</h2>
+                <div className="text-sm text-gray-600">
+                  OS: {formatOSHelper(data, id)} - NS: {serialLabel}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="text-sm text-gray-500 hover:text-gray-900 disabled:opacity-60"
+                onClick={() => setHistModalOpen(false)}
+                disabled={histSaving}
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <label className="block">
+                <div className="text-xs text-gray-600 mb-1">Acción</div>
+                <select
+                  className="border rounded p-2 w-full"
+                  value={histForm.accion}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setHistForm((s) => ({ ...s, accion: next, notificar: true }));
+                  }}
+                  disabled={histSaving}
+                >
+                  <option value="entrega">Entrega</option>
+                  <option value="alta_alquiler">Alta de alquiler</option>
+                  <option value="baja_alquiler">Baja de alquiler</option>
+                  <option value="baja_ingreso">Baja de ingreso</option>
+                  <option value="alta_ingreso">Alta de ingreso</option>
+                </select>
+              </label>
+
+              <label className="block">
+                <div className="text-xs text-gray-600 mb-1">Fecha efectiva</div>
+                <input
+                  type="datetime-local"
+                  className="border rounded p-2 w-full"
+                  value={histForm.fecha_efectiva}
+                  onChange={(e) => setHistForm((s) => ({ ...s, fecha_efectiva: e.target.value }))}
+                  max={maxLocalNow}
+                  disabled={histSaving}
+                />
+              </label>
+
+              {histForm.accion === "entrega" && (
+                <>
+                  <label className="block">
+                    <div className="text-xs text-gray-600 mb-1">Remito salida</div>
+                    <input
+                      className="border rounded p-2 w-full"
+                      value={histForm.remito_salida}
+                      onChange={(e) => setHistForm((s) => ({ ...s, remito_salida: e.target.value }))}
+                      disabled={histSaving}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-xs text-gray-600 mb-1">Factura</div>
+                    <input
+                      className="border rounded p-2 w-full"
+                      value={histForm.factura_numero}
+                      onChange={(e) => setHistForm((s) => ({ ...s, factura_numero: e.target.value }))}
+                      disabled={histSaving}
+                    />
+                  </label>
+                  <label className="block md:col-span-2">
+                    <div className="text-xs text-gray-600 mb-1">Fecha entrega (opcional)</div>
+                    <input
+                      type="datetime-local"
+                      className="border rounded p-2 w-full"
+                      value={histForm.fecha_entrega}
+                      onChange={(e) => setHistForm((s) => ({ ...s, fecha_entrega: e.target.value }))}
+                      max={maxLocalNow}
+                      disabled={histSaving}
+                    />
+                  </label>
+                </>
+              )}
+
+              {histForm.accion === "alta_alquiler" && (
+                <>
+                  <label className="block md:col-span-2">
+                    <div className="text-xs text-gray-600 mb-1">Alquiler a</div>
+                    <input
+                      className="border rounded p-2 w-full"
+                      value={histForm.alquiler_a}
+                      onChange={(e) => setHistForm((s) => ({ ...s, alquiler_a: e.target.value }))}
+                      disabled={histSaving}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-xs text-gray-600 mb-1">Remito alquiler</div>
+                    <input
+                      className="border rounded p-2 w-full"
+                      value={histForm.alquiler_remito}
+                      onChange={(e) => setHistForm((s) => ({ ...s, alquiler_remito: e.target.value }))}
+                      disabled={histSaving}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-xs text-gray-600 mb-1">Fecha alquiler</div>
+                    <input
+                      type="date"
+                      className="border rounded p-2 w-full"
+                      value={histForm.alquiler_fecha}
+                      onChange={(e) => setHistForm((s) => ({ ...s, alquiler_fecha: e.target.value }))}
+                      max={maxDateOnly}
+                      disabled={histSaving}
+                    />
+                  </label>
+                </>
+              )}
+
+              {(histForm.accion === "baja_ingreso" || histForm.accion === "alta_ingreso") && (
+                <label className="inline-flex items-center gap-2 md:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={!!histForm.notificar}
+                    onChange={(e) => setHistForm((s) => ({ ...s, notificar: e.target.checked }))}
+                    disabled={histSaving}
+                  />
+                  <span>Enviar notificación por correo</span>
+                </label>
+              )}
+
+              <label className="block md:col-span-2">
+                <div className="text-xs text-gray-600 mb-1">Motivo (obligatorio)</div>
+                <textarea
+                  className="border rounded p-2 w-full min-h-[90px]"
+                  value={histForm.motivo}
+                  onChange={(e) => setHistForm((s) => ({ ...s, motivo: e.target.value }))}
+                  disabled={histSaving}
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                className="px-3 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-60"
+                onClick={() => setHistModalOpen(false)}
+                disabled={histSaving}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                onClick={guardarCorreccionHistorica}
+                disabled={histSaving || !String(histForm.motivo || "").trim() || !String(histForm.fecha_efectiva || "").trim()}
+              >
+                {histSaving ? "Guardando..." : "Guardar corrección"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {mgModalOpen && canManageMgFromMenu && (
         <div
           className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
@@ -1319,7 +1748,7 @@ export default function ServiceSheet() {
               <div>
                 <h2 className="text-lg font-semibold">Venta del equipo (MG)</h2>
                 <div className="text-sm text-gray-600">
-                  {data?.numero_interno || data?.numero_serie || "-"}
+                  {serialLabel}
                 </div>
               </div>
               <button
@@ -1340,6 +1769,8 @@ export default function ServiceSheet() {
                 <div>Fecha venta: {data?.mg_venta_fecha ? formatDateTimeHelper(data.mg_venta_fecha) : "-"}</div>
                 <div>Factura venta: {data?.mg_venta_factura_numero || "-"}</div>
                 <div>Remito venta: {data?.mg_venta_remito_numero || "-"}</div>
+                <div>Vendido a: {data?.mg_venta_customer_nombre || "-"}</div>
+                <div>Número alternativo: {data?.mg_venta_numero_alternativo || "-"}</div>
                 <div>Observaciones: {data?.mg_venta_observaciones || "-"}</div>
                 <label className="block">
                   <div className="text-xs text-gray-600 mb-1">Observaciones de reactivacion</div>
@@ -1363,6 +1794,32 @@ export default function ServiceSheet() {
               <div className="space-y-3 text-sm">
                 <div className="text-gray-600">Registrar venta del equipo para desactivar MG operativo.</div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <label className="block md:col-span-2">
+                    <div className="text-xs text-gray-600 mb-1">Vendido a (cliente)</div>
+                    <div className="flex gap-2">
+                      <select
+                        className="border rounded p-2 w-full"
+                        value={mgForm.venta_customer_id}
+                        onChange={(e) => setMgForm((s) => ({ ...s, venta_customer_id: e.target.value }))}
+                        disabled={mgSaving}
+                      >
+                        <option value="">Seleccionar cliente</option>
+                        {(clientes || []).map((c) => (
+                          <option key={c.id} value={String(c.id)}>
+                            {c.razon_social}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="px-3 py-2 rounded border whitespace-nowrap hover:bg-gray-50 disabled:opacity-60"
+                        onClick={abrirAltaRapidaClienteMg}
+                        disabled={mgSaving}
+                      >
+                        Alta rápida
+                      </button>
+                    </div>
+                  </label>
                   <label className="block">
                     <div className="text-xs text-gray-600 mb-1">Factura venta</div>
                     <input
@@ -1381,6 +1838,15 @@ export default function ServiceSheet() {
                       disabled={mgSaving}
                     />
                   </label>
+                  <label className="block">
+                    <div className="text-xs text-gray-600 mb-1">Número alternativo</div>
+                    <input
+                      className="border rounded p-2 w-full"
+                      value={mgForm.venta_numero_alternativo}
+                      onChange={(e) => setMgForm((s) => ({ ...s, venta_numero_alternativo: e.target.value }))}
+                      disabled={mgSaving}
+                    />
+                  </label>
                   <label className="block md:col-span-2">
                     <div className="text-xs text-gray-600 mb-1">Fecha venta</div>
                     <input
@@ -1388,6 +1854,7 @@ export default function ServiceSheet() {
                       className="border rounded p-2 w-full"
                       value={mgForm.fecha_venta}
                       onChange={(e) => setMgForm((s) => ({ ...s, fecha_venta: e.target.value }))}
+                      max={maxDateOnly}
                       disabled={mgSaving}
                     />
                   </label>
@@ -1405,13 +1872,115 @@ export default function ServiceSheet() {
                 <button
                   className="px-3 py-2 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-60"
                   onClick={guardarVentaMgMenu}
-                  disabled={mgSaving || !((mgForm.factura_numero || "").trim() || (mgForm.remito_numero || "").trim())}
+                  disabled={
+                    mgSaving
+                    || !Number(mgForm.venta_customer_id || 0)
+                    || !((mgForm.factura_numero || "").trim() || (mgForm.remito_numero || "").trim())
+                  }
                   type="button"
                 >
                   {mgSaving ? "Guardando..." : "Registrar venta"}
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {mgAddCustomerOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!mgAddCustomerSaving) setMgAddCustomerOpen(false); }}
+        >
+          <div className="bg-white rounded shadow-xl max-w-lg w-full p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <h3 className="text-lg font-semibold">Alta rápida de cliente</h3>
+              <button
+                type="button"
+                className="text-sm text-gray-500 hover:text-gray-900 disabled:opacity-60"
+                onClick={() => setMgAddCustomerOpen(false)}
+                disabled={mgAddCustomerSaving}
+              >
+                Cerrar
+              </button>
+            </div>
+            {mgAddCustomerErr && (
+              <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3 text-sm">
+                {mgAddCustomerErr}
+              </div>
+            )}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <label className="block md:col-span-2">
+                <div className="text-xs text-gray-600 mb-1">Razón social</div>
+                <input
+                  className="border rounded p-2 w-full"
+                  value={mgAddCustomerForm.razon_social}
+                  onChange={(e) => setMgAddCustomerForm((s) => ({ ...s, razon_social: e.target.value }))}
+                  disabled={mgAddCustomerSaving}
+                />
+              </label>
+              <label className="block md:col-span-2">
+                <div className="text-xs text-gray-600 mb-1">Código de empresa</div>
+                <input
+                  className="border rounded p-2 w-full"
+                  value={mgAddCustomerForm.cod_empresa}
+                  onChange={(e) => setMgAddCustomerForm((s) => ({ ...s, cod_empresa: e.target.value }))}
+                  disabled={mgAddCustomerSaving}
+                />
+              </label>
+              <label className="block">
+                <div className="text-xs text-gray-600 mb-1">Teléfono</div>
+                <input
+                  className="border rounded p-2 w-full"
+                  value={mgAddCustomerForm.telefono}
+                  onChange={(e) => setMgAddCustomerForm((s) => ({ ...s, telefono: e.target.value }))}
+                  disabled={mgAddCustomerSaving}
+                />
+              </label>
+              <label className="block">
+                <div className="text-xs text-gray-600 mb-1">Teléfono 2</div>
+                <input
+                  className="border rounded p-2 w-full"
+                  value={mgAddCustomerForm.telefono_2}
+                  onChange={(e) => setMgAddCustomerForm((s) => ({ ...s, telefono_2: e.target.value }))}
+                  disabled={mgAddCustomerSaving}
+                />
+              </label>
+              <label className="block md:col-span-2">
+                <div className="text-xs text-gray-600 mb-1">Email</div>
+                <input
+                  type="email"
+                  className="border rounded p-2 w-full"
+                  value={mgAddCustomerForm.email}
+                  onChange={(e) => setMgAddCustomerForm((s) => ({ ...s, email: e.target.value }))}
+                  disabled={mgAddCustomerSaving}
+                />
+              </label>
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                className="px-3 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-60"
+                onClick={() => setMgAddCustomerOpen(false)}
+                disabled={mgAddCustomerSaving}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                onClick={crearClienteRapidoMg}
+                disabled={
+                  mgAddCustomerSaving
+                  || !String(mgAddCustomerForm.razon_social || "").trim()
+                  || !String(mgAddCustomerForm.cod_empresa || "").trim()
+                }
+              >
+                {mgAddCustomerSaving ? "Guardando..." : "Crear cliente"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1428,7 +1997,7 @@ export default function ServiceSheet() {
       )}
 
       {/* HISTORIAL */}
-      {tab === "historial" && canSeeHistory && (
+      {activeTab === "historial" && canViewHistorialTab && (
         <HistorialTab hErr={hErr} hLoading={hLoading} hist={hist} />
       )}
 

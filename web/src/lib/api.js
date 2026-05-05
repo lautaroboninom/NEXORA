@@ -134,6 +134,16 @@ import { MOTIVO_OPTIONS } from "./constants";
     api.put(`/api/usuarios/${id}/permisos/`, payload);
   export const postUsuarioPermisosReset = (id) =>
     api.post(`/api/usuarios/${id}/permisos/reset/`, {});
+  export const getUsuarioNotificaciones = (id) =>
+    api.get(`/api/usuarios/${id}/notificaciones/`);
+  export const putUsuarioNotificaciones = (id, payload) =>
+    api.put(`/api/usuarios/${id}/notificaciones/`, payload);
+  export const getNotificaciones = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/notificaciones/${qs ? `?${qs}` : ""}`);
+  };
+  export const postNotificacionClick = (id) =>
+    api.post(`/api/notificaciones/${id}/click/`, {});
 
   /* =============== catalogos =============== */
 
@@ -565,6 +575,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
   // Marcar alta (reactivar desde baja)
   export const postAltaIngreso = (ingresoId) =>
     api.post(`/api/ingresos/${ingresoId}/alta/`, {});
+  // Correcciones históricas forzadas
+  export const postIngresoCorreccionHistorica = (ingresoId, payload) =>
+    api.post(`/api/ingresos/${ingresoId}/correcciones-historicas/`, payload || {});
   export const getPendientesGeneral = () => api.get("/api/ingresos/pendientes/");
   export const getPendientesPresupuesto = () =>
     api.get("/api/presupuestos/pendientes/");
@@ -574,6 +587,22 @@ export const postModelo = (brandId, payloadOrNombre) => {
     api.get("/api/ingresos/aprobados-reparados/");
   export const getLiberados = () => api.get("/api/ingresos/liberados/");
   export const getTecnicos = () => api.get("/api/catalogos/tecnicos/");
+
+  export const getWorkResumen = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/trabajo/resumen/${qs ? `?${qs}` : ""}`);
+  };
+  export const getWorkObjetivos = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/trabajo/objetivos/${qs ? `?${qs}` : ""}`);
+  };
+  export const putWorkObjetivos = (payload) =>
+    api.put("/api/trabajo/objetivos/", payload);
+  export const getWorkAlertRules = () => api.get("/api/trabajo/reglas-alerta/");
+  export const patchWorkAlertRules = (payload) =>
+    api.patch("/api/trabajo/reglas-alerta/", payload);
+  export const getGlobalSearch = (q) =>
+    api.get(`/api/busqueda/global/?q=${encodeURIComponent(q || "")}`);
 
   const buildQuery = (params = {}) => {
     const qs = new URLSearchParams();
@@ -647,8 +676,11 @@ export const postModelo = (brandId, payloadOrNombre) => {
     api.patch(`/api/preventivos/revisiones/${revisionId}/items/${itemId}/`, payload);
   export const postPreventivoRevisionCerrar = (revisionId, payload) =>
     api.post(`/api/preventivos/revisiones/${revisionId}/cerrar/`, payload);
-  export const patchDeviceIdentificadores = (deviceId, payload) =>
+  export const getDeviceEditable = (deviceId) =>
+    api.get(`/api/devices/${deviceId}/identificadores/`);
+  export const patchDeviceEditable = (deviceId, payload) =>
     api.patch(`/api/devices/${deviceId}/identificadores/`, payload);
+  export const patchDeviceIdentificadores = patchDeviceEditable;
   export const postDevicesMerge = (payload) =>
     api.post("/api/devices/merge/", payload);
   // Check garantía de reparación por N/S

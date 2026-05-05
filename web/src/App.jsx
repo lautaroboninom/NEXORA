@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "./components/Sidebar.jsx";
 import Footer from "./components/Footer.jsx";
+import NotificationBell from "./components/NotificationBell.jsx";
 import useRouteUiState from "./hooks/useRouteUiState";
 import { useAuth } from "./context/AuthContext";
 import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
@@ -97,6 +98,7 @@ export default function App() {
                 Nuevo ingreso
               </Link>
             )}
+            {user && <NotificationBell />}
             {user && (
               <span className="hidden md:inline text-sm text-gray-500">
                 {user?.nombre} {rol}

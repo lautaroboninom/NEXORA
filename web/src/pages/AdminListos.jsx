@@ -24,6 +24,7 @@ export default function AdminListos() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const release = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
+  const canDeliver = can(user, PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY);
 
   async function load() {
     try {
@@ -207,18 +208,20 @@ export default function AdminListos() {
                           Ver OS
                         </button>
                       )}
-                      <button
-                        className="btn-secondary"
-                        onClick={(e) => {
-                          e.stopPropagation(); // no navegar al clickear
-                          entregar(row);
-                        }}
-                        disabled={busyId === ingresoIdOf(row)}
-                        aria-busy={busyId === ingresoIdOf(row) ? "true" : "false"}
-                        title="Marcar como entregado"
-                      >
-                        Entregado
-                      </button>
+                      {canDeliver && (
+                        <button
+                          className="btn-secondary"
+                          onClick={(e) => {
+                            e.stopPropagation(); // no navegar al clickear
+                            entregar(row);
+                          }}
+                          disabled={busyId === ingresoIdOf(row)}
+                          aria-busy={busyId === ingresoIdOf(row) ? "true" : "false"}
+                          title="Marcar como entregado"
+                        >
+                          Entregado
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

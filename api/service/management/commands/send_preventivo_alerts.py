@@ -2,8 +2,10 @@ import logging
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.core.mail import send_mail
+from django.utils import timezone
 
 from service.views.helpers import _email_append_footer_text, q
+from service.notifications import emit_notification
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,37 @@ class Command(BaseCommand):
             self.stdout.write(f"[DRY] destinatarios: {', '.join(recipients)}")
             self.stdout.write(f"[DRY] vencidos={len(vencidos)} proximos={len(proximos)} total={len(rows)}")
             return
+
+        try:
+            today = timezone.localdate().isoformat()
+            if vencidos:
+                emit_notification(
+                    "preventivo_vencido",
+                    emails=recipients,
+                    title=f"Preventivos vencidos: {len(vencidos)}",
+                    body="\n".join(fmt_row(r) for r in vencidos[:8]),
+                    href="/equipos?tab=preventivos",
+                    severity="critical",
+                    entity_type="preventivo",
+                    entity_id="vencidos",
+                    dedupe_key=f"preventivo_vencido:{today}",
+                    payload={"count": len(vencidos)},
+                )
+            if proximos:
+                emit_notification(
+                    "preventivo_proximo",
+                    emails=recipients,
+                    title=f"Preventivos próximos: {len(proximos)}",
+                    body="\n".join(fmt_row(r) for r in proximos[:8]),
+                    href="/equipos?tab=preventivos",
+                    severity="warning",
+                    entity_type="preventivo",
+                    entity_id="proximos",
+                    dedupe_key=f"preventivo_proximo:{today}",
+                    payload={"count": len(proximos)},
+                )
+        except Exception:
+            pass
 
         if _send(subject, body, recipients):
             self.stdout.write(f"Resumen preventivos enviado a {len(recipients)} destinatarios")

@@ -56,6 +56,7 @@ from .ingresos_views import (
     EntregarIngresoView,
     DarBajaIngresoView,
     DarAltaIngresoView,
+    IngresoCorreccionesHistoricasView,
     GarantiaReparacionCheckView,
     GarantiaFabricaCheckView,
     NuevoIngresoView,
@@ -166,6 +167,12 @@ from .usuarios_views import (
     CatalogoTecnicosView,
 )
 
+from .notifications_views import (
+    NotificacionesView,
+    NotificacionClickView,
+    UsuarioNotificacionesView,
+)
+
 from .derivaciones_views import (
     DerivarIngresoView,
     DerivacionesPorIngresoView,
@@ -220,6 +227,12 @@ from .scan_views import (
 # Motivos catálogo (propio de views/)
 from .motivos_view import CatalogoMotivosView
 from .warranty_views import WarrantyRulesView, WarrantyRuleDetailView
+from .work_views import (
+    WorkResumenView,
+    WorkObjectivesView,
+    WorkAlertRulesView,
+    GlobalSearchView,
+)
 
 __all__ = [
     # auth
@@ -259,6 +272,7 @@ __all__ = [
     "EntregarIngresoView",
     "DarBajaIngresoView",
     "DarAltaIngresoView",
+    "IngresoCorreccionesHistoricasView",
     "GarantiaReparacionCheckView",
     "GarantiaFabricaCheckView",
     "NuevoIngresoView",
@@ -348,6 +362,9 @@ __all__ = [
     "UsuarioPermisosView",
     "UsuarioPermisosResetView",
     "CatalogoTecnicosView",
+    "NotificacionesView",
+    "NotificacionClickView",
+    "UsuarioNotificacionesView",
     # derivaciones
     "DerivarIngresoView",
     "DerivacionesPorIngresoView",
@@ -390,4 +407,9 @@ __all__ = [
     # warranty rules
     "WarrantyRulesView",
     "WarrantyRuleDetailView",
+    # trabajo operativo
+    "WorkResumenView",
+    "WorkObjectivesView",
+    "WorkAlertRulesView",
+    "GlobalSearchView",
 ]

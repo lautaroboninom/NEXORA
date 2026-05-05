@@ -27,6 +27,7 @@ from ..permissions import (
     EFFECT_DENY,
     EFFECT_INHERIT,
     apply_overrides,
+    require_any_permission,
     require_permission,
     reset_overrides,
     resolve_effective_permissions,
@@ -264,7 +265,10 @@ class CatalogoTecnicosView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        require_permission(request, "action.ingreso.change_assignment")
+        require_any_permission(
+            request,
+            ["action.ingreso.change_assignment", "action.ingreso.create", "page.new_ingreso"],
+        )
         rows = q(
             """
             SELECT id, nombre

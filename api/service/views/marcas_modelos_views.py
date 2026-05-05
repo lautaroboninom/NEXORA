@@ -307,6 +307,16 @@ class ModelosPorMarcaView(APIView):
                     [bid, tipo_equipo],
                 )
 
+            existing_tipo = q(
+                "SELECT id FROM catalogo_tipos_equipo WHERE UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
+                [tipo_equipo],
+                one=True,
+            )
+            if existing_tipo:
+                q("UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s", [tipo_equipo, existing_tipo["id"]])
+            else:
+                q("INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)", [tipo_equipo])
+
         return Response({"ok": True})
 
 

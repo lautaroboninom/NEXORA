@@ -803,76 +803,77 @@ def _agenda_plan_rows(scope=None, customer_id=None, q_text=""):
 
     where_sql = " WHERE " + " AND ".join(wh)
     try:
-        return q(
-            f"""
-            SELECT
-              p.id AS plan_id,
-              p.scope_type::text AS scope_type,
-              p.device_id,
-              p.customer_id,
-              COALESCE(p.customer_id, d.customer_id) AS owner_customer_id,
-              COALESCE(cc.razon_social, cdev.razon_social, '') AS customer_nombre,
-              COALESCE(cc.cod_empresa, cdev.cod_empresa, '') AS customer_cod_empresa,
-              p.periodicidad_valor,
-              p.periodicidad_unidad::text AS periodicidad_unidad,
-              p.aviso_anticipacion_dias,
-              p.ultima_revision_fecha,
-              p.proxima_revision_fecha,
-              p.activa,
-              COALESCE(p.observaciones,'') AS observaciones,
-              COALESCE(d.numero_serie,'') AS numero_serie,
-              COALESCE(d.numero_interno,'') AS numero_interno,
-              COALESCE(d.tipo_equipo,'') AS tipo_equipo,
-              COALESCE(d.variante,'') AS variante,
-              COALESCE(b.nombre,'') AS marca,
-              COALESCE(m.nombre,'') AS modelo,
-              COALESCE(prc.total_repuestos,0) AS repuestos_total,
-              prn.repuesto_id AS repuesto_proximo_id,
-              COALESCE(prn.repuesto_nombre,'') AS repuesto_proximo_nombre,
-              prn.repuesto_ultima_revision_fecha,
-              prn.repuesto_proxima_revision_fecha,
-              prn.repuesto_aviso_anticipacion_dias,
-              dr.id AS borrador_revision_id
-            FROM preventivo_planes p
-            LEFT JOIN devices d ON d.id = p.device_id
-            LEFT JOIN customers cdev ON cdev.id = d.customer_id
-            LEFT JOIN customers cc ON cc.id = p.customer_id
-            LEFT JOIN marcas b ON b.id = d.marca_id
-            LEFT JOIN models m ON m.id = d.model_id
-            LEFT JOIN LATERAL (
-              SELECT r.id
-                FROM preventivo_revisiones r
-               WHERE r.plan_id = p.id
-                 AND r.estado = 'borrador'
-               ORDER BY r.id DESC
-               LIMIT 1
-            ) dr ON TRUE
-            LEFT JOIN LATERAL (
-              SELECT COUNT(*) AS total_repuestos
-              FROM preventivo_plan_repuestos prc
-              WHERE prc.plan_id = p.id
-                AND prc.activa=true
-            ) prc ON TRUE
-            LEFT JOIN LATERAL (
-              SELECT
-                pr.id AS repuesto_id,
-                COALESCE(pr.nombre_repuesto,'') AS repuesto_nombre,
-                pr.ultima_revision_fecha AS repuesto_ultima_revision_fecha,
-                pr.proxima_revision_fecha AS repuesto_proxima_revision_fecha,
-                pr.aviso_anticipacion_dias AS repuesto_aviso_anticipacion_dias
-              FROM preventivo_plan_repuestos pr
-              WHERE pr.plan_id = p.id
-                AND pr.activa=true
-              ORDER BY
-                CASE WHEN pr.proxima_revision_fecha IS NULL THEN 1 ELSE 0 END,
-                pr.proxima_revision_fecha ASC,
-                pr.id ASC
-              LIMIT 1
-            ) prn ON TRUE
-            {where_sql}
-            """,
-            params,
-        ) or []
+        with transaction.atomic():
+            return q(
+                f"""
+                SELECT
+                  p.id AS plan_id,
+                  p.scope_type::text AS scope_type,
+                  p.device_id,
+                  p.customer_id,
+                  COALESCE(p.customer_id, d.customer_id) AS owner_customer_id,
+                  COALESCE(cc.razon_social, cdev.razon_social, '') AS customer_nombre,
+                  COALESCE(cc.cod_empresa, cdev.cod_empresa, '') AS customer_cod_empresa,
+                  p.periodicidad_valor,
+                  p.periodicidad_unidad::text AS periodicidad_unidad,
+                  p.aviso_anticipacion_dias,
+                  p.ultima_revision_fecha,
+                  p.proxima_revision_fecha,
+                  p.activa,
+                  COALESCE(p.observaciones,'') AS observaciones,
+                  COALESCE(d.numero_serie,'') AS numero_serie,
+                  COALESCE(d.numero_interno,'') AS numero_interno,
+                  COALESCE(d.tipo_equipo,'') AS tipo_equipo,
+                  COALESCE(d.variante,'') AS variante,
+                  COALESCE(b.nombre,'') AS marca,
+                  COALESCE(m.nombre,'') AS modelo,
+                  COALESCE(prc.total_repuestos,0) AS repuestos_total,
+                  prn.repuesto_id AS repuesto_proximo_id,
+                  COALESCE(prn.repuesto_nombre,'') AS repuesto_proximo_nombre,
+                  prn.repuesto_ultima_revision_fecha,
+                  prn.repuesto_proxima_revision_fecha,
+                  prn.repuesto_aviso_anticipacion_dias,
+                  dr.id AS borrador_revision_id
+                FROM preventivo_planes p
+                LEFT JOIN devices d ON d.id = p.device_id
+                LEFT JOIN customers cdev ON cdev.id = d.customer_id
+                LEFT JOIN customers cc ON cc.id = p.customer_id
+                LEFT JOIN marcas b ON b.id = d.marca_id
+                LEFT JOIN models m ON m.id = d.model_id
+                LEFT JOIN LATERAL (
+                  SELECT r.id
+                    FROM preventivo_revisiones r
+                   WHERE r.plan_id = p.id
+                     AND r.estado = 'borrador'
+                   ORDER BY r.id DESC
+                   LIMIT 1
+                ) dr ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT COUNT(*) AS total_repuestos
+                  FROM preventivo_plan_repuestos prc
+                  WHERE prc.plan_id = p.id
+                    AND prc.activa=true
+                ) prc ON TRUE
+                LEFT JOIN LATERAL (
+                  SELECT
+                    pr.id AS repuesto_id,
+                    COALESCE(pr.nombre_repuesto,'') AS repuesto_nombre,
+                    pr.ultima_revision_fecha AS repuesto_ultima_revision_fecha,
+                    pr.proxima_revision_fecha AS repuesto_proxima_revision_fecha,
+                    pr.aviso_anticipacion_dias AS repuesto_aviso_anticipacion_dias
+                  FROM preventivo_plan_repuestos pr
+                  WHERE pr.plan_id = p.id
+                    AND pr.activa=true
+                  ORDER BY
+                    CASE WHEN pr.proxima_revision_fecha IS NULL THEN 1 ELSE 0 END,
+                    pr.proxima_revision_fecha ASC,
+                    pr.id ASC
+                  LIMIT 1
+                ) prn ON TRUE
+                {where_sql}
+                """,
+                params,
+            ) or []
     except Exception:
         rows = q(
             f"""

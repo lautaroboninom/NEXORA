@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router-dom";
-import { AuthProvider } from "./context/AuthContext";
+import { createBrowserRouter, RouterProvider, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./context/AuthContext";
 import ErrorBoundary from "./components/ErrorBoundary";
 
 import "./index.css";
@@ -30,9 +30,7 @@ import ServiceSheet from "./pages/ServiceSheet";
 import PendientesPorTecnico from "./pages/PendientesPorTecnico.jsx";
 import DerivarIngreso from "./pages/DerivarIngreso.jsx";
 import StockAlquiler from "./pages/StockAlquiler.jsx";
-import BusquedaNSCard from "./components/BusquedaNSCard.jsx";
-import BusquedaAccRefCard from "./components/BusquedaAccRefCard.jsx";
-import QrScanCard from "./components/QrScanCard.jsx";
+import WorkDashboard from "./pages/WorkDashboard.jsx";
 import BuscarNS from "./pages/BuscarNS.jsx";
 import BuscarAccesorio from "./pages/BuscarAccesorio.jsx";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -45,10 +43,20 @@ import MetricasFinanzas from "./pages/MetricasFinanzas.jsx";
 import Garantias from "./pages/Garantias.jsx";
 import Equipos from "./pages/Equipos.jsx";
 import ProtocolosTest from "./pages/ProtocolosTest.jsx";
-import { PERMISSION_CODES } from "./lib/permissions";
+import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
 
 function NotFound() {
   return <div className="p-8 text-center text-gray-600">Página no encontrada</div>;
+}
+
+function IndexRoute() {
+  const { user } = useAuth();
+  if (can(user, PERMISSION_CODES.PAGE_HOME_SEARCH)) return <WorkDashboard />;
+  if (canAny(user, [PERMISSION_CODES.ACTION_INGRESO_CREATE, PERMISSION_CODES.PAGE_NEW_INGRESO])) {
+    return <Navigate to="/ingresos/nuevo" replace />;
+  }
+  if (can(user, PERMISSION_CODES.PAGE_LIBERADOS)) return <Navigate to="/listos" replace />;
+  return <Forbidden />;
 }
 
 const router = createBrowserRouter([
@@ -63,15 +71,15 @@ const router = createBrowserRouter([
       {
         index: true,
         element: (
-          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_HOME_SEARCH}>
-            <div className="p-6">
-              <h1 className="text-2xl font-bold">Bienvenido</h1>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <BusquedaNSCard />
-                <BusquedaAccRefCard />
-                <QrScanCard />
-              </div>
-            </div>
+          <ProtectedRoute
+            permissions={[
+              PERMISSION_CODES.PAGE_HOME_SEARCH,
+              PERMISSION_CODES.ACTION_INGRESO_CREATE,
+              PERMISSION_CODES.PAGE_NEW_INGRESO,
+              PERMISSION_CODES.PAGE_LIBERADOS,
+            ]}
+          >
+            <IndexRoute />
           </ProtectedRoute>
         ),
       },
@@ -158,7 +166,7 @@ const router = createBrowserRouter([
       {
         path: "listos",
         element: (
-          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_LOGISTICS}>
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_LIBERADOS}>
             <AdminListos />
           </ProtectedRoute>
         ),
@@ -337,6 +345,8 @@ const router = createBrowserRouter([
               PERMISSION_CODES.PAGE_WORK_QUEUES,
               PERMISSION_CODES.PAGE_BUDGET_QUEUES,
               PERMISSION_CODES.PAGE_LOGISTICS,
+              PERMISSION_CODES.PAGE_LIBERADOS,
+              PERMISSION_CODES.PAGE_SERVICE_SHEET_PRINCIPAL,
               PERMISSION_CODES.ACTION_PRESUPUESTO_MANAGE,
               PERMISSION_CODES.ACTION_INGRESO_EDIT_BASICS,
               PERMISSION_CODES.ACTION_INGRESO_EDIT_DIAGNOSIS,

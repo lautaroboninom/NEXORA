@@ -80,6 +80,10 @@ class IngresoListItemSerializer(serializers.Serializer):
     presupuesto_fecha_envio = serializers.DateTimeField(required=False, allow_null=True)
     ubicacion_id = serializers.IntegerField(required=False, allow_null=True)
     ubicacion_nombre = serializers.CharField(required=False, allow_blank=True)
+    asignado_a = serializers.IntegerField(required=False, allow_null=True)
+    asignado_a_nombre = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    tecnico = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    tecnico_nombre = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     # Campos opcionales para búsquedas por accesorios
     accesorio_nombre = serializers.CharField(required=False, allow_blank=True)
@@ -138,6 +142,9 @@ class IngresoDetailSerializer(serializers.Serializer):
     mg_venta_remito_numero = serializers.CharField(allow_blank=True, required=False)
     mg_venta_observaciones = serializers.CharField(allow_blank=True, required=False)
     mg_venta_usuario_id = serializers.IntegerField(allow_null=True, required=False)
+    mg_venta_customer_id = serializers.IntegerField(allow_null=True, required=False)
+    mg_venta_customer_nombre = serializers.CharField(allow_blank=True, required=False)
+    mg_venta_numero_alternativo = serializers.CharField(allow_blank=True, required=False)
     es_propietario_mg = serializers.BooleanField(required=False)
     vendido = serializers.BooleanField(required=False)
     garantia = serializers.BooleanField()

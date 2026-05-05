@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..pdf import render_quote_pdf
+from ..notifications import emit_notification, notify_presupuesto_aprobado
 from ..permissions import user_has_permission
 from ..serializers import (
     QuoteDetailSerializer,
@@ -73,6 +74,26 @@ def _send_stock_min_alerts(items: list[dict]):
     if not items:
         return
     recipients = _get_stock_alert_recipients()
+    try:
+        title = f"Stock mínimo - {len(items)} repuesto(s)"
+        body_lines = ["Se alcanzó el stock mínimo en:", ""]
+        for it in items:
+            body_lines.append(f"- {it.get('codigo') or '-'} | {it.get('nombre') or '-'}")
+            body_lines.append(f"  Stock: {it.get('stock_on_hand')} | Mínimo: {it.get('stock_min')}")
+        emit_notification(
+            "stock_minimo",
+            emails=recipients,
+            title=title,
+            body="\n".join(body_lines).strip(),
+            href="/catalogo/repuestos",
+            severity="warning",
+            entity_type="repuesto",
+            entity_id=str(items[0].get("id") or items[0].get("codigo") or "stock"),
+            dedupe_key=f"stock_minimo:{','.join(str(it.get('id') or it.get('codigo') or it.get('nombre') or '-') for it in items)}:{len(items)}",
+            payload={"items": items},
+        )
+    except Exception:
+        pass
     if not recipients:
         return
     subject = f"Alerta stock minimo - {len(items)} repuesto(s)"
@@ -883,6 +904,7 @@ class AprobarPresupuestoView(APIView):
             row = q(
                 """
                 SELECT
+                  u.id AS tecnico_id,
                   u.email, COALESCE(u.nombre,'') AS tecnico_nombre,
                   c.razon_social AS cliente,
                   COALESCE(b.nombre,'') AS marca,
@@ -901,6 +923,11 @@ class AprobarPresupuestoView(APIView):
                 [ingreso_id],
                 one=True,
             ) or {}
+            if row.get("tecnico_id"):
+                try:
+                    notify_presupuesto_aprobado(ingreso_id, row.get("tecnico_id"))
+                except Exception:
+                    pass
             to_email = (row.get("email") or "").strip()
             if to_email:
                 os_label = f"OS {str(ingreso_id).zfill(6)}"

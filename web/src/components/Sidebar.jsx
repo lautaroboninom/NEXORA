@@ -56,6 +56,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canWorkQueues = can(user, PERMISSION_CODES.PAGE_WORK_QUEUES);
   const canBudgetQueues = can(user, PERMISSION_CODES.PAGE_BUDGET_QUEUES);
   const canLogistics = can(user, PERMISSION_CODES.PAGE_LOGISTICS);
+  const canLiberados = can(user, PERMISSION_CODES.PAGE_LIBERADOS);
   const canDevices = can(user, PERMISSION_CODES.PAGE_DEVICES_PREVENTIVOS);
   const canMetrics = can(user, PERMISSION_CODES.PAGE_METRICS);
   const canUsers = can(user, PERMISSION_CODES.PAGE_USERS);
@@ -64,7 +65,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canWarranty = can(user, PERMISSION_CODES.PAGE_WARRANTY);
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
 
-  const showEquiposSection = canWorkQueues || canBudgetQueues || canLogistics;
+  const showEquiposSection = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
   const showSistema =
     canMetrics || canUsers || canCatalogs || canSpareParts || canWarranty || canManageTestProtocols;
 
@@ -175,9 +176,6 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   <LinkItem to="/derivados" {...linkProps}>
                     Derivados
                   </LinkItem>
-                  <LinkItem to="/listos" {...linkProps}>
-                    Liberados
-                  </LinkItem>
                   <LinkItem to="/alquiler/stock" {...linkProps}>
                     Stock de alquiler
                   </LinkItem>
@@ -185,6 +183,11 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                     Depósitos/Bajas
                   </LinkItem>
                 </>
+              )}
+              {canLiberados && (
+                <LinkItem to="/listos" {...linkProps}>
+                  Liberados
+                </LinkItem>
               )}
             </div>
           )}

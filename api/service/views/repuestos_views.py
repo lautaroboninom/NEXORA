@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import q, exec_void, exec_returning, require_roles, money, _email_append_footer_text
+from ..notifications import emit_notification
 from ..repuestos import (
     get_repuestos_config,
     calc_precio_venta,
@@ -339,6 +340,26 @@ def _send_stock_min_alerts(items: list[dict]):
     if not items:
         return
     recipients = _get_stock_alert_recipients()
+    try:
+        title = f"Stock mínimo - {len(items)} repuesto(s)"
+        body_lines = ["Se alcanzó el stock mínimo en:", ""]
+        for it in items:
+            body_lines.append(f"- {it.get('codigo') or '-'} | {it.get('nombre') or '-'}")
+            body_lines.append(f"  Stock: {it.get('stock_on_hand')} | Mínimo: {it.get('stock_min')}")
+        emit_notification(
+            "stock_minimo",
+            emails=recipients,
+            title=title,
+            body="\n".join(body_lines).strip(),
+            href="/catalogo/repuestos",
+            severity="warning",
+            entity_type="repuesto",
+            entity_id=str(items[0].get("id") or items[0].get("codigo") or "stock"),
+            dedupe_key=f"stock_minimo:{','.join(str(it.get('id') or it.get('codigo') or it.get('nombre') or '-') for it in items)}:{len(items)}",
+            payload={"items": items},
+        )
+    except Exception:
+        pass
     if not recipients:
         return
     subject = f"Alerta stock minimo - {len(items)} repuesto(s)"

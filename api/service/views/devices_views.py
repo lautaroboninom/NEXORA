@@ -41,6 +41,50 @@ def _has_mg_schema() -> bool:
         return False
 
 
+def _has_table_column(table_name: str, column_name: str) -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name=%s
+                   AND column_name=%s
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                [table_name, column_name],
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name=%s
+               AND column_name=%s
+             LIMIT 1
+            """,
+            [table_name, column_name],
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _has_mg_sale_extended_schema() -> bool:
+    return _has_table_column("devices", "mg_venta_customer_id") and _has_table_column(
+        "devices", "mg_venta_numero_alternativo"
+    )
+
+
+def _has_mg_events_extended_schema() -> bool:
+    return _has_table_column("device_mg_events", "venta_customer_id") and _has_table_column(
+        "device_mg_events", "venta_numero_alternativo"
+    )
+
+
 def _mg_owner_customer_id():
     row = q(
         "SELECT id FROM customers WHERE LOWER(razon_social) LIKE %s ORDER BY id ASC LIMIT 1",
@@ -70,40 +114,153 @@ def _parse_sale_datetime(raw):
     return dt
 
 
+def _normalize_mg(numero_interno: str) -> str:
+    value = (numero_interno or "").strip()
+    if value and not value.upper().startswith(("MG", "NM", "NV", "CE")):
+        value = "MG " + value
+    return value
+
+
+def _fetch_device_editable(device_id: int):
+    return q(
+        """
+        SELECT
+          d.id,
+          d.customer_id,
+          COALESCE(c.razon_social,'') AS customer_nombre,
+          d.marca_id,
+          d.model_id,
+          COALESCE(b.nombre,'') AS marca,
+          COALESCE(m.nombre,'') AS modelo,
+          COALESCE(d.tipo_equipo,'') AS tipo_equipo,
+          COALESCE(d.variante,'') AS variante,
+          COALESCE(d.numero_serie,'') AS numero_serie,
+          COALESCE(d.numero_interno,'') AS numero_interno,
+          d.ubicacion_id,
+          COALESCE(loc.nombre,'') AS ubicacion_nombre,
+          COALESCE(d.alquilado,false) AS alquilado,
+          COALESCE(d.alquiler_a,'') AS alquiler_a
+        FROM devices d
+        LEFT JOIN customers c ON c.id = d.customer_id
+        LEFT JOIN marcas b ON b.id = d.marca_id
+        LEFT JOIN models m ON m.id = d.model_id
+        LEFT JOIN locations loc ON loc.id = d.ubicacion_id
+        WHERE d.id=%s
+        """,
+        [device_id],
+        one=True,
+    )
+
+
 class DeviceIdentificadoresView(APIView):
     """
-    Permite corregir numero_serie y numero_interno (MG) de un device ya existente,
-    aplicando las mismas reglas de normalización y unicidad que en ingresos.
+    Obtiene y corrige datos clave de un equipo existente.
+    Mantiene compatibilidad con PATCH parcial de numero_serie/numero_interno.
     """
 
     permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, device_id: int):
+        require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
+        dev = _fetch_device_editable(device_id)
+        if not dev:
+            return Response({"detail": "Device inexistente"}, status=404)
+        return Response({"ok": True, "device": dev})
 
     @transaction.atomic
     def patch(self, request, device_id: int):
         require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
         _set_audit_user(request)
         data = request.data or {}
-        numero_serie = (data.get("numero_serie") or "").strip()
-        numero_interno = (data.get("numero_interno") or "").strip()
-        if numero_interno and not numero_interno.upper().startswith(("MG", "NM", "NV", "CE")):
-            numero_interno = "MG " + numero_interno
+        if not isinstance(data, dict):
+            return Response({"detail": "Payload invalido"}, status=400)
 
-        # Verificar que el device exista
-        dev = q(
-            "SELECT id, COALESCE(numero_serie,'') AS numero_serie, COALESCE(numero_interno,'') AS numero_interno "
-            "FROM devices WHERE id=%s",
-            [device_id],
-            one=True,
-        )
+        dev = _fetch_device_editable(device_id)
         if not dev:
             return Response({"detail": "Device inexistente"}, status=404)
 
-        updates = []
-        params = []
+        editable_keys = {
+            "customer_id",
+            "tipo_equipo",
+            "marca_id",
+            "model_id",
+            "variante",
+            "numero_serie",
+            "numero_interno",
+            "ubicacion_id",
+            "alquilado",
+            "alquiler_a",
+        }
+        if not any(key in data for key in editable_keys):
+            return Response({"detail": "No se enviaron cambios"}, status=400)
 
-        # Validar numero_serie si viene
-        if numero_serie:
-            ns_key = numero_serie.replace(" ", "").replace("-", "").upper()
+        next_customer_id = int(dev.get("customer_id") or 0)
+        next_marca_id = _parse_int_or_none(dev.get("marca_id"))
+        next_model_id = _parse_int_or_none(dev.get("model_id"))
+        next_ubicacion_id = _parse_int_or_none(dev.get("ubicacion_id"))
+        next_tipo_equipo = (dev.get("tipo_equipo") or "").strip()
+        next_variante = (dev.get("variante") or "").strip()
+        next_numero_serie = (dev.get("numero_serie") or "").strip()
+        next_numero_interno = (dev.get("numero_interno") or "").strip()
+        next_alquilado = bool(dev.get("alquilado"))
+        next_alquiler_a = (dev.get("alquiler_a") or "").strip()
+
+        if "customer_id" in data:
+            parsed_customer_id = _parse_int_or_none(data.get("customer_id"))
+            if not parsed_customer_id:
+                return Response({"detail": "customer_id requerido"}, status=400)
+            next_customer_id = parsed_customer_id
+
+        if "marca_id" in data:
+            next_marca_id = _parse_int_or_none(data.get("marca_id"))
+        if "model_id" in data:
+            next_model_id = _parse_int_or_none(data.get("model_id"))
+        if "ubicacion_id" in data:
+            next_ubicacion_id = _parse_int_or_none(data.get("ubicacion_id"))
+        if "tipo_equipo" in data:
+            next_tipo_equipo = (data.get("tipo_equipo") or "").strip()
+        if "variante" in data:
+            next_variante = (data.get("variante") or "").strip()
+        if "numero_serie" in data:
+            next_numero_serie = (data.get("numero_serie") or "").strip()
+        if "numero_interno" in data:
+            next_numero_interno = _normalize_mg(data.get("numero_interno") or "")
+        if "alquilado" in data:
+            next_alquilado = bool(_parse_bool_or_default(data.get("alquilado"), next_alquilado))
+        if "alquiler_a" in data:
+            next_alquiler_a = (data.get("alquiler_a") or "").strip()
+        if not next_alquilado:
+            next_alquiler_a = ""
+
+        customer = q("SELECT id FROM customers WHERE id=%s", [next_customer_id], one=True)
+        if not customer:
+            return Response({"detail": "Institucion/cliente inexistente"}, status=404)
+
+        model_marca_id = None
+        if next_model_id:
+            model = q("SELECT id, marca_id FROM models WHERE id=%s", [next_model_id], one=True)
+            if not model:
+                return Response({"detail": "model_id inexistente"}, status=400)
+            model_marca_id = int(model.get("marca_id") or 0) if model.get("marca_id") is not None else None
+
+        if next_marca_id:
+            marca = q("SELECT id FROM marcas WHERE id=%s", [next_marca_id], one=True)
+            if not marca:
+                return Response({"detail": "marca_id inexistente"}, status=400)
+
+        if next_model_id and model_marca_id:
+            if next_marca_id and int(next_marca_id) != int(model_marca_id):
+                return Response({"detail": "model_id no pertenece a marca_id"}, status=400)
+            if not next_marca_id:
+                next_marca_id = int(model_marca_id)
+
+        if next_ubicacion_id:
+            loc = q("SELECT id FROM locations WHERE id=%s", [next_ubicacion_id], one=True)
+            if not loc:
+                return Response({"detail": "ubicacion_id inexistente"}, status=400)
+
+        if "numero_serie" in data and next_numero_serie:
+            ns_key = next_numero_serie.replace(" ", "").replace("-", "").upper()
             other = q(
                 """
                 SELECT id
@@ -118,17 +275,14 @@ class DeviceIdentificadoresView(APIView):
             if other:
                 return Response(
                     {
-                        "detail": "El número de serie ya está asignado a otro equipo.",
+                        "detail": "El numero de serie ya esta asignado a otro equipo.",
                         "conflict_type": "NS_DUPLICATE",
                         "conflict_device_id": other["id"],
                     },
                     status=400,
                 )
-            updates.append("numero_serie = %s")
-            params.append(numero_serie)
 
-        # Validar numero_interno si viene
-        if numero_interno:
+        if "numero_interno" in data and next_numero_interno:
             if connection.vendor == "postgresql":
                 conflict = q(
                     """
@@ -142,26 +296,70 @@ class DeviceIdentificadoresView(APIView):
                            '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
                      LIMIT 1
                     """,
-                    [device_id, numero_interno],
+                    [device_id, next_numero_interno],
                     one=True,
                 )
             else:
                 conflict = q(
                     "SELECT id FROM devices WHERE id <> %s AND numero_interno = %s LIMIT 1",
-                    [device_id, numero_interno],
+                    [device_id, next_numero_interno],
                     one=True,
                 )
             if conflict:
                 return Response(
                     {
-                        "detail": "El número interno ya está asignado a otro equipo.",
+                        "detail": "El numero interno ya esta asignado a otro equipo.",
                         "conflict_type": "MG_DUPLICATE",
                         "conflict_device_id": conflict["id"],
                     },
                     status=400,
                 )
+
+        updates = []
+        params = []
+
+        if int(dev.get("customer_id") or 0) != int(next_customer_id):
+            updates.append("customer_id = %s")
+            params.append(next_customer_id)
+
+        cur_marca_id = _parse_int_or_none(dev.get("marca_id"))
+        if cur_marca_id != next_marca_id:
+            updates.append("marca_id = %s")
+            params.append(next_marca_id)
+
+        cur_model_id = _parse_int_or_none(dev.get("model_id"))
+        if cur_model_id != next_model_id:
+            updates.append("model_id = %s")
+            params.append(next_model_id)
+
+        cur_ubicacion_id = _parse_int_or_none(dev.get("ubicacion_id"))
+        if cur_ubicacion_id != next_ubicacion_id:
+            updates.append("ubicacion_id = %s")
+            params.append(next_ubicacion_id)
+
+        if (dev.get("tipo_equipo") or "").strip() != next_tipo_equipo:
+            updates.append("tipo_equipo = NULLIF(%s,'')")
+            params.append(next_tipo_equipo)
+
+        if (dev.get("variante") or "").strip() != next_variante:
+            updates.append("variante = NULLIF(%s,'')")
+            params.append(next_variante)
+
+        if (dev.get("numero_serie") or "").strip() != next_numero_serie:
+            updates.append("numero_serie = NULLIF(%s,'')")
+            params.append(next_numero_serie)
+
+        if (dev.get("numero_interno") or "").strip() != next_numero_interno:
             updates.append("numero_interno = NULLIF(%s,'')")
-            params.append(numero_interno)
+            params.append(next_numero_interno)
+
+        if bool(dev.get("alquilado")) != bool(next_alquilado):
+            updates.append("alquilado = %s")
+            params.append(bool(next_alquilado))
+
+        if (dev.get("alquiler_a") or "").strip() != next_alquiler_a:
+            updates.append("alquiler_a = NULLIF(%s,'')")
+            params.append(next_alquiler_a)
 
         if not updates:
             return Response({"detail": "No se enviaron cambios"}, status=400)
@@ -213,6 +411,12 @@ class DevicesListView(APIView):
             )
         )
         has_mg_schema = _has_mg_schema()
+        has_mg_sale_extended = _has_mg_sale_extended_schema()
+        mg_sale_customer_join = (
+            "LEFT JOIN customers c_mg_sale ON c_mg_sale.id = d.mg_venta_customer_id"
+            if has_mg_sale_extended
+            else "LEFT JOIN customers c_mg_sale ON 1=0"
+        )
 
         if preventivo_estado_raw and preventivo_estado_raw not in ("sin_plan", "al_dia", "proximo", "vencido"):
             return Response({"detail": "preventivo_estado inválido"}, status=400)
@@ -224,12 +428,13 @@ class DevicesListView(APIView):
             con_plan_val = False
 
         if has_preventivos:
-            from_sql = """
+            from_sql = f"""
                 FROM devices d
                 LEFT JOIN customers c ON c.id = d.customer_id
                 LEFT JOIN marcas b ON b.id = d.marca_id
                 LEFT JOIN models m ON m.id = d.model_id
                 LEFT JOIN locations loc ON loc.id = d.ubicacion_id
+                {mg_sale_customer_join}
                 LEFT JOIN LATERAL (
                   SELECT i.id AS ingreso_id,
                          COALESCE(i.fecha_ingreso, i.fecha_creacion) AS fecha_ingreso
@@ -255,12 +460,13 @@ class DevicesListView(APIView):
                 ) pp ON TRUE
             """
         else:
-            from_sql = """
+            from_sql = f"""
                 FROM devices d
                 LEFT JOIN customers c ON c.id = d.customer_id
                 LEFT JOIN marcas b ON b.id = d.marca_id
                 LEFT JOIN models m ON m.id = d.model_id
                 LEFT JOIN locations loc ON loc.id = d.ubicacion_id
+                {mg_sale_customer_join}
                 LEFT JOIN LATERAL (
                   SELECT i.id AS ingreso_id,
                          COALESCE(i.fecha_ingreso, i.fecha_creacion) AS fecha_ingreso
@@ -433,7 +639,7 @@ class DevicesListView(APIView):
                   NULL::integer AS preventivo_dias_restantes
                 """
 
-            if has_mg_schema:
+            if has_mg_schema and has_mg_sale_extended:
                 mg_select_sql = """
                   COALESCE(d.mg_estado, 'activo') AS mg_estado,
                   d.mg_inactivo_desde AS mg_inactivo_desde,
@@ -442,6 +648,9 @@ class DevicesListView(APIView):
                   COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
                   COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
                   d.mg_venta_usuario_id AS mg_venta_usuario_id,
+                  d.mg_venta_customer_id AS mg_venta_customer_id,
+                  COALESCE(c_mg_sale.razon_social,'') AS mg_venta_customer_nombre,
+                  COALESCE(d.mg_venta_numero_alternativo,'') AS mg_venta_numero_alternativo,
                 """
             else:
                 mg_select_sql = """
@@ -452,6 +661,9 @@ class DevicesListView(APIView):
                   '' AS mg_venta_remito_numero,
                   '' AS mg_venta_observaciones,
                   NULL AS mg_venta_usuario_id,
+                  NULL AS mg_venta_customer_id,
+                  '' AS mg_venta_customer_nombre,
+                  '' AS mg_venta_numero_alternativo,
                 """
 
             sql = f"""
@@ -898,9 +1110,9 @@ class DeviceMgVentaView(APIView):
         require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
         _set_audit_user(request)
 
-        if not _has_mg_schema():
+        if not _has_mg_schema() or not _has_mg_sale_extended_schema() or not _has_mg_events_extended_schema():
             return Response(
-                {"detail": "Schema MG venta no aplicado. Ejecuta apply_mg_sale_schema."},
+                {"detail": "Schema MG venta extendido no aplicado. Ejecuta apply_historical_corrections_schema."},
                 status=500,
             )
 
@@ -925,6 +1137,25 @@ class DeviceMgVentaView(APIView):
             return Response({"detail": "fecha_venta inválida"}, status=400)
 
         observaciones = (data.get("observaciones") or "").strip()
+        venta_numero_alternativo = (data.get("venta_numero_alternativo") or "").strip()
+        venta_customer_id_raw = data.get("venta_customer_id")
+        if venta_customer_id_raw in (None, ""):
+            return Response(
+                {
+                    "detail": "Debe informar comprador de venta.",
+                    "conflict_type": "MG_VENTA_COMPRADOR_REQUERIDO",
+                },
+                status=400,
+            )
+        try:
+            venta_customer_id = int(venta_customer_id_raw)
+        except Exception:
+            return Response({"detail": "venta_customer_id inválido"}, status=400)
+        if venta_customer_id <= 0:
+            return Response({"detail": "venta_customer_id inválido"}, status=400)
+        venta_customer = q("SELECT id FROM customers WHERE id=%s", [venta_customer_id], one=True)
+        if not venta_customer:
+            return Response({"detail": "Comprador inexistente"}, status=404)
         ingreso_id_raw = data.get("ingreso_id")
         ingreso_id = None
         if ingreso_id_raw not in (None, ""):
@@ -989,7 +1220,9 @@ class DeviceMgVentaView(APIView):
                    mg_venta_factura_numero = NULLIF(%s,''),
                    mg_venta_remito_numero = NULLIF(%s,''),
                    mg_venta_observaciones = NULLIF(%s,''),
-                   mg_venta_usuario_id = %s
+                   mg_venta_usuario_id = %s,
+                   mg_venta_customer_id = %s,
+                   mg_venta_numero_alternativo = NULLIF(%s,'')
              WHERE id = %s
             """,
             [
@@ -999,6 +1232,8 @@ class DeviceMgVentaView(APIView):
                 remito_numero,
                 observaciones,
                 uid,
+                venta_customer_id,
+                venta_numero_alternativo,
                 device_id,
             ],
         )
@@ -1006,9 +1241,10 @@ class DeviceMgVentaView(APIView):
             """
             INSERT INTO device_mg_events(
               device_id, accion, numero_interno_snapshot, fecha_evento,
-              factura_numero, remito_numero, observaciones, usuario_id, ingreso_id, source
+              factura_numero, remito_numero, observaciones, usuario_id, ingreso_id,
+              venta_customer_id, venta_numero_alternativo, source
             )
-            VALUES (%s, 'venta', %s, %s, NULLIF(%s,''), NULLIF(%s,''), NULLIF(%s,''), %s, %s, %s)
+            VALUES (%s, 'venta', %s, %s, NULLIF(%s,''), NULLIF(%s,''), NULLIF(%s,''), %s, %s, %s, NULLIF(%s,''), %s)
             """,
             [
                 device_id,
@@ -1019,6 +1255,8 @@ class DeviceMgVentaView(APIView):
                 observaciones,
                 uid,
                 ingreso_id,
+                venta_customer_id,
+                venta_numero_alternativo,
                 source,
             ],
         )
@@ -1035,8 +1273,12 @@ class DeviceMgVentaView(APIView):
               COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
               COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
               COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
-              d.mg_venta_usuario_id
+              d.mg_venta_usuario_id,
+              d.mg_venta_customer_id AS mg_venta_customer_id,
+              COALESCE(c.razon_social,'') AS mg_venta_customer_nombre,
+              COALESCE(d.mg_venta_numero_alternativo,'') AS mg_venta_numero_alternativo
             FROM devices d
+            LEFT JOIN customers c ON c.id = d.mg_venta_customer_id
             WHERE d.id=%s
             """,
             [device_id],
@@ -1054,9 +1296,9 @@ class DeviceMgReactivarView(APIView):
         require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
         _set_audit_user(request)
 
-        if not _has_mg_schema():
+        if not _has_mg_schema() or not _has_mg_sale_extended_schema() or not _has_mg_events_extended_schema():
             return Response(
-                {"detail": "Schema MG venta no aplicado. Ejecuta apply_mg_sale_schema."},
+                {"detail": "Schema MG venta extendido no aplicado. Ejecuta apply_historical_corrections_schema."},
                 status=500,
             )
 
@@ -1130,7 +1372,9 @@ class DeviceMgReactivarView(APIView):
                    mg_venta_factura_numero = NULL,
                    mg_venta_remito_numero = NULL,
                    mg_venta_observaciones = NULL,
-                   mg_venta_usuario_id = NULL
+                   mg_venta_usuario_id = NULL,
+                   mg_venta_customer_id = NULL,
+                   mg_venta_numero_alternativo = NULL
              WHERE id = %s
             """,
             [device_id],
@@ -1139,9 +1383,10 @@ class DeviceMgReactivarView(APIView):
             """
             INSERT INTO device_mg_events(
               device_id, accion, numero_interno_snapshot, fecha_evento,
-              factura_numero, remito_numero, observaciones, usuario_id, ingreso_id, source
+              factura_numero, remito_numero, observaciones, usuario_id, ingreso_id,
+              venta_customer_id, venta_numero_alternativo, source
             )
-            VALUES (%s, 'reactivacion', %s, %s, NULL, NULL, NULLIF(%s,''), %s, %s, %s)
+            VALUES (%s, 'reactivacion', %s, %s, NULL, NULL, NULLIF(%s,''), %s, %s, NULL, NULL, %s)
             """,
             [
                 device_id,
@@ -1166,8 +1411,12 @@ class DeviceMgReactivarView(APIView):
               COALESCE(d.mg_venta_factura_numero,'') AS mg_venta_factura_numero,
               COALESCE(d.mg_venta_remito_numero,'') AS mg_venta_remito_numero,
               COALESCE(d.mg_venta_observaciones,'') AS mg_venta_observaciones,
-              d.mg_venta_usuario_id
+              d.mg_venta_usuario_id,
+              d.mg_venta_customer_id AS mg_venta_customer_id,
+              COALESCE(c.razon_social,'') AS mg_venta_customer_nombre,
+              COALESCE(d.mg_venta_numero_alternativo,'') AS mg_venta_numero_alternativo
             FROM devices d
+            LEFT JOIN customers c ON c.id = d.mg_venta_customer_id
             WHERE d.id=%s
             """,
             [device_id],

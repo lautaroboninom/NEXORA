@@ -99,20 +99,25 @@ export const catalogEquipmentLabel = (row, fallback = "-") => {
   return parts.length ? parts.join(" | ") : fallback;
 };
 
-// Devuelve la etiqueta de serie priorizando el nmero interno (MG) si existe.
+// Devuelve la etiqueta de serie para tablas/listados.
 // Reglas:
-//  - Si hay MG (numero_interno) -> mostrar MG
-//  - Si no hay MG pero hay N/S (numero_serie) -> mostrar N/S
-//  - Si no hay ninguno -> fallback ("-")
+//  - MG activo: prioriza numero_interno.
+//  - MG inactivo por venta: prioriza numero_serie.
+//  - Si falta el campo priorizado, usa el otro.
+//  - Si no hay ninguno, usa fallback.
 export const nsPreferInternoOf = (row, fallback = "-") => {
   if (!row) return fallback;
   const str = (v) => (v == null ? "" : String(v).trim());
+  const mgEstado = str(row?.mg_estado || row?.equipo?.mg_estado).toLowerCase();
+  const mgInactivoVenta =
+    Boolean(row?.mg_inactivo_venta || row?.equipo?.mg_inactivo_venta || row?.vendido || row?.equipo?.vendido)
+    || mgEstado === "inactivo_venta";
   const interno =
     str(row?.numero_interno) ||
     str(row?.equipo?.numero_interno);
-  if (interno) return interno;
   const serie = str(row?.numero_serie) || str(row?.equipo?.numero_serie);
-  return serie || fallback;
+  if (mgInactivoVenta) return serie || interno || fallback;
+  return interno || serie || fallback;
 };
 export const norm = (v) => {
   const s = (v ?? "").toString().toLowerCase().trim();

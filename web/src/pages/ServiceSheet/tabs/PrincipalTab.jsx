@@ -48,6 +48,8 @@ export default function PrincipalTab(props) {
     ubicaciones,
     ubicacionId,
     setUbicacionId,
+    canEditLocation,
+    canEditAlquiler,
     // savingUb,
     // saveUbicacion,
     // ubDirty,
@@ -155,10 +157,11 @@ export default function PrincipalTab(props) {
   }, [tecnicos]);
   const _selUb = (ubicacionId ? Number(ubicacionId) : null);
   const _curUb = (data?.ubicacion_id ?? null);
-  const ubDirty = _selUb !== null && _selUb !== _curUb;
+  const ubDirty = Boolean(canEditLocation && _selUb !== null && _selUb !== _curUb);
   const estadoLower = (data?.estado || "").toLowerCase();
   const presupuestoLower = (data?.presupuesto_estado || "").toLowerCase();
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower);
+  const alquilerEditable = Boolean(canEditAlquiler);
   const presupuestoLabel = useMemo(() => {
     const v = data?.presupuesto_estado;
     if (!v) return "-";
@@ -243,7 +246,10 @@ export default function PrincipalTab(props) {
   const [nuevoAccAlq, setNuevoAccAlq] = useState({ descripcion: "", referencia: "" });
   const [addingAccAlq, setAddingAccAlq] = useState(false);
   const [deletingAccAlqId, setDeletingAccAlqId] = useState(null);
-  useEffect(() => { (async () => { try { setAccesCatalogo(await getAccesoriosCatalogo()); } catch {} })(); }, []);
+  useEffect(() => {
+    if (!alquilerEditable) return;
+    (async () => { try { setAccesCatalogo(await getAccesoriosCatalogo()); } catch {} })();
+  }, [alquilerEditable]);
 
   async function addAccesorioAlquiler() {
     try {
@@ -312,7 +318,7 @@ export default function PrincipalTab(props) {
   }
 
   async function saveUbicacion() {
-    if (!ubDirty) return;
+    if (!canEditLocation || !ubDirty) return;
     try {
       setSavingUb(true);
       await patch({ ubicacion_id: _selUb });
@@ -644,13 +650,7 @@ export default function PrincipalTab(props) {
         <div className="border rounded p-4">
           <h2 className="font-semibold mb-2">Estado</h2>
           <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusChip value={data?.estado} title="Estado del equipo" />
-              <StatusChip value={data?.presupuesto_estado} title="Estado de presupuesto" />
-              <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-800">
-                Etapa: {etapaFlujo}
-              </span>
-            </div>
+
             {bajaSolicitadaLabel && (
               <div className="mt-2 text-xs font-medium text-amber-700">{bajaSolicitadaLabel}</div>
             )}
@@ -794,33 +794,39 @@ export default function PrincipalTab(props) {
             </div>
             <div>
               <h2 className="font-semibold mb-2">Ubicación</h2>
-              <div className="flex flex-col items-start gap-2">
-                <select
-                  className="border rounded p-2"
-                  value={ubicacionId}
-                  onChange={(e) => setUbicacionId(e.target.value)}
-                  aria-label="Seleccionar ubicación"
-                >
-                  <option value="" disabled>
-                    Seleccione la ubicación.
-                  </option>
-                  {ubicaciones.map((u) => (
-                    <option key={u.id} value={String(u.id)}>
-                      {u.nombre}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
-                  onClick={saveUbicacion}
-                  disabled={savingUb || !ubDirty}
-                  aria-busy={savingUb ? "true" : "false"}
-                  type="button"
-                >
-                  {savingUb ? "Guardando..." : "Guardar"}
-                </button>
-              </div>
-              <div className="text-xs text-gray-500">La ubicación puede modificarse desde aquí.</div>
+              {canEditLocation ? (
+                <>
+                  <div className="flex flex-col items-start gap-2">
+                    <select
+                      className="border rounded p-2"
+                      value={ubicacionId}
+                      onChange={(e) => setUbicacionId(e.target.value)}
+                      aria-label="Seleccionar ubicación"
+                    >
+                      <option value="" disabled>
+                        Seleccione la ubicación.
+                      </option>
+                      {ubicaciones.map((u) => (
+                        <option key={u.id} value={String(u.id)}>
+                          {u.nombre}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
+                      onClick={saveUbicacion}
+                      disabled={savingUb || !ubDirty}
+                      aria-busy={savingUb ? "true" : "false"}
+                      type="button"
+                    >
+                      {savingUb ? "Guardando..." : "Guardar"}
+                    </button>
+                  </div>
+                  <div className="text-xs text-gray-500">La ubicación puede modificarse desde aquí.</div>
+                </>
+              ) : (
+                <div>{data?.ubicacion_nombre || "-"}</div>
+              )}
             </div>
           </div>
           {/* Comentarios (debajo de Asignación y Ubicación) */}
@@ -1043,8 +1049,9 @@ export default function PrincipalTab(props) {
           <input
             type="checkbox"
             checked={!!data.alquilado}
-            disabled={!!data.alquilado && !canUncheckAlquilado}
+            disabled={!alquilerEditable || (!!data.alquilado && !canUncheckAlquilado)}
             onChange={async (e) => {
+              if (!alquilerEditable) return;
               const checked = e.target.checked;
               if (!checked && data?.alquilado && !canUncheckAlquilado) return;
               try {
@@ -1069,7 +1076,8 @@ export default function PrincipalTab(props) {
               className="border rounded p-1 w-80"
               list={clientesPerm ? "alquiler_clientes_rs" : undefined}
               value={data.alquiler_a || ""}
-              onChange={(e) => patch({ alquiler_a: e.target.value })}
+              onChange={(e) => { if (alquilerEditable) patch({ alquiler_a: e.target.value }); }}
+              disabled={!alquilerEditable}
               placeholder="Elegí de la lista"
             />
             {clientesPerm && (
@@ -1079,20 +1087,21 @@ export default function PrincipalTab(props) {
                 ))}
               </datalist>
             )}
-            {clientesPerm && (data.alquiler_a || "").trim() && !alquilerMatch && (
+            {alquilerEditable && clientesPerm && (data.alquiler_a || "").trim() && !alquilerMatch && (
               <div className="text-xs text-amber-700 mt-1">Selecciona un cliente válido de la lista.</div>
             )}
           </div>
         </Row>
         <Row label="Remito">
-          <input className="border rounded p-1 w-60" value={data.alquiler_remito || ""} onChange={(e) => patch({ alquiler_remito: e.target.value })} />
+          <input className="border rounded p-1 w-60" value={data.alquiler_remito || ""} onChange={(e) => { if (alquilerEditable) patch({ alquiler_remito: e.target.value }); }} disabled={!alquilerEditable} />
         </Row>
         <Row label="Fecha">
           <input
             type="date"
             className="border rounded p-1"
             value={(data.alquiler_fecha || "").slice(0, 10)}
-            onChange={(e) => patch({ alquiler_fecha: e.target.value || null })}
+            onChange={(e) => { if (alquilerEditable) patch({ alquiler_fecha: e.target.value || null }); }}
+            disabled={!alquilerEditable}
           />
         </Row>
         {data.alquilado && (
@@ -1106,7 +1115,7 @@ export default function PrincipalTab(props) {
                       {it.accesorio_nombre}
                       {it.referencia ? ` (ref: ${it.referencia})` : ""}
                     </span>
-                    {!isEntregadoOBaja && (
+                    {alquilerEditable && !isEntregadoOBaja && (
                       <button
                         className="text-red-600 text-xs"
                         onClick={() => removeAccesorioAlquiler(it.id)}
@@ -1122,7 +1131,7 @@ export default function PrincipalTab(props) {
             ) : (
               <div className="text-sm text-gray-500">Sin accesorios de alquiler.</div>
             )}
-            {!isEntregadoOBaja && (
+            {alquilerEditable && !isEntregadoOBaja && (
               <div className="mt-2 flex flex-wrap items-end gap-2">
                 <input
                   className="border rounded p-2 min-w-[240px]"

@@ -2,6 +2,7 @@ from django.db import connection
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from service.auth import issue_token
 from service.models import User
 
 
@@ -248,7 +249,7 @@ class PendientesPorTecnicoAPITest(TestCase):
     def setUp(self):
         super().setUp()
         self.client = APIClient()
-        self.client.force_authenticate(user=self.jefe_user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe_user)}")
 
     def test_filtra_pendientes_sin_tecnico_asignado(self):
         resp = self.client.get("/api/ingresos/pendientes/?tecnico_id=sin_asignar")
@@ -261,3 +262,17 @@ class PendientesPorTecnicoAPITest(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual([row["id"] for row in resp.data], [self.ingreso_assigned_id])
+        self.assertEqual(resp.data[0]["asignado_a"], self.tech_user.id)
+        self.assertEqual(resp.data[0]["asignado_a_nombre"], self.tech_user.nombre)
+        self.assertEqual(resp.data[0]["tecnico"], self.tech_user.nombre)
+
+    def test_mis_pendientes_incluye_tecnico_asignado(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.tech_user)}")
+
+        resp = self.client.get("/api/tecnico/mis-pendientes/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([row["id"] for row in resp.data], [self.ingreso_assigned_id])
+        self.assertEqual(resp.data[0]["asignado_a"], self.tech_user.id)
+        self.assertEqual(resp.data[0]["asignado_a_nombre"], self.tech_user.nombre)
+        self.assertEqual(resp.data[0]["tecnico"], self.tech_user.nombre)

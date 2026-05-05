@@ -1,6 +1,17 @@
 import { formatDateTime as formatDateTimeHelper } from "../../../lib/ui-helpers";
 
-const roleLabel = (v) => { if (!v) return "-"; const s = String(v).trim().replace(/_/g, " "); return s.charAt(0).toUpperCase() + s.slice(1); };
+const roleLabel = (value) => {
+  if (!value) return "-";
+  const text = String(value).trim().replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
+
+const fieldLabels = {
+  ubicacion_id: "Ubicación",
+};
+
+const fieldLabel = (value) => fieldLabels[String(value || "").trim()] || value || "-";
+const historyValue = (value) => (value === null || value === undefined || value === "" ? "-" : value);
 
 export default function HistorialTab({ hErr, hLoading, hist }) {
   return (
@@ -30,15 +41,15 @@ export default function HistorialTab({ hErr, hLoading, hist }) {
                 </td>
               </tr>
             ) : (
-              hist.map((r, idx) => (
+              hist.map((row, idx) => (
                 <tr key={idx} className="border-t">
-                  <td className="p-2 whitespace-nowrap">{formatDateTimeHelper(r.ts)}</td>
-                  <td className="p-2">{r.user_nombre || r.user_id || "-"}</td>
-                  <td className="p-2 whitespace-nowrap">{roleLabel(r.user_role)}</td>
-                  <td className="p-2">{r.table_name}</td>
-                  <td className="p-2">{r.column_name}</td>
-                  <td className="p-2">{r.old_value || '-'}</td>
-                  <td className="p-2">{r.new_value || '-'}</td>
+                  <td className="p-2 whitespace-nowrap">{formatDateTimeHelper(row.ts)}</td>
+                  <td className="p-2">{row.user_nombre || row.user_id || "-"}</td>
+                  <td className="p-2 whitespace-nowrap">{roleLabel(row.user_role)}</td>
+                  <td className="p-2">{row.table_name}</td>
+                  <td className="p-2">{fieldLabel(row.column_name)}</td>
+                  <td className="p-2">{historyValue(row.old_value)}</td>
+                  <td className="p-2">{historyValue(row.new_value)}</td>
                 </tr>
               ))
             )}
@@ -48,6 +59,3 @@ export default function HistorialTab({ hErr, hLoading, hist }) {
     </div>
   );
 }
-
-
-

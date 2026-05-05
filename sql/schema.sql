@@ -1,7 +1,7 @@
 ﻿-- schema/postgres.sql
 -- Esquema consolidado para PostgreSQL (12+)
--- Unifica DDL, Ã­ndices, vistas y triggers necesarios para la app.
--- Objetivo: base â€œprolijaâ€ y mÃ­nima sin parches adicionales.
+-- Unifica DDL, índices, vistas y triggers necesarios para la app.
+-- Objetivo: base prolija y mínima sin parches adicionales.
 
 SET TIME ZONE 'America/Argentina/Buenos_Aires';
 CREATE EXTENSION IF NOT EXISTS citext;
@@ -17,7 +17,7 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'motivo_ingreso') THEN
     CREATE TYPE motivo_ingreso AS ENUM (
-      'reparaciÃ³n','service preventivo','baja alquiler','reparaciÃ³n alquiler','urgente control','devolución demo','cotización de equipo','otros'
+      'reparación','service preventivo','baja alquiler','reparación alquiler','urgente control','devolución demo','cotización de equipo','otros'
     );
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'disposicion_type') THEN
@@ -43,6 +43,47 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'preventivo_item_state') THEN
     CREATE TYPE preventivo_item_state AS ENUM ('pendiente','ok','retirado','no_controlado');
+  END IF;
+END $$;
+
+-- Corrección idempotente para bases existentes creadas con etiquetas de enum mal codificadas.
+DO $$
+DECLARE
+  bad_reparacion TEXT := convert_from(decode('7265706172616369c383c2b36e', 'hex'), 'UTF8');
+  bad_reparacion_alquiler TEXT := convert_from(decode('7265706172616369c383c2b36e20616c7175696c6572', 'hex'), 'UTF8');
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'motivo_ingreso') THEN
+    IF EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'motivo_ingreso'
+         AND e.enumlabel = bad_reparacion
+    ) AND NOT EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'motivo_ingreso'
+         AND e.enumlabel = 'reparación'
+    ) THEN
+      EXECUTE format('ALTER TYPE motivo_ingreso RENAME VALUE %L TO %L', bad_reparacion, 'reparación');
+    END IF;
+
+    IF EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'motivo_ingreso'
+         AND e.enumlabel = bad_reparacion_alquiler
+    ) AND NOT EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'motivo_ingreso'
+         AND e.enumlabel = 'reparación alquiler'
+    ) THEN
+      EXECUTE format('ALTER TYPE motivo_ingreso RENAME VALUE %L TO %L', bad_reparacion_alquiler, 'reparación alquiler');
+    END IF;
   END IF;
 END $$;
 
@@ -212,6 +253,8 @@ CREATE TABLE IF NOT EXISTS devices (
   mg_venta_remito_numero TEXT,
   mg_venta_observaciones TEXT,
   mg_venta_usuario_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  mg_venta_customer_id INTEGER NULL REFERENCES customers(id) ON DELETE SET NULL,
+  mg_venta_numero_alternativo TEXT,
   tipo_equipo      TEXT,
   variante         TEXT,
   garantia_vence   DATE,
@@ -297,6 +340,8 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_factura_numero TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_remito_numero TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_observaciones TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_usuario_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_customer_id INTEGER NULL REFERENCES customers(id) ON DELETE SET NULL;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mg_venta_numero_alternativo TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS tipo_equipo TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS variante TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS garantia_vence DATE;
@@ -343,8 +388,12 @@ CREATE TABLE IF NOT EXISTS device_mg_events (
   observaciones TEXT,
   usuario_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   ingreso_id INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL,
+  venta_customer_id INTEGER NULL REFERENCES customers(id) ON DELETE SET NULL,
+  venta_numero_alternativo TEXT,
   source TEXT NOT NULL DEFAULT 'equipos' CHECK (source IN ('equipos', 'service_sheet'))
 );
+ALTER TABLE device_mg_events ADD COLUMN IF NOT EXISTS venta_customer_id INTEGER NULL REFERENCES customers(id) ON DELETE SET NULL;
+ALTER TABLE device_mg_events ADD COLUMN IF NOT EXISTS venta_numero_alternativo TEXT;
 CREATE INDEX IF NOT EXISTS idx_device_mg_events_device_fecha_desc
   ON device_mg_events (device_id, fecha_evento DESC);
 CREATE INDEX IF NOT EXISTS idx_device_mg_events_fecha_desc
@@ -660,6 +709,49 @@ CREATE TABLE IF NOT EXISTS ingreso_events (
   comentario  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  sync_type         TEXT NOT NULL,
+  ingreso_id        INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  device_id         INTEGER NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
+  ingreso_event_id  INTEGER NULL REFERENCES ingreso_events(id) ON DELETE SET NULL,
+  numero_serie      TEXT NOT NULL DEFAULT '',
+  source_deposit    TEXT NOT NULL DEFAULT 'STR',
+  target_deposit    TEXT NOT NULL DEFAULT 'STL',
+  status            TEXT NOT NULL DEFAULT 'pending',
+  attempts          INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_error        TEXT NULL,
+  request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_sync_jobs_type CHECK (NULLIF(TRIM(sync_type), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_sync_jobs_status CHECK (status IN ('pending','running','succeeded','failed','blocked')),
+  CONSTRAINT chk_bejerman_sync_jobs_attempts CHECK (attempts >= 0),
+  CONSTRAINT chk_bejerman_sync_jobs_deposits CHECK (
+    NULLIF(TRIM(source_deposit), '') IS NOT NULL
+    AND NULLIF(TRIM(target_deposit), '') IS NOT NULL
+    AND source_deposit <> target_deposit
+  )
+);
+
+CREATE TABLE IF NOT EXISTS ingreso_historical_corrections (
+  id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ingreso_id      INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  accion          TEXT NOT NULL CHECK (accion IN ('entrega','alta_alquiler','baja_alquiler','baja_ingreso','alta_ingreso')),
+  fecha_efectiva  TIMESTAMPTZ NOT NULL,
+  motivo          TEXT NOT NULL,
+  payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  notificar       BOOLEAN NOT NULL DEFAULT TRUE,
+  usuario_id      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ingreso_hist_corr_ingreso_fecha
+  ON ingreso_historical_corrections (ingreso_id, fecha_efectiva DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_ingreso_hist_corr_created_at
+  ON ingreso_historical_corrections (created_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS ingreso_media (
   id             INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id     INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -749,6 +841,166 @@ CREATE TABLE IF NOT EXISTS ingreso_presupuesto_alerts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ingreso_presupuesto_alerts_ingreso ON ingreso_presupuesto_alerts(ingreso_id);
 CREATE INDEX IF NOT EXISTS ix_ingreso_presupuesto_alerts_last_sent ON ingreso_presupuesto_alerts(last_sent_at);
+
+-- Centro de trabajo: reglas, objetivos y estado de avisos operativos
+CREATE TABLE IF NOT EXISTS work_alert_rules (
+  id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  rule_key        TEXT NOT NULL UNIQUE,
+  label           TEXT NOT NULL,
+  description     TEXT NULL,
+  threshold_value NUMERIC(12,2) NOT NULL,
+  threshold_unit  TEXT NOT NULL DEFAULT 'dias',
+  severity        TEXT NOT NULL DEFAULT 'warning',
+  enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+  email_enabled   BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_work_alert_rules_threshold CHECK (threshold_value >= 0),
+  CONSTRAINT chk_work_alert_rules_unit CHECK (threshold_unit IN ('horas','dias','dias_habiles','cantidad','porcentaje')),
+  CONSTRAINT chk_work_alert_rules_severity CHECK (severity IN ('info','warning','critical'))
+);
+
+CREATE TABLE IF NOT EXISTS work_objectives (
+  id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  scope_type      TEXT NOT NULL,
+  technician_id   INTEGER NULL REFERENCES users(id) ON DELETE CASCADE,
+  period_type     TEXT NOT NULL,
+  metric_key      TEXT NOT NULL,
+  label           TEXT NOT NULL,
+  target_value    NUMERIC(12,2) NOT NULL,
+  direction       TEXT NOT NULL DEFAULT 'gte',
+  active          BOOLEAN NOT NULL DEFAULT TRUE,
+  valid_from      DATE NOT NULL DEFAULT CURRENT_DATE,
+  valid_to        DATE NULL,
+  created_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  updated_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_work_objectives_scope CHECK (
+    (scope_type = 'global' AND technician_id IS NULL)
+    OR (scope_type = 'technician' AND technician_id IS NOT NULL)
+  ),
+  CONSTRAINT chk_work_objectives_period CHECK (period_type IN ('daily','weekly')),
+  CONSTRAINT chk_work_objectives_direction CHECK (direction IN ('gte','lte')),
+  CONSTRAINT chk_work_objectives_target CHECK (target_value >= 0),
+  CONSTRAINT chk_work_objectives_validity CHECK (valid_to IS NULL OR valid_to >= valid_from)
+);
+
+CREATE TABLE IF NOT EXISTS work_alert_snoozes (
+  id             INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  alert_key      TEXT NOT NULL,
+  alert_ref      TEXT NOT NULL,
+  snoozed_until  TIMESTAMPTZ NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_work_alert_snoozes_ref CHECK (NULLIF(TRIM(alert_ref), '') IS NOT NULL)
+);
+
+CREATE TABLE IF NOT EXISTS work_notification_state (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  channel           TEXT NOT NULL,
+  notification_key  TEXT NOT NULL,
+  user_id           INTEGER NULL REFERENCES users(id) ON DELETE CASCADE,
+  last_sent_at      TIMESTAMPTZ NULL,
+  payload_hash      TEXT NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_work_notification_state_channel CHECK (channel IN ('email','internal'))
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  notification_key  TEXT NOT NULL,
+  dedupe_key        TEXT NOT NULL,
+  title             TEXT NOT NULL,
+  body              TEXT NOT NULL DEFAULT '',
+  href              TEXT NOT NULL DEFAULT '',
+  severity          TEXT NOT NULL DEFAULT 'info',
+  entity_type       TEXT NULL,
+  entity_id         TEXT NULL,
+  payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  read_at           TIMESTAMPTZ NULL,
+  clicked_at        TIMESTAMPTZ NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_notifications_key CHECK (NULLIF(TRIM(notification_key), '') IS NOT NULL),
+  CONSTRAINT chk_notifications_dedupe CHECK (NULLIF(TRIM(dedupe_key), '') IS NOT NULL),
+  CONSTRAINT chk_notifications_severity CHECK (severity IN ('info','warning','critical'))
+);
+
+CREATE TABLE IF NOT EXISTS notification_user_preferences (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  notification_key  TEXT NOT NULL,
+  enabled           BOOLEAN NULL,
+  updated_by        INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_notification_preferences_key CHECK (NULLIF(TRIM(notification_key), '') IS NOT NULL),
+  CONSTRAINT uq_notification_user_preferences UNIQUE (user_id, notification_key)
+);
+
+CREATE INDEX IF NOT EXISTS ix_work_alert_rules_enabled ON work_alert_rules(enabled);
+CREATE INDEX IF NOT EXISTS ix_work_objectives_active_period
+  ON work_objectives(period_type, active, valid_from, valid_to);
+CREATE INDEX IF NOT EXISTS ix_work_objectives_technician
+  ON work_objectives(technician_id, period_type, active);
+CREATE INDEX IF NOT EXISTS ix_work_alert_snoozes_user_until
+  ON work_alert_snoozes(user_id, snoozed_until);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_work_alert_snoozes_user_alert
+  ON work_alert_snoozes(user_id, alert_key, alert_ref);
+CREATE INDEX IF NOT EXISTS ix_work_notification_state_last_sent
+  ON work_notification_state(last_sent_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_work_notification_state_key
+  ON work_notification_state(channel, notification_key, COALESCE(user_id, -1));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notifications_user_key_dedupe
+  ON notifications(user_id, notification_key, dedupe_key);
+CREATE INDEX IF NOT EXISTS ix_notifications_user_unread_created
+  ON notifications(user_id, created_at DESC)
+  WHERE read_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_notifications_entity
+  ON notifications(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS ix_notification_preferences_user
+  ON notification_user_preferences(user_id);
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_work_alert_rules_set_updated_at') THEN
+    CREATE TRIGGER trg_work_alert_rules_set_updated_at
+    BEFORE UPDATE ON work_alert_rules
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_work_objectives_set_updated_at') THEN
+    CREATE TRIGGER trg_work_objectives_set_updated_at
+    BEFORE UPDATE ON work_objectives
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_work_notification_state_set_updated_at') THEN
+    CREATE TRIGGER trg_work_notification_state_set_updated_at
+    BEFORE UPDATE ON work_notification_state
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notifications_set_updated_at') THEN
+    CREATE TRIGGER trg_notifications_set_updated_at
+    BEFORE UPDATE ON notifications
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_preferences_set_updated_at') THEN
+    CREATE TRIGGER trg_notification_preferences_set_updated_at
+    BEFORE UPDATE ON notification_user_preferences
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+END $$;
+
+INSERT INTO work_alert_rules(rule_key, label, description, threshold_value, threshold_unit, severity, enabled, email_enabled) VALUES
+  ('presupuesto_sin_aprobar', 'Presupuesto emitido sin aprobar', 'Presupuestos emitidos que llevan demasiados días sin aprobación.', 7, 'dias', 'critical', TRUE, TRUE),
+  ('liberado_sin_entregar', 'Liberado sin entregar', 'Equipos liberados que siguen en taller.', 3, 'dias', 'warning', TRUE, TRUE),
+  ('derivado_sin_devolucion', 'Derivado con espera', 'Equipos derivados a proveedor externo sin devolución.', 7, 'dias', 'warning', TRUE, TRUE),
+  ('wip_critico', 'Trabajo con espera crítica', 'Equipos en taller con demasiados días desde el ingreso.', 16, 'dias', 'critical', TRUE, TRUE),
+  ('sin_tecnico', 'Sin técnico asignado', 'Equipos en taller que todavía no tienen técnico responsable.', 1, 'dias', 'warning', TRUE, FALSE),
+  ('preventivo_vencido', 'Preventivo vencido', 'Planes de mantenimiento preventivo con fecha vencida.', 0, 'dias', 'critical', TRUE, TRUE),
+  ('preventivo_proximo', 'Preventivo próximo', 'Planes de mantenimiento preventivo próximos a vencer.', 30, 'dias', 'warning', TRUE, TRUE)
+ON CONFLICT (rule_key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS proveedores_externos (
   id        INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1299,6 +1551,48 @@ CREATE TABLE IF NOT EXISTS preventivo_revision_items (
     )
 );
 
+CREATE TABLE IF NOT EXISTS preventivo_plan_repuestos (
+  id                       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  plan_id                  INTEGER NOT NULL REFERENCES preventivo_planes(id) ON DELETE CASCADE,
+  repuesto_key             TEXT NOT NULL,
+  catalogo_repuesto_id     INTEGER NULL REFERENCES catalogo_repuestos(id) ON DELETE SET NULL,
+  nombre_repuesto          TEXT NOT NULL,
+  periodicidad_valor       INTEGER NOT NULL,
+  periodicidad_unidad      preventivo_period_unit NOT NULL,
+  aviso_anticipacion_dias  INTEGER NOT NULL DEFAULT 30,
+  ultima_revision_fecha    DATE NULL,
+  proxima_revision_fecha   DATE NULL,
+  activa                   BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  updated_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_preventivo_plan_repuestos_periodicidad CHECK (periodicidad_valor > 0),
+  CONSTRAINT chk_preventivo_plan_repuestos_aviso CHECK (aviso_anticipacion_dias >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS preventivo_repuesto_plantillas (
+  id                       INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  signature_key            TEXT NOT NULL,
+  signature_tipo_equipo    TEXT NULL,
+  signature_marca          TEXT NULL,
+  signature_modelo         TEXT NULL,
+  signature_variante       TEXT NULL,
+  repuesto_key             TEXT NOT NULL,
+  catalogo_repuesto_id     INTEGER NULL REFERENCES catalogo_repuestos(id) ON DELETE SET NULL,
+  nombre_repuesto          TEXT NOT NULL,
+  periodicidad_valor       INTEGER NOT NULL,
+  periodicidad_unidad      preventivo_period_unit NOT NULL,
+  aviso_anticipacion_dias  INTEGER NOT NULL DEFAULT 30,
+  activa                   BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  updated_by               INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_preventivo_plantillas_periodicidad CHECK (periodicidad_valor > 0),
+  CONSTRAINT chk_preventivo_plantillas_aviso CHECK (aviso_anticipacion_dias >= 0)
+);
+
 -- =============================
 -- Ãndices
 -- =============================
@@ -1322,6 +1616,15 @@ CREATE INDEX IF NOT EXISTS ix_quotes_aprobado ON quotes(fecha_aprobado);
 CREATE INDEX IF NOT EXISTS idx_items_quote ON quote_items(quote_id);
 CREATE INDEX IF NOT EXISTS idx_quote_items_repuesto_codigo ON quote_items(repuesto_codigo);
 CREATE INDEX IF NOT EXISTS ix_events_ingreso_estado_ts ON ingreso_events(ingreso_id, a_estado, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_ingreso
+  ON bejerman_sync_jobs(sync_type, ingreso_id);
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_due
+  ON bejerman_sync_jobs(status, next_attempt_at, id)
+  WHERE status IN ('pending','failed');
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_ingreso
+  ON bejerman_sync_jobs(ingreso_id);
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_device
+  ON bejerman_sync_jobs(device_id);
 
 CREATE INDEX IF NOT EXISTS idx_ingreso_acc_ingreso ON ingreso_accesorios(ingreso_id);
 CREATE INDEX IF NOT EXISTS idx_ingreso_acc_accesorio ON ingreso_accesorios(accesorio_id);
@@ -1362,6 +1665,20 @@ CREATE INDEX IF NOT EXISTS idx_preventivo_revision_items_revision_orden
   ON preventivo_revision_items(revision_id, orden);
 CREATE INDEX IF NOT EXISTS idx_preventivo_revision_items_revision_estado
   ON preventivo_revision_items(revision_id, estado_item);
+CREATE INDEX IF NOT EXISTS idx_preventivo_plan_repuestos_plan
+  ON preventivo_plan_repuestos(plan_id);
+CREATE INDEX IF NOT EXISTS idx_preventivo_plan_repuestos_key
+  ON preventivo_plan_repuestos(repuesto_key);
+CREATE INDEX IF NOT EXISTS idx_preventivo_plantillas_signature
+  ON preventivo_repuesto_plantillas(signature_key);
+CREATE INDEX IF NOT EXISTS idx_preventivo_plantillas_repuesto_key
+  ON preventivo_repuesto_plantillas(repuesto_key);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_preventivo_plan_repuestos_plan_key
+  ON preventivo_plan_repuestos(plan_id, repuesto_key)
+  WHERE activa = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_preventivo_plantillas_signature_key
+  ON preventivo_repuesto_plantillas(signature_key, repuesto_key)
+  WHERE activa = TRUE;
 
 CREATE INDEX IF NOT EXISTS idx_mte_marca ON marca_tipos_equipo(marca_id);
 CREATE INDEX IF NOT EXISTS idx_ms_tipo   ON marca_series(tipo_id);
@@ -1387,6 +1704,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_ingreso_media_set_updated_at') THEN
     CREATE TRIGGER trg_ingreso_media_set_updated_at
     BEFORE UPDATE ON ingreso_media
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_sync_jobs_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_sync_jobs_set_updated_at
+    BEFORE UPDATE ON bejerman_sync_jobs
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_ingreso_presupuesto_alerts_set_updated_at') THEN
@@ -1427,6 +1749,16 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_preventivo_revision_items_updated_at') THEN
     CREATE TRIGGER trg_preventivo_revision_items_updated_at
     BEFORE UPDATE ON preventivo_revision_items
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_preventivo_plan_repuestos_updated_at') THEN
+    CREATE TRIGGER trg_preventivo_plan_repuestos_updated_at
+    BEFORE UPDATE ON preventivo_plan_repuestos
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_preventivo_plantillas_updated_at') THEN
+    CREATE TRIGGER trg_preventivo_plantillas_updated_at
+    BEFORE UPDATE ON preventivo_repuesto_plantillas
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
   -- audit_log append-only
@@ -1519,6 +1851,16 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_preventivo_revision_items') THEN
     CREATE TRIGGER trg_audit_preventivo_revision_items
     AFTER INSERT OR UPDATE OR DELETE ON preventivo_revision_items
+    FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_preventivo_plan_repuestos') THEN
+    CREATE TRIGGER trg_audit_preventivo_plan_repuestos
+    AFTER INSERT OR UPDATE OR DELETE ON preventivo_plan_repuestos
+    FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_preventivo_plantillas') THEN
+    CREATE TRIGGER trg_audit_preventivo_plantillas
+    AFTER INSERT OR UPDATE OR DELETE ON preventivo_repuesto_plantillas
     FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
   END IF;
 END $$;

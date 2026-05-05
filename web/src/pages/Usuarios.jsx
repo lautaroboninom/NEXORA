@@ -3,6 +3,7 @@ import {
   deleteUsuario,
   getPermisosCatalogo,
   getRoles,
+  getUsuarioNotificaciones,
   getUsuarioPermisos,
   getUsuarios,
   patchUsuarioActivo,
@@ -10,6 +11,7 @@ import {
   patchUsuarioRolePerm,
   postUsuario,
   postUsuarioPermisosReset,
+  putUsuarioNotificaciones,
   putUsuarioPermisos,
 } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -33,6 +35,24 @@ const EFFECT_LABELS = {
   allow: "Permitir",
   deny: "Bloquear",
 };
+
+const NOTIFICATION_LABELS = {
+  inherit: "Heredar",
+  on: "Activada",
+  off: "Desactivada",
+};
+
+function notificationOverrideToUi(value) {
+  if (value === true) return "on";
+  if (value === false) return "off";
+  return "inherit";
+}
+
+function notificationUiToApi(value) {
+  if (value === "on") return true;
+  if (value === "off") return false;
+  return null;
+}
 
 export default function Usuarios() {
   const { user: yo, refreshSession } = useAuth();
@@ -63,6 +83,15 @@ export default function Usuarios() {
   const [permSaving, setPermSaving] = useState(false);
   const [permResetting, setPermResetting] = useState(false);
   const [permErr, setPermErr] = useState("");
+
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifTarget, setNotifTarget] = useState(null);
+  const [notifData, setNotifData] = useState(null);
+  const [notifOverrides, setNotifOverrides] = useState({});
+  const [notifSearch, setNotifSearch] = useState("");
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifSaving, setNotifSaving] = useState(false);
+  const [notifErr, setNotifErr] = useState("");
 
   useEffect(() => {
     if (!canManageUsers) {
@@ -103,7 +132,7 @@ export default function Usuarios() {
       if (!btnEl) return;
       const rect = btnEl.getBoundingClientRect();
       const menuWidth = 176; // w-44
-      const menuHeightEstimate = 132;
+      const menuHeightEstimate = 176;
       let left = rect.right - menuWidth;
       let top = rect.bottom + 6;
       left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
@@ -119,7 +148,7 @@ export default function Usuarios() {
       window.removeEventListener("resize", recalc);
       window.removeEventListener("scroll", recalc, true);
     };
-  }, [menuOpenId]);
+  }, [menuOpenId, canManagePermissions, canManageUsers]);
 
   useEffect(() => {
     if (!menuOpenId) return;
@@ -319,7 +348,7 @@ export default function Usuarios() {
 
   async function resetPermisos() {
     if (!permTarget || !modalEditable) return;
-    if (!window.confirm("Restablecer todos los permisos a herencia del rol base?")) return;
+    if (!window.confirm("¿Restablecer todos los permisos a herencia del rol base?")) return;
     try {
       setPermResetting(true);
       setPermErr("");
@@ -335,6 +364,105 @@ export default function Usuarios() {
       setPermErr(normalizeErr(e));
     } finally {
       setPermResetting(false);
+    }
+  }
+
+  async function openNotifEditor(u) {
+    if (!canManagePermissions) return;
+    setMenuOpenId(null);
+    setMenuPos(null);
+    setNotifOpen(true);
+    setNotifLoading(true);
+    setNotifErr("");
+    setNotifTarget(u);
+    setNotifData(null);
+    setNotifOverrides({});
+    setNotifSearch("");
+    try {
+      const data = await getUsuarioNotificaciones(u.id);
+      const overrides = {};
+      (data?.items || []).forEach((item) => {
+        overrides[item.key] = notificationOverrideToUi(item.override_enabled);
+      });
+      setNotifData(data || null);
+      setNotifOverrides(overrides);
+    } catch (e) {
+      setNotifErr(normalizeErr(e));
+    } finally {
+      setNotifLoading(false);
+    }
+  }
+
+  function closeNotifEditor() {
+    setNotifOpen(false);
+    setNotifTarget(null);
+    setNotifData(null);
+    setNotifOverrides({});
+    setNotifSearch("");
+    setNotifErr("");
+    setNotifLoading(false);
+    setNotifSaving(false);
+  }
+
+  const notifEditable = Boolean(notifData && canManagePermissions);
+
+  const groupedNotifications = useMemo(() => {
+    const list = Array.isArray(notifData?.items) ? notifData.items : [];
+    const needle = (notifSearch || "").trim().toLowerCase();
+    const groups = new Map();
+    list.forEach((item) => {
+      const text = `${item?.label || ""} ${item?.key || ""} ${item?.group || ""} ${item?.description || ""}`.toLowerCase();
+      if (needle && !text.includes(needle)) return;
+      const groupName = item?.group || "Otros";
+      if (!groups.has(groupName)) groups.set(groupName, []);
+      groups.get(groupName).push(item);
+    });
+    return Array.from(groups.entries()).sort((a, b) =>
+      a[0].localeCompare(b[0], "es", { sensitivity: "base" }),
+    );
+  }, [notifData, notifSearch]);
+
+  const notifDirty = useMemo(() => {
+    const list = Array.isArray(notifData?.items) ? notifData.items : [];
+    return list.some((item) => {
+      const next = notifOverrides?.[item.key] || "inherit";
+      const prev = notificationOverrideToUi(item.override_enabled);
+      return next !== prev;
+    });
+  }, [notifData, notifOverrides]);
+
+  function setNotifOverride(key, value) {
+    setNotifOverrides((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function notificationEffective(item) {
+    const override = notifOverrides?.[item.key] || "inherit";
+    if (override === "on") return true;
+    if (override === "off") return false;
+    return !!item?.default_enabled;
+  }
+
+  async function saveNotificaciones() {
+    if (!notifTarget || !notifEditable) return;
+    try {
+      setNotifSaving(true);
+      setNotifErr("");
+      const preferences = {};
+      (notifData?.items || []).forEach((item) => {
+        preferences[item.key] = notificationUiToApi(notifOverrides?.[item.key] || "inherit");
+      });
+      const data = await putUsuarioNotificaciones(notifTarget.id, { preferences });
+      const overrides = {};
+      (data?.items || []).forEach((item) => {
+        overrides[item.key] = notificationOverrideToUi(item.override_enabled);
+      });
+      setNotifData(data || null);
+      setNotifOverrides(overrides);
+      setMsg("Notificaciones actualizadas");
+    } catch (e) {
+      setNotifErr(normalizeErr(e));
+    } finally {
+      setNotifSaving(false);
     }
   }
 
@@ -497,6 +625,15 @@ export default function Usuarios() {
                 Editar permisos
               </button>
             )}
+            {canManagePermissions && (
+              <button
+                type="button"
+                className="w-full px-3 py-2 text-sm hover:bg-gray-50 text-left"
+                onClick={() => openNotifEditor(menuUser)}
+              >
+                Notificaciones
+              </button>
+            )}
             {canManageUsers && (
               <button
                 type="button"
@@ -561,7 +698,7 @@ export default function Usuarios() {
                     <input
                       type="text"
                       className="border rounded p-2 w-full md:max-w-md"
-                      placeholder="Buscar permiso por nombre, codigo o modulo"
+                      placeholder="Buscar permiso por nombre, código o módulo"
                       value={permSearch}
                       onChange={(e) => setPermSearch(e.target.value)}
                     />
@@ -575,7 +712,7 @@ export default function Usuarios() {
                         onClick={resetPermisos}
                         disabled={!modalEditable || permResetting}
                       >
-                        {permResetting ? "Reseteando..." : "Reset"}
+                        {permResetting ? "Restableciendo..." : "Restablecer"}
                       </Btn>
                       <Btn
                         type="button"
@@ -631,6 +768,130 @@ export default function Usuarios() {
                     ))}
                     {!groupedPermissions.length && (
                       <div className="text-sm text-gray-500">No hay permisos para el filtro actual.</div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notifOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={closeNotifEditor}
+        >
+          <div
+            className="bg-white rounded shadow-xl w-full max-w-5xl max-h-[88vh] overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b px-4 py-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">Notificaciones</div>
+                <div className="text-sm text-gray-600">
+                  {notifTarget ? `${notifTarget.nombre} (${notifTarget.email})` : "-"}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="text-sm text-gray-500 hover:text-gray-900"
+                onClick={closeNotifEditor}
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3 overflow-auto max-h-[calc(88vh-72px)]">
+              {notifErr && (
+                <div className="bg-red-100 text-red-700 border border-red-300 rounded p-2">
+                  {notifErr}
+                </div>
+              )}
+
+              {notifLoading ? (
+                <div className="text-sm text-gray-500">Cargando notificaciones...</div>
+              ) : (
+                <>
+                  <div className="flex flex-col md:flex-row md:items-center gap-3">
+                    <input
+                      type="text"
+                      className="border rounded p-2 w-full md:max-w-md"
+                      placeholder="Buscar notificación por nombre, código o módulo"
+                      value={notifSearch}
+                      onChange={(e) => setNotifSearch(e.target.value)}
+                    />
+                    <div className="text-xs text-gray-500">
+                      {groupedNotifications.reduce((acc, [, items]) => acc + items.length, 0)} tipo(s)
+                    </div>
+                    <div className="md:ml-auto flex gap-2">
+                      <Btn
+                        type="button"
+                        onClick={saveNotificaciones}
+                        disabled={!notifEditable || notifSaving || !notifDirty}
+                      >
+                        {notifSaving ? "Guardando..." : "Guardar"}
+                      </Btn>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    {groupedNotifications.map(([groupName, items]) => (
+                      <div key={groupName} className="border rounded">
+                        <div className="px-3 py-2 bg-gray-50 border-b text-sm font-medium">
+                          {groupName}
+                        </div>
+                        <div className="divide-y">
+                          {items.map((item) => {
+                            const override = notifOverrides?.[item.key] || "inherit";
+                            const effective = notificationEffective(item);
+                            return (
+                              <div
+                                key={item.key}
+                                className="px-3 py-2 flex flex-col md:flex-row md:items-center gap-2"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-sm font-medium">
+                                    {item.label || item.key}
+                                  </div>
+                                  <div className="text-xs text-gray-500">
+                                    {item.description || item.key}
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-gray-400">
+                                    Solo aplica cuando el usuario es destinatario. Predeterminado del rol: {item.default_enabled ? "activada" : "desactivada"}
+                                  </div>
+                                </div>
+                                <div className="text-xs">
+                                  <span
+                                    className={`inline-flex px-2 py-1 rounded border ${effective ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"}`}
+                                  >
+                                    {effective ? "Como destinatario: activada" : "Como destinatario: desactivada"}
+                                  </span>
+                                </div>
+                                <div className="w-full md:w-48">
+                                  <select
+                                    className="border rounded p-2 w-full text-sm"
+                                    value={override}
+                                    disabled={!notifEditable}
+                                    onChange={(e) => setNotifOverride(item.key, e.target.value)}
+                                  >
+                                    <option value="inherit">{NOTIFICATION_LABELS.inherit}</option>
+                                    <option value="on">{NOTIFICATION_LABELS.on}</option>
+                                    <option value="off">{NOTIFICATION_LABELS.off}</option>
+                                  </select>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                    {!groupedNotifications.length && (
+                      <div className="text-sm text-gray-500">
+                        No hay notificaciones para el filtro actual.
+                      </div>
                     )}
                   </div>
                 </>

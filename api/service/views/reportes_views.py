@@ -5,7 +5,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import _set_audit_user, exec_void, q, require_roles
+from ..bejerman_sync import enqueue_stock_transfer_for_ingreso
 from ..pdf import render_remito_salida_pdf, render_remito_derivacion_pdf
+from ..notifications import notify_ingreso_liberado
 
 
 class RemitoSalidaPdfView(APIView):
@@ -58,6 +60,14 @@ class RemitoSalidaPdfView(APIView):
                 )
         except Exception:
             # No bloquear la impresión del remito si falla la auditoría de eventos
+            pass
+
+        if (cur_row["estado"] or "").lower() not in ("entregado", "baja"):
+            enqueue_stock_transfer_for_ingreso(ingreso_id)
+
+        try:
+            notify_ingreso_liberado(ingreso_id)
+        except Exception:
             pass
 
         pdf_bytes, fname = render_remito_salida_pdf(ingreso_id, printed_by=getattr(request.user, "nombre", ""))

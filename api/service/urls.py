@@ -12,6 +12,7 @@ from .views import (
     MarcarReparadoView, MarcarParaRepararView, MarcarControladoSinDefectoView, EntregarIngresoView, GarantiaReparacionCheckView, GarantiaFabricaCheckView,
     HabilitarReparacionCotizacionView,
     DarBajaIngresoView, DarAltaIngresoView,
+    IngresoCorreccionesHistoricasView,
     ListosParaRetiroView,
     ScanLookupView,
 
@@ -47,6 +48,7 @@ from .views import (
     # administración de usuarios
     UsuariosView, UsuarioActivoView, UsuarioResetPassView, UsuarioRolePermView, UsuarioDeleteView,
     CatalogoRolesView, CatalogoPermisosView, UsuarioPermisosView, UsuarioPermisosResetView, CerrarReparacionView,
+    NotificacionesView, NotificacionClickView, UsuarioNotificacionesView,
 
     # clientes / marcas-modelos / proveedores externos
     ClientesView, ClienteDeleteView, ClienteMergeView,
@@ -69,6 +71,7 @@ from .views import (
     MetricasResumenView, MetricasSeriesView, MetricasFinanzasView, MetricasFinanzasLiberadosView, MetricasCalibracionView, FeriadosView, MetricasConfigView,
     CatalogoMotivosView,
     WarrantyRulesView, WarrantyRuleDetailView, DevicesMergeView,
+    WorkResumenView, WorkObjectivesView, WorkAlertRulesView, GlobalSearchView,
 )
 
 from .views.devices_views import (
@@ -113,6 +116,7 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/entregar/", EntregarIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/baja/", DarBajaIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/alta/", DarAltaIngresoView.as_view()),
+    path("ingresos/<int:ingreso_id>/correcciones-historicas/", IngresoCorreccionesHistoricasView.as_view()),
 
     # presupuestos
     path("quotes/<int:ingreso_id>/emitir/", EmitirPresupuestoView.as_view()),
@@ -125,6 +129,12 @@ urlpatterns = [
 
     # listados operativos
     path("clientes/", CustomersListView.as_view()),
+    path("trabajo/resumen/", WorkResumenView.as_view()),
+    path("trabajo/objetivos/", WorkObjectivesView.as_view()),
+    path("trabajo/reglas-alerta/", WorkAlertRulesView.as_view()),
+    path("notificaciones/", NotificacionesView.as_view()),
+    path("notificaciones/<int:notification_id>/click/", NotificacionClickView.as_view()),
+    path("busqueda/global/", GlobalSearchView.as_view()),
     path("ingresos/pendientes/", PendientesGeneralView.as_view()),
     path("ingresos/aprobados-para-reparar/", AprobadosParaRepararView.as_view()),
     path("ingresos/aprobados-reparados/", AprobadosYReparadosView.as_view()),
@@ -250,6 +260,7 @@ urlpatterns = [
     path("permisos/catalogo/", CatalogoPermisosView.as_view()),
     path("usuarios/<int:uid>/permisos/", UsuarioPermisosView.as_view()),
     path("usuarios/<int:uid>/permisos/reset/", UsuarioPermisosResetView.as_view()),
+    path("usuarios/<int:uid>/notificaciones/", UsuarioNotificacionesView.as_view()),
     path("ingresos/<int:ingreso_id>/asignar-tecnico/", IngresoAsignarTecnicoView.as_view()),
     path("catalogos/tecnicos/", CatalogoTecnicosView.as_view()),
 

@@ -1,6 +1,6 @@
 // web/src/pages/NuevoIngreso.jsx (UTF-8 authoring; will be re-encoded to Windows-1252)
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   getClientes,
   getMarcas,
@@ -18,6 +18,8 @@ import {
   getCatalogVariantes,
   lookupScan,
 } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
+import { canAny, PERMISSION_CODES } from "@/lib/permissions";
 
 const FIELD_BASE_CLASS =
   "border border-gray-300 bg-white rounded p-2 w-full text-[15px] font-semibold text-gray-900 placeholder:text-gray-400";
@@ -36,6 +38,18 @@ const TextArea = ({ className = "", ...p }) => (
   <textarea {...p} className={`${FIELD_BASE_CLASS} ${className}`} />
 );
 
+function scrollPageTop() {
+  try {
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  } catch (_) {
+    try {
+      window.scrollTo(0, 0);
+    } catch (_) {}
+  }
+}
+
 // clone helper (fallback if structuredClone is missing)
 function clone(obj) {
   try {
@@ -48,7 +62,37 @@ function clone(obj) {
 export default function NuevoIngreso() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
+  const canAutoOpenCreatedIngreso = canAny(user, [
+    PERMISSION_CODES.PAGE_INGRESOS_HISTORY,
+    PERMISSION_CODES.PAGE_WORK_QUEUES,
+    PERMISSION_CODES.PAGE_BUDGET_QUEUES,
+    PERMISSION_CODES.PAGE_LOGISTICS,
+    PERMISSION_CODES.ACTION_PRESUPUESTO_MANAGE,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_BASICS,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_DIAGNOSIS,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_LOCATION,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY,
+    PERMISSION_CODES.ACTION_INGRESO_MANAGE_DERIVATIONS,
+    PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS,
+    PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA,
+  ]);
+  const canViewCreatedIngreso = canAny(user, [
+    PERMISSION_CODES.PAGE_SERVICE_SHEET_PRINCIPAL,
+    PERMISSION_CODES.PAGE_INGRESOS_HISTORY,
+    PERMISSION_CODES.PAGE_WORK_QUEUES,
+    PERMISSION_CODES.PAGE_BUDGET_QUEUES,
+    PERMISSION_CODES.PAGE_LOGISTICS,
+    PERMISSION_CODES.ACTION_PRESUPUESTO_MANAGE,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_BASICS,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_DIAGNOSIS,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_LOCATION,
+    PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY,
+    PERMISSION_CODES.ACTION_INGRESO_MANAGE_DERIVATIONS,
+    PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS,
+    PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA,
+  ]);
   const prefillRef = useRef(null);
   const prefillAppliedRef = useRef(false);
   const prefillModelAppliedRef = useRef(false);
@@ -894,6 +938,7 @@ export default function NuevoIngreso() {
 
   const submit = async (e) => {
     e.preventDefault();
+    scrollPageTop();
     setLoading(true);
     setErr("");
     setOut(null);
@@ -984,10 +1029,9 @@ export default function NuevoIngreso() {
         });
         return;
       }
-      setOut(r);
-      if (r?.ingreso_id) navigate(`/ingresos/${r.ingreso_id}`);
-
       resetFormFields();
+      setOut(r);
+      if (r?.ingreso_id && canAutoOpenCreatedIngreso) navigate(`/ingresos/${r.ingreso_id}`);
     } catch (e2) {
       if (e2?.data?.conflict_type === "MG_INACTIVO_VENTA") {
         setMgInactiveInfo({
@@ -1054,8 +1098,18 @@ export default function NuevoIngreso() {
         <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded">{err}</div>
       )}
       {out && (
-        <div className="bg-green-100 border border-green-300 text-green-700 p-2 rounded">
-          Ingreso creado: <b>{out.os}</b> (ID: {out.ingreso_id})
+        <div className="bg-green-100 border border-green-300 text-green-700 p-2 rounded flex flex-wrap items-center gap-2">
+          <span>
+            Ingreso creado: <b>{out.os}</b> (ID: {out.ingreso_id})
+          </span>
+          {out.ingreso_id && canViewCreatedIngreso && (
+            <Link
+              to={`/ingresos/${out.ingreso_id}`}
+              className="font-semibold underline underline-offset-2 hover:text-green-900"
+            >
+              Ver ingreso
+            </Link>
+          )}
         </div>
       )}
 

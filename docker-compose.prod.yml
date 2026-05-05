@@ -49,6 +49,23 @@ services:
         read_only: true
     restart: unless-stopped
 
+  bejerman-sync:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+    container_name: sistemadereparaciones-bejerman-sync
+    env_file: .env.prod
+    environment:
+      - DJANGO_SETTINGS_MODULE=app.settings_prod
+      - TZ=${TZ:-America/Argentina/Buenos_Aires}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -lc "python manage.py apply_bejerman_sync_schema && \
+      python manage.py run_bejerman_sync_loop --interval 30 --limit 10"
+    restart: unless-stopped
+
   web:
     profiles:
       - dev

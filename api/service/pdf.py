@@ -196,6 +196,12 @@ def _compose_serial_internal(numero_serie, numero_interno) -> str:
     return ns or ni or ""
 
 
+def _compose_modelo_variante(head: dict) -> str:
+    modelo = _first_non_empty(head.get("modelo"))
+    variante = _first_non_empty(head.get("equipo_variante"))
+    return (f"{modelo} {variante}" if modelo else variante).strip()
+
+
 def _compose_equipment_label(head: dict) -> str:
     """Build a compact equipment label similar to web catalogEquipmentLabel.
 
@@ -204,9 +210,7 @@ def _compose_equipment_label(head: dict) -> str:
     """
     tipo = _first_non_empty(head.get("tipo_equipo_nombre"), head.get("equipo"))
     marca = _first_non_empty(head.get("marca"))
-    modelo = _first_non_empty(head.get("modelo"))
-    variante = _first_non_empty(head.get("equipo_variante"))
-    modelo_comp = (f"{modelo} {variante}" if modelo else variante).strip()
+    modelo_comp = _compose_modelo_variante(head)
     parts = [p for p in (tipo, marca, modelo_comp) if p]
     return " | ".join(parts) if parts else _first_non_empty(head.get("equipo"), head.get("modelo"), head.get("marca"))
 
@@ -411,7 +415,7 @@ def render_remito_derivacion_pdf(ingreso_id: int, deriv_id: int | None = None, p
 
         # r3: Marca | Modelo | NumeroSerie
         label_value(inner_x, y - ROW_H, 52 * mm, ROW_H, "Marca", head.get("marca"))
-        label_value(inner_x + 54 * mm, y - ROW_H, 38 * mm, ROW_H, "Modelo", head.get("modelo"))
+        label_value(inner_x + 54 * mm, y - ROW_H, 38 * mm, ROW_H, "Modelo", _compose_modelo_variante(head) or head.get("modelo"))
         label_value(inner_x + 95 * mm, y - ROW_H, 36 * mm, ROW_H, "NumeroSerie", head.get("numero_serie"))
         y -= (ROW_H + ROW_GAP)
 
@@ -773,7 +777,7 @@ def render_quote_pdf(ingreso_id: int):
 
     y = _draw_equipment_panel(
         c, ml, y, W - 2*ml,
-        head.get("marca"), head.get("modelo"), head.get("numero_serie"), head.get("numero_interno"),
+        head.get("marca"), _compose_modelo_variante(head) or head.get("modelo"), head.get("numero_serie"), head.get("numero_interno"),
         equipo=head.get("equipo"), remito=head.get("remito_ingreso"), etiq_ok=head.get("etiq_ok"),
     )
     y -= 5
@@ -1195,9 +1199,7 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         r2_x2 = r2_x1 + r2_w1 + r2_gap
         r2_x3 = r2_x2 + r2_w2 + r2_gap
 
-        modelo = (head.get("modelo") or "").strip()
-        variante = (head.get("equipo_variante") or "").strip()
-        modelo_comp = (f"{modelo} {variante}".strip() if (modelo or variante) else "")
+        modelo_comp = _compose_modelo_variante(head)
 
         label_value(r2_x1, y - ROW_H, r2_w1, ROW_H, "Tipo de equipo", head.get("equipo"))
         label_value(r2_x2, y - ROW_H, r2_w2, ROW_H, "Marca", head.get("marca"))

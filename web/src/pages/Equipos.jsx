@@ -1,4 +1,5 @@
-﻿import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/Tabs";
 import {
@@ -10,8 +11,10 @@ import {
   getMarcasPorTipo,
   getModelosByBrand,
   getTiposEquipo,
+  getUbicaciones,
+  getDeviceEditable,
   postDeviceDirectCreate,
-  patchDeviceIdentificadores,
+  patchDeviceEditable,
   postDevicesMerge,
   postDevicePreventivoPlan,
   patchDevicePreventivoPlan,
@@ -31,6 +34,7 @@ import {
   postPreventivoRevisionItem,
   patchPreventivoRevisionItem,
   postPreventivoRevisionCerrar,
+  getClientes,
   postCliente,
   postDeviceMgVenta,
   postDeviceMgReactivar,
@@ -114,43 +118,489 @@ function PropiedadBadge({ row }) {
   return <span className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700">Cliente</span>;
 }
 
-function EditModal({ row, onClose, onSaved, canEdit }) {
-  const [ns, setNs] = useState(row?.numero_serie || "");
-  const [mg, setMg] = useState(row?.numero_interno || "");
+function normalizeCustomerRows(rows = []) {
+  const map = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const id = Number(row?.customer_id ?? row?.id ?? 0);
+    if (!Number.isFinite(id) || id <= 0) return;
+    map.set(String(id), {
+      id,
+      razon_social: String(row?.razon_social || "").trim(),
+      cod_empresa: String(row?.cod_empresa || "").trim(),
+    });
+  });
+  return Array.from(map.values()).sort((a, b) =>
+    String(a?.razon_social || "").localeCompare(String(b?.razon_social || ""))
+  );
+}
+
+function mergeCustomerRows(...lists) {
+  const map = new Map();
+  lists.forEach((list) => {
+    normalizeCustomerRows(list).forEach((row) => {
+      map.set(String(row.id), row);
+    });
+  });
+  return Array.from(map.values()).sort((a, b) =>
+    String(a?.razon_social || "").localeCompare(String(b?.razon_social || ""))
+  );
+}
+
+function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
+  const [form, setForm] = useState({
+    customer_id: "",
+    tipo_equipo: "",
+    marca_id: "",
+    modelo_id: "",
+    variante: "",
+    numero_serie: "",
+    numero_interno: "",
+    ubicacion_id: "",
+    alquilado: false,
+    alquiler_customer_id: "",
+    alquiler_a: "",
+  });
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [catalogErr, setCatalogErr] = useState("");
+  const [tiposEquipo, setTiposEquipo] = useState([]);
+  const [marcas, setMarcas] = useState([]);
+  const [marcasPorTipo, setMarcasPorTipo] = useState([]);
+  const [modelos, setModelos] = useState([]);
+  const [varianteSugeridas, setVarianteSugeridas] = useState([]);
+  const [ubicaciones, setUbicaciones] = useState([]);
+  const [customerOptions, setCustomerOptions] = useState(() => normalizeCustomerRows(customers));
+  const [marcaTxt, setMarcaTxt] = useState("");
+  const [marcaId, setMarcaId] = useState(null);
+  const [catTipoId, setCatTipoId] = useState(null);
+  const [catModelos, setCatModelos] = useState([]);
 
-  if (!row) return null;
+  const tipoSel = (form.tipo_equipo || "").trim();
+
+  useEffect(() => {
+    setCustomerOptions((prev) => mergeCustomerRows(prev, customers));
+  }, [customers]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const rows = await getClientes();
+        if (!active) return;
+        setCustomerOptions((prev) => mergeCustomerRows(prev, rows));
+      } catch {
+        if (!active) return;
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setErr("");
+        setCatalogErr("");
+        const [deviceRes, marcasRows, tiposRows, ubicRows] = await Promise.all([
+          getDeviceEditable(deviceId),
+          getMarcas(),
+          getTiposEquipo(),
+          getUbicaciones(),
+        ]);
+        if (!active) return;
+
+        const dev = deviceRes?.device || null;
+        if (!dev?.id) {
+          throw new Error("No se pudo obtener el equipo a editar.");
+        }
+
+        setMarcas(Array.isArray(marcasRows) ? marcasRows : []);
+        const tipoList = (Array.isArray(tiposRows) ? tiposRows : [])
+          .map((t) => t?.nombre || t?.label || t?.name || t?.value || t)
+          .map(String)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        setTiposEquipo(Array.from(new Set(tipoList)));
+        setUbicaciones(Array.isArray(ubicRows) ? ubicRows : []);
+
+        const alquilerA = String(dev?.alquiler_a || "").trim();
+        const matchedAlquiler = mergeCustomerRows(customers, customerOptions).find(
+          (c) => String(c?.razon_social || "").trim().toLowerCase() === alquilerA.toLowerCase()
+        );
+
+        setForm({
+          customer_id: dev?.customer_id ? String(dev.customer_id) : "",
+          tipo_equipo: String(dev?.tipo_equipo || ""),
+          marca_id: dev?.marca_id ? String(dev.marca_id) : "",
+          modelo_id: dev?.model_id ? String(dev.model_id) : "",
+          variante: String(dev?.variante || ""),
+          numero_serie: String(dev?.numero_serie || ""),
+          numero_interno: String(dev?.numero_interno || ""),
+          ubicacion_id: dev?.ubicacion_id ? String(dev.ubicacion_id) : "",
+          alquilado: !!dev?.alquilado,
+          alquiler_customer_id: matchedAlquiler?.id ? String(matchedAlquiler.id) : "",
+          alquiler_a: alquilerA,
+        });
+        setMarcaId(dev?.marca_id ? Number(dev.marca_id) : null);
+        setMarcaTxt(String(dev?.marca || ""));
+      } catch (e) {
+        if (!active) return;
+        setErr(e?.message || "No se pudo cargar el equipo para edición.");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (!form.alquilado || form.alquiler_customer_id) return;
+    const alquilerA = String(form.alquiler_a || "").trim().toLowerCase();
+    if (!alquilerA) return;
+    const match = (customerOptions || []).find(
+      (c) => String(c?.razon_social || "").trim().toLowerCase() === alquilerA
+    );
+    if (match?.id) {
+      setForm((prev) => ({ ...prev, alquiler_customer_id: String(match.id) }));
+    }
+  }, [form.alquilado, form.alquiler_a, form.alquiler_customer_id, customerOptions]);
+
+  useEffect(() => {
+    let active = true;
+    if (!tipoSel) {
+      setMarcasPorTipo([]);
+      return () => {
+        active = false;
+      };
+    }
+    (async () => {
+      try {
+        const rows = await getMarcasPorTipo(tipoSel);
+        if (!active) return;
+        setMarcasPorTipo(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (!active) return;
+        setMarcasPorTipo([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [tipoSel]);
+
+  useEffect(() => {
+    let active = true;
+    setModelos([]);
+    setCatTipoId(null);
+    setCatModelos([]);
+    setVarianteSugeridas([]);
+    if (!marcaId) {
+      return () => {
+        active = false;
+      };
+    }
+
+    (async () => {
+      try {
+        setCatalogErr("");
+        const rows = await getModelosByBrand(marcaId);
+        if (!active) return;
+        const list = Array.isArray(rows) ? rows : [];
+        const norm = (s) => (s || "").toString().trim().toUpperCase();
+        const filtered = tipoSel ? list.filter((m) => norm(m?.tipo_equipo) === norm(tipoSel)) : list;
+        setModelos(filtered);
+
+        const tiposBrand = await getCatalogTipos(marcaId);
+        if (!active) return;
+        const match = (Array.isArray(tiposBrand) ? tiposBrand : []).find(
+          (t) => (t?.name || "").trim().toUpperCase() === (tipoSel || "").trim().toUpperCase()
+        );
+        const tId = match?.id ?? null;
+        setCatTipoId(tId);
+        if (tId) {
+          const mods = await getCatalogModelos(marcaId, tId);
+          if (!active) return;
+          setCatModelos(Array.isArray(mods) ? mods : []);
+        } else {
+          setCatModelos([]);
+        }
+      } catch (e) {
+        if (!active) return;
+        setCatalogErr(e?.message || "No se pudieron cargar modelos.");
+        setModelos([]);
+        setCatTipoId(null);
+        setCatModelos([]);
+        setVarianteSugeridas([]);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [marcaId, tipoSel]);
+
+  useEffect(() => {
+    let active = true;
+    const selectedModel = (modelos || []).find((x) => String(x.id) === String(form.modelo_id));
+    if (!selectedModel || !marcaId || !catTipoId) {
+      setVarianteSugeridas([]);
+      return () => {
+        active = false;
+      };
+    }
+
+    const needle = (selectedModel?.nombre || "").trim().toUpperCase();
+    const cmatch = (catModelos || []).filter((cm) => {
+      const a = (cm?.name || "").trim().toUpperCase();
+      const alias = (cm?.alias || "").trim().toUpperCase();
+      return (
+        a === needle
+        || a.includes(needle)
+        || needle.includes(a)
+        || (alias && (alias === needle || needle.includes(alias) || alias.includes(needle)))
+      );
+    });
+    if (cmatch.length !== 1) {
+      setVarianteSugeridas([]);
+      return () => {
+        active = false;
+      };
+    }
+
+    (async () => {
+      try {
+        const vars = await getCatalogVariantes(marcaId, catTipoId, cmatch[0].id);
+        if (!active) return;
+        const names = (Array.isArray(vars) ? vars : []).filter((v) => v?.name).map((v) => v.name);
+        setVarianteSugeridas(names);
+      } catch {
+        if (!active) return;
+        setVarianteSugeridas([]);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [form.modelo_id, modelos, marcaId, catTipoId, catModelos]);
+
+  const update = (key, value) =>
+    setForm((prev) => {
+      const next = { ...prev, [key]: value };
+      if (key === "alquilado" && !value) {
+        next.alquiler_customer_id = "";
+        next.alquiler_a = "";
+      }
+      if (key === "alquiler_customer_id") {
+        const selected = (customerOptions || []).find((c) => String(c.id) === String(value));
+        next.alquiler_a = selected?.razon_social || "";
+      }
+      return next;
+    });
+
+  const onMarcaInput = (value) => {
+    setMarcaTxt(value);
+    const pool = tipoSel ? (marcasPorTipo.length ? marcasPorTipo : marcas) : marcas;
+    const match = (pool || []).find(
+      (m) => (m?.nombre || "").toLowerCase() === String(value || "").trim().toLowerCase()
+    );
+    const nextMarcaId = match ? Number(match.id) : null;
+    setMarcaId(nextMarcaId);
+    setForm((prev) => {
+      const prevMarcaId = prev.marca_id ? Number(prev.marca_id) : null;
+      const changed = (prevMarcaId || null) !== (nextMarcaId || null);
+      return {
+        ...prev,
+        marca_id: nextMarcaId ? String(nextMarcaId) : "",
+        modelo_id: changed ? "" : prev.modelo_id,
+        variante: changed ? "" : prev.variante,
+      };
+    });
+  };
+
+  if (!deviceId) return null;
+
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-white rounded shadow-lg w-full max-w-lg p-4">
-        <div className="text-lg font-semibold mb-2">Editar identificadores</div>
-        <div className="text-sm text-gray-600 mb-3">
-          Equipo #{row.id} - Marca: {row.marca || "-"}, Modelo: {row.modelo || "-"}
-        </div>
+      <div className="bg-white rounded shadow-lg w-full max-w-3xl p-4 max-h-[90vh] overflow-y-auto">
+        <div className="text-lg font-semibold mb-2">Editar datos del equipo</div>
+        <div className="text-sm text-gray-600 mb-3">Equipo #{deviceId}</div>
         {err && <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mb-3">{err}</div>}
-        <div className="space-y-3">
-          <label className="block">
-            <div className="text-sm text-gray-700 mb-1">Número de serie</div>
-            <input
-              type="text"
-              value={ns}
-              onChange={(e) => setNs(e.target.value)}
-              className="border rounded p-2 w-full"
-              disabled={!canEdit || saving}
-            />
-          </label>
-          <label className="block">
-            <div className="text-sm text-gray-700 mb-1">Número interno (MG)</div>
-            <input
-              type="text"
-              value={mg}
-              onChange={(e) => setMg(e.target.value)}
-              className="border rounded p-2 w-full"
-              disabled={!canEdit || saving}
-            />
-          </label>
-        </div>
+        {catalogErr && <div className="bg-amber-100 border border-amber-300 text-amber-900 rounded p-2 mb-3">{catalogErr}</div>}
+
+        {loading ? (
+          <div className="text-sm text-gray-500 py-4">Cargando equipo...</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="block md:col-span-2">
+              <div className="text-sm text-gray-700 mb-1">Institución / Cliente *</div>
+              <select
+                className="border rounded p-2 w-full"
+                value={form.customer_id}
+                onChange={(e) => update("customer_id", e.target.value)}
+                disabled={!canEdit || saving}
+              >
+                <option value="">Seleccione una institución</option>
+                {(customerOptions || []).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block md:col-span-2">
+              <div className="text-sm text-gray-700 mb-1">Tipo de equipo</div>
+              <select
+                className="border rounded p-2 w-full"
+                value={form.tipo_equipo}
+                onChange={(e) => {
+                  const value = e.target.value || "";
+                  setForm((prev) => ({
+                    ...prev,
+                    tipo_equipo: value,
+                    marca_id: "",
+                    modelo_id: "",
+                    variante: "",
+                  }));
+                  setMarcaTxt("");
+                  setMarcaId(null);
+                }}
+                disabled={!canEdit || saving}
+              >
+                <option value="">-- Seleccionar --</option>
+                {(tiposEquipo || []).map((t, i) => (
+                  <option key={`${t}-${i}`} value={t}>{t}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Marca</div>
+              <input
+                list={`edit-device-marcas-list-${deviceId}`}
+                className="border rounded p-2 w-full"
+                value={marcaTxt}
+                onChange={(e) => onMarcaInput(e.target.value)}
+                placeholder="Marca"
+                disabled={!canEdit || saving}
+              />
+              <datalist id={`edit-device-marcas-list-${deviceId}`}>
+                {(tipoSel && marcasPorTipo.length ? marcasPorTipo : marcas).map((m) => (
+                  <option key={m.id} value={m.nombre} />
+                ))}
+              </datalist>
+              {marcaTxt && !marcaId && (
+                <div className="text-xs text-red-600 mt-1">Elija una marca de las sugeridas.</div>
+              )}
+            </label>
+
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Modelo</div>
+              <select
+                className="border rounded p-2 w-full"
+                value={form.modelo_id}
+                onChange={(e) => update("modelo_id", e.target.value)}
+                disabled={!canEdit || !marcaId || saving}
+              >
+                <option value="">{!marcaId ? "Seleccione marca primero" : "Seleccione modelo"}</option>
+                {(modelos || []).map((m) => (
+                  <option key={m.id} value={m.id}>{m.nombre}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block md:col-span-2">
+              <div className="text-sm text-gray-700 mb-1">Variante / detalle</div>
+              <input
+                list={`edit-device-variantes-list-${deviceId}`}
+                className="border rounded p-2 w-full"
+                value={form.variante}
+                onChange={(e) => update("variante", e.target.value)}
+                disabled={!canEdit || saving}
+              />
+              <datalist id={`edit-device-variantes-list-${deviceId}`}>
+                {(varianteSugeridas || []).map((v, i) => (
+                  <option key={`${v}-${i}`} value={v} />
+                ))}
+              </datalist>
+            </label>
+
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Número de serie</div>
+              <input
+                className="border rounded p-2 w-full"
+                value={form.numero_serie}
+                onChange={(e) => update("numero_serie", e.target.value)}
+                disabled={!canEdit || saving}
+              />
+            </label>
+
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Número interno (MG)</div>
+              <input
+                className="border rounded p-2 w-full"
+                value={form.numero_interno}
+                onChange={(e) => update("numero_interno", e.target.value)}
+                disabled={!canEdit || saving}
+              />
+            </label>
+
+            <label className="block md:col-span-2">
+              <div className="text-sm text-gray-700 mb-1">Ubicación</div>
+              <select
+                className="border rounded p-2 w-full"
+                value={form.ubicacion_id}
+                onChange={(e) => update("ubicacion_id", e.target.value)}
+                disabled={!canEdit || saving}
+              >
+                <option value="">Sin ubicación</option>
+                {(ubicaciones || []).map((u) => (
+                  <option key={u.id} value={u.id}>{u.nombre}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block md:col-span-2">
+              <span className="inline-flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={!!form.alquilado}
+                  onChange={(e) => update("alquilado", e.target.checked)}
+                  disabled={!canEdit || saving}
+                />
+                Equipo alquilado
+              </span>
+            </label>
+
+            {form.alquilado && (
+              <label className="block md:col-span-2">
+                <div className="text-sm text-gray-700 mb-1">Alquilado a (cliente) *</div>
+                <select
+                  className="border rounded p-2 w-full"
+                  value={form.alquiler_customer_id}
+                  onChange={(e) => update("alquiler_customer_id", e.target.value)}
+                  disabled={!canEdit || saving}
+                >
+                  <option value="">Selecciona cliente</option>
+                  {(customerOptions || []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 mt-4">
           <button className="px-3 py-1.5 rounded border" onClick={onClose} disabled={saving}>
             Cancelar
@@ -158,12 +608,45 @@ function EditModal({ row, onClose, onSaved, canEdit }) {
           {canEdit && (
             <button
               className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+              disabled={saving || loading}
               onClick={async () => {
                 setErr("");
+                const customerId = Number(form.customer_id || 0);
+                if (!customerId) {
+                  setErr("Debe seleccionar una institución.");
+                  return;
+                }
+                if (marcaTxt && !marcaId) {
+                  setErr("Debes elegir una marca válida de las sugerencias.");
+                  return;
+                }
+                let alquilerA = "";
+                if (form.alquilado) {
+                  const alquilerCustomer = (customerOptions || []).find(
+                    (c) => String(c.id) === String(form.alquiler_customer_id)
+                  );
+                  if (!alquilerCustomer?.razon_social) {
+                    setErr("Debes seleccionar a qué cliente está alquilado el equipo.");
+                    return;
+                  }
+                  alquilerA = String(alquilerCustomer.razon_social || "").trim();
+                }
+
                 try {
                   setSaving(true);
-                  await patchDeviceIdentificadores(row.id, { numero_serie: ns, numero_interno: mg });
-                  onSaved && onSaved();
+                  await patchDeviceEditable(deviceId, {
+                    customer_id: customerId,
+                    tipo_equipo: (form.tipo_equipo || "").trim(),
+                    marca_id: form.marca_id ? Number(form.marca_id) : null,
+                    model_id: form.modelo_id ? Number(form.modelo_id) : null,
+                    variante: (form.variante || "").trim(),
+                    numero_serie: (form.numero_serie || "").trim(),
+                    numero_interno: (form.numero_interno || "").trim(),
+                    ubicacion_id: form.ubicacion_id ? Number(form.ubicacion_id) : null,
+                    alquilado: !!form.alquilado,
+                    alquiler_a: alquilerA,
+                  });
+                  if (onSaved) await onSaved();
                   onClose();
                 } catch (e) {
                   const ctype = e?.data?.conflict_type;
@@ -174,9 +657,8 @@ function EditModal({ row, onClose, onSaved, canEdit }) {
                   setSaving(false);
                 }
               }}
-              disabled={saving}
             >
-              Guardar
+              {saving ? "Guardando..." : "Guardar"}
             </button>
           )}
         </div>
@@ -191,10 +673,57 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
   const [remito, setRemito] = useState("");
   const [fechaVenta, setFechaVenta] = useState(todayISO());
   const [observaciones, setObservaciones] = useState("");
+  const [ventaCustomerId, setVentaCustomerId] = useState("");
+  const [ventaNumeroAlternativo, setVentaNumeroAlternativo] = useState("");
+  const [clientes, setClientes] = useState([]);
+  const [clientesLoading, setClientesLoading] = useState(false);
+  const [addCustomerOpen, setAddCustomerOpen] = useState(false);
+  const [addCustomerSaving, setAddCustomerSaving] = useState(false);
+  const [addCustomerErr, setAddCustomerErr] = useState("");
+  const [addCustomerForm, setAddCustomerForm] = useState({
+    razon_social: "",
+    cod_empresa: "",
+    telefono: "",
+    telefono_2: "",
+    email: "",
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
   if (!row) return null;
+
+  useEffect(() => {
+    if (!row) return;
+    const defaultFecha = row?.mg_venta_fecha ? String(row.mg_venta_fecha).slice(0, 10) : todayISO();
+    setFactura(row?.mg_venta_factura_numero || "");
+    setRemito(row?.mg_venta_remito_numero || "");
+    setFechaVenta(defaultFecha);
+    setObservaciones("");
+    setVentaCustomerId(row?.mg_venta_customer_id ? String(row.mg_venta_customer_id) : "");
+    setVentaNumeroAlternativo(row?.mg_venta_numero_alternativo || "");
+    setErr("");
+    setAddCustomerOpen(false);
+    setAddCustomerErr("");
+  }, [row?.id, row?.mg_venta_fecha, row?.mg_venta_factura_numero, row?.mg_venta_remito_numero, row?.mg_venta_customer_id, row?.mg_venta_numero_alternativo]);
+
+  useEffect(() => {
+    if (!isVenta) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        setClientesLoading(true);
+        const rows = await getClientes();
+        if (cancelled) return;
+        setClientes(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (cancelled) return;
+        setClientes([]);
+      } finally {
+        if (!cancelled) setClientesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isVenta, row?.id]);
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
@@ -209,6 +738,142 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
 
         {isVenta ? (
           <div className="space-y-3">
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Vendido a (cliente)</div>
+              <div className="flex gap-2">
+                <select
+                  className="border rounded p-2 w-full"
+                  value={ventaCustomerId}
+                  onChange={(e) => setVentaCustomerId(e.target.value)}
+                  disabled={saving || clientesLoading}
+                >
+                  <option value="">{clientesLoading ? "Cargando clientes..." : "Seleccionar cliente"}</option>
+                  {(clientes || []).map((c) => (
+                    <option key={c.id} value={String(c.id)}>
+                      {c.razon_social}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded border whitespace-nowrap hover:bg-gray-50 disabled:opacity-60"
+                  onClick={() => {
+                    setAddCustomerErr("");
+                    setAddCustomerForm({
+                      razon_social: "",
+                      cod_empresa: "",
+                      telefono: "",
+                      telefono_2: "",
+                      email: "",
+                    });
+                    setAddCustomerOpen((v) => !v);
+                  }}
+                  disabled={saving || clientesLoading}
+                >
+                  Alta rápida
+                </button>
+              </div>
+            </label>
+            {addCustomerOpen && (
+              <div className="border rounded p-3 bg-gray-50">
+                {addCustomerErr && (
+                  <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mb-2 text-sm">
+                    {addCustomerErr}
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <input
+                    className="border rounded p-2 md:col-span-2"
+                    placeholder="Razón social"
+                    value={addCustomerForm.razon_social}
+                    onChange={(e) => setAddCustomerForm((s) => ({ ...s, razon_social: e.target.value }))}
+                    disabled={addCustomerSaving}
+                  />
+                  <input
+                    className="border rounded p-2 md:col-span-2"
+                    placeholder="Código de empresa"
+                    value={addCustomerForm.cod_empresa}
+                    onChange={(e) => setAddCustomerForm((s) => ({ ...s, cod_empresa: e.target.value }))}
+                    disabled={addCustomerSaving}
+                  />
+                  <input
+                    className="border rounded p-2"
+                    placeholder="Teléfono"
+                    value={addCustomerForm.telefono}
+                    onChange={(e) => setAddCustomerForm((s) => ({ ...s, telefono: e.target.value }))}
+                    disabled={addCustomerSaving}
+                  />
+                  <input
+                    className="border rounded p-2"
+                    placeholder="Teléfono 2"
+                    value={addCustomerForm.telefono_2}
+                    onChange={(e) => setAddCustomerForm((s) => ({ ...s, telefono_2: e.target.value }))}
+                    disabled={addCustomerSaving}
+                  />
+                  <input
+                    className="border rounded p-2 md:col-span-2"
+                    placeholder="Email"
+                    value={addCustomerForm.email}
+                    onChange={(e) => setAddCustomerForm((s) => ({ ...s, email: e.target.value }))}
+                    disabled={addCustomerSaving}
+                  />
+                </div>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded border"
+                    onClick={() => setAddCustomerOpen(false)}
+                    disabled={addCustomerSaving}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                    disabled={
+                      addCustomerSaving
+                      || !String(addCustomerForm.razon_social || "").trim()
+                      || !String(addCustomerForm.cod_empresa || "").trim()
+                    }
+                    onClick={async () => {
+                      const razon_social = String(addCustomerForm.razon_social || "").trim();
+                      const cod_empresa = String(addCustomerForm.cod_empresa || "").trim();
+                      if (!razon_social || !cod_empresa) {
+                        setAddCustomerErr("Razón social y código de empresa son obligatorios.");
+                        return;
+                      }
+                      try {
+                        setAddCustomerSaving(true);
+                        setAddCustomerErr("");
+                        await postCliente({
+                          razon_social,
+                          cod_empresa,
+                          telefono: String(addCustomerForm.telefono || "").trim() || null,
+                          telefono_2: String(addCustomerForm.telefono_2 || "").trim() || null,
+                          email: String(addCustomerForm.email || "").trim() || null,
+                        });
+                        const rows = await getClientes();
+                        const list = Array.isArray(rows) ? rows : [];
+                        setClientes(list);
+                        const match = list.find(
+                          (c) => String(c?.razon_social || "").trim().toLowerCase() === razon_social.toLowerCase()
+                        );
+                        if (match?.id) {
+                          setVentaCustomerId(String(match.id));
+                        }
+                        setAddCustomerOpen(false);
+                      } catch (e) {
+                        setAddCustomerErr(e?.message || "No se pudo crear el cliente.");
+                      } finally {
+                        setAddCustomerSaving(false);
+                      }
+                    }}
+                  >
+                    {addCustomerSaving ? "Guardando..." : "Crear cliente"}
+                  </button>
+                </div>
+              </div>
+            )}
             <label className="block">
               <div className="text-sm text-gray-700 mb-1">Factura de venta</div>
               <input
@@ -226,6 +891,16 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
                 className="border rounded p-2 w-full"
                 value={remito}
                 onChange={(e) => setRemito(e.target.value)}
+                disabled={saving}
+              />
+            </label>
+            <label className="block">
+              <div className="text-sm text-gray-700 mb-1">Número alternativo</div>
+              <input
+                type="text"
+                className="border rounded p-2 w-full"
+                value={ventaNumeroAlternativo}
+                onChange={(e) => setVentaNumeroAlternativo(e.target.value)}
                 disabled={saving}
               />
             </label>
@@ -255,6 +930,10 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
             <div className="text-sm text-gray-700">
               Esta acción vuelve el MG a estado operativo y conserva trazabilidad en el historial de eventos.
             </div>
+            <div className="text-sm text-gray-600">
+              <div>Vendido a: {row?.mg_venta_customer_nombre || "-"}</div>
+              <div>Número alternativo: {row?.mg_venta_numero_alternativo || "-"}</div>
+            </div>
             <label className="block">
               <div className="text-sm text-gray-700 mb-1">Observaciones</div>
               <textarea
@@ -273,7 +952,7 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
           </button>
           <button
             className={`px-3 py-1.5 rounded text-white disabled:opacity-50 ${isVenta ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-600 hover:bg-emerald-700"}`}
-            disabled={saving || (isVenta && !(factura.trim() || remito.trim()))}
+            disabled={saving || (isVenta && (!(factura.trim() || remito.trim()) || !Number(ventaCustomerId || 0)))}
             onClick={async () => {
               setErr("");
               try {
@@ -284,6 +963,8 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
                     remito_numero: remito.trim() || null,
                     fecha_venta: fechaVenta || null,
                     observaciones: observaciones.trim() || null,
+                    venta_customer_id: Number(ventaCustomerId || 0),
+                    venta_numero_alternativo: ventaNumeroAlternativo.trim() || null,
                     source: "equipos",
                   });
                 } else {
@@ -1405,7 +2086,7 @@ export default function Equipos() {
   const [hasNext, setHasNext] = useState(false);
   const [q, setQ] = useState(searchParams.get("q") || "");
   const [qDebounced, setQDebounced] = useState(searchParams.get("q") || "");
-  const [editRow, setEditRow] = useState(null);
+  const [editDeviceId, setEditDeviceId] = useState(null);
   const [mgModalRow, setMgModalRow] = useState(null);
   const [mgModalMode, setMgModalMode] = useState("venta");
   const [reloadDevicesKey, setReloadDevicesKey] = useState(0);
@@ -2142,16 +2823,16 @@ export default function Equipos() {
                           )}
                         </td>
                         <td className="p-2">
-                          <div className="relative inline-block text-left">
+                          <div className="inline-block text-left">
                             <Menu
-                              button={({ toggle }) => (
-                                <button onClick={toggle} className="px-2 py-1 rounded hover:bg-gray-100" aria-label="Acciones">
+                              button={({ toggle, buttonRef }) => (
+                                <button ref={buttonRef} onClick={toggle} className="px-2 py-1 rounded hover:bg-gray-100" aria-label="Acciones">
                                   &#8942;
                                 </button>
                               )}
                             >
                               {({ close }) => (
-                                <div className="absolute right-0 mt-1 w-40 bg-white border border-gray-200 rounded shadow z-10">
+                                <div className="w-40 bg-white border border-gray-200 rounded shadow z-10">
                                   <button
                                     className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
                                     onClick={() => {
@@ -2166,10 +2847,10 @@ export default function Equipos() {
                                       className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
                                       onClick={() => {
                                         close();
-                                        setEditRow(row);
+                                        setEditDeviceId(Number(row?.id || 0) || null);
                                       }}
                                     >
-                                      Editar IDs
+                                      Editar datos
                                     </button>
                                   )}
                                   {canEdit && row?.es_propietario_mg && row?.numero_interno && (
@@ -2309,15 +2990,28 @@ export default function Equipos() {
                           <td className="p-2"><PreventivoBadge estado={item.preventivo_estado} dias={item.preventivo_dias_restantes} /></td>
                           <td className="p-2">
                             {item.plan_id ? (
-                              <button
-                                className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  startAgendaDeviceRevision(item);
-                                }}
-                              >
-                                Registrar revisión
-                              </button>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    startAgendaDeviceRevision(item);
+                                  }}
+                                >
+                                  Registrar revisión
+                                </button>
+                                {canEdit && !!item.device_id && (
+                                  <button
+                                    className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditDeviceId(Number(item.device_id));
+                                    }}
+                                  >
+                                    Editar equipo
+                                  </button>
+                                )}
+                              </div>
                             ) : (
                               <div className="flex items-center gap-1">
                                 {canPlanEdit && (
@@ -2345,6 +3039,17 @@ export default function Equipos() {
                                 >
                                   Ir a equipo
                                 </button>
+                                {canEdit && !!item.device_id && (
+                                  <button
+                                    className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditDeviceId(Number(item.device_id));
+                                    }}
+                                  >
+                                    Editar equipo
+                                  </button>
+                                )}
                               </div>
                             )}
                           </td>
@@ -2742,8 +3447,17 @@ export default function Equipos() {
         </>
       )}
 
-      {editRow && (
-        <EditModal row={editRow} canEdit={canEdit} onClose={() => setEditRow(null)} onSaved={() => setReloadDevicesKey(Date.now())} />
+      {editDeviceId && (
+        <EditModal
+          deviceId={editDeviceId}
+          canEdit={canEdit}
+          customers={sortedInstituciones}
+          onClose={() => setEditDeviceId(null)}
+          onSaved={async () => {
+            setReloadDevicesKey(Date.now());
+            if (activeTab === "preventivos") await loadAgenda();
+          }}
+        />
       )}
       {mgModalRow && (
         <MgVentaModal
@@ -2989,20 +3703,74 @@ export default function Equipos() {
 function Menu({ button, children }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  useEffect(() => {
-    const handler = (e) => {
-      if (!open) return;
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
+  const buttonRef = useRef(null);
+  const panelRef = useRef(null);
+  const [coords, setCoords] = useState({ top: 0, left: 0 });
+
+  const recalcPosition = () => {
+    const btn = buttonRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const panelWidth = panelRef.current?.offsetWidth || 160;
+    const margin = 8;
+    const viewportWidth = window.innerWidth || 0;
+    let left = rect.right - panelWidth;
+    if (left < margin) left = margin;
+    if (left + panelWidth > viewportWidth - margin) {
+      left = Math.max(margin, viewportWidth - panelWidth - margin);
+    }
+    const top = rect.bottom + 6;
+    setCoords({ top, left });
+  };
+
   const toggle = () => setOpen((v) => !v);
   const close = () => setOpen(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const raf = requestAnimationFrame(recalcPosition);
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e) => {
+      const insideTrigger = ref.current && ref.current.contains(e.target);
+      const insidePanel = panelRef.current && panelRef.current.contains(e.target);
+      if (!insideTrigger && !insidePanel) setOpen(false);
+    };
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    const onResize = () => recalcPosition();
+    const onScroll = () => recalcPosition();
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onResize);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open]);
+
   return (
     <div ref={ref}>
-      {button({ open, toggle })}
-      {open && children({ close })}
+      {button({ open, toggle, buttonRef })}
+      {open
+        ? createPortal(
+          <div
+            ref={panelRef}
+            style={{ position: "fixed", top: coords.top, left: coords.left, zIndex: 80 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {children({ close })}
+          </div>,
+          document.body
+        )
+        : null}
     </div>
   );
 }

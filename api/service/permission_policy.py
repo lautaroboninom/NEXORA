@@ -16,6 +16,7 @@ VIEW_PERMISSION_MATRIX = {
     "EntregarIngresoView": {"POST": "action.ingreso.edit_delivery"},
     "DarBajaIngresoView": {"POST": "action.ingreso.baja_alta"},
     "DarAltaIngresoView": {"POST": "action.ingreso.baja_alta"},
+    "IngresoCorreccionesHistoricasView": {"POST": "action.ingreso.force_historical"},
     "PendientesPresupuestoView": {"GET": "page.budget_queues"},
     "PresupuestadosView": {"GET": "page.budget_queues"},
     "PresupuestadosExportView": {"GET": "page.budget_queues"},
@@ -23,8 +24,8 @@ VIEW_PERMISSION_MATRIX = {
     "AprobadosParaRepararView": {"GET": "page.work_queues"},
     "AprobadosYReparadosView": {"GET": "page.work_queues"},
     "AprobadosView": {"GET": "page.work_queues"},
-    "LiberadosView": {"GET": "page.logistics"},
-    "ListosParaRetiroView": {"GET": "page.logistics"},
+    "LiberadosView": {"GET": "page.liberados"},
+    "ListosParaRetiroView": {"GET": "page.liberados"},
     "GeneralEquiposView": {"GET": "page.ingresos_history"},
     "GeneralEquiposExportView": {"GET": "page.ingresos_history"},
     "IngresoAsignarTecnicoView": {"PATCH": "action.ingreso.change_assignment"},
@@ -54,6 +55,8 @@ VIEW_PERMISSION_MATRIX = {
             "page.work_queues",
             "page.budget_queues",
             "page.logistics",
+            "page.liberados",
+            "page.service_sheet_principal",
             "action.ingreso.edit_basics",
             "action.ingreso.edit_diagnosis",
             "action.ingreso.edit_location",
@@ -83,13 +86,17 @@ VIEW_PERMISSION_MATRIX = {
             "action.ingreso.edit_diagnosis",
         ]
     },
-    "GarantiaReparacionCheckView": {"GET": "page.ingresos_history"},
-    "GarantiaFabricaCheckView": {"GET": "page.ingresos_history"},
+    "GarantiaReparacionCheckView": {
+        "GET": ["page.ingresos_history", "action.ingreso.create", "page.new_ingreso"]
+    },
+    "GarantiaFabricaCheckView": {
+        "GET": ["page.ingresos_history", "action.ingreso.create", "page.new_ingreso"]
+    },
     "DerivarIngresoView": {"POST": "action.ingreso.manage_derivations"},
     "DerivacionesPorIngresoView": {"GET": ["page.logistics", "action.ingreso.manage_derivations"]},
     "DevolverDerivacionView": {"POST": "action.ingreso.manage_derivations"},
     "EquiposDerivadosView": {"GET": "page.logistics"},
-    "ScanLookupView": {"GET": "page.home_search"},
+    "ScanLookupView": {"GET": ["page.home_search", "action.ingreso.create", "page.new_ingreso"]},
     "CustomersListView": {"GET": ["page.home_search", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     # Reportes
     "RemitoSalidaPdfView": {"GET": "action.ingreso.print_exit_order"},
@@ -112,7 +119,10 @@ VIEW_PERMISSION_MATRIX = {
     "UsuarioRolePermView": {"PATCH": "action.users.manage"},
     "UsuarioDeleteView": {"DELETE": "action.users.manage"},
     "CatalogoRolesView": {"GET": "action.users.manage"},
-    "CatalogoTecnicosView": {"GET": "action.ingreso.change_assignment"},
+    "CatalogoTecnicosView": {
+        "GET": ["action.ingreso.change_assignment", "action.ingreso.create", "page.new_ingreso"]
+    },
+    "UsuarioNotificacionesView": {"GET": "action.users.manage_permissions", "PUT": "action.users.manage_permissions"},
     # Repuestos
     "CatalogoRepuestosView": {"GET": "page.spare_parts"},
     "RepuestosView": {"GET": "page.spare_parts", "POST": "action.spare_parts.manage"},
@@ -130,7 +140,11 @@ VIEW_PERMISSION_MATRIX = {
     "CatalogoModelosView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoUbicacionesView": {"GET": ["page.catalogs", "page.ingresos_history", "action.ingreso.create", "page.new_ingreso", "action.ingreso.edit_location"]},
     "CatalogoMotivosView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
-    "CatalogoAccesoriosView": {"GET": "page.catalogs", "POST": "action.catalogs.manage", "DELETE": "action.catalogs.manage"},
+    "CatalogoAccesoriosView": {
+        "GET": ["page.catalogs", "action.ingreso.create", "page.new_ingreso", "action.ingreso.edit_diagnosis"],
+        "POST": "action.catalogs.manage",
+        "DELETE": "action.catalogs.manage",
+    },
     "CatalogoTiposView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoModelosDeTipoView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoVariantesView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
@@ -159,12 +173,19 @@ VIEW_PERMISSION_MATRIX = {
     "ProveedoresExternosView": {"GET": "page.catalogs", "POST": "action.catalogs.manage", "DELETE": "action.catalogs.manage"},
     "WarrantyRulesView": {"GET": "page.warranty", "POST": "action.catalogs.manage"},
     "WarrantyRuleDetailView": {"PATCH": "action.catalogs.manage", "DELETE": "action.catalogs.manage"},
-    "TiposEquipoView": {"GET": "page.catalogs", "POST": "action.catalogs.manage", "DELETE": "action.catalogs.manage"},
+    "TiposEquipoView": {
+        "GET": ["page.catalogs", "action.ingreso.create", "page.new_ingreso"],
+        "POST": "action.catalogs.manage",
+        "DELETE": "action.catalogs.manage",
+    },
     "TestProtocolCatalogView": {"GET": "action.tests_protocol.manage", "POST": "action.tests_protocol.manage"},
     "TestProtocolDetailView": {"GET": "action.tests_protocol.manage", "PATCH": "action.tests_protocol.manage", "DELETE": "action.tests_protocol.manage"},
     # Equipos / preventivos
     "DevicesListView": {"GET": "page.devices_preventivos"},
-    "DeviceIdentificadoresView": {"PATCH": "action.devices_preventivos.manage"},
+    "DeviceIdentificadoresView": {
+        "GET": "page.devices_preventivos",
+        "PATCH": "action.devices_preventivos.manage",
+    },
     "DeviceDirectCreateView": {"POST": "action.devices_preventivos.manage"},
     "DevicesMergeView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgVentaView": {"POST": "action.devices_preventivos.manage"},
