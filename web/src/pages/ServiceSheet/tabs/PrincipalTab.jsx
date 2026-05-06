@@ -162,6 +162,14 @@ export default function PrincipalTab(props) {
   const presupuestoLower = (data?.presupuesto_estado || "").toLowerCase();
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower);
   const alquilerEditable = Boolean(canEditAlquiler);
+  const [alquilerAInput, setAlquilerAInput] = useState(data?.alquiler_a || "");
+  const [alquilerRemitoInput, setAlquilerRemitoInput] = useState(data?.alquiler_remito || "");
+  useEffect(() => {
+    setAlquilerAInput(data?.alquiler_a || "");
+  }, [data?.id, data?.alquiler_a]);
+  useEffect(() => {
+    setAlquilerRemitoInput(data?.alquiler_remito || "");
+  }, [data?.id, data?.alquiler_remito]);
   const presupuestoLabel = useMemo(() => {
     const v = data?.presupuesto_estado;
     if (!v) return "-";
@@ -236,10 +244,26 @@ export default function PrincipalTab(props) {
     return !!(rsMatch && codMatch && rsMatch.id !== codMatch.id);
   }, [rsMatch, codMatch, hasClienteCodCatalog]);
   const alquilerMatch = useMemo(() => {
-    const val = normClient(data?.alquiler_a);
+    const val = normClient(alquilerAInput);
     if (!val) return null;
     return (clientes || []).find((c) => normClient(c?.razon_social) === val) || null;
-  }, [data?.alquiler_a, clientes, normClient]);
+  }, [alquilerAInput, clientes, normClient]);
+
+  const commitAlquilerText = useCallback(async (field, value) => {
+    if (!alquilerEditable) return;
+    const next = String(value || "").trim();
+    const current = String((field === "alquiler_a" ? data?.alquiler_a : data?.alquiler_remito) || "").trim();
+    if (field === "alquiler_a") setAlquilerAInput(next);
+    if (field === "alquiler_remito") setAlquilerRemitoInput(next);
+    if (next === current) return;
+    await patch({ [field]: next });
+  }, [alquilerEditable, data?.alquiler_a, data?.alquiler_remito, patch]);
+
+  const blurOnEnter = useCallback((event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.currentTarget.blur();
+  }, []);
 
   // Catálogo de accesorios (para alquiler)
   const [accesCatalogo, setAccesCatalogo] = useState([]);
@@ -1075,8 +1099,10 @@ export default function PrincipalTab(props) {
             <input
               className="border rounded p-1 w-80"
               list={clientesPerm ? "alquiler_clientes_rs" : undefined}
-              value={data.alquiler_a || ""}
-              onChange={(e) => { if (alquilerEditable) patch({ alquiler_a: e.target.value }); }}
+              value={alquilerAInput}
+              onChange={(e) => { if (alquilerEditable) setAlquilerAInput(e.target.value); }}
+              onBlur={() => commitAlquilerText("alquiler_a", alquilerAInput)}
+              onKeyDown={blurOnEnter}
               disabled={!alquilerEditable}
               placeholder="Elegí de la lista"
             />
@@ -1087,13 +1113,20 @@ export default function PrincipalTab(props) {
                 ))}
               </datalist>
             )}
-            {alquilerEditable && clientesPerm && (data.alquiler_a || "").trim() && !alquilerMatch && (
-              <div className="text-xs text-amber-700 mt-1">Selecciona un cliente válido de la lista.</div>
+            {alquilerEditable && clientesPerm && (alquilerAInput || "").trim() && !alquilerMatch && (
+              <div className="text-xs text-amber-700 mt-1">Seleccioná un cliente válido de la lista.</div>
             )}
           </div>
         </Row>
         <Row label="Remito">
-          <input className="border rounded p-1 w-60" value={data.alquiler_remito || ""} onChange={(e) => { if (alquilerEditable) patch({ alquiler_remito: e.target.value }); }} disabled={!alquilerEditable} />
+          <input
+            className="border rounded p-1 w-60"
+            value={alquilerRemitoInput}
+            onChange={(e) => { if (alquilerEditable) setAlquilerRemitoInput(e.target.value); }}
+            onBlur={() => commitAlquilerText("alquiler_remito", alquilerRemitoInput)}
+            onKeyDown={blurOnEnter}
+            disabled={!alquilerEditable}
+          />
         </Row>
         <Row label="Fecha">
           <input

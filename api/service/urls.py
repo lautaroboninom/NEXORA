@@ -95,6 +95,12 @@ from .views.preventivos_views import (
     PreventivoRevisionItemDetailView,
     PreventivoRevisionCerrarView,
 )
+from .views.portal_integration_views import (
+    PortalClienteGeneralView,
+    PortalClienteIngresoSummaryView,
+    PortalInternalWorkQueueView,
+    PortalInternalWorkSummaryView,
+)
 
 
 urlpatterns = [
@@ -106,6 +112,15 @@ urlpatterns = [
     path("auth/session/", SessionView.as_view()),
     path("auth/forgot/", ForgotPasswordView.as_view()),
     path("auth/reset/", ResetPasswordView.as_view()),
+
+    # integracion read-only Portal Sepid
+    path("integrations/portal/clientes/<int:customer_id>/general/", PortalClienteGeneralView.as_view()),
+    path(
+        "integrations/portal/clientes/<int:customer_id>/ingresos/<int:ingreso_id>/summary/",
+        PortalClienteIngresoSummaryView.as_view(),
+    ),
+    path("integrations/portal/internal/work-summary/", PortalInternalWorkSummaryView.as_view()),
+    path("integrations/portal/internal/work-queue/", PortalInternalWorkQueueView.as_view()),
 
     # ténico / ingresos (acciones)
     path("tecnico/mis-pendientes/", MisPendientesView.as_view()),

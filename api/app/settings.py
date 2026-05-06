@@ -28,6 +28,13 @@ AUDIT_LOG_ENABLED = os.getenv("AUDIT_LOG_ENABLED", "0").lower() in ("1","true")
 AUDIT_LOG_MAX_BODY = int(os.getenv("AUDIT_LOG_MAX_BODY", "4096"))
 AUDIT_LOG_EXCLUDE_PREFIXES = _csv("AUDIT_LOG_EXCLUDE_PREFIXES", "")
 
+# Integracion read-only con Portal Sepid.
+# Guardar solo el hash SHA-256 del token, nunca el secreto plano.
+PORTAL_INTEGRATION_TOKEN_SHA256 = os.getenv("PORTAL_INTEGRATION_TOKEN_SHA256", "")
+PORTAL_INTEGRATION_TOKEN_SHA256_FALLBACKS = _csv("PORTAL_INTEGRATION_TOKEN_SHA256_FALLBACKS", "")
+# Opcional: IPs o CIDRs permitidos, por ejemplo rangos Tailscale. Vacio no restringe por IP.
+PORTAL_INTEGRATION_ALLOWED_IPS = _csv("PORTAL_INTEGRATION_ALLOWED_IPS", "")
+
 # Branding / URLs públicas
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 PUBLIC_WEB_URL = os.getenv("PUBLIC_WEB_URL", FRONTEND_ORIGIN)

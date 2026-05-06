@@ -7,10 +7,25 @@ const roleLabel = (value) => {
 };
 
 const fieldLabels = {
+  asignado_a: "Asignado a",
+  alquiler_a: "Alquilado a",
+  alquiler_fecha: "Fecha de alquiler",
+  alquiler_remito: "Remito de alquiler",
+  faja_garantia: "Faja de garantía",
   ubicacion_id: "Ubicación",
 };
 
+const entityLabels = {
+  devices: "Equipo",
+  ingresos: "Ingreso",
+  ingreso_accesorios: "Accesorios",
+  ingreso_alquiler_accesorios: "Accesorios de alquiler",
+  quote_items: "Ítems de presupuesto",
+  quotes: "Presupuesto",
+};
+
 const fieldLabel = (value) => fieldLabels[String(value || "").trim()] || value || "-";
+const entityLabel = (value) => entityLabels[String(value || "").trim()] || value || "-";
 const historyValue = (value) => (value === null || value === undefined || value === "" ? "-" : value);
 
 export default function HistorialTab({ hErr, hLoading, hist }) {
@@ -46,7 +61,7 @@ export default function HistorialTab({ hErr, hLoading, hist }) {
                   <td className="p-2 whitespace-nowrap">{formatDateTimeHelper(row.ts)}</td>
                   <td className="p-2">{row.user_nombre || row.user_id || "-"}</td>
                   <td className="p-2 whitespace-nowrap">{roleLabel(row.user_role)}</td>
-                  <td className="p-2">{row.table_name}</td>
+                  <td className="p-2">{entityLabel(row.table_name)}</td>
                   <td className="p-2">{fieldLabel(row.column_name)}</td>
                   <td className="p-2">{historyValue(row.old_value)}</td>
                   <td className="p-2">{historyValue(row.new_value)}</td>

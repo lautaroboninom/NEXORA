@@ -2,7 +2,7 @@ import Row from "../../../components/Row";
 import IngresoPhotos from "../../../components/IngresoPhotos";
 import { RESOLUCION_OPTIONS, RESOLUCION, ESTADO } from "../../../lib/constants";
 import { getBlob, postMarcarReparado, postCerrarReparacion, postAccesorioIngreso, deleteAccesorioIngreso, postMarcarControladoSinDefecto, postMarcarParaReparar, postHabilitarReparacionCotizacion } from "../../../lib/api";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export default function DiagnosticoTab({
   id,
@@ -50,6 +50,7 @@ export default function DiagnosticoTab({
   const [marcandoReparar, setMarcandoReparar] = useState(false);
   const [habilitandoReparacion, setHabilitandoReparacion] = useState(false);
   const [serialCambio, setSerialCambio] = useState("");
+  const [fajaGarantiaInput, setFajaGarantiaInput] = useState(data?.faja_garantia || "");
   const isEntregadoOBaja = ["entregado", "baja"].includes((data?.estado || "").toLowerCase());
   const estadoLower = (data?.estado || "").toLowerCase();
   const estadosBloqueadosDiag = new Set([
@@ -79,6 +80,24 @@ export default function DiagnosticoTab({
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.id]);
+
+  useEffect(() => {
+    setFajaGarantiaInput(data?.faja_garantia || "");
+  }, [data?.id, data?.faja_garantia]);
+
+  const commitFajaGarantia = useCallback(async () => {
+    const next = String(fajaGarantiaInput || "").trim();
+    const current = String(data?.faja_garantia || "").trim();
+    setFajaGarantiaInput(next);
+    if (next === current) return;
+    await patch({ faja_garantia: next });
+  }, [data?.faja_garantia, fajaGarantiaInput, patch]);
+
+  const blurOnEnter = useCallback((event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.currentTarget.blur();
+  }, []);
 
   async function saveResolucionCambioAware() {
     try {
@@ -440,11 +459,14 @@ export default function DiagnosticoTab({
 
       <IngresoPhotos ingresoId={Number(id)} canManage={canManagePhotos} />
 
-      <Row label="Faja de garantí­a Nro">
+      <Row label="Faja de garantía Nro.">
         <input
           className="border rounded p-1 w-60"
-          value={data.faja_garantia || ""}
-          onChange={(e) => patch({ faja_garantia: e.target.value })}
+          value={fajaGarantiaInput}
+          onChange={(e) => setFajaGarantiaInput(e.target.value)}
+          onBlur={commitFajaGarantia}
+          onKeyDown={blurOnEnter}
+          disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
         />
       </Row>
     </div>

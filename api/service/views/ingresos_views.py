@@ -2,7 +2,7 @@
 import time
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import permissions
@@ -3561,7 +3561,7 @@ def _resolve_location_history_values(rows):
     if not rows:
         return rows
 
-    def _location_id(value):
+    def _int_history_value(value):
         if value is None:
             return None
         raw = str(value).strip()
@@ -3577,7 +3577,7 @@ def _resolve_location_history_values(rows):
         if (row.get("column_name") or "").strip().lower() != "ubicacion_id":
             continue
         for key in ("old_value", "new_value"):
-            loc_id = _location_id(row.get(key))
+            loc_id = _int_history_value(row.get(key))
             if loc_id is not None:
                 ids.add(loc_id)
 
@@ -3601,10 +3601,190 @@ def _resolve_location_history_values(rows):
         if (row.get("column_name") or "").strip().lower() != "ubicacion_id":
             continue
         for key in ("old_value", "new_value"):
-            loc_id = _location_id(row.get(key))
+            loc_id = _int_history_value(row.get(key))
             if loc_id is not None and names.get(loc_id):
                 row[key] = names[loc_id]
     return rows
+
+
+def _resolve_assigned_history_values(rows):
+    if not rows:
+        return rows
+
+    def _user_id(value):
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw or raw.lower() in {"null", "none"}:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    ids = set()
+    for row in rows:
+        if (row.get("column_name") or "").strip().lower() != "asignado_a":
+            continue
+        for key in ("old_value", "new_value"):
+            uid = _user_id(row.get(key))
+            if uid is not None:
+                ids.add(uid)
+
+    if not ids:
+        return rows
+
+    try:
+        user_rows = q(
+            """
+            SELECT id, nombre
+              FROM users
+             WHERE id = ANY(%s)
+            """,
+            [list(ids)],
+        ) or []
+        names = {int(r["id"]): r.get("nombre") for r in user_rows if r.get("id") is not None}
+    except Exception:
+        return rows
+
+    for row in rows:
+        if (row.get("column_name") or "").strip().lower() != "asignado_a":
+            continue
+        for key in ("old_value", "new_value"):
+            uid = _user_id(row.get(key))
+            if uid is not None and names.get(uid):
+                row[key] = names[uid]
+    return rows
+
+
+def _history_ts(row):
+    ts = row.get("ts") if row else None
+    if isinstance(ts, datetime):
+        return ts
+    if isinstance(ts, str):
+        try:
+            return parse_datetime(ts)
+        except Exception:
+            return None
+    return None
+
+
+def _history_ts_sort_value(row):
+    ts = _history_ts(row)
+    if not ts:
+        return 0.0
+    try:
+        return ts.timestamp()
+    except Exception:
+        return 0.0
+
+
+def _history_id_sort_value(row):
+    try:
+        return int(row.get("_id") or row.get("id") or 0)
+    except Exception:
+        return 0
+
+
+def _history_value_key(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _compact_history_rows(rows, max_gap=timedelta(minutes=3)):
+    """Une guardados consecutivos del mismo campo, típicos de escritura por tecla."""
+    if not rows:
+        return rows
+
+    max_gap_seconds = max_gap.total_seconds()
+    ordered = sorted(
+        enumerate(rows),
+        key=lambda item: (
+            _history_ts_sort_value(item[1]),
+            _history_id_sort_value(item[1]),
+            item[0],
+        ),
+    )
+    groups = []
+    last_by_key = {}
+
+    for _, original_row in ordered:
+        row = dict(original_row)
+        row_key = (
+            (row.get("table_name") or "").strip().lower(),
+            row.get("record_id"),
+            (row.get("column_name") or "").strip().lower(),
+            row.get("user_id"),
+            row.get("user_role"),
+        )
+        row_ts = _history_ts_sort_value(row)
+        last = last_by_key.get(row_key)
+        can_join = False
+        if last and last["key"] == row_key:
+            close_enough = row_ts and last["last_ts"] and (row_ts - last["last_ts"]) <= max_gap_seconds
+            same_chain = _history_value_key(last["row"].get("new_value")) == _history_value_key(row.get("old_value"))
+            can_join = bool(close_enough and same_chain)
+
+        if can_join:
+            last["row"]["new_value"] = row.get("new_value")
+            last["row"]["ts"] = row.get("ts")
+            if row.get("_id") is not None:
+                last["row"]["_id"] = row.get("_id")
+            last["row"]["_compact_count"] = int(last["row"].get("_compact_count") or 1) + 1
+            last["last_ts"] = row_ts
+        else:
+            row["_compact_count"] = 1
+            group = {"key": row_key, "last_ts": row_ts, "row": row}
+            groups.append(group)
+            last_by_key[row_key] = group
+
+    compacted = [item["row"] for item in groups]
+    compacted.sort(
+        key=lambda row: (_history_ts_sort_value(row), _history_id_sort_value(row)),
+        reverse=True,
+    )
+    return compacted
+
+
+def _drop_mirrored_device_history_rows(rows, max_gap=timedelta(seconds=5)):
+    if not rows:
+        return rows
+
+    mirrored_fields = {
+        "alquilado",
+        "alquiler_a",
+        "ubicacion_id",
+        "faja_garantia",
+        "propietario_nombre",
+        "propietario_contacto",
+        "propietario_doc",
+    }
+    max_gap_seconds = max_gap.total_seconds()
+    ingreso_rows = [
+        r for r in rows
+        if (r.get("table_name") or "").strip().lower() == "ingresos"
+    ]
+    filtered = []
+    for row in rows:
+        table_name = (row.get("table_name") or "").strip().lower()
+        column_name = (row.get("column_name") or "").strip().lower()
+        if table_name != "devices" or column_name not in mirrored_fields:
+            filtered.append(row)
+            continue
+
+        row_ts = _history_ts_sort_value(row)
+        duplicated = any(
+            (other.get("column_name") or "").strip().lower() == column_name
+            and other.get("user_id") == row.get("user_id")
+            and _history_value_key(other.get("old_value")) == _history_value_key(row.get("old_value"))
+            and _history_value_key(other.get("new_value")) == _history_value_key(row.get("new_value"))
+            and abs(_history_ts_sort_value(other) - row_ts) <= max_gap_seconds
+            for other in ingreso_rows
+        )
+        if not duplicated:
+            filtered.append(row)
+    return filtered
 
 
 class IngresoHistorialView(APIView):
@@ -3622,7 +3802,7 @@ class IngresoHistorialView(APIView):
             try:
                 rows = q(
                     """
-                      SELECT cl.ts, cl.user_id, cl.user_role, COALESCE(u.nombre,'') AS user_nombre, cl.table_name, cl.record_id, cl.column_name, cl.old_value, cl.new_value FROM audit.change_log cl LEFT JOIN users u ON u.id = cl.user_id
+                      SELECT cl.id AS _id, cl.ts, cl.user_id, cl.user_role, COALESCE(u.nombre,'') AS user_nombre, cl.table_name, cl.record_id, cl.column_name, cl.old_value, cl.new_value FROM audit.change_log cl LEFT JOIN users u ON u.id = cl.user_id
                       WHERE ingreso_id = %s
                       ORDER BY cl.ts DESC, cl.id DESC
                     """,
@@ -3679,8 +3859,11 @@ class IngresoHistorialView(APIView):
                         "new_value": (body_str or None) and body_str[:512],
                     })
                 rows = (rows or []) + out
+            rows = _compact_history_rows(rows)
+            rows = _drop_mirrored_device_history_rows(rows)
             rows = _resolve_location_history_values(rows)
-            rows.sort(key=lambda x: (x.get("ts") or ""), reverse=True)
+            rows = _resolve_assigned_history_values(rows)
+            rows.sort(key=lambda x: (_history_ts_sort_value(x), _history_id_sort_value(x)), reverse=True)
         else:
             # 1) Cambios de estado (ingreso_events)
             ev_rows = q(
@@ -3753,7 +3936,7 @@ class IngresoHistorialView(APIView):
                     })
 
             # Orden final por fecha desc y sin modificar formato esperado
-            out.sort(key=lambda x: (x.get("ts") or "",), reverse=True)
+            out.sort(key=lambda x: (_history_ts_sort_value(x), _history_id_sort_value(x)), reverse=True)
             rows = out
         return Response(rows)
 
