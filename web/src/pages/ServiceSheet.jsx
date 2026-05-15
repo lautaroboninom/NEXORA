@@ -13,7 +13,9 @@ import {
   postRechazarSolicitudBaja,
   getClientes,
   getClientesBasico,
+  getDeviceEditable,
   postCliente,
+  postDevicesMerge,
   getMotivos,
   postDeviceMgVenta,
   postDeviceMgReactivar,
@@ -27,10 +29,11 @@ import {
   resolveFechaIngreso,
   resolveFechaCreacion,
   isMotivoCotizacionEquipo,
+  isSaleTicketState,
   nsPreferInternoOf,
 } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
-import { canActAsTech, ROLES } from "../lib/authz";
+import { canActAsTech, isJefe, ROLES } from "../lib/authz";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import ArchivosTab from "./ServiceSheet/tabs/ArchivosTab";
 import HistorialTab from "./ServiceSheet/tabs/HistorialTab";
@@ -61,6 +64,255 @@ const Tabs = ({ value, onChange, items, extraRight }) => (
     <div className="ml-auto">{extraRight}</div>
   </div>
 );
+
+const normalizeConflictDevice = (row) => {
+  if (!row) return null;
+  return {
+    id: row.id ?? row.device_id ?? null,
+    customer_nombre: row.customer_nombre || row.razon_social || row.last_customer_nombre || "",
+    cod_empresa: row.cod_empresa || row.customer_cod_empresa || "",
+    tipo_equipo: row.tipo_equipo || row.tipo_equipo_nombre || "",
+    marca: row.marca || "",
+    modelo: row.modelo || "",
+    variante: row.variante || row.equipo_variante || "",
+    numero_serie: row.numero_serie || "",
+    numero_interno: row.numero_interno || "",
+    ubicacion_nombre: row.ubicacion_nombre || "",
+    alquilado: !!row.alquilado,
+    alquiler_a: row.alquiler_a || "",
+  };
+};
+
+const conflictValue = (value) => {
+  const text = String(value || "").trim();
+  return text || "-";
+};
+
+function ConflictDeviceCard({ title, device, tone = "gray" }) {
+  const normalized = normalizeConflictDevice(device);
+  const borderClass = tone === "amber" ? "border-amber-300 bg-amber-50" : "border-gray-200 bg-white";
+  const Field = ({ label, value }) => (
+    <div>
+      <div className="text-xs font-medium text-gray-500">{label}</div>
+      <div className="text-sm text-gray-900 break-words">{conflictValue(value)}</div>
+    </div>
+  );
+
+  if (!normalized) {
+    return (
+      <div className={`border rounded p-3 ${borderClass}`}>
+        <div className="font-semibold mb-2">{title}</div>
+        <div className="text-sm text-gray-500">No se pudo cargar este equipo.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`border rounded p-3 ${borderClass}`}>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <div className="font-semibold">{title}</div>
+          <div className="text-xs text-gray-500">Equipo #{normalized.id || "-"}</div>
+        </div>
+        <div className="text-xs font-semibold text-gray-700">{nsPreferInternoOf(normalized, "-")}</div>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Cliente" value={normalized.customer_nombre} />
+        <Field label="Código empresa" value={normalized.cod_empresa} />
+        <Field label="Tipo" value={normalized.tipo_equipo} />
+        <Field label="Marca" value={normalized.marca} />
+        <Field label="Modelo" value={normalized.modelo} />
+        <Field label="Variante" value={normalized.variante} />
+        <Field label="N° serie" value={normalized.numero_serie} />
+        <Field label="N° interno (MG)" value={normalized.numero_interno} />
+        <Field label="Ubicación" value={normalized.ubicacion_nombre} />
+        <Field label="Alquiler" value={normalized.alquilado ? (normalized.alquiler_a || "Alquilado") : "No"} />
+      </div>
+    </div>
+  );
+}
+
+function IdentifierConflictModal({
+  conflict,
+  canMerge,
+  onClose,
+  onEditDevice,
+  onMerge,
+  onChange,
+}) {
+  if (!conflict) return null;
+
+  const current = normalizeConflictDevice(conflict.currentDevice);
+  const other = normalizeConflictDevice(conflict.conflictDevice);
+  const finalNs = conflict.nsChoice === "conflict" ? (other?.numero_serie || "") : (current?.numero_serie || "");
+  const finalMg = conflict.mgChoice === "conflict" ? (other?.numero_interno || "") : (current?.numero_interno || "");
+  const target = conflict.targetChoice === "conflict" ? other : current;
+  const source = conflict.targetChoice === "conflict" ? current : other;
+  const canSubmitMerge = canMerge && !!target?.id && !!source?.id && (String(finalNs || "").trim() || String(finalMg || "").trim()) && !conflict.mergeSaving;
+  const conflictLabel = conflict.conflictType === "NS_DUPLICATE" ? "N/S" : "MG";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!conflict.mergeSaving) onClose(); }}
+    >
+      <div className="bg-white rounded shadow-xl w-full max-w-6xl max-h-[92vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <h2 className="text-lg font-semibold">Conflicto de identificadores</h2>
+            <div className="text-sm text-gray-600">
+              El {conflictLabel} que intentaste guardar ya pertenece a otro equipo.
+            </div>
+          </div>
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded border text-sm hover:bg-gray-50 disabled:opacity-60"
+            onClick={onClose}
+            disabled={conflict.mergeSaving}
+          >
+            Cerrar
+          </button>
+        </div>
+
+        {conflict.detail && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded p-2 mb-3 text-sm">
+            {conflict.detail}
+          </div>
+        )}
+        {conflict.loadErr && (
+          <div className="bg-red-100 border border-red-300 text-red-800 rounded p-2 mb-3 text-sm">
+            {conflict.loadErr}
+          </div>
+        )}
+        {conflict.mergeErr && (
+          <div className="bg-red-100 border border-red-300 text-red-800 rounded p-2 mb-3 text-sm">
+            {conflict.mergeErr}
+          </div>
+        )}
+
+        {conflict.loading ? (
+          <div className="text-sm text-gray-500 py-6">Cargando equipos...</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <ConflictDeviceCard title="Equipo de esta OS" device={current} />
+              <ConflictDeviceCard title="Equipo en conflicto" device={other} tone="amber" />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 mt-4 text-sm">
+              <div className="border rounded p-3">
+                <div className="font-medium mb-2">Equipo a conservar</div>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="conflict-target"
+                    value="current"
+                    checked={conflict.targetChoice !== "conflict"}
+                    onChange={() => onChange({ targetChoice: "current" })}
+                  />
+                  Equipo de esta OS
+                </label>
+                <label className="flex items-center gap-2 mt-2">
+                  <input
+                    type="radio"
+                    name="conflict-target"
+                    value="conflict"
+                    checked={conflict.targetChoice === "conflict"}
+                    onChange={() => onChange({ targetChoice: "conflict" })}
+                  />
+                  Equipo en conflicto
+                </label>
+              </div>
+
+              <div className="border rounded p-3">
+                <div className="font-medium mb-2">N/S final</div>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="conflict-ns"
+                    value="current"
+                    checked={conflict.nsChoice !== "conflict"}
+                    onChange={() => onChange({ nsChoice: "current" })}
+                  />
+                  Esta OS: {conflictValue(current?.numero_serie)}
+                </label>
+                <label className="flex items-center gap-2 mt-2">
+                  <input
+                    type="radio"
+                    name="conflict-ns"
+                    value="conflict"
+                    checked={conflict.nsChoice === "conflict"}
+                    onChange={() => onChange({ nsChoice: "conflict" })}
+                  />
+                  Conflicto: {conflictValue(other?.numero_serie)}
+                </label>
+              </div>
+
+              <div className="border rounded p-3">
+                <div className="font-medium mb-2">MG final</div>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="conflict-mg"
+                    value="current"
+                    checked={conflict.mgChoice !== "conflict"}
+                    onChange={() => onChange({ mgChoice: "current" })}
+                  />
+                  Esta OS: {conflictValue(current?.numero_interno)}
+                </label>
+                <label className="flex items-center gap-2 mt-2">
+                  <input
+                    type="radio"
+                    name="conflict-mg"
+                    value="conflict"
+                    checked={conflict.mgChoice === "conflict"}
+                    onChange={() => onChange({ mgChoice: "conflict" })}
+                  />
+                  Conflicto: {conflictValue(other?.numero_interno)}
+                </label>
+              </div>
+            </div>
+          </>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-2 mt-4">
+          <div className="flex flex-wrap gap-2">
+            {current?.id && (
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded border text-sm hover:bg-gray-50"
+                onClick={() => onEditDevice(current.id)}
+                disabled={conflict.mergeSaving}
+              >
+                Editar equipo de esta OS
+              </button>
+            )}
+            {other?.id && (
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded border text-sm hover:bg-gray-50"
+                onClick={() => onEditDevice(other.id)}
+                disabled={conflict.mergeSaving}
+              >
+                Editar equipo en conflicto
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+            disabled={!canSubmitMerge}
+            onClick={() => onMerge({ targetId: target.id, sourceId: source.id, numeroSerie: finalNs, numeroInterno: finalMg })}
+          >
+            {conflict.mergeSaving ? "Unificando..." : "Unificar equipos"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function ServiceSheet() {
   const { id } = useParams();
@@ -163,6 +415,7 @@ export default function ServiceSheet() {
   // datos generales
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
+  const [identifierConflict, setIdentifierConflict] = useState(null);
 
   // entrega
   const [entrega, setEntrega] = useState({ remito_salida: "", factura_numero: "", fecha_entrega: "", serial_confirm: "" });
@@ -204,6 +457,18 @@ export default function ServiceSheet() {
     const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
     const pad = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const toDateInputStr = (isoOrDate) => {
+    if (!isoOrDate) return "";
+    if (!(isoOrDate instanceof Date)) {
+      const raw = String(isoOrDate).trim();
+      const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (match) return match[1];
+    }
+    const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   };
   const maxLocalNow = toDatetimeLocalStr(new Date());
 
@@ -255,7 +520,7 @@ export default function ServiceSheet() {
   const [histSaving, setHistSaving] = useState(false);
   const [histForm, setHistForm] = useState({
     accion: "entrega",
-    fecha_efectiva: toDatetimeLocalStr(new Date()),
+    fecha_efectiva: toDateInputStr(new Date()),
     motivo: "",
     notificar: true,
     remito_salida: "",
@@ -363,6 +628,127 @@ export default function ServiceSheet() {
     return num.toLocaleString("es-AR", { style: "currency", currency: "ARS", minimumFractionDigits: 2 });
   }
 
+  function currentDeviceForConflict(deviceId = null) {
+    return normalizeConflictDevice({
+      ...(data || {}),
+      id: deviceId || data?.device_id || null,
+      customer_nombre: data?.razon_social || "",
+      variante: data?.equipo_variante || "",
+    });
+  }
+
+  async function openIdentifierConflict(error, fields = {}) {
+    const payload = error?.data || {};
+    const conflictType = payload?.conflict_type || "";
+    const detail = payload?.detail || "Conflicto al guardar identificadores.";
+    const currentDeviceId = payload?.current_device_id || data?.device_id || null;
+    const embeddedConflictDevice =
+      payload?.conflict_device ||
+      payload?.payload?.device_mg ||
+      payload?.payload?.device_ns ||
+      null;
+    const conflictDeviceId =
+      payload?.conflict_device_id ||
+      embeddedConflictDevice?.id ||
+      null;
+
+    const currentFallback = currentDeviceForConflict(currentDeviceId);
+    const conflictFallback = normalizeConflictDevice(embeddedConflictDevice);
+    const nsChoice = conflictType === "NS_DUPLICATE" ? "conflict" : "current";
+    const mgChoice = conflictType === "MG_DUPLICATE" || conflictType === "MG_UNIQUE_CONSTRAINT" ? "conflict" : "current";
+
+    setIdentifierConflict({
+      loading: true,
+      loadErr: "",
+      mergeErr: "",
+      mergeSaving: false,
+      detail,
+      conflictType,
+      currentDeviceId,
+      conflictDeviceId,
+      attemptedNumeroSerie: payload?.numero_serie_input || fields?.numero_serie || formBasics?.numero_serie || "",
+      attemptedNumeroInterno: payload?.numero_interno_input || fields?.numero_interno || formBasics?.numero_interno || "",
+      currentDevice: currentFallback,
+      conflictDevice: conflictFallback,
+      targetChoice: "current",
+      nsChoice,
+      mgChoice,
+    });
+
+    if (!currentDeviceId && !conflictDeviceId) {
+      setIdentifierConflict((prev) => prev ? ({
+        ...prev,
+        loading: false,
+        loadErr: "No se pudieron determinar los equipos involucrados en el conflicto.",
+      }) : prev);
+      return;
+    }
+
+    try {
+      const [currentRes, conflictRes] = await Promise.all([
+        currentDeviceId ? getDeviceEditable(currentDeviceId) : Promise.resolve(null),
+        conflictDeviceId ? getDeviceEditable(conflictDeviceId) : Promise.resolve(null),
+      ]);
+      setIdentifierConflict((prev) => prev ? ({
+        ...prev,
+        loading: false,
+        currentDevice: normalizeConflictDevice(currentRes?.device) || currentFallback,
+        conflictDevice: normalizeConflictDevice(conflictRes?.device) || conflictFallback,
+      }) : prev);
+    } catch (fetchError) {
+      setIdentifierConflict((prev) => prev ? ({
+        ...prev,
+        loading: false,
+        loadErr: fetchError?.message || "No se pudieron cargar los equipos en conflicto.",
+        currentDevice: prev.currentDevice || currentFallback,
+        conflictDevice: prev.conflictDevice || conflictFallback,
+      }) : prev);
+    }
+  }
+
+  const updateIdentifierConflict = (patchFields) => {
+    setIdentifierConflict((prev) => prev ? ({ ...prev, ...patchFields }) : prev);
+  };
+
+  const closeIdentifierConflict = () => {
+    setIdentifierConflict((prev) => (prev?.mergeSaving ? prev : null));
+  };
+
+  const editConflictDevice = (deviceId) => {
+    if (!deviceId) return;
+    const sp = new URLSearchParams();
+    sp.set("tab", "equipos");
+    sp.set("edit_device_id", String(deviceId));
+    sp.set("device_id", String(deviceId));
+    sp.set("from", "service");
+    sp.set("ingreso_id", String(id));
+    navigate(`/equipos?${sp.toString()}`);
+  };
+
+  async function mergeIdentifierConflict({ targetId, sourceId, numeroSerie, numeroInterno }) {
+    if (!targetId || !sourceId || targetId === sourceId) return;
+    setIdentifierConflict((prev) => prev ? ({ ...prev, mergeSaving: true, mergeErr: "" }) : prev);
+    try {
+      await postDevicesMerge({
+        target_id: Number(targetId),
+        source_id: Number(sourceId),
+        numero_serie: String(numeroSerie || "").trim(),
+        numero_interno: String(numeroInterno || "").trim(),
+      });
+      setIdentifierConflict(null);
+      setEditBasics(false);
+      setFormBasics(null);
+      setErr("");
+      await refreshIngreso();
+    } catch (e) {
+      setIdentifierConflict((prev) => prev ? ({
+        ...prev,
+        mergeSaving: false,
+        mergeErr: e?.message || "No se pudieron unificar los equipos.",
+      }) : prev);
+    }
+  }
+
   // PATCH helper
   async function patch(fields) {
     try {
@@ -372,15 +758,9 @@ export default function ServiceSheet() {
     } catch (e) {
       const conflict = e?.data?.conflict_type;
       if (conflict) {
-        const detail = e?.data?.detail || "Conflicto al guardar identificadores. Debes corregirlo desde Equipos.";
-        const devId = e?.data?.payload?.device_mg?.id || e?.data?.payload?.device_ns?.id || null;
+        const detail = e?.data?.detail || "Conflicto al guardar identificadores.";
         setErr(detail);
-        window.alert(`${detail}\nTe redirigimos a Equipos para corregir N/S o MG.`);
-        if (devId) {
-          navigate(`/equipos?device_id=${devId}&from=service&ingreso_id=${id}`);
-        } else {
-          navigate(`/equipos?from=service&ingreso_id=${id}`);
-        }
+        await openIdentifierConflict(e, fields);
         return;
       }
       setErr(e?.message || "No se pudo guardar");
@@ -427,7 +807,7 @@ export default function ServiceSheet() {
     setHistSaving(false);
     setHistForm({
       accion: "entrega",
-      fecha_efectiva: toDatetimeLocalStr(new Date()),
+      fecha_efectiva: toDateInputStr(new Date()),
       motivo: "",
       notificar: true,
       remito_salida: "",
@@ -817,7 +1197,7 @@ export default function ServiceSheet() {
   function resetHistForm(nextAccion = "entrega") {
     setHistForm({
       accion: nextAccion,
-      fecha_efectiva: toDatetimeLocalStr(new Date()),
+      fecha_efectiva: toDateInputStr(new Date()),
       motivo: "",
       notificar: true,
       remito_salida: "",
@@ -1023,16 +1403,20 @@ export default function ServiceSheet() {
     if (!ns) { if (formBasics) setFormBasics((s) => ({ ...(s || {}), garantia: false })); return; }
     const h = setTimeout(async () => {
       try {
-        const r = await checkGarantiaFabrica(ns, marcaName);
-        const enGarantia = !!r.within_365_days;
+        const r = await checkGarantiaFabrica(ns, marcaName, {
+          brand_id: marcaIdSel || null,
+          model_id: modeloIdSel || null,
+        });
+        if (typeof r?.within_365_days !== "boolean") return;
+        const enGarantia = r.within_365_days;
         setFormBasics((s) => ({ ...(s || {}), garantia: enGarantia }));
       } catch {}
     }, 400);
     return () => clearTimeout(h);
-  }, [editBasics, formBasics?.numero_serie, marcaIdSel, marcas, data?.marca]);
+  }, [editBasics, formBasics?.numero_serie, marcaIdSel, modeloIdSel, marcas, data?.marca]);
 
   const estadoLower = (data?.estado || "").toLowerCase();
-  const isEntregadoOBaja = estadoLower === "entregado" || estadoLower === "baja";
+  const isEntregadoOBaja = estadoLower === "entregado" || estadoLower === "baja" || isSaleTicketState(estadoLower);
 
   // carga general
   useEffect(() => {
@@ -1065,7 +1449,7 @@ export default function ServiceSheet() {
         setEntrega({
           remito_salida: ing?.remito_salida || "",
           factura_numero: ing?.factura_numero || "",
-          fecha_entrega: toDatetimeLocalStr(ing?.fecha_entrega),
+          fecha_entrega: toDateInputStr(ing?.fecha_entrega),
         });
         // tcnicos
         if (canAssignTecnico) { try { setTecnicos(await getTecnicos()); } catch {} } else { setTecnicos([]); }
@@ -1121,7 +1505,7 @@ export default function ServiceSheet() {
   const canEditDiag = canEditDiagPermission && (canAssignTecnico || assignedToMe);
   const canManagePhotos = canEditDiag;
   const canMarkReparado = canRepairTransitions && (canAssignTecnico || assignedToMe);
-  const canResolve = canRepairTransitions && (canAssignTecnico || assignedToMe);
+  const canResolve = canRepairTransitions && isJefe(user);
   const canAutorizarReparar = canRepairTransitions && (canAssignTecnico || assignedToMe);
   const canDarBaja = canBajaAltaPermission;
   const canRequestBaja = Boolean(
@@ -1167,7 +1551,7 @@ export default function ServiceSheet() {
       </button>
       <div className="flex items-start justify-between gap-3 mb-2">
         <h1 className="text-2xl font-bold">
-          Hoja de servicio - OS: {formatOSHelper(data, id)} - NS: {serialLabel}
+          Hoja de servicio - OS: {formatOSHelper(data, id)} - NS/MG: {serialLabel}
         </h1>
         {hasMenuActions && (
           <div className="relative" ref={actionsMenuRef}>
@@ -1334,7 +1718,8 @@ export default function ServiceSheet() {
           refreshIngreso={refreshIngreso}
           setErr={setErr}
           setRelatedOpen={setRelatedOpen}
-          toDatetimeLocalStr={toDatetimeLocalStr}
+          toDateInputStr={toDateInputStr}
+          maxDateOnly={maxDateOnly}
         />
       )}
 
@@ -1614,11 +1999,11 @@ export default function ServiceSheet() {
               <label className="block">
                 <div className="text-xs text-gray-600 mb-1">Fecha efectiva</div>
                 <input
-                  type="datetime-local"
+                  type="date"
                   className="border rounded p-2 w-full"
                   value={histForm.fecha_efectiva}
                   onChange={(e) => setHistForm((s) => ({ ...s, fecha_efectiva: e.target.value }))}
-                  max={maxLocalNow}
+                  max={maxDateOnly}
                   disabled={histSaving}
                 />
               </label>
@@ -1646,11 +2031,11 @@ export default function ServiceSheet() {
                   <label className="block md:col-span-2">
                     <div className="text-xs text-gray-600 mb-1">Fecha entrega (opcional)</div>
                     <input
-                      type="datetime-local"
+                      type="date"
                       className="border rounded p-2 w-full"
                       value={histForm.fecha_entrega}
                       onChange={(e) => setHistForm((s) => ({ ...s, fecha_entrega: e.target.value }))}
-                      max={maxLocalNow}
+                      max={maxDateOnly}
                       disabled={histSaving}
                     />
                   </label>
@@ -1984,6 +2369,15 @@ export default function ServiceSheet() {
           </div>
         </div>
       )}
+
+      <IdentifierConflictModal
+        conflict={identifierConflict}
+        canMerge={canManageDevices}
+        onClose={closeIdentifierConflict}
+        onEditDevice={editConflictDevice}
+        onMerge={mergeIdentifierConflict}
+        onChange={updateIdentifierConflict}
+      />
 
       {toastMsg && (
         <div className="fixed right-4 top-4 bg-emerald-600 text-white px-4 py-2 rounded shadow-lg" role="status">

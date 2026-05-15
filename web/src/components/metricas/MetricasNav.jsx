@@ -2,13 +2,16 @@ import { Link, useLocation } from "react-router-dom";
 
 const TABS = [
   { key: "tecnicos", label: "Técnicos", to: "/metricas" },
+  { key: "actividad", label: "Actividad técnicos", to: "/metricas/actividad-tecnicos" },
   { key: "clientes", label: "Clientes", to: "/metricas/clientes" },
   { key: "finanzas", label: "Finanzas", to: "/metricas/finanzas" },
 ];
 
 export default function MetricasNav({ extraRight }) {
   const { pathname } = useLocation();
-  const section = pathname.startsWith("/metricas/clientes")
+  const section = pathname.startsWith("/metricas/actividad-tecnicos")
+    ? "actividad"
+    : pathname.startsWith("/metricas/clientes")
     ? "clientes"
     : pathname.startsWith("/metricas/finanzas")
       ? "finanzas"

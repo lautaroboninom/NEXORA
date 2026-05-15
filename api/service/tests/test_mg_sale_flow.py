@@ -44,6 +44,16 @@ class MgSaleFlowAPITest(TestCase):
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS user_permission_overrides (
+                    user_id INTEGER NOT NULL,
+                    permission_code TEXT NOT NULL,
+                    effect TEXT NOT NULL,
+                    PRIMARY KEY (user_id, permission_code)
+                )
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS customers (
                     id BIGSERIAL PRIMARY KEY,
                     cod_empresa TEXT,
@@ -110,7 +120,37 @@ class MgSaleFlowAPITest(TestCase):
                 )
                 """
             )
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS fecha_entrega TIMESTAMPTZ NULL")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS remito_salida TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS factura_numero TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquilado BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquiler_a TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquiler_remito TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquiler_fecha DATE")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS recibido_por INTEGER NULL")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS asignado_a INTEGER NULL")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS equipo_variante TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS propietario_nombre TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS propietario_contacto TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS propietario_doc TEXT")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS garantia_fabrica BOOLEAN")
+            cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS etiq_garantia_ok BOOLEAN")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ingreso_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    ticket_id INTEGER,
+                    ingreso_id INTEGER,
+                    de_estado TEXT,
+                    a_estado TEXT,
+                    usuario_id INTEGER,
+                    ts TIMESTAMPTZ,
+                    comentario TEXT
+                )
+                """
+            )
         call_command("apply_mg_sale_schema")
+        call_command("apply_ticket_sale_states_schema")
         call_command("apply_historical_corrections_schema")
         super().setUpClass()
 
@@ -123,10 +163,13 @@ class MgSaleFlowAPITest(TestCase):
     def setUpTestData(cls):
         with connection.cursor() as cur:
             cur.execute("DELETE FROM device_mg_events")
+            cur.execute("DELETE FROM ingreso_events")
+            cur.execute("DELETE FROM user_permission_overrides")
             cur.execute("DELETE FROM ingresos")
             cur.execute("DELETE FROM devices")
             cur.execute("DELETE FROM models")
             cur.execute("DELETE FROM marcas")
+            cur.execute("DELETE FROM locations")
             cur.execute("DELETE FROM customers")
         User.objects.all().delete()
 
@@ -160,6 +203,8 @@ class MgSaleFlowAPITest(TestCase):
             cls.model_id = cls._last_id(cur)
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
             cls.taller_id = cls._last_id(cur)
+            cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["-"])
+            cls.dash_id = cls._last_id(cur)
 
             cur.execute(
                 """
@@ -195,6 +240,34 @@ class MgSaleFlowAPITest(TestCase):
     def _url_nuevo_ingreso(self):
         return "/api/ingresos/nuevo/"
 
+    def _url_entregar(self, ingreso_id):
+        return f"/api/ingresos/{ingreso_id}/entregar/"
+
+    def _create_ingreso(self, *, device_id, estado, alquilado=False):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    device_id, estado, motivo, fecha_ingreso, ubicacion_id,
+                    informe_preliminar, accesorios, comentarios,
+                    garantia_reparacion, garantia_fabrica, remito_ingreso,
+                    alquilado, alquiler_a, alquiler_remito, alquiler_fecha
+                )
+                VALUES (%s,%s,'reparacion',now(),%s,'Test','','',false,false,'',
+                        %s,%s,%s,%s)
+                """,
+                [
+                    device_id,
+                    estado,
+                    self.taller_id,
+                    alquilado,
+                    "Clinica Demo" if alquilado else None,
+                    "REM-ALQ" if alquilado else None,
+                    "2026-03-01" if alquilado else None,
+                ],
+            )
+            return self._last_id(cur)
+
     def _base_nuevo_payload(self, *, numero_serie, numero_interno):
         return {
             "cliente": {"id": self.customer_cli_id},
@@ -205,7 +278,7 @@ class MgSaleFlowAPITest(TestCase):
                 "numero_interno": numero_interno,
                 "garantia": False,
             },
-            "motivo": "reparacion",
+            "motivo": "otros",
             "informe_preliminar": "Test",
             "comentarios": "",
             "garantia_reparacion": False,
@@ -368,8 +441,8 @@ class MgSaleFlowAPITest(TestCase):
 
         payload = self._base_nuevo_payload(numero_serie="NS-MG-9001", numero_interno="MG 9001")
         resp = self.client.post(self._url_nuevo_ingreso(), payload, format="json")
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.data.get("conflict_type"), "MG_INACTIVO_VENTA")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(resp.data.get("conflict_type"), "MG_INACTIVO_VENTA", resp.data)
 
     def test_nuevo_ingreso_por_ns_sigue_funcionando(self):
         sold = self.client.post(
@@ -385,5 +458,105 @@ class MgSaleFlowAPITest(TestCase):
 
         payload = self._base_nuevo_payload(numero_serie="NS-MG-9001", numero_interno="")
         resp = self.client.post(self._url_nuevo_ingreso(), payload, format="json")
-        self.assertEqual(resp.status_code, 200)
+        self.assertIn(resp.status_code, (200, 201), resp.data)
         self.assertTrue(bool(resp.data.get("ingreso_id")))
+
+    def test_venta_mg_alquilado_desde_hoja_queda_vendido_entregado(self):
+        ingreso_id = self._create_ingreso(device_id=self.device_id, estado="alquilado", alquilado=True)
+        with connection.cursor() as cur:
+            cur.execute("UPDATE devices SET alquilado=true WHERE id=%s", [self.device_id])
+
+        resp = self.client.post(
+            self._url_venta(self.device_id),
+            {
+                "factura_numero": "FAC-ALQ-1",
+                "remito_numero": "REM-ALQ-1",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "service_sheet",
+                "ingreso_id": ingreso_id,
+                "fecha_venta": "2026-03-25",
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT estado, alquilado, ubicacion_id, factura_numero, remito_salida, fecha_entrega
+                  FROM ingresos
+                 WHERE id=%s
+                """,
+                [ingreso_id],
+            )
+            ingreso = cur.fetchone()
+            cur.execute("SELECT alquilado, mg_estado FROM devices WHERE id=%s", [self.device_id])
+            device = cur.fetchone()
+            cur.execute(
+                "SELECT COUNT(*) FROM ingreso_events WHERE ticket_id=%s AND a_estado='vendido_entregado'",
+                [ingreso_id],
+            )
+            event_count = int(cur.fetchone()[0] or 0)
+
+        self.assertEqual(ingreso[0], "vendido_entregado")
+        self.assertFalse(bool(ingreso[1]))
+        self.assertEqual(int(ingreso[2]), int(self.dash_id))
+        self.assertEqual(ingreso[3], "FAC-ALQ-1")
+        self.assertEqual(ingreso[4], "REM-ALQ-1")
+        self.assertIsNotNone(ingreso[5])
+        self.assertFalse(bool(device[0]))
+        self.assertEqual(device[1], "inactivo_venta")
+        self.assertGreaterEqual(event_count, 1)
+
+    def test_venta_mg_no_alquilado_queda_pendiente_y_entrega_cierra_venta(self):
+        ingreso_id = self._create_ingreso(device_id=self.device_id_2, estado="liberado", alquilado=False)
+
+        sold = self.client.post(
+            self._url_venta(self.device_id_2),
+            {
+                "factura_numero": "FAC-VTA-2",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "service_sheet",
+                "ingreso_id": ingreso_id,
+                "fecha_venta": "2026-03-25",
+            },
+            format="json",
+        )
+
+        self.assertEqual(sold.status_code, 200)
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado, fecha_entrega, factura_numero FROM ingresos WHERE id=%s", [ingreso_id])
+            pending = cur.fetchone()
+        self.assertEqual(pending[0], "vendido_pendiente_entrega")
+        self.assertIsNone(pending[1])
+        self.assertEqual(pending[2], "FAC-VTA-2")
+
+        delivered = self.client.post(
+            self._url_entregar(ingreso_id),
+            {"remito_salida": "REM-VTA-2", "fecha_entrega": "2026-03-26"},
+            format="json",
+        )
+
+        self.assertEqual(delivered.status_code, 200)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT estado, alquilado, remito_salida, factura_numero, fecha_entrega
+                  FROM ingresos
+                 WHERE id=%s
+                """,
+                [ingreso_id],
+            )
+            ingreso = cur.fetchone()
+            cur.execute(
+                "SELECT COUNT(*) FROM ingreso_events WHERE ticket_id=%s AND a_estado='vendido_entregado'",
+                [ingreso_id],
+            )
+            event_count = int(cur.fetchone()[0] or 0)
+
+        self.assertEqual(ingreso[0], "vendido_entregado")
+        self.assertFalse(bool(ingreso[1]))
+        self.assertEqual(ingreso[2], "REM-VTA-2")
+        self.assertEqual(ingreso[3], "FAC-VTA-2")
+        self.assertIsNotNone(ingreso[4])
+        self.assertGreaterEqual(event_count, 1)

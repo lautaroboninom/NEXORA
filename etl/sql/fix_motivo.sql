@@ -1,1 +1,3 @@
-﻿UPDATE ingresos SET motivo='reparación' WHERE motivo='reparaci�n';
+UPDATE ingresos
+SET motivo='reparación'
+WHERE HEX(motivo)='7265706172616369EFBFBD';

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { getGeneralEquipos } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion } from "../lib/ui-helpers";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 export default function BuscarNS() {
   const [sp] = useSearchParams();
@@ -73,8 +74,7 @@ export default function BuscarNS() {
                 <th className="p-2">OS</th>
                 <th className="p-2">Marca</th>
                 <th className="p-2">Modelo</th>
-                <th className="p-2">MG</th>
-                <th className="p-2">N° serie</th>
+                <th className="p-2">Identificación</th>
                 <th className="p-2">Tipo</th>
                 <th className="p-2">Fecha de ingreso</th>
               </tr>
@@ -92,8 +92,7 @@ export default function BuscarNS() {
                     <td className="p-2 underline">{formatOSHelper(r, "")}</td>
                     <td className="p-2">{r?.marca || "-"}</td>
                     <td className="p-2">{r?.modelo || "-"}</td>
-                    <td className="p-2">{r?.numero_interno || "-"}</td>
-                    <td className="p-2">{r?.numero_serie || "-"}</td>
+                    <td className="p-2"><DeviceIdentifier row={r} /></td>
                     <td className="p-2">{tipoEquipoOf(r)}</td>
                     <td className="p-2 whitespace-nowrap">{formatDateOnlyHelper(resolveFechaIngreso(r))}</td>
                   </tr>

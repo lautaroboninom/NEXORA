@@ -1,0 +1,49 @@
+{
+  "tipo_archivo": "error_registrado_por_nexora",
+  "descripcion": "Evento de error registrado por NEXORA al intentar ejecutar el request contra el SDK de Bejerman. No es un log interno generado por Bejerman.",
+  "base_datos_gestion": "SBDASEP",
+  "empresa_codigo": "SEP",
+  "empresa_nombre": "SEPID S.A.",
+  "endpoint": "http://45.173.2.155/Bejerman-SDK-WS/EFlexSDK_Service.svc",
+  "nexora": {
+    "job_id": 2,
+    "sync_type": "stock_str_to_stl",
+    "ingreso_id": 29012,
+    "numero_serie": "F1121504032",
+    "article_code": "1102001",
+    "source_deposit": "STR",
+    "target_deposit": "STL",
+    "status": "failed",
+    "attempts": 1,
+    "updated_at": "2026-05-08 15:07:16.549133+00:00"
+  },
+  "error": {
+    "tipo": "timeout_http",
+    "mensaje": "Error HTTP Bejerman: HTTPConnectionPool(host='45.173.2.155', port=80): Read timed out. (read timeout=240)",
+    "timeout_segundos": 240
+  },
+  "validacion_posterior": {
+    "comprobante_esperado": {
+      "tipo": "TRA",
+      "numero": "00029012"
+    },
+    "stock_partida": {
+      "partida": "F1121504032",
+      "STR": 1,
+      "STL": 0
+    },
+    "resultado": "No se generó el comprobante TRA 00029012 y no se movió stock."
+  },
+  "iis_observado": {
+    "ruta": "/Bejerman-SDK-WS/EFlexSDK_Service.svc",
+    "application_pool": "DefaultAppPool",
+    "module": "ServiceModel-4.0",
+    "stage": "AuthenticateRequest",
+    "duracion_observada_milisegundos": 611532
+  },
+  "sdk_observado": {
+    "dll": "C:\\Program Files (x86)\\SistemasBejermanSQL\\WFRCVSVR.DLL",
+    "version": "8.80",
+    "fecha_modificacion": "2026-04-15 16:33:27 -03:00"
+  }
+}

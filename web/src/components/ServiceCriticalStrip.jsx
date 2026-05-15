@@ -1,9 +1,9 @@
 import StatusChip from "./StatusChip.jsx";
+import DeviceIdentifier from "./DeviceIdentifier.jsx";
 import {
   formatDateOnly,
   formatOS,
   modeloSerieVarianteOf,
-  nsPreferInternoOf,
   parseDateLocal,
   resolveFechaCreacion,
   resolveFechaIngreso,
@@ -53,7 +53,9 @@ export default function ServiceCriticalStrip({ data, isCotizacion = false }) {
         <Field label="Tipo de equipo" title={tipoEquipo} className="xl:col-span-2">{tipoEquipo}</Field>
         <Field label="Marca" title={marca} className="xl:col-span-1">{marca}</Field>
         <Field label="Modelo" title={modelo} className="xl:col-span-1">{modelo}</Field>
-        <Field label="N/S o MG" className="xl:col-span-1">{nsPreferInternoOf(data)}</Field>
+        <Field label="N/S o MG" className="xl:col-span-1">
+          <DeviceIdentifier row={data} />
+        </Field>
         <Field label="Estado" className="xl:col-span-2"><StatusChip value={data?.estado} /></Field>
         <Field label={isCotizacion ? "Cotización" : "Presupuesto"}>
           <StatusChip value={data?.presupuesto_estado} />

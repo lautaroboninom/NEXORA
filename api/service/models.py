@@ -9,6 +9,14 @@ class User(models.Model):
     rol = models.TextField()
     activo = models.BooleanField(default=True)
 
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
+
     class Meta:
         managed = False
         db_table = "users"

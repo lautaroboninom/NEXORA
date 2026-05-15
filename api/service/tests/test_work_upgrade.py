@@ -459,6 +459,30 @@ class WorkUpgradeAPITest(TestCase):
             },
         )
 
+    def test_resumen_deduplica_ingresos_que_caen_en_multiples_alertas(self):
+        now = timezone.now()
+        with connection.cursor() as cur:
+            cur.execute("SELECT device_id, ubicacion_id FROM ingresos WHERE id = %s", [self.old_ingreso_id])
+            device_id, ubicacion_id = cur.fetchone()
+            duplicado_ingreso_id = self._insert_id(
+                cur,
+                """
+                INSERT INTO ingresos(device_id, estado, presupuesto_estado, motivo, fecha_ingreso, fecha_creacion, ubicacion_id, asignado_a)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                [device_id, "diagnosticado", "presupuestado", "reparacion", now - dt.timedelta(days=20), now - dt.timedelta(days=20), ubicacion_id, self.tecnico.id],
+            )
+            cur.execute(
+                "INSERT INTO quotes(ingreso_id, estado, moneda, fecha_emitido) VALUES (%s,%s,%s,%s)",
+                [duplicado_ingreso_id, "presupuestado", "ARS", now - dt.timedelta(days=18)],
+            )
+
+        resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")
+        self.assertEqual(resp.status_code, 200)
+        duplicados = [row for row in resp.data["prioridades"] if row.get("ingreso_id") == duplicado_ingreso_id]
+        self.assertEqual(len(duplicados), 1)
+        self.assertEqual(duplicados[0]["alert_key"], "presupuesto_sin_aprobar")
+
     def test_dashboard_tecnico_muestra_solo_datos_propios(self):
         self.client.force_authenticate(user=self.tecnico)
         resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")

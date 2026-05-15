@@ -47,9 +47,9 @@
 0047:  async function addAccesorio() {
 0048:    try {
 0049:      const d = (nuevoAcc?.descripcion || "").trim().toLowerCase();
-0050:      if (!d) { setErr("EscribÃ­ una descripciÃ³n"); return; }
+0050:      if (!d) { setErr("Escribí una descripción"); return; }
 0051:      const acc = (accesCatalogo || []).find(a => (a?.nombre || "").trim().toLowerCase() === d);
-0052:      if (!acc) { setErr("ElegÃ­ una descripciÃ³n vÃ¡lida de la lista"); return; }
+0052:      if (!acc) { setErr("Elegí una descripción válida de la lista"); return; }
 0053:      setAddingAcc(true);
 0054:      await postAccesorioIngreso(id, {
 0055:        accesorio_id: Number(acc.id),
@@ -98,13 +98,13 @@
 0098:
 0099:  async function saveResolucion() {
 0100:    try {
-0101:      if (!resolucion) { setErr("SeleccionÃ¡ una resoluciÃ³n."); return; }
+0101:      if (!resolucion) { setErr("Seleccioná una resolución."); return; }
 0102:      setSavingResol(true);
 0103:      await postCerrarReparacion(id, { resolucion });
 0104:      await refreshIngreso();
 0105:      setErr("");
 0106:    } catch (e) {
-0107:      setErr(e?.message || "No se pudo guardar la resoluciÃ³n");
+0107:      setErr(e?.message || "No se pudo guardar la resolución");
 0108:    } finally {
 0109:      setSavingResol(false);
 0110:    }
@@ -153,7 +153,7 @@
 0153:                <input
 0154:                  className="border rounded p-2 min-w-[240px]"
 0155:                  list="accesorios_catalogo"
-0156:                  placeholder="DescripciÃ³n (elegÃ­ de la lista)"
+0156:                  placeholder="Descripción (elegí de la lista)"
 0157:                  value={nuevoAcc.descripcion}
 0158:                  onChange={(e) => setNuevoAcc((s) => ({ ...s, descripcion: e.target.value }))}
 0159:                />
@@ -182,7 +182,7 @@
 0182:        </div>
 0183:      </div>
 0184:
-0185:      <h2 className="font-semibold mb-2">DescripciÃ³n del problema (diagnÃ³stico)</h2>
+0185:      <h2 className="font-semibold mb-2">Descripción del problema (diagnóstico)</h2>
 0186:
 0187:      <div className="flex flex-wrap items-end gap-3 mb-3">
 0188:        <div>
@@ -207,7 +207,7 @@
 0207:          {canResolve && (
 0208:            <>
 0209:              <div className="min-w-[260px]">
-0210:                <label className="block text-sm text-gray-600 mb-1">ResoluciÃ³n de reparaciÃ³n</label>
+0210:                <label className="block text-sm text-gray-600 mb-1">Resolución de reparación</label>
 0211:                <select
 0212:                  className="border rounded p-2 w-full"
 0213:                  value={resolucion}
@@ -229,7 +229,7 @@
 0229:                onClick={saveResolucion}
 0230:                type="button"
 0231:              >
-0232:                {savingResol ? "Guardando..." : "Guardar resoluciÃ³n"}
+0232:                {savingResol ? "Guardando..." : "Guardar resolución"}
 0233:              </button>
 0234:            </>
 0235:          )}
@@ -260,7 +260,7 @@
 0260:        value={descripcion}
 0261:        onChange={(e) => setDescripcion(e.target.value)}
 0262:        disabled={typeof canEditDiag === 'boolean' ? !canEditDiag : false}
-0263:        placeholder="Ej.: Ingreso de agua; placa de control con Ã³xido; vÃ¡lvula X no abre..."
+0263:        placeholder="Ej.: Ingreso de agua; placa de control con óxido; válvula X no abre..."
 0264:      />
 0265:
 0266:      <div className="border rounded p-4 mt-4">
@@ -270,16 +270,16 @@
 0270:          value={trabajos}
 0271:          onChange={(e) => setTrabajos(e.target.value)}
 0272:          disabled={typeof canEditDiag === 'boolean' ? !canEditDiag : false}
-0273:          placeholder="Ej.: Cambio de turbina; limpieza y secado; resoldado de conector; calibraciÃ³n; pruebas OK."
+0273:          placeholder="Ej.: Cambio de turbina; limpieza y secado; resoldado de conector; calibración; pruebas OK."
 0274:        />
 0275:        <div className="mt-2 text-xs text-gray-500" aria-live="polite">
-0276:          {(savingDiag || savingAll) ? "Guardando..." : "Los cambios se guardan automǭticamente"}
+0276:          {(savingDiag || savingAll) ? "Guardando..." : "Los cambios se guardan automáticamente"}
 0277:        </div>
 0278:      </div>
 0279:
 0280:      <IngresoPhotos ingresoId={Number(id)} canManage={canManagePhotos} />
 0281:
-0282:      <Row label="Faja de garantÃ­a Nro">
+0282:      <Row label="Faja de garantía Nro">
 0283:        <input
 0284:          className="border rounded p-1 w-60"
 0285:          value={data.faja_garantia || ""}

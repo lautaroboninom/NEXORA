@@ -22,8 +22,8 @@ def _q(sql, params=None, one=False):
 def _fix_mojibake(val: str) -> str:
     s = _fix_text_value(val)
     try:
-        # Casos típicos de mojibake UTF-8 visto como Latin-1: 'Ãƒ', 'Ã‚', etc.
-        if any(ch in s for ch in ("Ãƒ", "Ã‚", "Ã¢", "â‚¬", "â„¢")):
+        # Casos típicos de mojibake UTF-8 visto como Latin-1 o Windows-1252.
+        if any(ch in s for ch in ("\u00c3\u0192", "\u00c3\u201a", "\u00c3\u00a2", "\u00e2\u201a\u00ac", "\u00e2\u201e\u00a2")):
             return s.encode("latin1").decode("utf-8")
     except Exception:
         pass

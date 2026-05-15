@@ -26,7 +26,7 @@ from .helpers import _rol, _set_audit_user, exec_void, q, require_permission
 
 _EDIT_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin"}
 _VIEW_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin", "recepcion"}
-_BLOCKED_EDIT_STATES = {"entregado", "baja"}
+_BLOCKED_EDIT_STATES = {"entregado", "baja", "vendido_pendiente_entrega", "vendido_entregado"}
 _VALID_GLOBAL_RESULTS = {"", "pendiente", "apto", "apto_condicional", "no_apto"}
 _VALID_ITEM_RESULTS = {"", "ok", "observado", "no_ok", "na"}
 
@@ -125,7 +125,7 @@ def _can_operate_on_ingreso(request, ingreso: dict[str, Any], for_edit: bool) ->
     if rol not in allowed:
         raise PermissionDenied("No autorizado")
     if for_edit and (ingreso.get("estado") or "").strip().lower() in _BLOCKED_EDIT_STATES:
-        raise PermissionDenied("No se puede editar test en estado entregado/baja")
+        raise PermissionDenied("No se puede editar test en estado entregado, baja o vendido")
     if rol in ("tecnico", "jefe_veedor"):
         uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
         if int(ingreso.get("asignado_a") or 0) != int(uid or 0):

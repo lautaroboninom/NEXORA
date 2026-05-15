@@ -1,0 +1,34 @@
+{
+  "evento": "BejermanSDK.EFlexSDK_WSEjecutar",
+  "endpoint": "http://45.173.2.155/Bejerman-SDK-WS/EFlexSDK_Service.svc",
+  "base_datos_gestion": "SBDASEP",
+  "empresa_codigo": "SEP",
+  "empresa_nombre": "SEPID S.A.",
+  "puesto_trabajo": "STEC",
+  "sucursal": "",
+  "request": {
+    "Circuito": "STOCK",
+    "Operacion": "IngresarListaComprobantesJSON",
+    "Parametros": null,
+    "ParametrosJson": [
+      "[{\"Comprobante_Tipo\":\"TRA\",\"Comprobante_Letra\":\"\",\"Comprobante_Numero\":\"00029012\",\"Comprobante_IdOrigen\":\"NEXORA-OS-29012-STR\",\"Comprobante_PtoVenta\":\"\",\"Partida_Observaciones\":\"NEXORA-OS-29012\",\"Comprobante_ArtCodTipo\":\"1\",\"Comprobante_ArtPartida\":\"F1121504032\",\"Comprobante_Art_CodGen\":\"1102001\",\"Comprobante_ArtDeposito\":\"STR\",\"Comprobante_CantidadUM1\":-1,\"Comprobante_CantidadUM2\":-1,\"Comprobante_DescArticulo\":\"NEXORA F1121504032\",\"Comprobante_FechaEmision\":\"2026-05-08\",\"Comprobante_PrecioTotalMonLocal\":0},{\"Comprobante_Tipo\":\"TRA\",\"Comprobante_Letra\":\"\",\"Comprobante_Numero\":\"00029012\",\"Comprobante_IdOrigen\":\"NEXORA-OS-29012-STL\",\"Comprobante_PtoVenta\":\"\",\"Partida_Observaciones\":\"NEXORA-OS-29012\",\"Comprobante_ArtCodTipo\":\"1\",\"Comprobante_ArtPartida\":\"F1121504032\",\"Comprobante_Art_CodGen\":\"1102001\",\"Comprobante_ArtDeposito\":\"STL\",\"Comprobante_CantidadUM1\":1,\"Comprobante_CantidadUM2\":1,\"Comprobante_DescArticulo\":\"NEXORA F1121504032\",\"Comprobante_FechaEmision\":\"2026-05-08\",\"Comprobante_PrecioTotalMonLocal\":0}]",
+      "N"
+    ]
+  },
+  "nexora": {
+    "job_id": 2,
+    "sync_type": "stock_str_to_stl",
+    "ingreso_id": 29012,
+    "numero_serie": "F1121504032",
+    "source_deposit": "STR",
+    "target_deposit": "STL",
+    "article_code": "1102001",
+    "status": "failed",
+    "attempts": 1,
+    "updated_at": "2026-05-08 15:07:16.549133+00:00"
+  },
+  "error": {
+    "tipo": "timeout_http",
+    "mensaje": "Error HTTP Bejerman: HTTPConnectionPool(host='45.173.2.155', port=80): Read timed out. (read timeout=240)"
+  }
+}

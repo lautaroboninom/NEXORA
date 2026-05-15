@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getClientes, postCliente, deleteCliente, patchCliente, postClienteMerge } from "../lib/api";
 
-const Input = (p) => <input {...p} className="border rounded p-2 w-full" />;
+const Input = ({ className = "", ...p }) => <input {...p} className={`border rounded p-2 w-full ${className}`} />;
 
 export default function CatalogoClientes() {
   const [rows, setRows] = useState([]);
@@ -269,7 +269,7 @@ export default function CatalogoClientes() {
               </div>
               <div>
                 <label className="text-sm">Código empresa</label>
-                <Input value={ef.cod_empresa} onChange={(e) => setEf({ ...ef, cod_empresa: e.target.value })} required />
+                <Input value={ef.cod_empresa} readOnly className="bg-gray-50 text-gray-700" required />
               </div>
               <div>
                 <label className="text-sm">Teléfono</label>

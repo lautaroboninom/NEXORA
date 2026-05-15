@@ -5,6 +5,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, resolveFechaIngreso } from "../lib/ui-helpers";
 import useQueryState from "../hooks/useQueryState";
 import StatusChip from "../components/StatusChip.jsx";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 export default function HistoricoIngresos() {
   const [rows, setRows] = useState([]);
@@ -286,8 +287,7 @@ export default function HistoricoIngresos() {
                 <th scope="col" className="p-2">Modelo</th>
                 <th scope="col" className="p-2">Variante</th>
                 <th scope="col" className="p-2">Estado</th>
-                <th scope="col" className="p-2">N/S (serie)</th>
-                <th scope="col" className="p-2">MG</th>
+                <th scope="col" className="p-2" colSpan={2}>Identificación</th>
                 <th scope="col" className="p-2">Fecha ingreso</th>
                 <th scope="col" className="p-2">Fecha liberacion</th>
                 <th scope="col" className="p-2">Fecha entrega</th>
@@ -497,8 +497,7 @@ export default function HistoricoIngresos() {
                     <td className="p-2">{row?.modelo ?? row?.equipo?.modelo ?? "-"}</td>
                     <td className="p-2">{row?.equipo_variante ?? row?.variante ?? row?.modelo_variante ?? "-"}</td>
                     <td className="p-2"><StatusChip value={row?.estado} /></td>
-                    <td className="p-2">{row?.numero_serie ?? "-"}</td>
-                    <td className="p-2">{row?.numero_interno ?? "-"}</td>
+                    <td className="p-2" colSpan={2}><DeviceIdentifier row={row} /></td>
                     <td className="p-2 whitespace-nowrap">{formatDateTime(resolveFechaIngreso(row))}</td>
                     <td className="p-2 whitespace-nowrap">{formatDateTime(row?.fecha_liberacion)}</td>
                     <td className="p-2 whitespace-nowrap">{formatDateTime(row?.fecha_entrega)}</td>

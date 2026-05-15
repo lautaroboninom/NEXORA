@@ -1,12 +1,15 @@
 import datetime as dt
+from collections import defaultdict
 from django.core.cache import cache
 from django.db import connection
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import permissions
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from ..activity_audit import classify_read_path
 from .helpers import (
     WORKDAY_END_HOUR,
     WORKDAY_START_HOUR,
@@ -15,7 +18,9 @@ from .helpers import (
     _set_audit_user,
     business_minutes_between,
     exec_void,
+    os_label,
     q,
+    require_permission,
     require_roles,
 )
 
@@ -174,6 +179,1025 @@ def _pctiles(values, percent_list=(50, 75, 90, 95)):
     out["avg"] = sum(arr) / n
     out["count"] = n
     return out
+
+
+ACTIVITY_TYPE_LABELS = {
+    "apertura_hoja": "Apertura de hoja",
+    "apertura_presupuesto": "Apertura de presupuesto",
+    "apertura_cola": "Apertura de cola",
+    "apertura_historico": "Apertura de histórico",
+    "apertura_repuestos": "Apertura de repuestos",
+    "apertura_movimientos": "Apertura de movimientos",
+    "apertura_equipos": "Apertura de equipos",
+    "cambio_estado": "Cambio de estado",
+    "evento_estado": "Evento de estado",
+    "asignacion_tecnico": "Asignación de técnico",
+    "edicion_diagnostico": "Edición de diagnóstico",
+    "edicion_comentarios": "Edición de comentarios",
+    "edicion_presupuesto": "Edición de presupuesto",
+    "cambio_presupuesto_estado": "Cambio de presupuesto",
+    "cambio_ubicacion": "Cambio de ubicación",
+    "movimiento_repuesto": "Movimiento de repuesto",
+    "derivacion": "Derivación",
+    "devolucion_derivacion": "Devolución de derivación",
+    "edicion_equipo": "Edición de equipo",
+    "edicion_accesorios": "Edición de accesorios",
+    "edicion_registro": "Edición de registro",
+}
+
+ACTIVITY_FIELD_LABELS = {
+    "estado": "Estado",
+    "asignado_a": "Técnico asignado",
+    "ubicacion_id": "Ubicación",
+    "descripcion_problema": "Descripción del problema",
+    "trabajos_realizados": "Trabajos realizados",
+    "informe_preliminar": "Informe preliminar",
+    "comentarios": "Comentarios",
+    "resolucion": "Resolución",
+    "presupuesto_estado": "Estado de presupuesto",
+    "total": "Total",
+    "subtotal": "Subtotal",
+    "iva_21": "IVA",
+    "precio_u": "Precio unitario",
+    "qty": "Cantidad",
+    "descripcion": "Descripción",
+    "fecha_servicio": "Fecha de servicio",
+    "fecha_emitido": "Fecha emitido",
+    "fecha_aprobado": "Fecha aprobado",
+    "fecha_entrega": "Fecha de entrega",
+}
+
+ACTIVITY_TABLE_LABELS = {
+    "ingresos": "Ingreso",
+    "devices": "Equipo",
+    "quotes": "Presupuesto",
+    "quote_items": "Ítem de presupuesto",
+    "ingreso_accesorios": "Accesorio",
+    "ingreso_alquiler_accesorios": "Accesorio de alquiler",
+    "catalogo_repuestos": "Repuesto",
+}
+
+ACTIVITY_STATE_LABELS = {
+    "ingresado": "Ingresado",
+    "asignado": "Asignado",
+    "diagnosticado": "Diagnosticado",
+    "presupuestado": "Presupuestado",
+    "reparar": "Reparar",
+    "controlado_sin_defecto": "Controlado sin defecto",
+    "reparado": "Reparado",
+    "liberado": "Liberado",
+    "entregado": "Entregado",
+    "baja": "Baja",
+    "derivado": "Derivado",
+    "alquilado": "Alquilado",
+}
+
+ACTIVITY_PRESUPUESTO_STATE_LABELS = {
+    "pendiente": "Pendiente",
+    "presupuestado": "Presupuestado",
+    "aprobado": "Aprobado",
+    "rechazado": "Rechazado",
+    "no_aplica": "No aplica",
+}
+
+ACTIVITY_REPUESTO_MOVIMIENTO_LABELS = {
+    "ingreso_compra": "Ingreso por compra",
+    "egreso_aprobado": "Egreso por presupuesto aprobado",
+    "ingreso_anulacion_aprobado": "Ingreso por anulación de presupuesto",
+    "ajuste": "Ajuste manual",
+}
+
+ACTIVITY_DIAG_FIELDS = {
+    "descripcion_problema",
+    "trabajos_realizados",
+    "informe_preliminar",
+    "resolucion",
+    "fecha_servicio",
+}
+
+ACTIVITY_COMMENT_FIELDS = {"comentarios"}
+ACTIVITY_STATE_EVENT_TYPES = {"cambio_estado", "evento_estado", "derivacion", "devolucion_derivacion"}
+ACTIVITY_ACTOR_ROLES = ("tecnico", "jefe", "jefe_veedor")
+ACTIVITY_CHANGE_TABLES = (
+    "ingresos",
+    "devices",
+    "quotes",
+    "quote_items",
+    "ingreso_accesorios",
+    "ingreso_alquiler_accesorios",
+    "catalogo_repuestos",
+)
+
+
+def _table_exists_local(table_name: str, schema_name: str | None = None) -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            params = [table_name]
+            sql = (
+                """
+                SELECT 1
+                  FROM information_schema.tables
+                 WHERE table_schema = ANY(current_schemas(true))
+                   AND table_name = %s
+                 LIMIT 1
+                """
+            )
+            if schema_name:
+                sql = (
+                    """
+                    SELECT 1
+                      FROM information_schema.tables
+                     WHERE table_schema = %s
+                       AND table_name = %s
+                     LIMIT 1
+                    """
+                )
+                params = [schema_name, table_name]
+            row = q(sql, params, one=True)
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.tables
+             WHERE table_name = %s
+             LIMIT 1
+            """,
+            [table_name],
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _request_role(request) -> str:
+    return (
+        getattr(getattr(request, "user", None), "rol", None)
+        or getattr(request, "user_role", None)
+        or ""
+    ).strip().lower()
+
+
+def _require_metricas_activity_viewer(request):
+    require_permission(request, "page.metrics")
+    if _request_role(request) not in {"jefe", "jefe_veedor"}:
+        raise PermissionDenied("Solo jefe y jefe veedor pueden ver la actividad de técnicos.")
+
+
+def _parse_activity_range_params(request):
+    tz = timezone.get_current_timezone()
+    now = timezone.now()
+    today = timezone.localtime(now, tz).date()
+    preset = (request.GET.get("preset") or "").strip().lower()
+    from_s = request.GET.get("from") or request.GET.get("desde")
+    to_s = request.GET.get("to") or request.GET.get("hasta")
+
+    if preset == "today":
+        since = timezone.make_aware(dt.datetime.combine(today, dt.time.min), tz)
+        until = now
+    elif preset == "yesterday":
+        target = today - dt.timedelta(days=1)
+        since = timezone.make_aware(dt.datetime.combine(target, dt.time.min), tz)
+        until = timezone.make_aware(dt.datetime.combine(target, dt.time.max), tz)
+    elif preset == "week" or (not preset and not from_s and not to_s):
+        start = today - dt.timedelta(days=today.weekday())
+        since = timezone.make_aware(dt.datetime.combine(start, dt.time.min), tz)
+        until = now
+    else:
+        since, until = _parse_range_params(request)
+
+    try:
+        cutoff = _cutoff_ts()
+        if since < cutoff:
+            since = cutoff
+    except Exception:
+        pass
+    return since, until
+
+
+def _clean_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _truncate_text(value, max_len=180):
+    text = _clean_text(value)
+    if not text:
+        return "-"
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3].rstrip()}..."
+
+
+def _display_value(value):
+    text = _clean_text(value)
+    return text or "-"
+
+
+def _humanize_key(value):
+    text = _clean_text(value)
+    if not text:
+        return "-"
+    base = text.replace("_", " ")
+    return base[:1].upper() + base[1:]
+
+
+def _activity_type_label(value):
+    return ACTIVITY_TYPE_LABELS.get(value, _humanize_key(value))
+
+
+def _activity_field_label(value):
+    raw = _clean_text(value).lower()
+    return ACTIVITY_FIELD_LABELS.get(raw, _humanize_key(raw))
+
+
+def _activity_table_label(value):
+    raw = _clean_text(value).lower()
+    return ACTIVITY_TABLE_LABELS.get(raw, _humanize_key(raw))
+
+
+def _activity_state_label(value):
+    raw = _clean_text(value).lower()
+    if not raw:
+        return "-"
+    return ACTIVITY_STATE_LABELS.get(raw, _humanize_key(raw))
+
+
+def _activity_presupuesto_state_label(value):
+    raw = _clean_text(value).lower()
+    if not raw:
+        return "-"
+    return ACTIVITY_PRESUPUESTO_STATE_LABELS.get(raw, _humanize_key(raw))
+
+
+def _activity_decimal_label(value):
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except Exception:
+        return _display_value(value)
+    if abs(number - int(number)) < 0.000001:
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _activity_ts_sort_value(item):
+    ts = item.get("ts") if isinstance(item, dict) else None
+    if hasattr(ts, "timestamp"):
+        try:
+            return float(ts.timestamp())
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _activity_id_sort_value(item):
+    try:
+        return int(item.get("_id") or item.get("id") or 0)
+    except Exception:
+        return 0
+
+
+def _sql_in_clause(values):
+    seq = [value for value in values if value is not None]
+    if not seq:
+        return None, []
+    return ",".join(["%s"] * len(seq)), seq
+
+
+def _load_ingreso_context(ingreso_ids):
+    placeholders, params = _sql_in_clause(sorted(set(ingreso_ids or [])))
+    if not placeholders:
+        return {}
+    try:
+        rows = q(
+            f"""
+            SELECT
+              i.id AS ingreso_id,
+              c.razon_social AS cliente,
+              COALESCE(b.nombre, '') AS marca,
+              COALESCE(m.nombre, '') AS modelo,
+              COALESCE(m.tipo_equipo, '') AS tipo_equipo,
+              COALESCE(d.numero_serie, '') AS numero_serie,
+              COALESCE(d.numero_interno, '') AS numero_interno
+            FROM ingresos i
+            LEFT JOIN devices d ON d.id = i.device_id
+            LEFT JOIN customers c ON c.id = d.customer_id
+            LEFT JOIN marcas b ON b.id = d.marca_id
+            LEFT JOIN models m ON m.id = d.model_id
+            WHERE i.id IN ({placeholders})
+            """,
+            params,
+        ) or []
+    except Exception:
+        return {}
+
+    out = {}
+    for row in rows:
+        rid = row.get("ingreso_id")
+        if rid is None:
+            continue
+        tipo = _clean_text(row.get("tipo_equipo"))
+        marca = _clean_text(row.get("marca"))
+        modelo = _clean_text(row.get("modelo"))
+        parts = [part for part in [tipo, marca, modelo] if part]
+        row["equipo_label"] = " | ".join(parts)
+        row["os"] = os_label(rid)
+        out[int(rid)] = row
+    return out
+
+
+def _load_repuesto_context(repuesto_ids):
+    placeholders, params = _sql_in_clause(sorted(set(repuesto_ids or [])))
+    if not placeholders:
+        return {}
+    try:
+        rows = q(
+            f"""
+            SELECT id AS repuesto_id, COALESCE(codigo, '') AS codigo, COALESCE(nombre, '') AS nombre
+            FROM catalogo_repuestos
+            WHERE id IN ({placeholders})
+            """,
+            params,
+        ) or []
+    except Exception:
+        return {}
+    return {
+        int(row["repuesto_id"]): row
+        for row in rows
+        if row.get("repuesto_id") is not None
+    }
+
+
+def _ingreso_os_suffix(context):
+    os_value = _clean_text((context or {}).get("os"))
+    return f" de {os_value}" if os_value else ""
+
+
+def _ingreso_os_target_suffix(context):
+    os_value = _clean_text((context or {}).get("os"))
+    return f" para {os_value}" if os_value else ""
+
+
+def _activity_ingreso_reference(context):
+    if not context:
+        return ""
+    parts = [context.get("os"), context.get("equipo_label")]
+    return " | ".join([_clean_text(part) for part in parts if _clean_text(part)])
+
+
+def _activity_make_row(
+    *,
+    source,
+    raw_row,
+    activity_type,
+    title,
+    detail,
+    ingreso_context=None,
+    repuesto_context=None,
+    meta=None,
+):
+    ingreso_id = raw_row.get("ingreso_id")
+    repuesto_id = raw_row.get("repuesto_id")
+    ingreso_ref = _activity_ingreso_reference(ingreso_context or {})
+    repuesto_codigo = _clean_text((repuesto_context or {}).get("codigo") or raw_row.get("codigo") or raw_row.get("repuesto_codigo"))
+    repuesto_nombre = _clean_text((repuesto_context or {}).get("nombre") or raw_row.get("repuesto_nombre") or raw_row.get("nombre"))
+    repuesto_ref = " - ".join([part for part in [repuesto_codigo, repuesto_nombre] if part])
+    reference = " | ".join([part for part in [ingreso_ref, repuesto_ref] if part]) or None
+    return {
+        "_id": raw_row.get("_id") or raw_row.get("id"),
+        "ts": raw_row.get("ts"),
+        "tecnico_id": raw_row.get("user_id"),
+        "tecnico_nombre": _clean_text(raw_row.get("user_nombre")) or _display_value(raw_row.get("user_id")),
+        "source": source,
+        "activity_type": activity_type,
+        "activity_type_label": _activity_type_label(activity_type),
+        "title": title,
+        "detail": detail,
+        "ingreso_id": ingreso_id,
+        "os": (ingreso_context or {}).get("os") if ingreso_id else None,
+        "ingreso_ref": ingreso_ref or None,
+        "repuesto_id": repuesto_id,
+        "repuesto_codigo": repuesto_codigo or None,
+        "repuesto_nombre": repuesto_nombre or None,
+        "reference": reference,
+        "path": raw_row.get("path"),
+        "meta": meta or {},
+    }
+
+
+def _normalize_change_log_row(row, ingreso_context_map, repuesto_context_map):
+    table_name = _clean_text(row.get("table_name")).lower()
+    column_name = _clean_text(row.get("column_name")).lower()
+    ingreso_context = ingreso_context_map.get(int(row["ingreso_id"])) if row.get("ingreso_id") is not None else None
+    compact_count = int(row.get("_compact_count") or 1)
+
+    if table_name == "ingresos" and column_name == "estado":
+        old_label = _activity_state_label(row.get("old_value"))
+        new_label = _activity_state_label(row.get("new_value"))
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="cambio_estado",
+            title=f"Cambió el estado{_ingreso_os_suffix(ingreso_context)}",
+            detail=f"{old_label} -> {new_label}",
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "state_to": _clean_text(row.get("new_value")).lower(),
+                "compact_count": compact_count,
+            },
+        )
+
+    if table_name == "ingresos" and column_name == "asignado_a":
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="asignacion_tecnico",
+            title=f"Actualizó la asignación{_ingreso_os_suffix(ingreso_context)}",
+            detail=f"{_display_value(row.get('old_value'))} -> {_display_value(row.get('new_value'))}",
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    if table_name == "ingresos" and column_name == "ubicacion_id":
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="cambio_ubicacion",
+            title=f"Cambió la ubicación{_ingreso_os_suffix(ingreso_context)}",
+            detail=f"{_display_value(row.get('old_value'))} -> {_display_value(row.get('new_value'))}",
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    if column_name == "presupuesto_estado":
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="cambio_presupuesto_estado",
+            title=f"Actualizó el estado del presupuesto{_ingreso_os_suffix(ingreso_context)}",
+            detail=(
+                f"{_activity_presupuesto_state_label(row.get('old_value'))} -> "
+                f"{_activity_presupuesto_state_label(row.get('new_value'))}"
+            ),
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    if table_name in {"quotes", "quote_items"}:
+        detail = f"{_activity_field_label(column_name)}: {_display_value(row.get('old_value'))} -> {_display_value(row.get('new_value'))}"
+        if compact_count > 1:
+            detail = f"{detail} ({compact_count} cambios compactados)"
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="edicion_presupuesto",
+            title=f"Editó el presupuesto{_ingreso_os_suffix(ingreso_context)}",
+            detail=_truncate_text(detail),
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    if column_name in ACTIVITY_DIAG_FIELDS:
+        detail = f"{_activity_field_label(column_name)}: {_truncate_text(row.get('new_value'))}"
+        if compact_count > 1:
+            detail = f"{detail} ({compact_count} cambios compactados)"
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="edicion_diagnostico",
+            title=f"Actualizó diagnóstico/trabajos{_ingreso_os_suffix(ingreso_context)}",
+            detail=detail,
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    if column_name in ACTIVITY_COMMENT_FIELDS:
+        detail = f"{_activity_field_label(column_name)}: {_truncate_text(row.get('new_value'))}"
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="edicion_comentarios",
+            title=f"Actualizó comentarios{_ingreso_os_suffix(ingreso_context)}",
+            detail=detail,
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    if table_name in {"ingreso_accesorios", "ingreso_alquiler_accesorios"}:
+        detail = f"{_activity_field_label(column_name)}: {_display_value(row.get('old_value'))} -> {_display_value(row.get('new_value'))}"
+        return _activity_make_row(
+            source="change_log",
+            raw_row=row,
+            activity_type="edicion_accesorios",
+            title=f"Actualizó accesorios{_ingreso_os_suffix(ingreso_context)}",
+            detail=_truncate_text(detail),
+            ingreso_context=ingreso_context,
+            repuesto_context=None,
+            meta={
+                "table_name": table_name,
+                "column_name": column_name,
+                "old_value": row.get("old_value"),
+                "new_value": row.get("new_value"),
+                "compact_count": compact_count,
+            },
+        )
+
+    activity_type = "edicion_equipo" if table_name == "devices" else "edicion_registro"
+    detail = f"{_activity_field_label(column_name)}: {_display_value(row.get('old_value'))} -> {_display_value(row.get('new_value'))}"
+    if compact_count > 1:
+        detail = f"{detail} ({compact_count} cambios compactados)"
+    return _activity_make_row(
+        source="change_log",
+        raw_row=row,
+        activity_type=activity_type,
+        title=f"Editó {_activity_table_label(table_name).lower()}",
+        detail=_truncate_text(detail),
+        ingreso_context=ingreso_context,
+        repuesto_context=repuesto_context_map.get(int(row["repuesto_id"])) if row.get("repuesto_id") is not None else None,
+        meta={
+            "table_name": table_name,
+            "column_name": column_name,
+            "old_value": row.get("old_value"),
+            "new_value": row.get("new_value"),
+            "compact_count": compact_count,
+        },
+    )
+
+
+def _normalize_event_row(row, ingreso_context_map):
+    ingreso_context = ingreso_context_map.get(int(row["ingreso_id"])) if row.get("ingreso_id") is not None else None
+    state_to = _clean_text(row.get("a_estado")).lower()
+    state_from = _clean_text(row.get("de_estado")).lower()
+    comment = _clean_text(row.get("comentario"))
+    comment_key = comment.lower()
+
+    activity_type = "evento_estado"
+    title = f"Registró evento de {_activity_state_label(state_to)}"
+    if state_to == "derivado":
+        activity_type = "derivacion"
+        title = "Registró derivación externa"
+    elif "devolucion de externo" in comment_key or ("devol" in comment_key and state_to == "ingresado"):
+        activity_type = "devolucion_derivacion"
+        title = "Registró devolución de derivación"
+    elif state_to:
+        title = f"Marcó {ingreso_context.get('os') if ingreso_context else 'la OS'} como {_activity_state_label(state_to)}"
+
+    detail = comment or f"{_activity_state_label(state_from)} -> {_activity_state_label(state_to)}"
+    return _activity_make_row(
+        source="ingreso_event",
+        raw_row=row,
+        activity_type=activity_type,
+        title=title,
+        detail=_truncate_text(detail),
+        ingreso_context=ingreso_context,
+        repuesto_context=None,
+        meta={
+            "state_from": state_from or None,
+            "state_to": state_to or None,
+            "comment": comment or None,
+        },
+    )
+
+
+def _normalize_repuesto_row(row, ingreso_context_map, repuesto_context_map):
+    ingreso_context = ingreso_context_map.get(int(row["ingreso_id"])) if row.get("ingreso_id") is not None else None
+    repuesto_context = repuesto_context_map.get(int(row["repuesto_id"])) if row.get("repuesto_id") is not None else None
+    movement_type = _clean_text(row.get("tipo")).lower()
+    movement_label = ACTIVITY_REPUESTO_MOVIMIENTO_LABELS.get(movement_type, _humanize_key(movement_type))
+    qty = _activity_decimal_label(row.get("qty"))
+    stock_prev = _activity_decimal_label(row.get("stock_prev"))
+    stock_new = _activity_decimal_label(row.get("stock_new"))
+    repuesto_ref = " - ".join([part for part in [_clean_text((repuesto_context or {}).get("codigo")), _clean_text((repuesto_context or {}).get("nombre"))] if part])
+    detail_parts = [repuesto_ref or _clean_text(row.get("repuesto_nombre")) or "Repuesto", movement_label, f"Cantidad {qty}", f"Stock {stock_prev} -> {stock_new}"]
+    if _clean_text(row.get("nota")):
+        detail_parts.append(_truncate_text(row.get("nota"), 80))
+    return _activity_make_row(
+        source="repuestos_movimientos",
+        raw_row=row,
+        activity_type="movimiento_repuesto",
+        title=f"Registró movimiento de repuesto{_ingreso_os_target_suffix(ingreso_context)}",
+        detail=" | ".join([part for part in detail_parts if part]),
+        ingreso_context=ingreso_context,
+        repuesto_context=repuesto_context,
+        meta={
+            "movement_type": movement_type or None,
+            "qty": row.get("qty"),
+            "stock_prev": row.get("stock_prev"),
+            "stock_new": row.get("stock_new"),
+            "ref_tipo": row.get("ref_tipo"),
+            "ref_id": row.get("ref_id"),
+        },
+    )
+
+
+def _normalize_audit_log_row(row, ingreso_context_map):
+    info = classify_read_path(row.get("path"))
+    if not info:
+        return None
+    ingreso_id = info.get("ingreso_id")
+    if ingreso_id is not None:
+        row["ingreso_id"] = ingreso_id
+    ingreso_context = ingreso_context_map.get(int(ingreso_id)) if ingreso_id is not None and int(ingreso_id) in ingreso_context_map else None
+    detail = row.get("path")
+    if ingreso_context and ingreso_context.get("equipo_label"):
+        detail = f"{detail} | {ingreso_context.get('equipo_label')}"
+    return _activity_make_row(
+        source="audit_log",
+        raw_row=row,
+        activity_type=info["activity_type"],
+        title=info["title"],
+        detail=detail,
+        ingreso_context=ingreso_context,
+        repuesto_context=None,
+        meta={
+            "method": row.get("method"),
+            "status_code": row.get("status_code"),
+        },
+    )
+
+
+def _dedupe_activity_timeline(rows):
+    if not rows:
+        return rows
+
+    kept = []
+    for row in sorted(rows, key=lambda item: (_activity_ts_sort_value(item), _activity_id_sort_value(item)), reverse=True):
+        if row.get("source") == "audit_log":
+            duplicated_open = any(
+                other.get("source") == "audit_log"
+                and other.get("tecnico_id") == row.get("tecnico_id")
+                and other.get("activity_type") == row.get("activity_type")
+                and other.get("path") == row.get("path")
+                and other.get("ingreso_id") == row.get("ingreso_id")
+                and abs(_activity_ts_sort_value(other) - _activity_ts_sort_value(row)) <= 60
+                for other in kept
+            )
+            if duplicated_open:
+                continue
+
+        if row.get("source") == "ingreso_event" and row.get("activity_type") in ACTIVITY_STATE_EVENT_TYPES:
+            state_to = _clean_text((row.get("meta") or {}).get("state_to")).lower()
+            duplicated_state = any(
+                other.get("source") == "change_log"
+                and other.get("tecnico_id") == row.get("tecnico_id")
+                and other.get("ingreso_id") == row.get("ingreso_id")
+                and _clean_text((other.get("meta") or {}).get("state_to")).lower() == state_to
+                and abs(_activity_ts_sort_value(other) - _activity_ts_sort_value(row)) <= 120
+                for other in kept
+            )
+            if duplicated_state:
+                continue
+
+        kept.append(row)
+
+    kept.sort(key=lambda item: (_activity_ts_sort_value(item), _activity_id_sort_value(item)), reverse=True)
+    return kept
+
+
+def _build_activity_summary(rows):
+    by_tecnico = {}
+    by_type = defaultdict(int)
+    for row in rows:
+        tecnico_id = row.get("tecnico_id")
+        tecnico_key = tecnico_id if tecnico_id is not None else f"anon:{row.get('tecnico_nombre')}"
+        current = by_tecnico.setdefault(
+            tecnico_key,
+            {
+                "tecnico_id": tecnico_id,
+                "tecnico_nombre": row.get("tecnico_nombre"),
+                "total": 0,
+                "aperturas": 0,
+                "movimientos_repuestos": 0,
+            },
+        )
+        current["total"] += 1
+        if str(row.get("activity_type") or "").startswith("apertura_"):
+            current["aperturas"] += 1
+        if row.get("activity_type") == "movimiento_repuesto":
+            current["movimientos_repuestos"] += 1
+        by_type[row.get("activity_type")] += 1
+
+    by_tecnico_rows = sorted(
+        by_tecnico.values(),
+        key=lambda item: (-int(item.get("total") or 0), _clean_text(item.get("tecnico_nombre")).lower()),
+    )
+    by_type_rows = [
+        {
+            "activity_type": activity_type,
+            "label": _activity_type_label(activity_type),
+            "count": count,
+        }
+        for activity_type, count in sorted(by_type.items(), key=lambda item: (-item[1], _activity_type_label(item[0]).lower()))
+    ]
+    return {
+        "total": len(rows),
+        "unique_tecnicos": len(by_tecnico_rows),
+        "by_tecnico": by_tecnico_rows,
+        "by_activity_type": by_type_rows,
+        "activity_types": by_type_rows,
+    }
+
+
+def _load_activity_history_transforms():
+    try:
+        from .ingresos_views import (
+            _compact_history_rows,
+            _drop_mirrored_device_history_rows,
+            _resolve_assigned_history_values,
+            _resolve_location_history_values,
+        )
+    except Exception:
+        return {
+            "compact": lambda rows: rows,
+            "drop_mirrored": lambda rows: rows,
+            "resolve_assigned": lambda rows: rows,
+            "resolve_location": lambda rows: rows,
+        }
+    return {
+        "compact": _compact_history_rows,
+        "drop_mirrored": _drop_mirrored_device_history_rows,
+        "resolve_assigned": _resolve_assigned_history_values,
+        "resolve_location": _resolve_location_history_values,
+    }
+
+
+def _load_change_log_activity_rows(since, until, tecnico_id=None):
+    if connection.vendor != "postgresql" or not _table_exists_local("change_log", "audit"):
+        return []
+
+    table_clause, table_params = _sql_in_clause(ACTIVITY_CHANGE_TABLES)
+    role_clause, role_params = _sql_in_clause(ACTIVITY_ACTOR_ROLES)
+    if not table_clause or not role_clause:
+        return []
+
+    joins = []
+    ingreso_exprs = ["cl.ingreso_id"]
+    repuesto_expr = (
+        "CASE WHEN LOWER(cl.table_name) = 'catalogo_repuestos' THEN cl.record_id ELSE NULL END"
+    )
+
+    has_quotes = _table_exists_local("quotes")
+    has_quote_items = _table_exists_local("quote_items")
+    has_ingreso_acc = _table_exists_local("ingreso_accesorios")
+    has_ingreso_alq_acc = _table_exists_local("ingreso_alquiler_accesorios")
+
+    if has_quotes:
+        joins.append(
+            "LEFT JOIN quotes q ON LOWER(cl.table_name) = 'quotes' AND q.id = cl.record_id"
+        )
+        ingreso_exprs.append("q.ingreso_id")
+    if has_quote_items:
+        joins.append(
+            "LEFT JOIN quote_items qi ON LOWER(cl.table_name) = 'quote_items' AND qi.id = cl.record_id"
+        )
+        if has_quotes:
+            joins.append("LEFT JOIN quotes qq ON qq.id = qi.quote_id")
+            ingreso_exprs.append("qq.ingreso_id")
+        repuesto_expr = (
+            "CASE "
+            "WHEN LOWER(cl.table_name) = 'quote_items' THEN qi.repuesto_id "
+            "WHEN LOWER(cl.table_name) = 'catalogo_repuestos' THEN cl.record_id "
+            "ELSE NULL END"
+        )
+    if has_ingreso_acc:
+        joins.append(
+            "LEFT JOIN ingreso_accesorios ia ON LOWER(cl.table_name) = 'ingreso_accesorios' AND ia.id = cl.record_id"
+        )
+        ingreso_exprs.append("ia.ingreso_id")
+    if has_ingreso_alq_acc:
+        joins.append(
+            "LEFT JOIN ingreso_alquiler_accesorios iala ON LOWER(cl.table_name) = 'ingreso_alquiler_accesorios' AND iala.id = cl.record_id"
+        )
+        ingreso_exprs.append("iala.ingreso_id")
+
+    tecnico_where = ""
+    params = [since, until, *role_params, *table_params]
+    if tecnico_id is not None:
+        tecnico_where = " AND cl.user_id = %s"
+        params.append(tecnico_id)
+
+    rows = q(
+        f"""
+        SELECT
+          cl.id AS _id,
+          cl.ts,
+          cl.user_id,
+          COALESCE(cl.user_role, u.rol, '') AS user_role,
+          COALESCE(u.nombre, '') AS user_nombre,
+          cl.table_name,
+          cl.record_id,
+          cl.column_name,
+          cl.old_value,
+          cl.new_value,
+          COALESCE({", ".join(ingreso_exprs)}) AS ingreso_id,
+          {repuesto_expr} AS repuesto_id
+        FROM audit.change_log cl
+        LEFT JOIN users u ON u.id = cl.user_id
+        {" ".join(joins)}
+        WHERE cl.ts BETWEEN %s AND %s
+          AND LOWER(COALESCE(NULLIF(TRIM(cl.user_role), ''), COALESCE(u.rol, ''))) IN ({role_clause})
+          AND LOWER(cl.table_name) IN ({table_clause})
+          AND LOWER(cl.column_name) NOT IN ('created_at', 'updated_at')
+          {tecnico_where}
+        ORDER BY cl.ts DESC, cl.id DESC
+        """,
+        params,
+    ) or []
+
+    transforms = _load_activity_history_transforms()
+    rows = transforms["compact"](rows)
+    rows = transforms["drop_mirrored"](rows)
+    rows = transforms["resolve_location"](rows)
+    rows = transforms["resolve_assigned"](rows)
+    return rows
+
+
+def _load_ingreso_event_activity_rows(since, until, tecnico_id=None):
+    if not _table_exists_local("ingreso_events"):
+        return []
+
+    role_clause, role_params = _sql_in_clause(ACTIVITY_ACTOR_ROLES)
+    if not role_clause:
+        return []
+
+    tecnico_where = ""
+    params = [since, until, *role_params]
+    if tecnico_id is not None:
+        tecnico_where = " AND e.usuario_id = %s"
+        params.append(tecnico_id)
+
+    return q(
+        f"""
+        SELECT
+          e.id AS _id,
+          e.ts,
+          e.usuario_id AS user_id,
+          COALESCE(u.rol, '') AS user_role,
+          COALESCE(u.nombre, '') AS user_nombre,
+          e.ingreso_id,
+          e.de_estado,
+          e.a_estado,
+          COALESCE(e.comentario, '') AS comentario
+        FROM ingreso_events e
+        LEFT JOIN users u ON u.id = e.usuario_id
+        WHERE e.ts BETWEEN %s AND %s
+          AND LOWER(COALESCE(u.rol, '')) IN ({role_clause})
+          {tecnico_where}
+        ORDER BY e.ts DESC, e.id DESC
+        """,
+        params,
+    ) or []
+
+
+def _load_repuesto_activity_rows(since, until, tecnico_id=None):
+    if not _table_exists_local("repuestos_movimientos"):
+        return []
+
+    role_clause, role_params = _sql_in_clause(ACTIVITY_ACTOR_ROLES)
+    if not role_clause:
+        return []
+
+    joins = []
+    ingreso_expr = "NULL"
+    if _table_exists_local("quotes"):
+        joins.append(
+            "LEFT JOIN quotes q ON LOWER(COALESCE(rm.ref_tipo, '')) = 'quote' AND q.id = rm.ref_id"
+        )
+        ingreso_expr = (
+            "CASE "
+            "WHEN LOWER(COALESCE(rm.ref_tipo, '')) = 'ingreso' THEN rm.ref_id "
+            "WHEN LOWER(COALESCE(rm.ref_tipo, '')) = 'quote' THEN q.ingreso_id "
+            "ELSE NULL END"
+        )
+
+    tecnico_where = ""
+    params = [since, until, *role_params]
+    if tecnico_id is not None:
+        tecnico_where = " AND rm.created_by = %s"
+        params.append(tecnico_id)
+
+    return q(
+        f"""
+        SELECT
+          rm.id AS _id,
+          rm.created_at AS ts,
+          rm.created_by AS user_id,
+          COALESCE(u.rol, '') AS user_role,
+          COALESCE(u.nombre, '') AS user_nombre,
+          rm.repuesto_id,
+          rm.tipo,
+          rm.qty,
+          rm.stock_prev,
+          rm.stock_new,
+          rm.ref_tipo,
+          rm.ref_id,
+          COALESCE(rm.nota, '') AS nota,
+          {ingreso_expr} AS ingreso_id
+        FROM repuestos_movimientos rm
+        LEFT JOIN users u ON u.id = rm.created_by
+        {" ".join(joins)}
+        WHERE rm.created_at BETWEEN %s AND %s
+          AND LOWER(COALESCE(u.rol, '')) IN ({role_clause})
+          {tecnico_where}
+        ORDER BY rm.created_at DESC, rm.id DESC
+        """,
+        params,
+    ) or []
+
+
+def _load_audit_log_activity_rows(since, until, tecnico_id=None):
+    if not _table_exists_local("audit_log"):
+        return []
+
+    role_clause, role_params = _sql_in_clause(ACTIVITY_ACTOR_ROLES)
+    if not role_clause:
+        return []
+
+    tecnico_where = ""
+    params = [since, until, *role_params]
+    if tecnico_id is not None:
+        tecnico_where = " AND al.user_id = %s"
+        params.append(tecnico_id)
+
+    return q(
+        f"""
+        SELECT
+          al.id AS _id,
+          al.ts,
+          al.user_id,
+          COALESCE(al.role, u.rol, '') AS user_role,
+          COALESCE(u.nombre, '') AS user_nombre,
+          al.method,
+          al.path,
+          al.status_code
+        FROM audit_log al
+        LEFT JOIN users u ON u.id = al.user_id
+        WHERE al.ts BETWEEN %s AND %s
+          AND UPPER(COALESCE(al.method, '')) = 'GET'
+          AND COALESCE(al.status_code, 0) BETWEEN 200 AND 399
+          AND LOWER(COALESCE(NULLIF(TRIM(al.role), ''), COALESCE(u.rol, ''))) IN ({role_clause})
+          {tecnico_where}
+        ORDER BY al.ts DESC, al.id DESC
+        """,
+        params,
+    ) or []
+
+
+def _filter_activity_rows(rows, activity_type=None):
+    target = _clean_text(activity_type).lower()
+    if not target:
+        return list(rows or [])
+    return [row for row in (rows or []) if _clean_text(row.get("activity_type")).lower() == target]
 
 
 class MetricasConfigView(APIView):
@@ -953,6 +1977,86 @@ class MetricasFinanzasLiberadosView(APIView):
         return Response(rows)
 
 
+class MetricasActividadTecnicosView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        _require_metricas_activity_viewer(request)
+
+        since, until = _parse_activity_range_params(request)
+        if since > until:
+            since, until = until, since
+
+        tecnico_id = None
+        tecnico_raw = _clean_text(request.GET.get("tecnico_id"))
+        if tecnico_raw:
+            try:
+                tecnico_id = int(tecnico_raw)
+            except Exception:
+                tecnico_id = None
+
+        activity_type = _clean_text(request.GET.get("tipo")).lower() or None
+
+        change_rows = _load_change_log_activity_rows(since, until, tecnico_id=tecnico_id)
+        event_rows = _load_ingreso_event_activity_rows(since, until, tecnico_id=tecnico_id)
+        repuesto_rows = _load_repuesto_activity_rows(since, until, tecnico_id=tecnico_id)
+        audit_rows = _load_audit_log_activity_rows(since, until, tecnico_id=tecnico_id)
+
+        ingreso_ids = set()
+        repuesto_ids = set()
+
+        for row in change_rows:
+            if row.get("ingreso_id") is not None:
+                ingreso_ids.add(int(row["ingreso_id"]))
+            if row.get("repuesto_id") is not None:
+                repuesto_ids.add(int(row["repuesto_id"]))
+        for row in event_rows:
+            if row.get("ingreso_id") is not None:
+                ingreso_ids.add(int(row["ingreso_id"]))
+        for row in repuesto_rows:
+            if row.get("ingreso_id") is not None:
+                ingreso_ids.add(int(row["ingreso_id"]))
+            if row.get("repuesto_id") is not None:
+                repuesto_ids.add(int(row["repuesto_id"]))
+        for row in audit_rows:
+            info = classify_read_path(row.get("path"))
+            if info and info.get("ingreso_id") is not None:
+                ingreso_ids.add(int(info["ingreso_id"]))
+
+        ingreso_context_map = _load_ingreso_context(ingreso_ids)
+        repuesto_context_map = _load_repuesto_context(repuesto_ids)
+
+        timeline = []
+        for row in change_rows:
+            timeline.append(_normalize_change_log_row(row, ingreso_context_map, repuesto_context_map))
+        for row in event_rows:
+            timeline.append(_normalize_event_row(row, ingreso_context_map))
+        for row in repuesto_rows:
+            timeline.append(_normalize_repuesto_row(row, ingreso_context_map, repuesto_context_map))
+        for row in audit_rows:
+            normalized = _normalize_audit_log_row(row, ingreso_context_map)
+            if normalized:
+                timeline.append(normalized)
+
+        timeline = _dedupe_activity_timeline([row for row in timeline if row])
+        available_activity_types = _build_activity_summary(timeline).get("activity_types", [])
+        timeline = _filter_activity_rows(timeline, activity_type=activity_type)
+        summary = _build_activity_summary(timeline)
+
+        return Response(
+            {
+                "range": {
+                    "from": since.date().isoformat(),
+                    "to": until.date().isoformat(),
+                    "preset": _clean_text(request.GET.get("preset")).lower() or None,
+                },
+                "available_activity_types": available_activity_types,
+                "summary": summary,
+                "timeline": timeline,
+            }
+        )
+
+
 class MetricasCalibracionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
@@ -1085,7 +2189,7 @@ class MetricasResumenView(APIView):
             f"{join_dm}\n"
             "JOIN locations loc ON loc.id=i.ubicacion_id\n"
             "LEFT JOIN users u ON u.id=i.asignado_a\n"
-            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','entregado','liberado','alquilado','baja','derivado')\n"
+            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
             "  AND LOWER(loc.nombre) = LOWER(%s)"
             f"{(' AND ' + where_i[5:]) if where_i else ''}\n"
             "GROUP BY i.asignado_a, tecnico_nombre\n"
@@ -1099,7 +2203,7 @@ class MetricasResumenView(APIView):
             "FROM ingresos i\n"
             f"{join_dm}\n"
             "JOIN locations loc ON loc.id=i.ubicacion_id\n"
-            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','entregado','liberado','alquilado','baja','derivado')\n"
+            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
             "  AND LOWER(loc.nombre) = LOWER(%s)"
             f"{where_i}\n"
         ), ["taller", *where_params]) or []

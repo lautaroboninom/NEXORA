@@ -2,8 +2,9 @@
 import { useEffect, useMemo, useState } from "react";
 import api, { getBlob } from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, catalogEquipmentLabel, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { resolutionLabel } from "../lib/constants";
 import useQueryState from "../hooks/useQueryState";
 import { useAuth } from "../context/AuthContext";
@@ -91,6 +92,10 @@ export default function AdminListos() {
   async function entregar(row) {
     const id = ingresoIdOf(row);
     if (!id) return;
+    if (String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega") {
+      navigate(`/ingresos/${id}`);
+      return;
+    }
     try {
       setBusyId(id);
       await api.post(`/api/ingresos/${id}/entregar/`);
@@ -188,7 +193,7 @@ export default function AdminListos() {
                   <td className="p-2">
                     <StatusChip value={resolutionLabel(row?.resolucion)} title="Resolución" />
                   </td>
-                  <td className="p-2">{nsPreferInternoOf(row)}</td>
+                  <td className="p-2"><DeviceIdentifier row={row} /></td>
                   <td className="p-2 whitespace-nowrap">
                     {formatDateOnly(row?.fecha_listo ?? "-")}
                   </td>
@@ -217,9 +222,9 @@ export default function AdminListos() {
                           }}
                           disabled={busyId === ingresoIdOf(row)}
                           aria-busy={busyId === ingresoIdOf(row) ? "true" : "false"}
-                          title="Marcar como entregado"
+                          title={String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega" ? "Completar entrega de venta" : "Marcar como entregado"}
                         >
-                          Entregado
+                          {String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega" ? "Completar entrega" : "Entregado"}
                         </button>
                       )}
                     </div>

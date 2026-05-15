@@ -12,7 +12,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ticket_state') THEN
     CREATE TYPE ticket_state AS ENUM (
-      'ingresado','diagnosticado','presupuestado','reparar','controlado_sin_defecto','reparado','entregado','baja','derivado','liberado','alquilado'
+      'ingresado','diagnosticado','presupuestado','reparar','controlado_sin_defecto','reparado','entregado','baja','derivado','liberado','alquilado','vendido_pendiente_entrega','vendido_entregado'
     );
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'motivo_ingreso') THEN
@@ -43,6 +43,32 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'preventivo_item_state') THEN
     CREATE TYPE preventivo_item_state AS ENUM ('pendiente','ok','retirado','no_controlado');
+  END IF;
+END $$;
+
+-- Estados de venta de equipos propios MG.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ticket_state') THEN
+    IF NOT EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'ticket_state'
+         AND e.enumlabel = 'vendido_pendiente_entrega'
+    ) THEN
+      ALTER TYPE ticket_state ADD VALUE 'vendido_pendiente_entrega' AFTER 'alquilado';
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'ticket_state'
+         AND e.enumlabel = 'vendido_entregado'
+    ) THEN
+      ALTER TYPE ticket_state ADD VALUE 'vendido_entregado' AFTER 'vendido_pendiente_entrega';
+    END IF;
   END IF;
 END $$;
 
@@ -212,11 +238,11 @@ CREATE TABLE IF NOT EXISTS locations (
   nombre  TEXT NOT NULL UNIQUE
 );
 
--- Seed mÃ­nimo indispensable
+-- Seed mínimo indispensable
 INSERT INTO locations(nombre) VALUES
   ('Taller'),
   ('Sarmiento'),
-  ('EstanterÃ­a de Alquiler'),
+  ('Estantería de Alquiler'),
   ('-')
 ON CONFLICT DO NOTHING;
 
@@ -263,18 +289,18 @@ CREATE TABLE IF NOT EXISTS devices (
   propietario_nombre   TEXT,
   propietario_contacto TEXT,
   propietario_doc      TEXT,
-  n_de_control     TEXT,    -- NÂ° faja garantÃ­a (snapshot del Ãºltimo ingreso)
+  n_de_control     TEXT,    -- N° faja garantía (snapshot del último ingreso)
   alquilado        BOOLEAN NOT NULL DEFAULT FALSE,
   alquiler_a       TEXT
 );
 
--- Ãndices funcionales y unicidad (normalizados)
--- Unicidad por nÃºmero de serie normalizado (UPPER, sin espacios ni guiones)
+-- índices funcionales y unicidad (normalizados)
+-- Unicidad por número de serie normalizado (UPPER, sin espacios ni guiones)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_norm
   ON devices ((UPPER(REPLACE(REPLACE(numero_serie, ' ', ''), '-', ''))))
   WHERE NULLIF(TRIM(numero_serie), '') IS NOT NULL;
 
--- Unicidad por nÃºmero interno normalizado a 'XX ####' (MG|NM|NV|CE)
+-- Unicidad por número interno normalizado a 'XX ####' (MG|NM|NV|CE)
 DO $$
 BEGIN
   BEGIN
@@ -565,7 +591,7 @@ BEGIN
   END IF;
 END $$;
 
--- Reglas de garantÃ­a (excepciones administrables) - Parte 2 editarÃ¡, Parte 1 solo lectura
+-- Reglas de garantía (excepciones administrables) - Parte 2 editará, Parte 1 solo lectura
 CREATE TABLE IF NOT EXISTS warranty_rules (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   brand_id      INTEGER NULL REFERENCES marcas(id) ON DELETE SET NULL,
@@ -584,7 +610,7 @@ CREATE INDEX IF NOT EXISTS idx_wr_model ON warranty_rules(model_id);
 CREATE INDEX IF NOT EXISTS idx_wr_activo ON warranty_rules(activo);
 
 -- =============================
--- SincronizaciÃ³n snapshot devices <- Ãºltimo ingreso
+-- Sincronización snapshot devices <- último ingreso
 -- =============================
 CREATE OR REPLACE FUNCTION sync_device_snapshot()
 RETURNS TRIGGER AS $$
@@ -603,7 +629,7 @@ DECLARE
 BEGIN
   v_device_id := COALESCE(NEW.device_id, OLD.device_id);
 
-  -- Ãšltimo ingreso del equipo afectado
+  -- último ingreso del equipo afectado
   SELECT t.id, t.alquilado, t.alquiler_a, t.propietario_nombre, t.propietario_contacto, t.propietario_doc, t.faja_garantia, t.ubicacion_id
     INTO v_last_id, v_alquilado, v_alquiler_a, v_propietario_nombre, v_propietario_contacto, v_propietario_doc, v_faja, v_ubic_id
     FROM ingresos t
@@ -611,13 +637,13 @@ BEGIN
    ORDER BY COALESCE(t.fecha_ingreso, t.fecha_creacion) DESC, t.id DESC
    LIMIT 1;
 
-  -- Determinar si es equipo propio por patrÃ³n del nÃºmero de serie
+  -- Determinar si es equipo propio por patrón del número de serie
   SELECT (CASE WHEN d.numero_serie ~* '^(MG|NM|NV)\s*\d{1,4}$' THEN TRUE ELSE FALSE END)
     INTO v_is_own
     FROM devices d
    WHERE d.id = v_device_id;
 
-  -- Buscar id de MGBIO si aplica (heurÃ­stico por nombre)
+  -- Buscar id de MGBIO si aplica (heurístico por nombre)
   IF v_is_own THEN
     SELECT id INTO v_mgbio_id FROM customers
      WHERE LOWER(razon_social) LIKE '%mg%bio%'
@@ -708,6 +734,7 @@ CREATE TABLE IF NOT EXISTS ingreso_events (
   ts          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   comentario  TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_ingreso_events_usuario_ts ON ingreso_events(usuario_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
   id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -722,6 +749,7 @@ CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
   attempts          INTEGER NOT NULL DEFAULT 0,
   next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_error        TEXT NULL,
+  article_code      TEXT NULL,
   request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
   response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -734,6 +762,23 @@ CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
     AND NULLIF(TRIM(target_deposit), '') IS NOT NULL
     AND source_deposit <> target_deposit
   )
+);
+
+CREATE TABLE IF NOT EXISTS bejerman_article_mappings (
+  id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  model_id             INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  variante             TEXT NOT NULL DEFAULT '',
+  variante_norm        TEXT NOT NULL DEFAULT '',
+  article_code         TEXT NOT NULL,
+  article_description  TEXT NULL,
+  match_source         TEXT NOT NULL DEFAULT 'manual',
+  source_payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  confirmed_by         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  confirmed_at         TIMESTAMPTZ NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_article_mappings_code CHECK (NULLIF(TRIM(article_code), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_article_mappings_source CHECK (match_source IN ('manual','auto'))
 );
 
 CREATE TABLE IF NOT EXISTS ingreso_historical_corrections (
@@ -768,7 +813,7 @@ CREATE TABLE IF NOT EXISTS ingreso_media (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Solicitudes de asignaciÃ³n de tÃ©cnico (simple, una fila por solicitud)
+-- Solicitudes de asignación de técnico (simple, una fila por solicitud)
 CREATE TABLE IF NOT EXISTS ingreso_tests (
   id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id           INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -1067,6 +1112,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   status_code  INTEGER,
   body         JSONB
 );
+CREATE INDEX IF NOT EXISTS ix_audit_log_user_ts_method ON audit_log(user_id, ts DESC, method);
 
 -- ===============
 -- Audit (change log por columna) para PostgreSQL
@@ -1089,8 +1135,9 @@ CREATE TABLE IF NOT EXISTS audit.change_log (
 CREATE INDEX IF NOT EXISTS ix_audit_change_log_ts ON audit.change_log(ts DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_change_log_ingreso ON audit.change_log(ingreso_id, ts DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_change_log_table ON audit.change_log(table_name, record_id, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_audit_change_log_user_ts ON audit.change_log(user_id, ts DESC);
 
--- FunciÃ³n genÃ©rica de auditorÃ­a por fila (INSERT/UPDATE/DELETE)
+-- Función gen de auditoría por fila (INSERT/UPDATE/DELETE)
 CREATE OR REPLACE FUNCTION audit.log_row_change()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -1166,7 +1213,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Accesorios (catÃ¡logo y vÃ­nculo con ingreso)
+-- Accesorios (catálogo y vínculo con ingreso)
 CREATE TABLE IF NOT EXISTS catalogo_accesorios (
   id      INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre  TEXT NOT NULL,
@@ -1393,7 +1440,7 @@ CREATE TABLE IF NOT EXISTS ingreso_accesorios (
   descripcion   TEXT NULL
 );
 
--- Accesorios asociados especÃ­ficamente a alquileres de equipos
+-- Accesorios asociados específicamente a alquileres de equipos
 CREATE TABLE IF NOT EXISTS ingreso_alquiler_accesorios (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id    INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -1403,7 +1450,7 @@ CREATE TABLE IF NOT EXISTS ingreso_alquiler_accesorios (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- CatÃ¡logo general de tipos de equipo
+-- Catálogo general de tipos de equipo
 CREATE TABLE IF NOT EXISTS catalogo_tipos_equipo (
   id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   nombre     VARCHAR(160) NOT NULL UNIQUE,
@@ -1412,7 +1459,7 @@ CREATE TABLE IF NOT EXISTS catalogo_tipos_equipo (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- CatÃ¡logo por marca/tipo/serie/variante (jerÃ¡rquico) y mapeo de models
+-- Catálogo por marca/tipo/serie/variante (jerárquico) y mapeo de models
 CREATE TABLE IF NOT EXISTS marca_tipos_equipo (
   id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   marca_id   INTEGER NOT NULL REFERENCES marcas(id) ON DELETE CASCADE,
@@ -1594,7 +1641,7 @@ CREATE TABLE IF NOT EXISTS preventivo_repuesto_plantillas (
 );
 
 -- =============================
--- Ãndices
+-- índices
 -- =============================
 CREATE INDEX IF NOT EXISTS idx_models_marca ON models(marca_id);
 CREATE INDEX IF NOT EXISTS idx_models_tecnico ON models(tecnico_id);
@@ -1625,6 +1672,12 @@ CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_ingreso
   ON bejerman_sync_jobs(ingreso_id);
 CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_device
   ON bejerman_sync_jobs(device_id);
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_article_code
+  ON bejerman_sync_jobs(article_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
+  ON bejerman_article_mappings(model_id, variante_norm);
+CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_article_code
+  ON bejerman_article_mappings(article_code);
 
 CREATE INDEX IF NOT EXISTS idx_ingreso_acc_ingreso ON ingreso_accesorios(ingreso_id);
 CREATE INDEX IF NOT EXISTS idx_ingreso_acc_accesorio ON ingreso_accesorios(accesorio_id);
@@ -1636,6 +1689,7 @@ CREATE INDEX IF NOT EXISTS idx_catalogo_repuestos_nombre_ci ON catalogo_repuesto
 CREATE INDEX IF NOT EXISTS idx_repuestos_subrubros_nombre_ci ON repuestos_subrubros ((LOWER(nombre)));
 CREATE INDEX IF NOT EXISTS idx_repuestos_movimientos_repuesto_id ON repuestos_movimientos(repuesto_id);
 CREATE INDEX IF NOT EXISTS idx_repuestos_movimientos_created_at ON repuestos_movimientos(created_at);
+CREATE INDEX IF NOT EXISTS ix_repuestos_movimientos_created_by_ts ON repuestos_movimientos(created_by, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repuestos_cambios_created_at ON repuestos_cambios(created_at);
 CREATE INDEX IF NOT EXISTS idx_repuestos_cambios_codigo_ci ON repuestos_cambios ((LOWER(codigo)));
 CREATE INDEX IF NOT EXISTS idx_repuestos_proveedores_repuesto_id ON repuestos_proveedores(repuesto_id);
@@ -1688,7 +1742,7 @@ CREATE INDEX IF NOT EXISTS idx_mh_tipo   ON model_hierarchy(tipo_id);
 CREATE INDEX IF NOT EXISTS idx_mh_serie  ON model_hierarchy(serie_id);
 CREATE INDEX IF NOT EXISTS idx_mh_var    ON model_hierarchy(variante_id);
 
--- Unicidad case-insensitive (nombres) mediante Ã­ndices Ãºnicos funcionales
+-- Unicidad case-insensitive (nombres) mediante índices únicos funcionales
 CREATE UNIQUE INDEX IF NOT EXISTS uq_marcas_nombre_ci ON marcas ((LOWER(nombre)));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_models_marca_nombre_ci ON models (marca_id, (LOWER(nombre)));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_accesorios_nombre_ci ON catalogo_accesorios ((LOWER(nombre)));
@@ -1709,6 +1763,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_sync_jobs_set_updated_at') THEN
     CREATE TRIGGER trg_bejerman_sync_jobs_set_updated_at
     BEFORE UPDATE ON bejerman_sync_jobs
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_article_mappings_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_article_mappings_set_updated_at
+    BEFORE UPDATE ON bejerman_article_mappings
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_ingreso_presupuesto_alerts_set_updated_at') THEN
@@ -1781,7 +1840,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Activar triggers de auditorÃ­a por fila (si no existen)
+-- Activar triggers de auditoría por fila (si no existen)
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_audit_ingresos') THEN
     CREATE TRIGGER trg_audit_ingresos

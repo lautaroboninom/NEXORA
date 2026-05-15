@@ -211,14 +211,14 @@ def _set_audit_user(request):
             cur.execute("SET app.user_role = %s;", [role])
 
 
-_SUSPECT_UTF8 = ("\ufffd", "Ã", "Â")  # U+FFFD replacement char and common mojibake lead bytes
+_SUSPECT_UTF8 = ("\ufffd", "\u00c3", "\u00c2")  # U+FFFD replacement char and common mojibake lead bytes
 
 
 def _fix_text_value(val):
     """Best-effort decode/fix for mojibake coming from legacy DB enum/latin1.
 
     - If bytes, try utf-8 then latin1, finally utf-8 with ignore.
-    - If str contains obvious mojibake (� / Ã / Â), attempt latin1->utf8 roundtrip.
+    - If str contains obvious mojibake (U+FFFD / U+00C3 / U+00C2), attempt latin1->utf8 roundtrip.
     """
     if isinstance(val, bytes):
         for enc in ("utf-8", "latin1"):
@@ -384,6 +384,8 @@ def _map_motivo_to_db_label(user_value: str):
     if not user_value:
         return None
     raw_vals = _get_motivo_enum_values_raw()
+    if not raw_vals:
+        raw_vals = _get_motivo_enum_values()
     if not raw_vals:
         return None
     by_key = {}

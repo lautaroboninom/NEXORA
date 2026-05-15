@@ -3,6 +3,7 @@ import IngresoPhotos from "../../../components/IngresoPhotos";
 import { RESOLUCION_OPTIONS, RESOLUCION, ESTADO } from "../../../lib/constants";
 import { getBlob, postMarcarReparado, postCerrarReparacion, postAccesorioIngreso, deleteAccesorioIngreso, postMarcarControladoSinDefecto, postMarcarParaReparar, postHabilitarReparacionCotizacion } from "../../../lib/api";
 import { useCallback, useEffect, useState } from "react";
+import { isSaleTicketState } from "../../../lib/ui-helpers";
 
 export default function DiagnosticoTab({
   id,
@@ -51,8 +52,8 @@ export default function DiagnosticoTab({
   const [habilitandoReparacion, setHabilitandoReparacion] = useState(false);
   const [serialCambio, setSerialCambio] = useState("");
   const [fajaGarantiaInput, setFajaGarantiaInput] = useState(data?.faja_garantia || "");
-  const isEntregadoOBaja = ["entregado", "baja"].includes((data?.estado || "").toLowerCase());
   const estadoLower = (data?.estado || "").toLowerCase();
+  const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
   const estadosBloqueadosDiag = new Set([
     ESTADO.REPARADO,
     ESTADO.LIBERADO,
@@ -60,6 +61,8 @@ export default function DiagnosticoTab({
     ESTADO.BAJA,
     ESTADO.ALQUILADO,
     ESTADO.CONTROLADO_SIN_DEFECTO,
+    ESTADO.VENDIDO_PENDIENTE_ENTREGA,
+    ESTADO.VENDIDO_ENTREGADO,
   ].map((s) => String(s || "").toLowerCase()));
   const isEstadoBloqueadoDiag = estadosBloqueadosDiag.has(estadoLower);
   const estadosBloqueadosReparado = new Set([
@@ -67,6 +70,8 @@ export default function DiagnosticoTab({
     ESTADO.BAJA,
     ESTADO.ALQUILADO,
     ESTADO.CONTROLADO_SIN_DEFECTO,
+    ESTADO.VENDIDO_PENDIENTE_ENTREGA,
+    ESTADO.VENDIDO_ENTREGADO,
   ].map((s) => String(s || "").toLowerCase()));
   const isEstadoBloqueadoReparado = estadosBloqueadosReparado.has(estadoLower);
   const reparacionBloqueadaCotizacion = !!isCotizacion && !permiteReparacion;

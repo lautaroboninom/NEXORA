@@ -1,7 +1,7 @@
 import re
 
 
-MG_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,4}$", re.IGNORECASE)
+MG_CODE_RE = re.compile(r"^MG\s*\d{1,4}$", re.IGNORECASE)
 
 
 def is_mg_code(value: str) -> bool:

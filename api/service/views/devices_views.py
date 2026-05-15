@@ -128,12 +128,13 @@ def _fetch_device_editable(device_id: int):
           d.id,
           d.customer_id,
           COALESCE(c.razon_social,'') AS customer_nombre,
+          COALESCE(c.cod_empresa,'') AS cod_empresa,
           d.marca_id,
           d.model_id,
           COALESCE(b.nombre,'') AS marca,
           COALESCE(m.nombre,'') AS modelo,
-          COALESCE(d.tipo_equipo,'') AS tipo_equipo,
-          COALESCE(d.variante,'') AS variante,
+          COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), '') AS tipo_equipo,
+          COALESCE(NULLIF(d.variante,''), NULLIF(m.variante,''), '') AS variante,
           COALESCE(d.numero_serie,'') AS numero_serie,
           COALESCE(d.numero_interno,'') AS numero_interno,
           d.ubicacion_id,
@@ -275,9 +276,11 @@ class DeviceIdentificadoresView(APIView):
             if other:
                 return Response(
                     {
-                        "detail": "El numero de serie ya esta asignado a otro equipo.",
+                        "detail": "El número de serie ya está asignado a otro equipo.",
                         "conflict_type": "NS_DUPLICATE",
                         "conflict_device_id": other["id"],
+                        "current_device_id": device_id,
+                        "numero_serie_input": next_numero_serie,
                     },
                     status=400,
                 )
@@ -308,9 +311,11 @@ class DeviceIdentificadoresView(APIView):
             if conflict:
                 return Response(
                     {
-                        "detail": "El numero interno ya esta asignado a otro equipo.",
+                        "detail": "El número interno ya está asignado a otro equipo.",
                         "conflict_type": "MG_DUPLICATE",
                         "conflict_device_id": conflict["id"],
+                        "current_device_id": device_id,
+                        "numero_interno_input": next_numero_interno,
                     },
                     status=400,
                 )
@@ -495,10 +500,16 @@ class DevicesListView(APIView):
                     "LOWER(COALESCE(d.numero_interno,'')) LIKE LOWER(%s) OR "
                     "LOWER(COALESCE(c.razon_social,'')) LIKE LOWER(%s) OR "
                     "LOWER(COALESCE(b.nombre,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(m.nombre,'')) LIKE LOWER(%s)"
+                    "LOWER(COALESCE(m.nombre,'')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), '')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(NULLIF(d.variante,''), NULLIF(m.variante,''), '')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(d.propietario_nombre,'')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(d.propietario_contacto,'')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(d.propietario_doc,'')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(loc.nombre,'')) LIKE LOWER(%s)"
                     ")"
                 )
-                params.extend([like, like, like, like, like])
+                params.extend([like, like, like, like, like, like, like, like, like, like, like])
 
             if propio_raw in ("1", "true", "yes", "y", "t"):
                 wh.append(
@@ -677,8 +688,8 @@ class DevicesListView(APIView):
                   COALESCE(m.nombre,'') AS modelo,
                   COALESCE(d.numero_serie,'') AS numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
-                  COALESCE(d.tipo_equipo,'') AS tipo_equipo,
-                  COALESCE(d.variante,'') AS variante,
+                  COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), '') AS tipo_equipo,
+                  COALESCE(NULLIF(d.variante,''), NULLIF(m.variante,''), '') AS variante,
                   d.garantia_vence,
                   COALESCE(d.alquilado,false) AS alquilado,
                   COALESCE(d.alquiler_a,'') AS alquiler_a,
@@ -935,8 +946,8 @@ class DevicesMergeView(APIView):
     - Se mantiene el device destino (target_id) y se elimina el source_id.
     - Se puede fijar un nuevo numero_serie para el destino.
     - El numero_interno se mantiene del destino por defecto.
-    - Si se envia numero_interno, se aplica (debe coincidir con MG del target o source).
-    - Si no se envia numero_interno y ambos MG existen y difieren, devuelve error.
+    - Si se envía numero_interno, se aplica (debe coincidir con MG del target o source).
+    - Si no se envía numero_interno y ambos MG existen y difieren, devuelve error.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -1008,36 +1019,37 @@ class DevicesMergeView(APIView):
                 status=400,
             )
 
-        # NS requerido
-        if not new_ns:
-            return Response({"detail": "numero_serie requerido para unificar"}, status=400)
-        ns_key = new_ns.replace(" ", "").replace("-", "").upper()
-        ns_conflict = q(
-            """
-            SELECT id FROM devices
-             WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
-               AND id NOT IN (%s, %s)
-             LIMIT 1
-            """,
-            [ns_key, target_id, source_id],
-            one=True,
-        )
-        if ns_conflict:
-            return Response(
-                {
-                    "detail": "El número de serie ya esta asignado a otro equipo.",
-                    "conflict_type": "NS_DUPLICATE",
-                    "conflict_device_id": ns_conflict["id"],
-                },
-                status=400,
-            )
-
         # Determinar MG final
         mg_to_apply = mg_target
         if has_mg_override:
             mg_to_apply = desired_mg
         elif not mg_target and mg_source and copy_mg_if_missing:
             mg_to_apply = mg_source
+
+        if not new_ns and not mg_to_apply:
+            return Response({"detail": "Se requiere N/S o número interno para unificar."}, status=400)
+
+        if new_ns:
+            ns_key = new_ns.replace(" ", "").replace("-", "").upper()
+            ns_conflict = q(
+                """
+                SELECT id FROM devices
+                 WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                   AND id NOT IN (%s, %s)
+                 LIMIT 1
+                """,
+                [ns_key, target_id, source_id],
+                one=True,
+            )
+            if ns_conflict:
+                return Response(
+                    {
+                        "detail": "El número de serie ya está asignado a otro equipo.",
+                        "conflict_type": "NS_DUPLICATE",
+                        "conflict_device_id": ns_conflict["id"],
+                    },
+                    status=400,
+                )
 
         # Si vamos a aplicar MG (nuevo o distinto), validar que no choque con otros
         if mg_to_apply and mg_to_apply != mg_target:
@@ -1059,17 +1071,17 @@ class DevicesMergeView(APIView):
             if mg_conflict:
                 return Response(
                     {
-                        "detail": "El número interno ya esta asignado a otro equipo.",
+                        "detail": "El número interno ya está asignado a otro equipo.",
                         "conflict_type": "MG_DUPLICATE",
                         "conflict_device_id": mg_conflict["id"],
                     },
                     status=400,
                 )
 
-        # 1) Limpiar N/S del source para evitar choque de indice al setear en target
-        exec_void("UPDATE devices SET numero_serie = NULL WHERE id=%s", [source_id])
-        # 2) Aplicar N/S en target
-        exec_void("UPDATE devices SET numero_serie = NULLIF(%s,'') WHERE id=%s", [new_ns, target_id])
+        # 1) Limpiar N/S del source para evitar choque de índice al setear en target
+        if new_ns:
+            exec_void("UPDATE devices SET numero_serie = NULL WHERE id=%s", [source_id])
+            exec_void("UPDATE devices SET numero_serie = NULLIF(%s,'') WHERE id=%s", [new_ns, target_id])
         # 3) Aplicar MG al target si corresponde (liberar source si necesitamos moverlo)
         if mg_to_apply != mg_target:
             if mg_to_apply:
@@ -1211,31 +1223,45 @@ class DeviceMgVentaView(APIView):
             if int(ing.get("device_id") or 0) != int(device_id):
                 return Response({"detail": "ingreso_id no corresponde al equipo"}, status=400)
 
+        device_sets = [
+            "mg_estado = 'inactivo_venta'",
+            "mg_inactivo_desde = %s",
+            "mg_venta_fecha = %s",
+            "mg_venta_factura_numero = NULLIF(%s,'')",
+            "mg_venta_remito_numero = NULLIF(%s,'')",
+            "mg_venta_observaciones = NULLIF(%s,'')",
+            "mg_venta_usuario_id = %s",
+            "mg_venta_customer_id = %s",
+            "mg_venta_numero_alternativo = NULLIF(%s,'')",
+        ]
+        device_params = [
+            fecha_venta,
+            fecha_venta,
+            factura_numero,
+            remito_numero,
+            observaciones,
+            uid,
+            venta_customer_id,
+            venta_numero_alternativo,
+        ]
+        if _has_table_column("devices", "alquilado"):
+            device_sets.append("alquilado = FALSE")
+        if _has_table_column("devices", "alquiler_a"):
+            device_sets.append("alquiler_a = NULL")
+        if _has_table_column("devices", "ubicacion_id"):
+            dash_row = q("SELECT id FROM locations WHERE nombre='-' LIMIT 1", one=True)
+            dash_id = dash_row.get("id") if dash_row else None
+            if dash_id:
+                device_sets.append("ubicacion_id = %s")
+                device_params.append(dash_id)
+        device_params.append(device_id)
         exec_void(
-            """
+            f"""
             UPDATE devices
-               SET mg_estado = 'inactivo_venta',
-                   mg_inactivo_desde = %s,
-                   mg_venta_fecha = %s,
-                   mg_venta_factura_numero = NULLIF(%s,''),
-                   mg_venta_remito_numero = NULLIF(%s,''),
-                   mg_venta_observaciones = NULLIF(%s,''),
-                   mg_venta_usuario_id = %s,
-                   mg_venta_customer_id = %s,
-                   mg_venta_numero_alternativo = NULLIF(%s,'')
+               SET {', '.join(device_sets)}
              WHERE id = %s
             """,
-            [
-                fecha_venta,
-                fecha_venta,
-                factura_numero,
-                remito_numero,
-                observaciones,
-                uid,
-                venta_customer_id,
-                venta_numero_alternativo,
-                device_id,
-            ],
+            device_params,
         )
         exec_void(
             """
@@ -1260,6 +1286,96 @@ class DeviceMgVentaView(APIView):
                 source,
             ],
         )
+
+        if source == "service_sheet" and ingreso_id is not None:
+            has_ingreso_alquilado = _has_table_column("ingresos", "alquilado")
+            alquilado_sql = "COALESCE(alquilado,false) AS alquilado" if has_ingreso_alquilado else "FALSE AS alquilado"
+            ingreso_row = q(
+                f"""
+                SELECT id, estado, {alquilado_sql}
+                  FROM ingresos
+                 WHERE id=%s
+                """,
+                [ingreso_id],
+                one=True,
+            ) or {}
+            estado_anterior = (ingreso_row.get("estado") or "").strip().lower()
+            estaba_alquilado = bool(ingreso_row.get("alquilado")) or estado_anterior == "alquilado"
+            nuevo_estado = "vendido_entregado" if estaba_alquilado else "vendido_pendiente_entrega"
+            ingreso_sets = ["estado=%s"]
+            ingreso_params = [nuevo_estado]
+
+            if _has_table_column("ingresos", "factura_numero"):
+                ingreso_sets.append("factura_numero = COALESCE(NULLIF(%s,''), factura_numero)")
+                ingreso_params.append(factura_numero)
+            if estaba_alquilado and _has_table_column("ingresos", "fecha_entrega"):
+                ingreso_sets.append("fecha_entrega = COALESCE(fecha_entrega, %s)")
+                ingreso_params.append(fecha_venta)
+            if estaba_alquilado and _has_table_column("ingresos", "remito_salida"):
+                ingreso_sets.append("remito_salida = COALESCE(NULLIF(%s,''), remito_salida)")
+                ingreso_params.append(remito_numero)
+            if has_ingreso_alquilado:
+                ingreso_sets.append("alquilado = FALSE")
+            if _has_table_column("ingresos", "alquiler_a"):
+                ingreso_sets.append("alquiler_a = NULL")
+            if _has_table_column("ingresos", "alquiler_remito"):
+                ingreso_sets.append("alquiler_remito = NULL")
+            if _has_table_column("ingresos", "alquiler_fecha"):
+                ingreso_sets.append("alquiler_fecha = NULL")
+            if _has_table_column("ingresos", "ubicacion_id"):
+                dash_row = q("SELECT id FROM locations WHERE nombre='-' LIMIT 1", one=True)
+                dash_id = dash_row.get("id") if dash_row else None
+                if dash_id:
+                    ingreso_sets.append("ubicacion_id = %s")
+                    ingreso_params.append(dash_id)
+
+            ingreso_params.append(ingreso_id)
+            exec_void(
+                f"UPDATE ingresos SET {', '.join(ingreso_sets)} WHERE id=%s",
+                ingreso_params,
+            )
+            try:
+                with transaction.atomic():
+                    exec_void(
+                        """
+                        INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, ts, comentario)
+                        VALUES (%s, NULLIF(%s,'')::ticket_state, %s::ticket_state, %s, %s, %s)
+                        """,
+                        [
+                            ingreso_id,
+                            estado_anterior,
+                            nuevo_estado,
+                            uid,
+                            fecha_venta,
+                            (
+                                "Venta registrada y entrega confirmada"
+                                if nuevo_estado == "vendido_entregado"
+                                else "Venta registrada; entrega pendiente"
+                            ),
+                        ],
+                    )
+            except Exception:
+                try:
+                    with transaction.atomic():
+                        exec_void(
+                            """
+                            INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, ts, comentario)
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            [
+                                ingreso_id,
+                                nuevo_estado,
+                                uid,
+                                fecha_venta,
+                                (
+                                    "Venta registrada y entrega confirmada"
+                                    if nuevo_estado == "vendido_entregado"
+                                    else "Venta registrada; entrega pendiente"
+                                ),
+                            ],
+                        )
+                except Exception:
+                    pass
 
         row = q(
             """

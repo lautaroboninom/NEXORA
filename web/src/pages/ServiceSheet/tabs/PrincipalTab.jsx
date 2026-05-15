@@ -1,7 +1,7 @@
 import Row from "../../../components/Row";
 import StatusChip from "../../../components/StatusChip";
 import { useMemo, useState, useEffect, useCallback } from "react";
-import { formatDateTime as formatDateTimeHelper, resolveFechaIngreso } from "../../../lib/ui-helpers";
+import { formatDateTime as formatDateTimeHelper, isSaleTicketState, resolveFechaIngreso } from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
 import {
@@ -75,7 +75,8 @@ export default function PrincipalTab(props) {
     refreshIngreso,
     setErr,
     setRelatedOpen,
-    toDatetimeLocalStr,
+    toDateInputStr,
+    maxDateOnly,
   } = props;
 
   const canUncheckAlquilado = isJefe(user);
@@ -160,8 +161,20 @@ export default function PrincipalTab(props) {
   const ubDirty = Boolean(canEditLocation && _selUb !== null && _selUb !== _curUb);
   const estadoLower = (data?.estado || "").toLowerCase();
   const presupuestoLower = (data?.presupuesto_estado || "").toLowerCase();
-  const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower);
-  const alquilerEditable = Boolean(canEditAlquiler);
+  const isVentaPendienteEntrega = estadoLower === "vendido_pendiente_entrega";
+  const mgVendido = Boolean(data?.mg_inactivo_venta)
+    || String(data?.mg_estado || "").trim().toLowerCase() === "inactivo_venta"
+    || isSaleTicketState(estadoLower);
+  const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
+  const alquilerEditable = Boolean(canEditAlquiler && !mgVendido);
+  const alquilerBloqueadoPorEntrega = Boolean(
+    data?.alquilado
+    && String(data?.alquiler_remito || "").trim()
+    && (data?.fecha_entrega || estadoLower === "entregado")
+  );
+  const alquilerPuedeDestildarse = Boolean(
+    !data?.alquilado || (canUncheckAlquilado && !alquilerBloqueadoPorEntrega)
+  );
   const [alquilerAInput, setAlquilerAInput] = useState(data?.alquiler_a || "");
   const [alquilerRemitoInput, setAlquilerRemitoInput] = useState(data?.alquiler_remito || "");
   useEffect(() => {
@@ -183,6 +196,7 @@ export default function PrincipalTab(props) {
     }
   }, [data?.presupuesto_estado]);
   const etapaFlujo = useMemo(() => {
+    if (isSaleTicketState(estadoLower)) return "Venta";
     if (["entregado", "alquilado", "baja"].includes(estadoLower)) return "Cierre";
     if (estadoLower === "derivado") return "Derivación externa";
     if (["reparar", "controlado_sin_defecto", "reparado", "liberado"].includes(estadoLower)) return "Reparación / Salida";
@@ -223,26 +237,12 @@ export default function PrincipalTab(props) {
         .replace(/\s+/g, " "),
     [],
   );
-  const hasClienteCodCatalog = useMemo(
-    () => (clientes || []).some((c) => String(c?.cod_empresa || "").trim() !== ""),
-    [clientes],
-  );
   const rsMatch = useMemo(() => {
     if (!clienteRsInput) return null;
     const needle = normClient(clienteRsInput);
     if (!needle) return null;
     return (clientes || []).find((c) => normClient(c?.razon_social) === needle) || null;
   }, [clienteRsInput, clientes, normClient]);
-  const codMatch = useMemo(() => {
-    if (!clienteCodInput || !hasClienteCodCatalog) return null;
-    const needle = normClient(clienteCodInput);
-    if (!needle) return null;
-    return (clientes || []).find((c) => normClient(c?.cod_empresa) === needle) || null;
-  }, [clienteCodInput, clientes, hasClienteCodCatalog, normClient]);
-  const clienteMismatch = useMemo(() => {
-    if (!hasClienteCodCatalog) return false;
-    return !!(rsMatch && codMatch && rsMatch.id !== codMatch.id);
-  }, [rsMatch, codMatch, hasClienteCodCatalog]);
   const alquilerMatch = useMemo(() => {
     const val = normClient(alquilerAInput);
     if (!val) return null;
@@ -369,7 +369,8 @@ export default function PrincipalTab(props) {
           brand_id: data?.marca_id ?? null,
           model_id: data?.model_id ?? null,
         });
-        const enGarantia = !!r.within_365_days;
+        if (typeof r?.within_365_days !== "boolean") return;
+        const enGarantia = r.within_365_days;
         setFormBasics((s) => ({ ...(s || {}), garantia: enGarantia }));
       } catch {
         /* noop */
@@ -395,14 +396,10 @@ export default function PrincipalTab(props) {
                     onChange={(e) => {
                       const v = e.target.value;
                       setClienteRsInput(v);
-                      const c = syncClienteFromInputs(v, clienteCodInput);
-                      if (
-                        hasClienteCodCatalog
-                        && c
-                        && normClient(clienteCodInput) !== normClient(c.cod_empresa)
-                      ) {
-                        setClienteCodInput(c.cod_empresa || "");
-                      }
+                      const selected = (clientes || []).find((c) => normClient(c?.razon_social) === normClient(v));
+                      const nextCod = selected?.cod_empresa || "";
+                      setClienteCodInput(nextCod);
+                      syncClienteFromInputs(v, nextCod);
                     }}
                     placeholder="Elegí de la lista"
                   />
@@ -425,32 +422,12 @@ export default function PrincipalTab(props) {
               {editBasics ? (
                 <>
                   <input
-                    className="border rounded p-1 w-40"
-                    list={clientesPerm && hasClienteCodCatalog ? "service_clientes_cod" : undefined}
+                    className="border rounded p-1 w-40 bg-gray-50 text-gray-700"
                     value={clienteCodInput}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setClienteCodInput(v);
-                      const c = syncClienteFromInputs(clienteRsInput, v);
-                      if (c && normClient(clienteRsInput) !== normClient(c.razon_social)) {
-                        setClienteRsInput(c.razon_social || "");
-                      }
-                    }}
-                    placeholder="Elegí de la lista"
+                    readOnly
+                    tabIndex={-1}
+                    placeholder="Se completa solo"
                   />
-                  {clientesPerm && hasClienteCodCatalog && (
-                    <datalist id="service_clientes_cod">
-                      {(clientes || []).map((c) => (
-                        <option key={c.id} value={c.cod_empresa} />
-                      ))}
-                    </datalist>
-                  )}
-                  {clientesPerm && hasClienteCodCatalog && clienteCodInput && !codMatch && (
-                    <div className="text-xs text-amber-700 mt-1">Selecciona un código válido de la lista.</div>
-                  )}
-                  {clientesPerm && hasClienteCodCatalog && clienteMismatch && (
-                    <div className="text-xs text-amber-700 mt-1">La razón social y el código no coinciden.</div>
-                  )}
                 </>
               ) : (
                 data.cod_empresa || "-"
@@ -617,13 +594,28 @@ export default function PrincipalTab(props) {
             </Row>
             <Row label={"N° interno (MG)"}>
               {editBasics ? (
-                <input
-                  className="border rounded p-1 w-60"
-                  value={formBasics?.numero_interno || ""}
-                  onChange={(e) => setFormBasics((s) => ({ ...s, numero_interno: e.target.value }))}
-                />
+                <div>
+                  <input
+                    className="border rounded p-1 w-60 disabled:bg-gray-100 disabled:text-gray-500"
+                    value={formBasics?.numero_interno || ""}
+                    onChange={(e) => setFormBasics((s) => ({ ...s, numero_interno: e.target.value }))}
+                    disabled={mgVendido}
+                  />
+                  {mgVendido && (
+                    <div className="mt-1 max-w-md text-xs text-amber-700">
+                      Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.
+                    </div>
+                  )}
+                </div>
               ) : (
-                <span>{data.numero_interno || ""}</span>
+                <div>
+                  <span>{data.numero_interno || "-"}</span>
+                  {mgVendido && (
+                    <div className="mt-1 max-w-md text-xs text-amber-700">
+                      Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.
+                    </div>
+                  )}
+                </div>
               )}
             </Row>
             <Row label={"N° de remito"}>
@@ -897,7 +889,7 @@ export default function PrincipalTab(props) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
         <div className="border rounded p-4">
         <h2 className="font-semibold mb-2">Entrega</h2>
-        {data.estado === "liberado" ? (
+        {data.estado === "liberado" || isVentaPendienteEntrega ? (
           <>
             <div className="grid grid-cols-1 gap-3">
                 <Row label="Remito salida (requerido)">{
@@ -919,10 +911,11 @@ export default function PrincipalTab(props) {
 
               <Row label="Fecha entrega">{
                 <input
-                  type="datetime-local"
+                  type="date"
                   className="border rounded p-2 w-full"
                   value={entrega.fecha_entrega}
                   onChange={(e) => setEntrega({ ...entrega, fecha_entrega: e.target.value })}
+                  max={maxDateOnly}
                 />
               }</Row>
               {String(data?.resolucion || "") === "cambio" && (
@@ -960,7 +953,7 @@ export default function PrincipalTab(props) {
                   }
                 }}
               >
-                Marcar ENTREGADO
+                {isVentaPendienteEntrega ? "Marcar venta entregada" : "Marcar ENTREGADO"}
               </button>
             </div>
           </>
@@ -1011,10 +1004,11 @@ export default function PrincipalTab(props) {
                   <div>
                     <label className="text-sm">Fecha entrega</label>
                     <input
-                      type="datetime-local"
+                      type="date"
                       className="border rounded p-2 w-full"
                       value={entrega.fecha_entrega}
                       onChange={(e) => setEntrega({ ...entrega, fecha_entrega: e.target.value })}
+                      max={maxDateOnly}
                     />
                   </div>
                 </div>
@@ -1053,7 +1047,7 @@ export default function PrincipalTab(props) {
                       setEntrega({
                         remito_salida: data?.remito_salida || "",
                         factura_numero: data?.factura_numero || "",
-                        fecha_entrega: toDatetimeLocalStr(data?.fecha_entrega),
+                        fecha_entrega: toDateInputStr(data?.fecha_entrega),
                       });
                     }}
                   >
@@ -1069,15 +1063,20 @@ export default function PrincipalTab(props) {
       {/* Alquiler */}
       <div className="border rounded p-4">
         <h2 className="font-semibold mb-2">Alquiler</h2>
+        {alquilerBloqueadoPorEntrega && (
+          <div className="text-xs text-amber-700 mb-2">
+            No se puede destildar: el equipo ya fue entregado con remito de alquiler.
+          </div>
+        )}
         <Row label="¿Se alquiló?">
           <input
             type="checkbox"
             checked={!!data.alquilado}
-            disabled={!alquilerEditable || (!!data.alquilado && !canUncheckAlquilado)}
+            disabled={!alquilerEditable || !alquilerPuedeDestildarse}
             onChange={async (e) => {
               if (!alquilerEditable) return;
               const checked = e.target.checked;
-              if (!checked && data?.alquilado && !canUncheckAlquilado) return;
+              if (!checked && data?.alquilado && !alquilerPuedeDestildarse) return;
               try {
                 if (checked) {
                   const target = (ubicaciones || []).find((u) => (u?.nombre || "").trim().toLowerCase() === "alquilado");

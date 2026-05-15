@@ -1,8 +1,8 @@
 ﻿// web/src/lib/constants.js
-// Catlogos/constantes de dominio (nica fuente de verdad).
+// Catálogos/constantes de dominio (única fuente de verdad).
 
 // =========================
-// Resolucin de reparacin
+// Resolución de reparación
 // =========================
 export const RESOLUCION = {
   REPARADO: "reparado",
@@ -15,12 +15,12 @@ export const RESOLUCION = {
 export const RESOLUCION_LABELS = {
   [RESOLUCION.REPARADO]: "Reparado",
   [RESOLUCION.NO_REPARADO]: "No reparado",
-  [RESOLUCION.NO_SE_ENCONTRO_FALLA]: "No se encontrÃ³ falla",
+  [RESOLUCION.NO_SE_ENCONTRO_FALLA]: "No se encontró falla",
   [RESOLUCION.PRESUPUESTO_RECHAZADO]: "Presupuesto rechazado",
   [RESOLUCION.CAMBIO]: "Cambio",
 };
 
-// til para armar selects sin repetir arrays en cada pantalla
+// Útil para armar selects sin repetir arrays en cada pantalla
 export const RESOLUCION_OPTIONS = Object.entries(RESOLUCION_LABELS).map(
   ([value, label]) => ({ value, label })
 );
@@ -38,6 +38,8 @@ export const ESTADO = {
   ENTREGADO: "Entregado",
   BAJA: "Baja",
   ALQUILADO: "Alquilado",
+  VENDIDO_PENDIENTE_ENTREGA: "vendido_pendiente_entrega",
+  VENDIDO_ENTREGADO: "vendido_entregado",
 };
 
 export const ESTADO_LABELS = {
@@ -49,13 +51,15 @@ export const ESTADO_LABELS = {
   [ESTADO.ENTREGADO]: "Entregado",
   [ESTADO.BAJA]: "Baja",
   [ESTADO.ALQUILADO]: "Alquilado",
+  [ESTADO.VENDIDO_PENDIENTE_ENTREGA]: "Vendido pendiente de entrega",
+  [ESTADO.VENDIDO_ENTREGADO]: "Vendido entregado",
 };
 
 export const ESTADO_OPTIONS = Object.entries(ESTADO_LABELS).map(
   ([value, label]) => ({ value, label })
 );
 
-// (opcional) por si quers habilitar siguiente paso en UI
+// (opcional) por si querés habilitar siguiente paso en UI
 export const NEXT_STATE = {
   [ESTADO.DIAGNOSTICADO]: ESTADO.REPARAR,
   [ESTADO.REPARAR]: ESTADO.REPARADO,
@@ -76,6 +80,8 @@ export const ESTADO_VALUE_LABELS = {
   liberado: "Liberado",
   entregado: "Entregado",
   alquilado: "Alquilado",
+  vendido_pendiente_entrega: "Vendido pendiente de entrega",
+  vendido_entregado: "Vendido entregado",
   baja: "Baja",
 };
 
@@ -126,7 +132,7 @@ export const motivoLabel = (value) =>
   MOTIVO_LABELS[value] ?? String(value ?? "");
 
 // =========================
-// MÃ©tricas - Fecha mÃ­nima de corte (unificada)
+// Métricas - Fecha mínima de corte (unificada)
 // =========================
 // Solo considerar ingresos con fecha_ingreso >= METRICAS_DESDE_MIN (inclusive)
 export const METRICAS_DESDE_MIN = '2025-06-26';

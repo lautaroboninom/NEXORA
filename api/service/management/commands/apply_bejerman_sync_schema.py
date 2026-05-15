@@ -2,11 +2,11 @@ from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
 
-TABLES = ["bejerman_sync_jobs"]
+TABLES = ["bejerman_sync_jobs", "bejerman_article_mappings"]
 
 
 class Command(BaseCommand):
-    help = "Aplica el esquema de sincronizacion con Bejerman"
+    help = "Aplica el esquema de sincronización con Bejerman"
 
     def handle(self, *args, **opts):
         with transaction.atomic():
@@ -39,6 +39,7 @@ class Command(BaseCommand):
                       attempts          INTEGER NOT NULL DEFAULT 0,
                       next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       last_error        TEXT NULL,
+                      article_code      TEXT NULL,
                       request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
                       response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
                       created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -51,6 +52,27 @@ class Command(BaseCommand):
                         AND NULLIF(TRIM(target_deposit), '') IS NOT NULL
                         AND source_deposit <> target_deposit
                       )
+                    )
+                    """
+                )
+                cur.execute("ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS article_code TEXT")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bejerman_article_mappings (
+                      id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                      model_id             INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+                      variante             TEXT NOT NULL DEFAULT '',
+                      variante_norm        TEXT NOT NULL DEFAULT '',
+                      article_code         TEXT NOT NULL,
+                      article_description  TEXT NULL,
+                      match_source         TEXT NOT NULL DEFAULT 'manual',
+                      source_payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      confirmed_by         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                      confirmed_at         TIMESTAMPTZ NULL,
+                      created_at           TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at           TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_bejerman_article_mappings_code CHECK (NULLIF(TRIM(article_code), '') IS NOT NULL),
+                      CONSTRAINT chk_bejerman_article_mappings_source CHECK (match_source IN ('manual','auto'))
                     )
                     """
                 )
@@ -79,6 +101,24 @@ class Command(BaseCommand):
                       ON bejerman_sync_jobs(device_id)
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_article_code
+                      ON bejerman_sync_jobs(article_code)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
+                      ON bejerman_article_mappings(model_id, variante_norm)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_article_code
+                      ON bejerman_article_mappings(article_code)
+                    """
+                )
 
                 if connection.vendor == "postgresql":
                     cur.execute(
@@ -87,6 +127,11 @@ class Command(BaseCommand):
                           IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_sync_jobs_set_updated_at') THEN
                             CREATE TRIGGER trg_bejerman_sync_jobs_set_updated_at
                             BEFORE UPDATE ON bejerman_sync_jobs
+                            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                          END IF;
+                          IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_article_mappings_set_updated_at') THEN
+                            CREATE TRIGGER trg_bejerman_article_mappings_set_updated_at
+                            BEFORE UPDATE ON bejerman_article_mappings
                             FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                           END IF;
                         END $$;
@@ -108,4 +153,33 @@ class Command(BaseCommand):
                 if missing:
                     raise RuntimeError(f"No se aplicaron tablas requeridas: {', '.join(missing)}")
 
-        self.stdout.write("APLICADO OK: esquema de sincronizacion Bejerman")
+                required_columns = {
+                    "bejerman_sync_jobs": {"article_code", "request_payload", "response_payload"},
+                    "bejerman_article_mappings": {
+                        "model_id",
+                        "variante_norm",
+                        "article_code",
+                        "match_source",
+                        "source_payload",
+                    },
+                }
+                for table_name, columns in required_columns.items():
+                    placeholders = ",".join(["%s"] * len(columns))
+                    cur.execute(
+                        f"""
+                        SELECT column_name
+                          FROM information_schema.columns
+                         WHERE table_schema = ANY(current_schemas(true))
+                           AND table_name = %s
+                           AND column_name IN ({placeholders})
+                        """,
+                        [table_name, *columns],
+                    )
+                    found_columns = {r[0] for r in cur.fetchall()}
+                    missing_columns = sorted(columns - found_columns)
+                    if missing_columns:
+                        raise RuntimeError(
+                            f"No se aplicaron columnas requeridas en {table_name}: {', '.join(missing_columns)}"
+                        )
+
+        self.stdout.write("APLICADO OK: esquema de sincronización Bejerman")

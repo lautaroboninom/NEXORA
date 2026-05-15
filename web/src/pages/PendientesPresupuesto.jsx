@@ -2,8 +2,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { getPendientesPresupuesto } from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import useQueryState from "../hooks/useQueryState";
 
 
@@ -146,7 +147,7 @@ export default function PendientesPresupuesto() {
                     <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}</td>
                     <td className="p-2">{catalogEquipmentLabel(row) ?? "-"}</td>
                     <td className="p-2"><StatusChip value={row?.estado} title="Estado del equipo" /></td>
-                    <td className="p-2">{nsPreferInternoOf(row)}</td>
+                    <td className="p-2"><DeviceIdentifier row={row} /></td>
                     <td className="p-2 whitespace-nowrap">{formatDateOnly(resolveFechaIngreso(row))}</td>
                     <td className="p-2 whitespace-nowrap">{formatDateOnly(row?.fecha_servicio)}</td>
                   </tr>

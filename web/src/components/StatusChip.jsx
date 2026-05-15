@@ -52,6 +52,9 @@ function variantOf(value) {
   // Pendiente(s)
   if (s.includes("pend")) return "amber";
 
+  // Venta de equipos propios
+  if (s.includes("vendido")) return s.includes("entregado") ? "gray" : "amber";
+
   // Rechazado (p.ej. Presupuesto rechazado)
   if (s.includes("rechaz")) return "rose";
 
@@ -106,4 +109,3 @@ export default function StatusChip({ value, title }) {
     </span>
   );
 }
-

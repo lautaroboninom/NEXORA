@@ -2,8 +2,9 @@
 import { useEffect, useMemo, useState } from "react";
 import api, { getClientesBasico, downloadAuth } from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion, catalogEquipmentLabel, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion, catalogEquipmentLabel } from "../lib/ui-helpers";
 import useQueryState from "../hooks/useQueryState";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 
 
@@ -271,7 +272,7 @@ export default function GeneralPorCliente() {
                   </td>
                   <td className="p-2 underline">{formatOS(row)}</td>
                   <td className="p-2">{catalogEquipmentLabel(row)}</td>
-                  <td className="p-2">{nsPreferInternoOf(row)}</td>
+                  <td className="p-2"><DeviceIdentifier row={row} /></td>
                   <td className="p-2">{row?.estado ?? "-"}</td>
                   <td className="p-2">{(() => {
                     const v = row?.presupuesto_estado;

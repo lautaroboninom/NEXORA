@@ -1,0 +1,38 @@
+{
+  "comprobantes": [
+    {
+      "Comprobante_Tipo": "TRA",
+      "Comprobante_Letra": "",
+      "Comprobante_Numero": "00029012",
+      "Comprobante_IdOrigen": "NEXORA-OS-29012-STR",
+      "Comprobante_PtoVenta": "",
+      "Partida_Observaciones": "NEXORA-OS-29012",
+      "Comprobante_ArtCodTipo": "1",
+      "Comprobante_ArtPartida": "F1121504032",
+      "Comprobante_Art_CodGen": "1102001",
+      "Comprobante_ArtDeposito": "STR",
+      "Comprobante_CantidadUM1": -1,
+      "Comprobante_CantidadUM2": -1,
+      "Comprobante_DescArticulo": "NEXORA F1121504032",
+      "Comprobante_FechaEmision": "2026-05-08",
+      "Comprobante_PrecioTotalMonLocal": 0
+    },
+    {
+      "Comprobante_Tipo": "TRA",
+      "Comprobante_Letra": "",
+      "Comprobante_Numero": "00029012",
+      "Comprobante_IdOrigen": "NEXORA-OS-29012-STL",
+      "Comprobante_PtoVenta": "",
+      "Partida_Observaciones": "NEXORA-OS-29012",
+      "Comprobante_ArtCodTipo": "1",
+      "Comprobante_ArtPartida": "F1121504032",
+      "Comprobante_Art_CodGen": "1102001",
+      "Comprobante_ArtDeposito": "STL",
+      "Comprobante_CantidadUM1": 1,
+      "Comprobante_CantidadUM2": 1,
+      "Comprobante_DescArticulo": "NEXORA F1121504032",
+      "Comprobante_FechaEmision": "2026-05-08",
+      "Comprobante_PrecioTotalMonLocal": 0
+    }
+  ]
+}

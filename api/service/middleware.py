@@ -1,5 +1,6 @@
 from django.db import connection
 from django.conf import settings
+from .activity_audit import should_audit_read_request
 from .ip_utils import get_client_ip
 from .views.helpers import _set_audit_user
 import json
@@ -33,6 +34,7 @@ class ActivityLogMiddleware:
     (POST/PATCH/PUT/DELETE) con metadata mínima. Append-only.
     """
     WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+    READ_METHODS = {"GET"}
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -47,6 +49,8 @@ class ActivityLogMiddleware:
                 return self.get_response(request)
 
         is_write = request.method in self.WRITE_METHODS
+        is_read_open = request.method in self.READ_METHODS and should_audit_read_request(path, request.GET)
+        should_log = is_write or is_read_open
         user = getattr(request, "user", None)
         user_id = getattr(user, "id", None)
         role = getattr(user, "rol", None)
@@ -64,7 +68,7 @@ class ActivityLogMiddleware:
 
         response = self.get_response(request)
 
-        if is_write:
+        if should_log:
             try:
                 with connection.cursor() as cur:
                     cur.execute(

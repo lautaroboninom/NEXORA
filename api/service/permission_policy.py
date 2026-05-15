@@ -101,6 +101,9 @@ VIEW_PERMISSION_MATRIX = {
     # Reportes
     "RemitoSalidaPdfView": {"GET": "action.ingreso.print_exit_order"},
     "RemitoDerivacionPdfView": {"GET": "action.ingreso.manage_derivations"},
+    "BejermanJobsView": {"GET": ["page.bejerman_sync", "page.logistics"]},
+    "BejermanJobRetryView": {"POST": "action.bejerman_sync.manage"},
+    "BejermanArticleMappingsView": {"POST": "action.bejerman_sync.manage"},
     # Presupuestos
     "QuoteDetailView": {"GET": ["page.ingresos_history", "page.budget_queues", "action.presupuesto.manage"]},
     "QuoteItemsView": {"POST": "action.presupuesto.manage"},
@@ -205,6 +208,7 @@ VIEW_PERMISSION_MATRIX = {
     "MetricasSeriesView": {"GET": "page.metrics"},
     "MetricasFinanzasView": {"GET": "page.metrics"},
     "MetricasFinanzasLiberadosView": {"GET": "page.metrics"},
+    "MetricasActividadTecnicosView": {"GET": "page.metrics"},
     "MetricasCalibracionView": {"GET": "page.metrics"},
     "MetricasConfigView": {"GET": "page.metrics", "PATCH": "action.metrics.configure"},
     "FeriadosView": {"GET": "page.metrics", "POST": "action.metrics.configure", "DELETE": "action.metrics.configure"},

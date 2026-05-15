@@ -620,6 +620,17 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return qs.toString();
   };
 
+  export const getBejermanJobs = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/jobs/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const postBejermanJobRetry = (jobId) =>
+    api.post(`/api/bejerman/jobs/${jobId}/retry/`, {});
+
+  export const postBejermanArticleMapping = (payload) =>
+    api.post("/api/bejerman/article-mappings/", payload);
+
   export const getHistoricoIngresos = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/ingresos/${qs ? `?${qs}` : ""}`);
@@ -866,6 +877,10 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const getMetricasFinanzasLiberados = (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return api.get(`/api/metricas/finanzas/liberados/${qs ? `?${qs}` : ""}`);
+  };
+  export const getMetricasActividadTecnicos = (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/api/metricas/actividad-tecnicos/${qs ? `?${qs}` : ""}`);
   };
   export const getMetricasCalibracion = (params = {}) => {
     const qs = new URLSearchParams(params).toString();

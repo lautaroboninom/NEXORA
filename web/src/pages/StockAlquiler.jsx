@@ -3,14 +3,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getGeneralEquipos } from "../lib/api";
-import { ingresoIdOf, formatOS, norm, tipoEquipoOf, catalogEquipmentLabel, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
 import { useAuth } from "../context/AuthContext";
 import useQueryState from "../hooks/useQueryState";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 // Catlogo (DB):
 const TARGET_ID = 5;
 const TARGET_NAME = "Estantería de Alquiler";
-const ESTADOS_EXCLUIR = new Set(['entregado', 'alquilado', 'baja']);
+const EXCLUIR_ESTADOS_QUERY = "entregado,alquilado,baja,vendido_pendiente_entrega,vendido_entregado";
+const ESTADOS_EXCLUIR = new Set(["entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado"]);
 const isStockAlquiler = (r) => {
   const id = Number(r?.ubicacion_id ?? NaN);
   const name = r?.ubicacion_nombre;
@@ -43,9 +45,9 @@ export default function StockAlquiler() {
       setErr("");
       setLoading(true);
       try {
-        let data = await getGeneralEquipos({ ubicacion_id: TARGET_ID, solo_taller: false, excluir_estados: 'entregado,alquilado,baja' });
+        let data = await getGeneralEquipos({ ubicacion_id: TARGET_ID, solo_taller: false, excluir_estados: EXCLUIR_ESTADOS_QUERY });
         if (!Array.isArray(data) || data.length === 0) {
-          data = await getGeneralEquipos({ solo_taller: false, excluir_estados: 'entregado,alquilado,baja' });
+          data = await getGeneralEquipos({ solo_taller: false, excluir_estados: EXCLUIR_ESTADOS_QUERY });
         }
         if (!active) return;
         const safe = Array.isArray(data) ? data : [];
@@ -137,7 +139,7 @@ export default function StockAlquiler() {
                     <td className="p-2">{marcaOf(row)}</td>
                     <td className="p-2">{modeloOf(row)}</td>
                     <td className="p-2">{varianteOf(row)}</td>
-                    <td className="p-2">{nsPreferInternoOf(row)}</td>
+                    <td className="p-2"><DeviceIdentifier row={row} /></td>
                   </tr>
                 ))}
               </tbody>

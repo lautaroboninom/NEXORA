@@ -68,10 +68,11 @@ from .views import (
 
     QuoteDetailView, QuoteItemsView, QuoteItemDetailView, QuoteResumenView, AnularPresupuestoView,
     RemitoSalidaPdfView, RemitoDerivacionPdfView, TiposEquipoView, ModeloTipoEquipoView, IngresoHistorialView,
-    MetricasResumenView, MetricasSeriesView, MetricasFinanzasView, MetricasFinanzasLiberadosView, MetricasCalibracionView, FeriadosView, MetricasConfigView,
+    MetricasResumenView, MetricasSeriesView, MetricasFinanzasView, MetricasFinanzasLiberadosView, MetricasActividadTecnicosView, MetricasCalibracionView, FeriadosView, MetricasConfigView,
     CatalogoMotivosView,
     WarrantyRulesView, WarrantyRuleDetailView, DevicesMergeView,
     WorkResumenView, WorkObjectivesView, WorkAlertRulesView, GlobalSearchView,
+    BejermanJobsView, BejermanJobRetryView, BejermanArticleMappingsView,
 )
 
 from .views.devices_views import (
@@ -98,6 +99,11 @@ from .views.preventivos_views import (
 from .views.portal_integration_views import (
     PortalClienteGeneralView,
     PortalClienteIngresoSummaryView,
+    PortalClientePresupuestoDecisionView,
+    PortalClientePresupuestoPdfView,
+    PortalClientePresupuestoSummaryView,
+    PortalClientePresupuestosView,
+    PortalInternalPresupuestosView,
     PortalInternalWorkQueueView,
     PortalInternalWorkSummaryView,
 )
@@ -119,8 +125,28 @@ urlpatterns = [
         "integrations/portal/clientes/<int:customer_id>/ingresos/<int:ingreso_id>/summary/",
         PortalClienteIngresoSummaryView.as_view(),
     ),
+    path(
+        "integrations/portal/clientes/<int:customer_id>/presupuestos/",
+        PortalClientePresupuestosView.as_view(),
+    ),
+    path(
+        "integrations/portal/clientes/<int:customer_id>/presupuestos/<int:ingreso_id>/summary/",
+        PortalClientePresupuestoSummaryView.as_view(),
+    ),
+    path(
+        "integrations/portal/clientes/<int:customer_id>/presupuestos/<int:ingreso_id>/pdf/",
+        PortalClientePresupuestoPdfView.as_view(),
+    ),
+    path(
+        "integrations/portal/clientes/<int:customer_id>/presupuestos/<int:ingreso_id>/decision/",
+        PortalClientePresupuestoDecisionView.as_view(),
+    ),
+    path("integrations/portal/internal/presupuestos/", PortalInternalPresupuestosView.as_view()),
     path("integrations/portal/internal/work-summary/", PortalInternalWorkSummaryView.as_view()),
     path("integrations/portal/internal/work-queue/", PortalInternalWorkQueueView.as_view()),
+    path("bejerman/jobs/", BejermanJobsView.as_view()),
+    path("bejerman/jobs/<int:job_id>/retry/", BejermanJobRetryView.as_view()),
+    path("bejerman/article-mappings/", BejermanArticleMappingsView.as_view()),
 
     # ténico / ingresos (acciones)
     path("tecnico/mis-pendientes/", MisPendientesView.as_view()),
@@ -329,6 +355,7 @@ urlpatterns = [
     path("metricas/series/", MetricasSeriesView.as_view()),
     path("metricas/finanzas/", MetricasFinanzasView.as_view()),
     path("metricas/finanzas/liberados/", MetricasFinanzasLiberadosView.as_view()),
+    path("metricas/actividad-tecnicos/", MetricasActividadTecnicosView.as_view()),
     path("metricas/calibracion/", MetricasCalibracionView.as_view()),
     path("metricas/feriados/", FeriadosView.as_view()),
     path("metricas/config/", MetricasConfigView.as_view()),

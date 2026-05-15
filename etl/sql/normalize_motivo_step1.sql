@@ -1,2 +1,4 @@
-﻿ALTER TABLE ingresos MODIFY COLUMN motivo TEXT NOT NULL;
-UPDATE ingresos SET motivo='reparación' WHERE motivo='reparaci�n';
+ALTER TABLE ingresos MODIFY COLUMN motivo TEXT NOT NULL;
+UPDATE ingresos
+SET motivo='reparación'
+WHERE HEX(motivo)='7265706172616369EFBFBD';

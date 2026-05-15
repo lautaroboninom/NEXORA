@@ -3,7 +3,7 @@ import datetime as _dt
 from typing import Optional, Dict, Any, Tuple
 
 from django.conf import settings
-from django.db import connection
+from django.db import connection, transaction
 
 
 def _norm_serial(s: str) -> str:
@@ -113,47 +113,48 @@ def _rule_days_for(brand_id: Optional[int], model_id: Optional[int], serial_norm
     Prioridad: model_id > brand_id > serial_prefix. Devuelve None si no hay reglas.
     """
     try:
-        with connection.cursor() as cur:
-            # 1) Por modelo
-            if model_id is not None:
-                cur.execute(
-                    """
-                    SELECT days FROM warranty_rules
-                     WHERE activo = TRUE AND model_id = %s
-                     ORDER BY id DESC LIMIT 1
-                    """,
-                    [int(model_id)],
-                )
-                r = cur.fetchone()
-                if r:
-                    return int(r[0])
-            # 2) Por marca
-            if brand_id is not None:
-                cur.execute(
-                    """
-                    SELECT days FROM warranty_rules
-                     WHERE activo = TRUE AND brand_id = %s AND model_id IS NULL
-                     ORDER BY id DESC LIMIT 1
-                    """,
-                    [int(brand_id)],
-                )
-                r = cur.fetchone()
-                if r:
-                    return int(r[0])
-            # 3) Por prefijo de serie
-            if serial_norm:
-                cur.execute(
-                    """
-                    SELECT days FROM warranty_rules
-                     WHERE activo = TRUE AND serial_prefix IS NOT NULL
-                       AND %s LIKE (serial_prefix || '%')
-                     ORDER BY length(serial_prefix) DESC, id DESC LIMIT 1
-                    """,
-                    [serial_norm],
-                )
-                r = cur.fetchone()
-                if r:
-                    return int(r[0])
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                # 1) Por modelo
+                if model_id is not None:
+                    cur.execute(
+                        """
+                        SELECT days FROM warranty_rules
+                         WHERE activo = TRUE AND model_id = %s
+                         ORDER BY id DESC LIMIT 1
+                        """,
+                        [int(model_id)],
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        return int(r[0])
+                # 2) Por marca
+                if brand_id is not None:
+                    cur.execute(
+                        """
+                        SELECT days FROM warranty_rules
+                         WHERE activo = TRUE AND brand_id = %s AND model_id IS NULL
+                         ORDER BY id DESC LIMIT 1
+                        """,
+                        [int(brand_id)],
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        return int(r[0])
+                # 3) Por prefijo de serie
+                if serial_norm:
+                    cur.execute(
+                        """
+                        SELECT days FROM warranty_rules
+                         WHERE activo = TRUE AND serial_prefix IS NOT NULL
+                           AND %s LIKE (serial_prefix || '%')
+                         ORDER BY length(serial_prefix) DESC, id DESC LIMIT 1
+                        """,
+                        [serial_norm],
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        return int(r[0])
     except Exception:
         return None
     return None
@@ -195,4 +196,3 @@ def compute_warranty(numero_serie: str,
         "days": days,
         "meta": meta or {"source": "excel_general", "file": getattr(settings, "TRAZABILIDAD_GENERAL_FILE", None)},
     }
-

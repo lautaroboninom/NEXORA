@@ -99,25 +99,47 @@ export const catalogEquipmentLabel = (row, fallback = "-") => {
   return parts.length ? parts.join(" | ") : fallback;
 };
 
-// Devuelve la etiqueta de serie para tablas/listados.
-// Reglas:
-//  - MG activo: prioriza numero_interno.
-//  - MG inactivo por venta: prioriza numero_serie.
-//  - Si falta el campo priorizado, usa el otro.
-//  - Si no hay ninguno, usa fallback.
-export const nsPreferInternoOf = (row, fallback = "-") => {
-  if (!row) return fallback;
+export const SALE_TICKET_STATES = new Set(["vendido_pendiente_entrega", "vendido_entregado"]);
+
+export const isSaleTicketState = (value) =>
+  SALE_TICKET_STATES.has(String(value ?? "").trim().toLowerCase());
+
+export const isMgInactiveBySale = (row) => {
+  if (!row) return false;
   const str = (v) => (v == null ? "" : String(v).trim());
   const mgEstado = str(row?.mg_estado || row?.equipo?.mg_estado).toLowerCase();
-  const mgInactivoVenta =
+  const estado = str(row?.estado || row?.equipo?.estado).toLowerCase();
+  return (
     Boolean(row?.mg_inactivo_venta || row?.equipo?.mg_inactivo_venta || row?.vendido || row?.equipo?.vendido)
-    || mgEstado === "inactivo_venta";
+    || mgEstado === "inactivo_venta"
+    || isSaleTicketState(estado)
+  );
+};
+
+export const deviceIdentifierPartsOf = (row, fallback = "-") => {
+  if (!row) {
+    return { primary: fallback, secondary: "", sold: false, numeroSerie: "", numeroInterno: "" };
+  }
+  const str = (v) => (v == null ? "" : String(v).trim());
+  const sold = isMgInactiveBySale(row);
   const interno =
     str(row?.numero_interno) ||
     str(row?.equipo?.numero_interno);
   const serie = str(row?.numero_serie) || str(row?.equipo?.numero_serie);
-  if (mgInactivoVenta) return serie || interno || fallback;
-  return interno || serie || fallback;
+  const primary = sold ? (serie || interno || fallback) : (interno || serie || fallback);
+  return {
+    primary,
+    secondary: sold && interno ? `MG histórico: ${interno}` : "",
+    sold,
+    numeroSerie: serie,
+    numeroInterno: interno,
+  };
+};
+
+// Devuelve la etiqueta principal para tablas/listados.
+// MG activo: prioriza número interno. MG vendido: prioriza N/S.
+export const nsPreferInternoOf = (row, fallback = "-") => {
+  return deviceIdentifierPartsOf(row, fallback).primary;
 };
 export const norm = (v) => {
   const s = (v ?? "").toString().toLowerCase().trim();

@@ -18,6 +18,7 @@ PERMISSION_CATALOG = [
     {"code": "page.metrics", "label": "Ver metricas", "type": "page", "group": "Paginas"},
     {"code": "page.warranty", "label": "Ver garantias", "type": "page", "group": "Paginas"},
     {"code": "page.users", "label": "Ver usuarios", "type": "page", "group": "Paginas"},
+    {"code": "page.bejerman_sync", "label": "Ver sincronización Bejerman", "type": "page", "group": "Sistema"},
     {"code": "action.ingreso.create", "label": "Ingresar equipo (crear ingreso)", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.edit_basics", "label": "Editar datos de ingreso", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.edit_diagnosis", "label": "Editar diagnostico/trabajos", "type": "action", "group": "Ingresos"},
@@ -39,6 +40,7 @@ PERMISSION_CATALOG = [
     {"code": "action.spare_parts.manage_24h_permissions", "label": "Gestionar permisos 24h de repuestos", "type": "action", "group": "Repuestos"},
     {"code": "action.devices_preventivos.manage", "label": "Gestionar edicion de equipos/preventivos", "type": "action", "group": "Equipos"},
     {"code": "action.metrics.configure", "label": "Configurar metricas", "type": "action", "group": "Sistema"},
+    {"code": "action.bejerman_sync.manage", "label": "Gestionar sincronización Bejerman", "type": "action", "group": "Sistema"},
 ]
 
 
@@ -97,6 +99,7 @@ _grant(
     "page.catalogs",
     "page.spare_parts",
     "page.warranty",
+    "page.bejerman_sync",
     "action.ingreso.create",
     "action.ingreso.edit_basics",
     "action.ingreso.edit_diagnosis",
@@ -111,6 +114,7 @@ _grant(
     "action.catalogs.manage",
     "action.tests_protocol.manage",
     "action.devices_preventivos.manage",
+    "action.bejerman_sync.manage",
 )
 
 # jefe_veedor
@@ -130,6 +134,7 @@ _grant(
     "page.metrics",
     "page.warranty",
     "page.users",
+    "page.bejerman_sync",
     "action.ingreso.create",
     "action.ingreso.edit_basics",
     "action.ingreso.edit_diagnosis",
@@ -146,6 +151,7 @@ _grant(
     "action.spare_parts.manage",
     "action.spare_parts.manage_24h_permissions",
     "action.devices_preventivos.manage",
+    "action.bejerman_sync.manage",
 )
 
 # recepcion

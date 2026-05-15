@@ -1,11 +1,11 @@
 import StatusChip from "./StatusChip.jsx";
+import DeviceIdentifier from "./DeviceIdentifier.jsx";
 import {
   catalogEquipmentLabel,
   formatDateOnly,
   formatOS,
   ingresoIdOf,
   isMotivoCotizacionEquipo,
-  nsPreferInternoOf,
   parseDateLocal,
   resolveFechaCreacion,
   resolveFechaIngreso,
@@ -68,6 +68,7 @@ function nextActionOf(row) {
   if (presupuesto === "aprobado" || estado === "reparar") return "Reparar";
   if (estado === "reparado") return "Liberar o entregar";
   if (estado === "liberado") return "Coordinar entrega";
+  if (estado === "vendido_pendiente_entrega") return "Confirmar entrega de venta";
   return "Actualizar avance";
 }
 
@@ -158,7 +159,9 @@ export default function WorkQueueTable({
                   {row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}
                 </td>
                 <td className="p-2 border-b align-top min-w-56">{catalogEquipmentLabel(row)}</td>
-                <td className="p-2 border-b align-top whitespace-nowrap">{nsPreferInternoOf(row)}</td>
+                <td className="p-2 border-b align-top whitespace-nowrap">
+                  <DeviceIdentifier row={row} />
+                </td>
                 {showTechnician && (
                   <td className="p-2 border-b align-top whitespace-nowrap">{technicianOf(row) || "-"}</td>
                 )}

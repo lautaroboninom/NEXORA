@@ -184,7 +184,7 @@ class Command(BaseCommand):
                       OR t.presupuesto_estado = 'presupuestado'
                     )
                 AND LOWER(loc.nombre) = LOWER(%s)
-                AND t.estado NOT IN ('entregado','liberado','alquilado','baja')
+                AND t.estado NOT IN ('entregado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
             )
             SELECT *,
                    FLOOR(EXTRACT(EPOCH FROM (now() - presupuesto_fecha_emision)) / 86400) AS dias_desde_emitido

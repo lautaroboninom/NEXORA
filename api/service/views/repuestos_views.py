@@ -237,7 +237,7 @@ def _parse_repuesto_cost_input(data, user, current=None):
         valor = current_cost.get("costo_valor")
 
     if valor is not None and valor < 0:
-        raise ValidationError("costo_valor invÃ¡lido")
+        raise ValidationError("costo_valor inválido")
     if valor is not None:
         valor = money(valor)
 

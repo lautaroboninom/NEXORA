@@ -5,7 +5,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import _set_audit_user, exec_void, q, require_roles
-from ..bejerman_sync import enqueue_stock_transfer_for_ingreso
+from ..bejerman_sync import (
+    enqueue_client_ready_transfer_for_ingreso,
+    enqueue_stock_exit_for_ingreso,
+    enqueue_stock_transfer_for_ingreso,
+    ingreso_is_internal_equipment,
+)
 from ..pdf import render_remito_salida_pdf, render_remito_derivacion_pdf
 from ..notifications import notify_ingreso_liberado
 
@@ -20,8 +25,10 @@ class RemitoSalidaPdfView(APIView):
         cur_row = q("SELECT resolucion, estado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
         if not cur_row:
             return Response(status=404)
+        estado_actual = (cur_row["estado"] or "").lower()
+        es_venta_pendiente = estado_actual == "vendido_pendiente_entrega"
         # Autocompletar resolución si está 'reparado' y aún sin resolución
-        if not cur_row["resolucion"] and (cur_row["estado"] or "").lower() == 'reparado':
+        if not cur_row["resolucion"] and estado_actual == 'reparado':
             exec_void(
                 """
                 UPDATE ingresos
@@ -31,7 +38,7 @@ class RemitoSalidaPdfView(APIView):
                 [ingreso_id],
             )
             cur_row["resolucion"] = 'reparado'
-        if not cur_row["resolucion"] and cur_row["estado"] != 'liberado':
+        if not cur_row["resolucion"] and cur_row["estado"] != 'liberado' and not es_venta_pendiente:
             return Response({"detail": "No se puede liberar sin resolución"}, status=409)
 
         # Marcar 'liberado' y registrar evento para fecha_listo
@@ -39,7 +46,7 @@ class RemitoSalidaPdfView(APIView):
             """
           UPDATE ingresos
              SET estado = 'liberado'
-           WHERE id=%s AND estado NOT IN ('entregado','baja')
+           WHERE id=%s AND estado NOT IN ('entregado','baja','vendido_pendiente_entrega','vendido_entregado')
         """,
             [ingreso_id],
         )
@@ -55,18 +62,32 @@ class RemitoSalidaPdfView(APIView):
                         SELECT 1 FROM ingreso_events
                          WHERE ingreso_id=%s AND a_estado='liberado'
                     )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM ingresos
+                         WHERE id=%s AND estado IN ('vendido_pendiente_entrega','vendido_entregado')
+                    )
                     """,
-                    [ingreso_id, uid, ingreso_id],
+                    [ingreso_id, uid, ingreso_id, ingreso_id],
                 )
         except Exception:
             # No bloquear la impresión del remito si falla la auditoría de eventos
             pass
 
-        if (cur_row["estado"] or "").lower() not in ("entregado", "baja"):
-            enqueue_stock_transfer_for_ingreso(ingreso_id)
+        if estado_actual not in ("entregado", "baja", "vendido_pendiente_entrega", "vendido_entregado"):
+            try:
+                with transaction.atomic():
+                    if ingreso_is_internal_equipment(ingreso_id):
+                        enqueue_stock_transfer_for_ingreso(ingreso_id)
+                        enqueue_stock_exit_for_ingreso(ingreso_id)
+                    else:
+                        enqueue_client_ready_transfer_for_ingreso(ingreso_id)
+                        enqueue_stock_exit_for_ingreso(ingreso_id)
+            except Exception:
+                pass
 
         try:
-            notify_ingreso_liberado(ingreso_id)
+            if not es_venta_pendiente:
+                notify_ingreso_liberado(ingreso_id)
         except Exception:
             pass
 

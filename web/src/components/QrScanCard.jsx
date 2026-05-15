@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 import { lookupScan, postEntregarIngreso } from "../lib/api";
 import { formatOS } from "../lib/ui-helpers";
+import DeviceIdentifier from "./DeviceIdentifier.jsx";
 
 const emptyEntrega = { remito_salida: "", retira_persona: "", serial_confirm: "" };
 const SCAN_RESET_MS = 120;
@@ -310,8 +311,8 @@ export default function QrScanCard() {
   const device = result?.device || null;
   const flags = result?.flags || {};
   const estado = String(ingreso?.estado || "").toLowerCase();
-  const isLiberado = estado === "liberado";
-  const isEntregado = estado === "entregado";
+  const isLiberado = estado === "liberado" || estado === "vendido_pendiente_entrega";
+  const isEntregado = estado === "entregado" || estado === "vendido_entregado";
   const requiereSerial = String(ingreso?.resolucion || "").toLowerCase() === "cambio";
   const hoyLabel = new Date().toLocaleDateString("es-AR");
 
@@ -368,11 +369,14 @@ export default function QrScanCard() {
       setDeliverOk("Entrega registrada.");
       setResult((prev) => {
         if (!prev || !prev.ingreso) return prev;
+        const nextEstado = String(prev.ingreso.estado || "").toLowerCase() === "vendido_pendiente_entrega"
+          ? "vendido_entregado"
+          : "entregado";
         return {
           ...prev,
           ingreso: {
             ...prev.ingreso,
-            estado: "entregado",
+            estado: nextEstado,
             fecha_entrega: new Date().toISOString(),
           },
         };
@@ -497,7 +501,7 @@ export default function QrScanCard() {
                       <div>Estado: {estadoLabel(ingreso.estado)}</div>
                       <div>Cliente: {safeText(ingreso.razon_social)}</div>
                       <div>Equipo: {safeText(ingreso.marca)} {safeText(ingreso.modelo)}</div>
-                      <div>Serie: {safeText(ingreso.numero_serie || ingreso.numero_interno)}</div>
+                      <div>Serie: <DeviceIdentifier row={ingreso} /></div>
                       <div>Tipo: {safeText(ingreso.tipo_equipo)}</div>
                     </div>
                     <div className="mt-3 flex items-center gap-2">
@@ -514,7 +518,9 @@ export default function QrScanCard() {
 
                     {isLiberado && !isEntregado && (
                       <div className="mt-4 border-t pt-4">
-                        <div className="font-semibold text-emerald-700">Equipo liberado</div>
+                        <div className="font-semibold text-emerald-700">
+                          {estado === "vendido_pendiente_entrega" ? "Venta pendiente de entrega" : "Equipo liberado"}
+                        </div>
                         <div className="text-xs text-gray-500">Fecha de entrega: {hoyLabel} (auto)</div>
                         {deliverOk && (
                           <div className="bg-emerald-100 text-emerald-800 border border-emerald-300 rounded p-2 mt-2">
@@ -574,7 +580,7 @@ export default function QrScanCard() {
                     <div className="text-sm text-gray-700 grid grid-cols-1 md:grid-cols-2 gap-2">
                       <div>Propiedad: {propiedadLabel()}</div>
                       <div>Cliente: {safeText(device.customer_nombre)}</div>
-                      <div>Serie: {safeText(device.numero_serie || device.numero_interno)}</div>
+                      <div>Serie: <DeviceIdentifier row={{ ...device, ...flags }} /></div>
                       <div>Equipo: {safeText(device.marca)} {safeText(device.modelo)}</div>
                       <div>Alquilado: {device.alquilado ? "Sí" : "No"}</div>
                       <div>Alquiler a: {safeText(device.alquiler_a)}</div>

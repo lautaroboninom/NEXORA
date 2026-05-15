@@ -38,11 +38,13 @@ import ResetPassword from "./pages/ResetPassword";
 import Depositos from "./pages/Depositos.jsx";
 import Derivados from "./pages/Derivados.jsx";
 import Metricas from "./pages/Metricas.jsx";
+import MetricasActividadTecnicos from "./pages/MetricasActividadTecnicos.jsx";
 import MetricasClientes from "./pages/MetricasClientes.jsx";
 import MetricasFinanzas from "./pages/MetricasFinanzas.jsx";
 import Garantias from "./pages/Garantias.jsx";
 import Equipos from "./pages/Equipos.jsx";
 import ProtocolosTest from "./pages/ProtocolosTest.jsx";
+import BejermanSync from "./pages/BejermanSync.jsx";
 import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
 
 function NotFound() {
@@ -249,6 +251,14 @@ const router = createBrowserRouter([
         ),
       },
       {
+        path: "metricas/actividad-tecnicos",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_METRICS}>
+            <MetricasActividadTecnicos />
+          </ProtectedRoute>
+        ),
+      },
+      {
         path: "metricas/finanzas",
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_METRICS}>
@@ -261,6 +271,14 @@ const router = createBrowserRouter([
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_METRICS}>
             <Metricas />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "bejerman",
+        element: (
+          <ProtectedRoute permissions={[PERMISSION_CODES.PAGE_BEJERMAN_SYNC, PERMISSION_CODES.PAGE_LOGISTICS]}>
+            <BejermanSync />
           </ProtectedRoute>
         ),
       },

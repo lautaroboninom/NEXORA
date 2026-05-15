@@ -21,7 +21,7 @@ from .helpers import (
 
 VIEW_ROLES = ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"]
 MANAGE_ROLES = ["jefe", "admin", "jefe_veedor"]
-TERMINAL_STATES = ("entregado", "alquilado", "baja")
+TERMINAL_STATES = ("entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado")
 TALLER_LOCATION = "taller"
 
 RULE_UNITS = {"horas", "dias", "dias_habiles", "cantidad", "porcentaje"}
@@ -29,6 +29,50 @@ RULE_SEVERITIES = {"info", "warning", "critical"}
 OBJECTIVE_SCOPES = {"global", "technician"}
 OBJECTIVE_PERIODS = {"daily", "weekly"}
 OBJECTIVE_DIRECTIONS = {"gte", "lte"}
+
+
+def _has_table_column(table_name: str, column_name: str) -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name=%s
+                   AND column_name=%s
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                [table_name, column_name],
+                one=True,
+            )
+            return bool(row)
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name=%s
+               AND column_name=%s
+             LIMIT 1
+            """,
+            [table_name, column_name],
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _mg_list_select_sql(alias: str = "d") -> str:
+    if _has_table_column("devices", "mg_estado"):
+        return f"""
+                   COALESCE({alias}.mg_estado,'activo') AS mg_estado,
+                   (COALESCE({alias}.mg_estado,'activo') = 'inactivo_venta') AS mg_inactivo_venta,
+        """
+    return """
+                   'activo' AS mg_estado,
+                   FALSE AS mg_inactivo_venta,
+    """
 
 DASHBOARD_ALERTS = {
     "jefe": {
@@ -399,7 +443,7 @@ def _metric_progress(metric_key, start, end, obj):
               FROM ingresos t
               LEFT JOIN locations loc ON loc.id = t.ubicacion_id
              WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
-               AND t.estado NOT IN ('liberado','entregado','alquilado','baja')
+               AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                {scope_sql}
             """,
             [TALLER_LOCATION, *scope_params],
@@ -574,7 +618,7 @@ def _alert_rows_sin_tecnico(request, rule):
         SELECT {COMMON_INGRESO_SELECT}
         {COMMON_INGRESO_JOINS}
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
-           AND t.estado NOT IN ('liberado','entregado','alquilado','baja')
+           AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
            AND t.asignado_a IS NULL
            AND CAST(COALESCE(t.fecha_ingreso, t.fecha_creacion) AS DATE) <= CURRENT_DATE - %s::int
          ORDER BY dias_espera DESC, t.id ASC
@@ -591,7 +635,7 @@ def _alert_rows_wip_critico(request, rule):
         SELECT {COMMON_INGRESO_SELECT}
         {COMMON_INGRESO_JOINS}
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
-           AND t.estado NOT IN ('liberado','entregado','alquilado','baja')
+           AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
            AND CAST(COALESCE(t.fecha_ingreso, t.fecha_creacion) AS DATE) <= CURRENT_DATE - %s::int
            {scope_sql}
          ORDER BY dias_espera DESC, t.id ASC
@@ -618,7 +662,7 @@ def _alert_rows_presupuesto(request, rule):
            LIMIT 1
         )
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
-           AND t.estado NOT IN ('liberado','entregado','alquilado','baja')
+           AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
            AND (
                 q.estado::text IN ('emitido','enviado','presupuestado')
                 OR t.presupuesto_estado = 'presupuestado'
@@ -647,7 +691,7 @@ def _alert_rows_liberado(request, rule):
            GROUP BY ingreso_id
         ) ev ON ev.ingreso_id = t.id
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
-           AND t.estado = 'liberado'
+           AND t.estado IN ('liberado','vendido_pendiente_entrega')
            AND CAST(COALESCE(ev.fecha_liberacion, t.fecha_ingreso, t.fecha_creacion) AS DATE) <= CURRENT_DATE - %s::int
            {scope_sql}
          ORDER BY dias_liberado DESC, t.id ASC
@@ -751,7 +795,7 @@ def _active_work_count(request):
           FROM ingresos t
           LEFT JOIN locations loc ON loc.id = t.ubicacion_id
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
-           AND t.estado NOT IN ('liberado','entregado','alquilado','baja')
+           AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
            {scope_sql}
         """,
         [TALLER_LOCATION, *scope_params],
@@ -835,21 +879,67 @@ def _build_alerts(request):
     return alerts, raw
 
 
+def _priority_identity(item):
+    if item.get("ingreso_id"):
+        return ("ingreso", int(item.get("ingreso_id")))
+    if item.get("preventivo_plan_id"):
+        return ("preventivo", int(item.get("preventivo_plan_id")))
+    if item.get("id"):
+        return ("item", int(item.get("id")))
+    return None
+
+
+def _priority_wait_days(item):
+    return -int(
+        item.get("dias_espera")
+        or item.get("dias_presupuesto")
+        or item.get("dias_derivado")
+        or item.get("dias_liberado")
+        or item.get("dias_vencido")
+        or 0
+    )
+
+
+def _priority_alert_rank(item):
+    return {
+        "sin_tecnico": 0,
+        "presupuesto_sin_aprobar": 1,
+        "liberado_sin_entregar": 2,
+        "derivado_sin_devolucion": 3,
+        "wip_critico": 4,
+        "preventivo_vencido": 5,
+        "preventivo_proximo": 6,
+    }.get(item.get("alert_key"), 99)
+
+
+def _dedupe_priorities(items):
+    seen = set()
+    unique = []
+    for item in items:
+        identity = _priority_identity(item)
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        unique.append(item)
+    return unique
+
+
 def build_work_summary(request, periodo="hoy"):
     alerts, raw = _build_alerts(request)
     variant = _dashboard_variant(request)
     priorities = []
     for alert in alerts:
         priorities.extend(alert.get("items") or [])
+    severity_by_key = {alert.get("key"): alert.get("severity") or "info" for alert in alerts}
     priorities.sort(
         key=lambda item: (
-            {"critical": 0, "warning": 1, "info": 2}.get(
-                next((a.get("severity") for a in alerts if a.get("key") == item.get("alert_key")), "info"),
-                9,
-            ),
-            -int(item.get("dias_espera") or item.get("dias_presupuesto") or item.get("dias_derivado") or item.get("dias_liberado") or item.get("dias_vencido") or 0),
+            {"critical": 0, "warning": 1, "info": 2}.get(severity_by_key.get(item.get("alert_key"), "info"), 9),
+            _priority_alert_rank(item),
+            _priority_wait_days(item),
         )
     )
+    priorities = _dedupe_priorities(priorities)
     objectives = build_objectives(periodo, request=request)
     return {
         "generated_at": timezone.now(),
@@ -1028,8 +1118,9 @@ class GlobalSearchView(APIView):
         if len(term) < 2:
             return Response({"q": term, "groups": [], "total": 0})
         like = f"%{term}%"
+        mg_select_sql = _mg_list_select_sql("d")
         ingreso_rows = _safe_rows(
-            """
+            f"""
             SELECT t.id AS ingreso_id,
                    t.estado::text AS estado,
                    t.presupuesto_estado::text AS presupuesto_estado,
@@ -1038,6 +1129,7 @@ class GlobalSearchView(APIView):
                    c.razon_social AS cliente,
                    d.numero_serie,
                    COALESCE(d.numero_interno,'') AS numero_interno,
+                   {mg_select_sql}
                    COALESCE(b.nombre,'') AS marca,
                    COALESCE(m.nombre,'') AS modelo,
                    COALESCE(m.tipo_equipo,'') AS tipo_equipo,
@@ -1071,11 +1163,12 @@ class GlobalSearchView(APIView):
         ]
 
         devices = _safe_rows(
-            """
+            f"""
             SELECT d.id AS device_id,
                    c.razon_social AS cliente,
                    d.numero_serie,
                    COALESCE(d.numero_interno,'') AS numero_interno,
+                   {mg_select_sql}
                    COALESCE(b.nombre,'') AS marca,
                    COALESCE(m.nombre,'') AS modelo,
                    COALESCE(m.tipo_equipo,'') AS tipo_equipo,

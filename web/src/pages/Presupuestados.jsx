@@ -11,10 +11,10 @@ import {
   formatOS,
   ingresoIdOf,
   norm,
-  nsPreferInternoOf,
   resolveFechaCreacion,
   tipoEquipoOf,
 } from "../lib/ui-helpers";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import useQueryState from "../hooks/useQueryState";
 
 // ENDPOINT para "presupuestados" (ya emitidos/enviados)
@@ -471,7 +471,7 @@ export default function JefePresupuestos() {
                       {row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}
                     </td>
                     <td className="p-2">{catalogEquipmentLabel(row) ?? "-"}</td>
-                    <td className="p-2">{nsPreferInternoOf(row)}</td>
+                    <td className="p-2"><DeviceIdentifier row={row} /></td>
                     <td className="p-2">{row?.estado ?? "-"}</td>
                     <td className="p-2">{formatMoney(monto, moneda)}</td>
                     <td className="p-2 whitespace-nowrap">

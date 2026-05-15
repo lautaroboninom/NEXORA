@@ -104,7 +104,7 @@ class Command(BaseCommand):
                   LEFT JOIN marcas b ON b.id = d.marca_id
                   LEFT JOIN models m ON m.id = d.model_id
                  WHERE LOWER(loc.nombre) = LOWER('taller')
-                   AND t.estado NOT IN ('liberado','entregado','alquilado','baja')
+                   AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                    AND DATE(COALESCE(t.fecha_ingreso, t.fecha_creacion)) <= DATE('2023-12-31')
                 """
             )

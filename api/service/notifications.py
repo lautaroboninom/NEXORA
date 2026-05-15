@@ -101,6 +101,13 @@ NOTIFICATION_CATALOG = [
         "default_roles": ["jefe"],
     },
     {
+        "key": "presupuesto_decision_portal",
+        "label": "Decision de presupuesto desde Portal",
+        "description": "Un cliente aprobo o rechazo un presupuesto desde el Portal.",
+        "group": "Presupuestos",
+        "default_roles": ["jefe"],
+    },
+    {
         "key": "resumen_operativo",
         "label": "Resumen operativo",
         "description": "Resumen de alertas y objetivos del servicio técnico.",

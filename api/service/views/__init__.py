@@ -27,6 +27,7 @@ from .metricas_views import (
     MetricasSeriesView,
     MetricasFinanzasView,
     MetricasFinanzasLiberadosView,
+    MetricasActividadTecnicosView,
     MetricasCalibracionView,
     FeriadosView,
     MetricasConfigView,
@@ -233,6 +234,11 @@ from .work_views import (
     WorkAlertRulesView,
     GlobalSearchView,
 )
+from .bejerman_views import (
+    BejermanJobsView,
+    BejermanJobRetryView,
+    BejermanArticleMappingsView,
+)
 
 __all__ = [
     # auth
@@ -247,6 +253,7 @@ __all__ = [
     "MetricasSeriesView",
     "MetricasFinanzasView",
     "MetricasFinanzasLiberadosView",
+    "MetricasActividadTecnicosView",
     "MetricasCalibracionView",
     "FeriadosView",
     "MetricasConfigView",
@@ -412,4 +419,8 @@ __all__ = [
     "WorkObjectivesView",
     "WorkAlertRulesView",
     "GlobalSearchView",
+    # Bejerman
+    "BejermanJobsView",
+    "BejermanJobRetryView",
+    "BejermanArticleMappingsView",
 ]

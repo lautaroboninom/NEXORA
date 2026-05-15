@@ -670,7 +670,8 @@ export default function NuevoIngreso() {
           brand_id: marcaId || form.equipo.marca_id || null,
           model_id: form.equipo.modelo_id || null,
         });
-        const enGarantia = !!r?.within_365_days;
+        if (typeof r?.within_365_days !== "boolean") return;
+        const enGarantia = r.within_365_days;
         setForm((f) => ({ ...f, equipo: { ...f.equipo, garantia: enGarantia } }));
       } catch {
         /* noop: no bloquear */
@@ -929,11 +930,10 @@ export default function NuevoIngreso() {
   // Handlers cliente
   function onClienteRsChange(v) {
     setClienteRsInput(v);
-    syncClienteFromInputs(v, clienteCodInput);
-  }
-  function onClienteCodChange(v) {
-    setClienteCodInput(v);
-    syncClienteFromInputs(clienteRsInput, v);
+    const c = findClienteByRS(v);
+    const nextCod = c?.cod_empresa || "";
+    setClienteCodInput(nextCod);
+    syncClienteFromInputs(v, nextCod);
   }
 
   const submit = async (e) => {
@@ -1242,23 +1242,11 @@ export default function NuevoIngreso() {
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Código empresa</label>
               <Input
-                list={clientesPerm ? "clientes_cod" : undefined}
                 value={clienteCodInput}
-                onChange={(e) => onClienteCodChange(e.target.value)}
-                placeholder="Opcional: podés buscar por código"
+                readOnly
+                tabIndex={-1}
+                placeholder="Se completa al elegir cliente"
               />
-              {clientesPerm && (
-                <datalist id="clientes_cod">
-                  {(Array.isArray(clientes) ? clientes : [])
-                    .filter((c) => c.cod_empresa)
-                    .map((c) => (
-                      <option key={c.id} value={c.cod_empresa} />
-                    ))}
-                </datalist>
-              )}
-              {clienteCodInput && !codMatch && (
-                <div className="text-xs text-red-600 mt-1">Debés seleccionar de la lista</div>
-              )}
             </div>
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Teléfono</label>

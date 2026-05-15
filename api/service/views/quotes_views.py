@@ -1000,8 +1000,14 @@ class AnularPresupuestoView(APIView):
             presu_estado = (row.get("presupuesto_estado") or "").strip()
             if presu_estado not in ("presupuestado", "aprobado"):
                 raise ValidationError("Solo se puede anular cuando el presupuesto esta 'presupuestado' o 'aprobado'.")
-            if presu_estado == "aprobado" and estado_ingreso in ("entregado", "alquilado", "baja"):
-                raise ValidationError("No se puede anular un presupuesto aprobado en estado entregado, alquilado o baja.")
+            if presu_estado == "aprobado" and estado_ingreso in (
+                "entregado",
+                "alquilado",
+                "baja",
+                "vendido_pendiente_entrega",
+                "vendido_entregado",
+            ):
+                raise ValidationError("No se puede anular un presupuesto aprobado en un estado cerrado o vendido.")
 
             qid = _ensure_quote(ingreso_id)
             q("SELECT id FROM quotes WHERE id=%s FOR UPDATE", [qid], one=True)

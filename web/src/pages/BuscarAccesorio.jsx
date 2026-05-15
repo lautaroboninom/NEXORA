@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buscarAccesorioPorRef } from "../lib/api";
-import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, resolveFechaIngreso, nsPreferInternoOf } from "../lib/ui-helpers";
+import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, resolveFechaIngreso } from "../lib/ui-helpers";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 export default function BuscarAccesorio() {
   const [sp] = useSearchParams();
@@ -60,7 +61,7 @@ export default function BuscarAccesorio() {
                     <td className="p-2">{r?.referencia || "-"}</td>
                     <td className="p-2">{r?.razon_social || "-"}</td>
                     <td className="p-2">{equipo || "-"}</td>
-                    <td className="p-2">{nsPreferInternoOf(r)}</td>
+                    <td className="p-2"><DeviceIdentifier row={r} /></td>
                     <td className="p-2 whitespace-nowrap">{formatDateOnlyHelper(resolveFechaIngreso(r))}</td>
                   </tr>
                 );

@@ -11,9 +11,9 @@ import {
   norm,
   tipoEquipoOf,
   catalogEquipmentLabel,
-  nsPreferInternoOf,
 } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import useQueryState from "../hooks/useQueryState";
 
 // Endpoint combinado del backend
@@ -137,7 +137,7 @@ export default function Aprobados() {
                   <td className="p-2">
                     <StatusChip value={row?.estado} />
                   </td>
-                  <td className="p-2">{nsPreferInternoOf(row)}</td>
+                  <td className="p-2"><DeviceIdentifier row={row} /></td>
                   <td className="p-2 whitespace-nowrap">{formatDateOnly(
                     row?.fecha_aprobado ||
                     row?.presupuesto_fecha_aprobacion ||

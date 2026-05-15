@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import api, { postDerivacionDevuelto } from "../lib/api";
-import { ingresoIdOf, formatOS, formatDateOnly, nsPreferInternoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateOnly } from "../lib/ui-helpers";
 import { catalogEquipmentLabel } from "../lib/ui-helpers";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 export default function Derivados() {
   const [rows, setRows] = useState([]);
@@ -79,7 +80,7 @@ export default function Derivados() {
                   <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? '-'}</td>
                   <td className="p-2">{row?.proveedor ?? '-'}</td>
                   <td className="p-2">{catalogEquipmentLabel(row)}</td>
-                  <td className="p-2">{nsPreferInternoOf(row)}</td>
+                  <td className="p-2"><DeviceIdentifier row={row} /></td>
                   <td className="p-2 whitespace-nowrap">{row?.fecha_deriv ? formatDateOnly(row.fecha_deriv) : '-'}</td>
                   <td className="p-2 text-right">
                     <div className="flex items-center gap-2 justify-end">

@@ -41,6 +41,8 @@ import {
 } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
+import { tipoEquipoOf } from "../lib/ui-helpers";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 const TAB_ITEMS = [
   { value: "equipos", label: "Equipos" },
@@ -116,6 +118,45 @@ function PropiedadBadge({ row }) {
     return <span className="px-2 py-1 text-xs rounded bg-emerald-100 text-emerald-800">Propio (MG/BIO)</span>;
   }
   return <span className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700">Cliente</span>;
+}
+
+function isOwnerDisplayCustomer(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "particular") return true;
+  return normalized.includes("mg") && normalized.includes("bio");
+}
+
+function deviceCustomerTitle(row) {
+  const customer = String(row?.last_customer_nombre || row?.customer_nombre || "").trim();
+  const owner = String(row?.propietario_nombre || "").trim();
+  if (owner && isOwnerDisplayCustomer(customer)) return owner;
+  return customer || owner || "-";
+}
+
+function deviceCustomerSubtitle(row) {
+  const customer = String(row?.last_customer_nombre || row?.customer_nombre || "").trim();
+  const owner = String(row?.propietario_nombre || "").trim();
+  if (owner && customer && isOwnerDisplayCustomer(customer)) {
+    return `Cliente base: ${customer}`;
+  }
+  if (owner && customer && owner.toLowerCase() !== customer.toLowerCase()) {
+    return `Dueño: ${owner}`;
+  }
+  return "";
+}
+
+function deviceOwnerMeta(row) {
+  const parts = [row?.propietario_contacto, row?.propietario_doc]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return parts.join(" | ");
+}
+
+function deviceModelTitle(row) {
+  const modelo = String(row?.modelo || "").trim();
+  const variante = String(row?.variante || "").trim();
+  return [modelo, variante].filter(Boolean).join(" ").trim() || "-";
 }
 
 function normalizeCustomerRows(rows = []) {
@@ -732,7 +773,7 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
           {isVenta ? "Marcar MG vendido" : "Reactivar MG"}
         </div>
         <div className="text-sm text-gray-600 mb-3">
-          Equipo #{row.id} - MG: {row.numero_interno || "-"}
+          Equipo #{row.id} - <DeviceIdentifier row={row} />
         </div>
         {err && <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mb-3">{err}</div>}
 
@@ -1632,8 +1673,7 @@ function AddPreventivoEquipoModal({ onClose, onSelect, onCreateManaged }) {
                 <tr className="text-left bg-gray-50">
                   <th className="p-2">ID</th>
                   <th className="p-2">Cliente</th>
-                  <th className="p-2">N/S</th>
-                  <th className="p-2">MG</th>
+                  <th className="p-2">Identificación</th>
                   <th className="p-2">Marca</th>
                   <th className="p-2">Modelo</th>
                   <th className="p-2">Acción</th>
@@ -1643,11 +1683,20 @@ function AddPreventivoEquipoModal({ onClose, onSelect, onCreateManaged }) {
                 {rows.map((row) => (
                   <tr key={row.id} className="border-t">
                     <td className="p-2 font-mono text-xs">{row.id}</td>
-                    <td className="p-2">{row.last_customer_nombre || row.customer_nombre || "-"}</td>
-                    <td className="p-2">{row.numero_serie || "-"}</td>
-                    <td className="p-2">{row.numero_interno || "-"}</td>
+                    <td className="p-2">
+                      <div className="font-medium">{deviceCustomerTitle(row)}</div>
+                      {deviceCustomerSubtitle(row) ? (
+                        <div className="text-xs text-gray-500">{deviceCustomerSubtitle(row)}</div>
+                      ) : null}
+                    </td>
+                    <td className="p-2"><DeviceIdentifier row={row} /></td>
                     <td className="p-2">{row.marca || "-"}</td>
-                    <td className="p-2">{row.modelo || "-"}</td>
+                    <td className="p-2">
+                      <div className="font-medium">{deviceModelTitle(row)}</div>
+                      {tipoEquipoOf(row, "") ? (
+                        <div className="text-xs text-gray-500">{tipoEquipoOf(row, "")}</div>
+                      ) : null}
+                    </td>
                     <td className="p-2">
                       <button
                         className="px-2 py-1 rounded border text-xs hover:bg-gray-50"
@@ -2159,6 +2208,27 @@ export default function Equipos() {
   const [closingRevision, setClosingRevision] = useState(false);
 
   const pageSize = 100;
+  const autoEditDeviceIdRef = useRef("");
+
+  useEffect(() => {
+    const explicitEditId = searchParams.get("edit_device_id") || "";
+    const rawEditId = explicitEditId || (searchParams.get("from") === "service" ? searchParams.get("device_id") : "");
+    if (!rawEditId) return;
+    const nextEditId = Number(rawEditId);
+    if (!Number.isFinite(nextEditId) || nextEditId <= 0) return;
+    const autoEditKey = `${explicitEditId ? "edit" : "service"}:${nextEditId}`;
+    if (autoEditDeviceIdRef.current === autoEditKey) return;
+    autoEditDeviceIdRef.current = autoEditKey;
+    setActiveTab("equipos");
+    if (canEdit) setEditDeviceId(nextEditId);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("tab", "equipos");
+      next.set("device_id", String(nextEditId));
+      next.delete("edit_device_id");
+      return next;
+    }, { replace: true });
+  }, [canEdit, searchParams, setSearchParams]);
 
   useEffect(() => {
     const timer = setTimeout(() => setQDebounced(q), 300);
@@ -2226,7 +2296,7 @@ export default function Equipos() {
   const mergeMgFinal = mergeMgChoice === "equipo1" ? (mergeEquipo1?.numero_interno || "") : (mergeEquipo2?.numero_interno || "");
   const mergeNsFinalValue = (mergeNsFinal || "").trim();
   const mergeMgFinalValue = (mergeMgFinal || "").trim();
-  const canSubmitMerge = !!mergeEquipo1 && !!mergeEquipo2 && !!mergeNsFinalValue && !mergeSaving;
+  const canSubmitMerge = !!mergeEquipo1 && !!mergeEquipo2 && !!(mergeNsFinalValue || mergeMgFinalValue) && !mergeSaving;
 
   async function loadDevices(p = 1, { reset = false } = {}) {
     try {
@@ -2786,8 +2856,7 @@ export default function Equipos() {
                     <SortableTh label="ID" field="id" sort={sort} setSort={setSort} />
                     <th className="p-2">Propiedad</th>
                     <SortableTh label="Último cliente/Dueño" field="cliente" sort={sort} setSort={setSort} />
-                    <SortableTh label="N/S" field="ns" sort={sort} setSort={setSort} />
-                    <SortableTh label="MG" field="mg" sort={sort} setSort={setSort} />
+                    <SortableTh label="Identificación" field="ns" sort={sort} setSort={setSort} />
                     <SortableTh label="Marca" field="marca" sort={sort} setSort={setSort} />
                     <SortableTh label="Modelo" field="modelo" sort={sort} setSort={setSort} />
                     <SortableTh label="Ubicación" field="ubicacion" sort={sort} setSort={setSort} />
@@ -2803,14 +2872,22 @@ export default function Equipos() {
                         <td className="p-2 font-mono text-xs">{row.id}</td>
                         <td className="p-2"><PropiedadBadge row={row} /></td>
                         <td className="p-2">
-                          <div className="font-medium">{row.last_customer_nombre || row.customer_nombre || "-"}</div>
+                          <div className="font-medium">{deviceCustomerTitle(row)}</div>
+                          {deviceCustomerSubtitle(row) ? (
+                            <div className="text-xs text-gray-500">{deviceCustomerSubtitle(row)}</div>
+                          ) : null}
+                          {deviceOwnerMeta(row) ? <div className="text-xs text-gray-500">{deviceOwnerMeta(row)}</div> : null}
                           {row.last_ingreso_id ? <div className="text-xs text-gray-500">Último ingreso #{row.last_ingreso_id}</div> : null}
                           {row.es_propietario_mg && !row.mg_inactivo_venta && <div className="text-xs text-gray-500">Dueño base (propio MG/BIO)</div>}
                         </td>
-                        <td className="p-2">{row.numero_serie || "-"}</td>
-                        <td className="p-2">{row.numero_interno || "-"}</td>
+                        <td className="p-2"><DeviceIdentifier row={row} /></td>
                         <td className="p-2">{row.marca || "-"}</td>
-                        <td className="p-2">{row.modelo || "-"}</td>
+                        <td className="p-2">
+                          <div className="font-medium">{deviceModelTitle(row)}</div>
+                          {tipoEquipoOf(row, "") ? (
+                            <div className="text-xs text-gray-500">{tipoEquipoOf(row, "")}</div>
+                          ) : null}
+                        </td>
                         <td className="p-2">{row.ubicacion_nombre || "-"}</td>
                         <td className="p-2">
                           {row.alquilado ? (
@@ -2951,8 +3028,7 @@ export default function Equipos() {
                   <tr className="text-left">
                     <th className="p-2">Cliente</th>
                     <th className="p-2">Equipo</th>
-                    <th className="p-2">N/S</th>
-                    <th className="p-2">Numero interno</th>
+                    <th className="p-2">Identificación</th>
                     <th className="p-2">Ultima revision</th>
                     <th className="p-2">Próxima</th>
                     <th className="p-2">Estado</th>
@@ -2983,8 +3059,7 @@ export default function Equipos() {
                               </div>
                             ) : null}
                           </td>
-                          <td className="p-2">{item.numero_serie || "-"}</td>
-                          <td className="p-2">{item.numero_interno || "-"}</td>
+                          <td className="p-2"><DeviceIdentifier row={item} /></td>
                           <td className="p-2">{fmtDate(item.ultima_revision_fecha)}</td>
                           <td className="p-2">{fmtDate(item.proxima_revision_fecha)}</td>
                           <td className="p-2"><PreventivoBadge estado={item.preventivo_estado} dias={item.preventivo_dias_restantes} /></td>
@@ -3588,7 +3663,9 @@ export default function Equipos() {
               <div className="space-y-3">
                 <div className="text-sm">
                   <div className="text-gray-700">Equipo 1</div>
-                  <div className="text-gray-900 font-medium">#{mergeEquipo1.id} - NS: {mergeEquipo1.numero_serie || "-"} - MG: {mergeEquipo1.numero_interno || "-"}</div>
+                  <div className="text-gray-900 font-medium">
+                    #{mergeEquipo1.id} - <DeviceIdentifier row={mergeEquipo1} />
+                  </div>
                 </div>
                 <label className="block">
                   <div className="text-sm text-gray-700 mb-1">Buscar equipo 2 (N/S o MG)</div>
@@ -3601,7 +3678,7 @@ export default function Equipos() {
                 <div className="border rounded overflow-auto max-h-72">
                   {mergeSearching ? "Buscando..." : mergeSearchResults.map((row) => (
                     <div key={row.id} className="p-2 border-t flex items-center justify-between">
-                      <div className="text-xs">#{row.id} - NS: {row.numero_serie || "-"} - MG: {row.numero_interno || "-"}</div>
+                      <div className="text-xs">#{row.id} - <DeviceIdentifier row={row} /></div>
                       <button className="px-2 py-1 rounded border text-xs" onClick={() => selectMergeEquipo2(row)}>Seleccionar</button>
                     </div>
                   ))}

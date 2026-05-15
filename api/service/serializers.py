@@ -91,6 +91,8 @@ class IngresoListItemSerializer(serializers.Serializer):
 
     # Flags opcionales
     derivado_devuelto = serializers.BooleanField(required=False)
+    mg_estado = serializers.CharField(allow_blank=True, required=False)
+    mg_inactivo_venta = serializers.BooleanField(required=False)
 
 
 class IngresoDetailSerializer(serializers.Serializer):

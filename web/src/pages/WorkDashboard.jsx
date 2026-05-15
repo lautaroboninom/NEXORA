@@ -7,10 +7,10 @@ import QrScanCard from "../components/QrScanCard.jsx";
 import WorkQueueTable from "../components/WorkQueueTable.jsx";
 import {
   catalogEquipmentLabel,
+  deviceIdentifierPartsOf,
   formatDateOnly,
   formatOS,
   ingresoIdOf,
-  nsPreferInternoOf,
 } from "../lib/ui-helpers";
 
 const severityClasses = {
@@ -73,10 +73,14 @@ function SearchResult({ item, groupKey, onOpen }) {
       : groupKey === "equipos"
         ? catalogEquipmentLabel(item)
         : `OS ${formatOS(item)}`;
+  const identifier = deviceIdentifierPartsOf(item, "");
+  const identifierText = identifier.secondary
+    ? `${identifier.primary} (${identifier.secondary})`
+    : identifier.primary;
   const subtitle =
     groupKey === "clientes"
       ? [item?.cod_empresa, item?.telefono, item?.email].filter(Boolean).join(" · ")
-      : [item?.cliente, catalogEquipmentLabel(item), nsPreferInternoOf(item)].filter(Boolean).join(" · ");
+      : [item?.cliente, catalogEquipmentLabel(item), identifierText].filter(Boolean).join(" · ");
 
   return (
     <button
