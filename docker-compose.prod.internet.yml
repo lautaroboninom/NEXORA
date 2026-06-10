@@ -127,7 +127,13 @@ networks:
 
 volumes:
   pg_data:
+    external: true
+    name: sistemadereparaciones_pg_data
   staticfiles:
+    external: true
+    name: sistemadereparaciones_staticfiles
   mediafiles:
+    external: true
+    name: sistemadereparaciones_mediafiles
 
 

@@ -64,3 +64,5 @@ services:
 
 volumes:
   pg_data:
+    external: true
+    name: sistemadereparaciones-dev_pg_data

@@ -2,7 +2,8 @@ param(
   [string]$ComposeFile = "docker-compose.prod.yml",
   [string]$Branch = "main",
   [string]$HealthUrl = "http://localhost/api/ping/",
-  [int]$HealthRetries = 30
+  [int]$HealthRetries = 30,
+  [switch]$KeepLegacyContainers
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,22 @@ Write-Host "NEXORA deploy: $repo"
 git fetch origin $Branch
 git checkout $Branch
 git pull --ff-only origin $Branch
+
+if (-not $KeepLegacyContainers) {
+  $legacyContainers = @(
+    "sistemadereparaciones-web",
+    "sistemadereparaciones-api",
+    "sistemadereparaciones-bejerman-sync",
+    "sistemadereparaciones-postgres"
+  )
+  foreach ($container in $legacyContainers) {
+    $exists = docker ps -a --format "{{.Names}}" | Where-Object { $_ -eq $container }
+    if ($exists) {
+      docker stop $container | Out-Null
+      docker rm $container | Out-Null
+    }
+  }
+}
 
 docker compose -f $ComposeFile pull
 docker compose -f $ComposeFile up -d --build
