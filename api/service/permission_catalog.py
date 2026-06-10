@@ -93,7 +93,6 @@ _grant(
     "page.service_sheet_principal",
     "page.devices_preventivos",
     "page.spare_parts",
-    "page.delivery_orders",
     "action.ingreso.edit_diagnosis",
     "action.ingreso.edit_location",
     "action.ingreso.repair_transitions",
@@ -101,7 +100,6 @@ _grant(
     "action.ingreso.print_barcode",
     "action.spare_parts.manage",
     "action.devices_preventivos.manage",
-    "action.delivery_order.assign_articles",
 )
 
 # admin

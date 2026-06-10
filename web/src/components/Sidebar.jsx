@@ -131,11 +131,6 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   Panel de recepción
                 </LinkItem>
               )}
-              {canCreateIngreso && (
-                <LinkItem to="/ingresos/nuevo" {...linkProps}>
-                  Nuevo ingreso
-                </LinkItem>
-              )}
               {canLiberados && (
                 <LinkItem to="/listos" {...linkProps}>
                   Equipos pendientes
@@ -151,14 +146,14 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
 
           {showServicioTecnico && (
             <Section title="Servicio técnico">
-              {canWorkQueues && techLike && (
-                <LinkItem to="/tecnico" {...linkProps}>
-                  Mis pendientes
-                </LinkItem>
-              )}
               {canWorkQueues && (
                 <LinkItem to="/pendientes" {...linkProps}>
                   Pendientes general
+                </LinkItem>
+              )}
+              {canWorkQueues && techLike && (
+                <LinkItem to="/tecnico" {...linkProps}>
+                  Mis pendientes
                 </LinkItem>
               )}
               {canWorkQueues && (

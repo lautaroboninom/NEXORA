@@ -12,6 +12,13 @@ DEFAULT_NOMBRE = "Lucas Bonino"
 DEFAULT_ROL = "jefe"
 DEFAULT_PASSWORD = "Sepid.dev.2026!"
 
+DEV_ROLE_USERS = [
+    {"email": "recepcion@nexora.dev", "nombre": "Recepción NEXORA", "rol": "recepcion"},
+    {"email": "admin@nexora.dev", "nombre": "Administración NEXORA", "rol": "admin"},
+    {"email": "cobranzas@nexora.dev", "nombre": "Cobranzas NEXORA", "rol": "cobranzas"},
+    {"email": "tecnico@nexora.dev", "nombre": "Técnico NEXORA", "rol": "tecnico"},
+]
+
 SEED_CLIENTES = [
     {"cod_empresa": "PART", "razon_social": "Particular", "contacto": "", "telefono": "", "email": ""},
     {"cod_empresa": "SEPID", "razon_social": "SEPID", "contacto": "Administración", "telefono": "", "email": ""},
@@ -310,6 +317,7 @@ class Command(BaseCommand):
             "marcas": 0,
             "modelos": 0,
             "marca_tipos": 0,
+            "role_users": 0,
         }
 
         with transaction.atomic():
@@ -322,6 +330,18 @@ class Command(BaseCommand):
                     password=password,
                     reset_password=reset_password,
                 )
+
+                for role_user in DEV_ROLE_USERS:
+                    _, role_created, _ = self._upsert_user(
+                        cur,
+                        nombre=role_user["nombre"],
+                        email=role_user["email"],
+                        rol=role_user["rol"],
+                        password=password,
+                        reset_password=reset_password,
+                    )
+                    if role_created:
+                        created_counts["role_users"] += 1
 
                 for cliente in SEED_CLIENTES:
                     if self._upsert_cliente(cur, cliente):
@@ -354,7 +374,12 @@ class Command(BaseCommand):
                 f"(created={str(user_created).lower()}, password_set={str(user_password_set).lower()}) | "
                 f"clientes+={created_counts['clientes']} tipos+={created_counts['tipos']} "
                 f"marcas+={created_counts['marcas']} modelos+={created_counts['modelos']} "
-                f"marca_tipos+={created_counts['marca_tipos']}"
+                f"marca_tipos+={created_counts['marca_tipos']} "
+                f"role_users+={created_counts['role_users']}"
             )
         )
         self.stdout.write(f"Usuario seed: {email} | password: {password}")
+        self.stdout.write(
+            "Usuarios por rol: "
+            + ", ".join(f"{item['email']} ({item['rol']})" for item in DEV_ROLE_USERS)
+        )

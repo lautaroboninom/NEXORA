@@ -14,7 +14,13 @@ class CustomersListView(APIView):
     def get(self, request):
         require_any_permission(
             request,
-            ["page.home_search", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"],
+            [
+                "page.home_search",
+                "action.ingreso.edit_basics",
+                "action.ingreso.create",
+                "page.new_ingreso",
+                "action.delivery_order.create",
+            ],
         )
         return Response(q("SELECT id, razon_social FROM customers ORDER BY razon_social;"))
 

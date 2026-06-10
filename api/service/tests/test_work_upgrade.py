@@ -180,6 +180,29 @@ class WorkUpgradeAPITest(TestCase):
                 ){engine_suffix}
                 """
             )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS delivery_orders (
+                    id TEXT PRIMARY KEY,
+                    order_number TEXT,
+                    customer_id INT NULL,
+                    bejerman_customer_code TEXT NULL,
+                    customer_name TEXT,
+                    delivery_type TEXT,
+                    status TEXT,
+                    priority TEXT,
+                    order_date {date_type} NULL,
+                    equipment_model TEXT NULL,
+                    equipment_serial TEXT NULL,
+                    equipment_internal_number TEXT NULL,
+                    remito_number TEXT NULL,
+                    remito_location TEXT NULL,
+                    invoice_number TEXT NULL,
+                    created_at {datetime_type} NULL,
+                    updated_at {datetime_type} NULL
+                ){engine_suffix}
+                """
+            )
             for statement in (
                 "ALTER TABLE customers ADD COLUMN cod_empresa TEXT NULL",
                 "ALTER TABLE customers ADD COLUMN cuit TEXT NULL",
@@ -213,6 +236,22 @@ class WorkUpgradeAPITest(TestCase):
                 "ALTER TABLE preventivo_planes ADD COLUMN customer_id INT NULL",
                 f"ALTER TABLE preventivo_planes ADD COLUMN proxima_revision_fecha {date_type} NULL",
                 f"ALTER TABLE preventivo_planes ADD COLUMN activa {bool_type} DEFAULT TRUE",
+                "ALTER TABLE delivery_orders ADD COLUMN order_number TEXT",
+                "ALTER TABLE delivery_orders ADD COLUMN customer_id INT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN bejerman_customer_code TEXT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN customer_name TEXT",
+                "ALTER TABLE delivery_orders ADD COLUMN delivery_type TEXT",
+                "ALTER TABLE delivery_orders ADD COLUMN status TEXT",
+                "ALTER TABLE delivery_orders ADD COLUMN priority TEXT",
+                f"ALTER TABLE delivery_orders ADD COLUMN order_date {date_type} NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN equipment_model TEXT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN equipment_serial TEXT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN equipment_internal_number TEXT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN remito_number TEXT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN remito_location TEXT NULL",
+                "ALTER TABLE delivery_orders ADD COLUMN invoice_number TEXT NULL",
+                f"ALTER TABLE delivery_orders ADD COLUMN created_at {datetime_type} NULL",
+                f"ALTER TABLE delivery_orders ADD COLUMN updated_at {datetime_type} NULL",
             ):
                 try:
                     cur.execute(statement)
@@ -243,6 +282,7 @@ class WorkUpgradeAPITest(TestCase):
             "work_objectives",
             "work_alert_snoozes",
             "work_notification_state",
+            "delivery_orders",
             "preventivo_planes",
             "equipos_derivados",
             "ingreso_events",
@@ -264,6 +304,7 @@ class WorkUpgradeAPITest(TestCase):
                 "tecnico-otro-work@example.com",
                 "recepcion-work@example.com",
                 "admin-work@example.com",
+                "cobranzas-work@example.com",
             ]
         ).delete()
         cls.jefe = User.objects.create(
@@ -299,6 +340,13 @@ class WorkUpgradeAPITest(TestCase):
             email="admin-work@example.com",
             hash_pw="",
             rol="admin",
+            activo=True,
+        )
+        cls.cobranzas = User.objects.create(
+            nombre="Cobranzas Trabajo",
+            email="cobranzas-work@example.com",
+            hash_pw="",
+            rol="cobranzas",
             activo=True,
         )
 
@@ -412,6 +460,43 @@ class WorkUpgradeAPITest(TestCase):
                 ["device", delivered_device, None, timezone.localdate() + dt.timedelta(days=10)],
             )
 
+            def delivery_order(order_id, number, status, priority="normal", remito_number=None, invoice_number=None):
+                cur.execute(
+                    """
+                    INSERT INTO delivery_orders(
+                      id, order_number, customer_id, bejerman_customer_code, customer_name,
+                      delivery_type, status, priority, order_date, equipment_model,
+                      equipment_serial, equipment_internal_number, remito_number,
+                      remito_location, invoice_number, created_at, updated_at
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    [
+                        order_id,
+                        number,
+                        customer_id,
+                        "C001",
+                        "Clínica Central",
+                        "sale",
+                        status,
+                        priority,
+                        timezone.localdate(),
+                        "AirSense",
+                        "SERIE-PED",
+                        "MG 3001",
+                        remito_number,
+                        "recepcion" if remito_number else None,
+                        invoice_number,
+                        now,
+                        now,
+                    ],
+                )
+
+            delivery_order("do-work-1", "OE-1", "pendiente_armado", priority="urgente")
+            delivery_order("do-work-2", "OE-2", "armado_pendiente_entrega")
+            delivery_order("do-work-3", "OE-3", "entregado_pendiente_facturacion", remito_number="R 0001-00000001")
+            delivery_order("do-work-4", "OE-4", "facturado", remito_number="R 0001-00000002", invoice_number="F 0001-00000002")
+
             cur.execute(
                 """
                 INSERT INTO work_objectives(scope_type, period_type, metric_key, label, target_value, direction, active, valid_from, created_by, updated_by)
@@ -460,8 +545,11 @@ class WorkUpgradeAPITest(TestCase):
                 "presupuestos_demorados",
                 "liberados_en_espera",
                 "derivados_en_espera",
+                "pedidos_abiertos",
             },
         )
+        self.assertEqual(resp.data["delivery_orders"]["counts"]["active"], 3)
+        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
 
     def test_resumen_deduplica_ingresos_que_caen_en_multiples_alertas(self):
         now = timezone.now()
@@ -508,14 +596,23 @@ class WorkUpgradeAPITest(TestCase):
         self.assertNotIn(self.otro_ingreso_id, prioridad_ids)
         self.assertNotIn(self.liberado_ingreso_id, prioridad_ids)
 
-    def test_dashboard_recepcion_solo_liberados_en_espera(self):
+    def test_dashboard_recepcion_muestra_liberados_y_pedidos_activos(self):
         self.client.force_authenticate(user=self.recepcion)
         resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["scope"]["dashboard_variant"], "recepcion")
-        self.assertEqual({row["key"] for row in resp.data["kpis"]}, {"liberados_en_espera"})
+        self.assertEqual(
+            {row["key"] for row in resp.data["kpis"]},
+            {
+                "liberados_en_espera",
+                "pedidos_pendientes_armado",
+                "pedidos_listos_entrega",
+                "remitos_pendientes_facturacion",
+            },
+        )
         self.assertEqual({row["key"] for row in resp.data["alerts"]}, {"liberado_sin_entregar"})
         self.assertEqual(resp.data["objetivos"], [])
+        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
         self.assertTrue(resp.data["prioridades"])
         for row in resp.data["prioridades"]:
             self.assertEqual(row.get("alert_key"), "liberado_sin_entregar")
@@ -533,7 +630,13 @@ class WorkUpgradeAPITest(TestCase):
                 "derivados_en_espera",
                 "preventivos_vencidos",
                 "preventivos_proximos",
+                "pedidos_pendientes_armado",
+                "pedidos_listos_entrega",
             },
+        )
+        self.assertEqual(
+            {row["status"] for row in resp.data["delivery_orders"]["items"]},
+            {"pendiente_armado", "armado_pendiente_entrega"},
         )
         alert_keys = {row["key"] for row in resp.data["alerts"]}
         self.assertIn("liberado_sin_entregar", alert_keys)
@@ -544,6 +647,22 @@ class WorkUpgradeAPITest(TestCase):
         self.assertNotIn("sin_tecnico", alert_keys)
         self.assertNotIn("presupuesto_sin_aprobar", alert_keys)
         self.assertEqual(resp.data["objetivos"], [])
+
+    def test_dashboard_cobranzas_muestra_remitos_pendientes(self):
+        self.client.force_authenticate(user=self.cobranzas)
+        resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["scope"]["dashboard_variant"], "cobranzas")
+        self.assertEqual(
+            {row["key"] for row in resp.data["kpis"]},
+            {"remitos_pendientes_facturacion", "pedidos_facturados"},
+        )
+        self.assertEqual(resp.data["alerts"], [])
+        self.assertEqual(resp.data["objetivos"], [])
+        self.assertEqual(
+            [row["status"] for row in resp.data["delivery_orders"]["items"]],
+            ["entregado_pendiente_facturacion"],
+        )
 
     def test_objetivos_calculan_progreso_desde_entregas(self):
         resp = self.client.get("/api/trabajo/objetivos/?periodo=hoy")
@@ -574,4 +693,9 @@ class WorkUpgradeAPITest(TestCase):
         resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")
         self.assertEqual(resp.status_code, 200)
         wip = [row for row in resp.data["alerts"] if row["key"] == "wip_critico"]
-        self.assertFalse(wip)
+        wip_ids = {
+            item.get("ingreso_id")
+            for alert in wip
+            for item in (alert.get("items") or [])
+        }
+        self.assertNotIn(self.old_ingreso_id, wip_ids)

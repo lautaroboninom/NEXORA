@@ -65,6 +65,7 @@ services:
         condition: service_healthy
     command: >
       bash -lc "python manage.py migrate --noinput && \
+      python manage.py apply_ticket_sale_states_schema && \
       python manage.py apply_delivery_orders_schema && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:

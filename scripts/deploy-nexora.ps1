@@ -36,6 +36,7 @@ if (-not $KeepLegacyContainers) {
 docker compose -f $ComposeFile pull
 docker compose -f $ComposeFile up -d --build
 
+docker compose -f $ComposeFile exec -T api python manage.py apply_ticket_sale_states_schema
 docker compose -f $ComposeFile exec -T api python manage.py apply_delivery_orders_schema
 docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_sync_schema
 docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_ris_schema

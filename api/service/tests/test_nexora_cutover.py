@@ -1,8 +1,12 @@
 from django.test import SimpleTestCase
+from django.urls import resolve
 
 from service.delivery_orders import normalize_delivery_type, normalize_priority, remito_status
 from service.management.commands.import_portal_delivery_orders import _delivery_type, _priority, _status
 from service.permission_catalog import get_role_defaults
+from service.permission_policy import VIEW_PERMISSION_MATRIX
+from service.permissions import MappedPermissionGuard
+from service.views.delivery_orders_views import DeliveryOrderBejermanRemitoView, FacturacionCompanyOptionsView
 
 
 class NexoraRoleDefaultsTests(SimpleTestCase):
@@ -35,8 +39,29 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         self.assertTrue(permissions["action.delivery_order.generate_bejerman_remito"])
         self.assertFalse(permissions["page.billing"])
 
+    def test_tecnico_does_not_get_administrative_delivery_workspaces(self):
+        permissions = get_role_defaults("tecnico")
+
+        self.assertFalse(permissions["page.delivery_orders"])
+        self.assertFalse(permissions["page.billing"])
+        self.assertFalse(permissions["action.delivery_order.generate_bejerman_remito"])
+
+    def test_customer_lookup_allows_delivery_order_creation(self):
+        required = VIEW_PERMISSION_MATRIX["CustomersListView"]["GET"]
+
+        self.assertIn("action.delivery_order.create", required)
+
 
 class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
+    def test_bejerman_remito_route_resolves_before_dynamic_order_detail(self):
+        match = resolve("/api/ordenes-entrega/remito-bejerman/")
+
+        self.assertEqual(match.func.view_class.__name__, "DeliveryOrderBejermanRemitoView")
+
+    def test_migrated_bejerman_views_use_mapped_permissions(self):
+        self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanRemitoView.permission_classes)
+        self.assertIn(MappedPermissionGuard, FacturacionCompanyOptionsView.permission_classes)
+
     def test_remito_status_moves_to_pending_billing_only_when_remito_exists(self):
         self.assertEqual(remito_status(""), "armado_pendiente_entrega")
         self.assertEqual(remito_status("RT 0002-00012345"), "entregado_pendiente_facturacion")

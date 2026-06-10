@@ -19,7 +19,7 @@ from .helpers import (
 )
 
 
-VIEW_ROLES = ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"]
+VIEW_ROLES = ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
 MANAGE_ROLES = ["jefe", "admin", "jefe_veedor"]
 TERMINAL_STATES = ("entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado")
 TALLER_LOCATION = "taller"
@@ -86,6 +86,7 @@ DASHBOARD_ALERTS = {
     },
     "tecnico": {"wip_critico", "derivado_sin_devolucion"},
     "recepcion": {"liberado_sin_entregar"},
+    "cobranzas": set(),
     "admin": {
         "liberado_sin_entregar",
         "derivado_sin_devolucion",
@@ -102,14 +103,26 @@ DASHBOARD_KPIS = {
         "presupuestos_demorados",
         "liberados_en_espera",
         "derivados_en_espera",
+        "pedidos_abiertos",
     ),
     "tecnico": ("en_taller", "wip_critico", "derivados_en_espera"),
-    "recepcion": ("liberados_en_espera",),
+    "recepcion": (
+        "liberados_en_espera",
+        "pedidos_pendientes_armado",
+        "pedidos_listos_entrega",
+        "remitos_pendientes_facturacion",
+    ),
     "admin": (
         "liberados_en_espera",
         "derivados_en_espera",
         "preventivos_vencidos",
         "preventivos_proximos",
+        "pedidos_pendientes_armado",
+        "pedidos_listos_entrega",
+    ),
+    "cobranzas": (
+        "remitos_pendientes_facturacion",
+        "pedidos_facturados",
     ),
 }
 
@@ -226,7 +239,7 @@ def _dashboard_variant(request):
     role = _normalize_role_value(_rol(request))
     if role in {"jefe", "jefe_veedor"}:
         return "jefe"
-    if role in {"tecnico", "recepcion", "admin"}:
+    if role in {"tecnico", "recepcion", "admin", "cobranzas"}:
         return role
     return "jefe"
 
@@ -458,7 +471,7 @@ def _fetch_objectives(period_type, request=None):
         return []
     role = _normalize_role_value(_rol(request)) if request is not None else "jefe"
     user_id = _current_user_id(request) if request is not None else None
-    if role in {"admin", "recepcion"}:
+    if role in {"admin", "recepcion", "cobranzas"}:
         return []
     where = [
         "wo.active = TRUE",
@@ -803,7 +816,106 @@ def _active_work_count(request):
     return int(row.get("total") or 0)
 
 
+DELIVERY_OPEN_STATUSES = (
+    "pendiente_armado",
+    "armado_pendiente_entrega",
+    "entregado_pendiente_facturacion",
+)
+
+
+def _empty_delivery_counts():
+    return {
+        "pendiente_armado": 0,
+        "armado_pendiente_entrega": 0,
+        "entregado_pendiente_facturacion": 0,
+        "facturado": 0,
+        "cancelado": 0,
+        "active": 0,
+    }
+
+
+def _delivery_order_counts():
+    counts = _empty_delivery_counts()
+    if not _table_exists("delivery_orders"):
+        return counts
+    rows = _safe_rows(
+        """
+        SELECT status, COUNT(*) AS total
+          FROM delivery_orders
+         GROUP BY status
+        """
+    )
+    for row in rows:
+        status = row.get("status")
+        if status:
+            counts[status] = int(row.get("total") or 0)
+    counts["active"] = sum(int(counts.get(status) or 0) for status in DELIVERY_OPEN_STATUSES)
+    return counts
+
+
+def _format_delivery_order(row):
+    return {
+        "id": row.get("id"),
+        "orderNumber": row.get("order_number") or "",
+        "customerName": row.get("customer_name") or "",
+        "deliveryType": row.get("delivery_type") or "",
+        "status": row.get("status") or "",
+        "priority": row.get("priority") or "",
+        "orderDate": row.get("order_date"),
+        "equipmentModel": row.get("equipment_model") or "",
+        "equipmentSerial": row.get("equipment_serial") or "",
+        "equipmentInternalNumber": row.get("equipment_internal_number") or "",
+        "remitoNumber": row.get("remito_number") or "",
+        "remitoLocation": row.get("remito_location") or "",
+        "invoiceNumber": row.get("invoice_number") or "",
+        "href": "/administracion/ordenes-entrega",
+    }
+
+
+def _delivery_statuses_for_variant(variant):
+    if variant == "cobranzas":
+        return ("entregado_pendiente_facturacion",)
+    if variant == "admin":
+        return ("pendiente_armado", "armado_pendiente_entrega")
+    if variant in {"jefe", "recepcion"}:
+        return DELIVERY_OPEN_STATUSES
+    return ()
+
+
+def _delivery_order_items(variant, limit=8):
+    if not _table_exists("delivery_orders"):
+        return []
+    statuses = _delivery_statuses_for_variant(variant)
+    if not statuses:
+        return []
+    placeholders = ",".join(["%s"] * len(statuses))
+    rows = _safe_rows(
+        f"""
+        SELECT id, order_number, customer_name, delivery_type, status, priority,
+               order_date, equipment_model, equipment_serial, equipment_internal_number,
+               remito_number, remito_location, invoice_number, created_at
+          FROM delivery_orders
+         WHERE status IN ({placeholders})
+         ORDER BY
+           CASE priority WHEN 'urgente' THEN 0 ELSE 1 END,
+           order_date DESC,
+           created_at DESC
+         LIMIT %s
+        """,
+        [*statuses, limit],
+    )
+    return [_format_delivery_order(row) for row in rows]
+
+
+def _build_delivery_summary(variant):
+    return {
+        "counts": _delivery_order_counts(),
+        "items": _delivery_order_items(variant),
+    }
+
+
 def _build_kpis(request, raw):
+    delivery_counts = raw.get("delivery_counts") or {}
     all_kpis = {
         "en_taller": {"key": "en_taller", "label": "En taller", "value": _active_work_count(request), "severity": "info"},
         "wip_critico": {"key": "wip_critico", "label": "WIP crítico", "value": len(raw.get("wip_critico") or []), "severity": "critical"},
@@ -813,6 +925,11 @@ def _build_kpis(request, raw):
         "derivados_en_espera": {"key": "derivados_en_espera", "label": "Derivados en espera", "value": len(raw.get("derivado_sin_devolucion") or []), "severity": "warning"},
         "preventivos_vencidos": {"key": "preventivos_vencidos", "label": "Preventivos vencidos", "value": len(raw.get("preventivo_vencido") or []), "severity": "critical"},
         "preventivos_proximos": {"key": "preventivos_proximos", "label": "Preventivos próximos", "value": len(raw.get("preventivo_proximo") or []), "severity": "warning"},
+        "pedidos_abiertos": {"key": "pedidos_abiertos", "label": "Pedidos abiertos", "value": int(delivery_counts.get("active") or 0), "severity": "info"},
+        "pedidos_pendientes_armado": {"key": "pedidos_pendientes_armado", "label": "Pedidos a armar", "value": int(delivery_counts.get("pendiente_armado") or 0), "severity": "warning"},
+        "pedidos_listos_entrega": {"key": "pedidos_listos_entrega", "label": "Listos para entrega", "value": int(delivery_counts.get("armado_pendiente_entrega") or 0), "severity": "info"},
+        "remitos_pendientes_facturacion": {"key": "remitos_pendientes_facturacion", "label": "Remitos a facturar", "value": int(delivery_counts.get("entregado_pendiente_facturacion") or 0), "severity": "warning"},
+        "pedidos_facturados": {"key": "pedidos_facturados", "label": "Pedidos facturados", "value": int(delivery_counts.get("facturado") or 0), "severity": "info"},
     }
     variant = _dashboard_variant(request)
     return [all_kpis[key] for key in DASHBOARD_KPIS.get(variant, DASHBOARD_KPIS["jefe"]) if key in all_kpis]
@@ -928,6 +1045,8 @@ def _dedupe_priorities(items):
 def build_work_summary(request, periodo="hoy"):
     alerts, raw = _build_alerts(request)
     variant = _dashboard_variant(request)
+    delivery_orders = _build_delivery_summary(variant)
+    raw["delivery_counts"] = delivery_orders.get("counts") or {}
     priorities = []
     for alert in alerts:
         priorities.extend(alert.get("items") or [])
@@ -953,6 +1072,7 @@ def build_work_summary(request, periodo="hoy"):
         "alerts": alerts,
         "prioridades": priorities[:16],
         "objetivos": objectives.get("items", []),
+        "delivery_orders": delivery_orders,
         "periodo": objectives.get("periodo"),
     }
 

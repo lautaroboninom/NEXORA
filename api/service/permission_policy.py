@@ -98,7 +98,15 @@ VIEW_PERMISSION_MATRIX = {
     "DevolverDerivacionView": {"POST": "action.ingreso.manage_derivations"},
     "EquiposDerivadosView": {"GET": "page.logistics"},
     "ScanLookupView": {"GET": ["page.home_search", "action.ingreso.create", "page.new_ingreso"]},
-    "CustomersListView": {"GET": ["page.home_search", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
+    "CustomersListView": {
+        "GET": [
+            "page.home_search",
+            "action.ingreso.edit_basics",
+            "action.ingreso.create",
+            "page.new_ingreso",
+            "action.delivery_order.create",
+        ]
+    },
     # Reportes
     "RemitoSalidaPdfView": {"GET": "action.ingreso.print_exit_order"},
     "RemitoDerivacionPdfView": {"GET": "action.ingreso.manage_derivations"},

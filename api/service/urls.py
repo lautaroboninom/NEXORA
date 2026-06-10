@@ -184,6 +184,8 @@ urlpatterns = [
 
     # NEXORA: órdenes de entrega, remitos y cobranzas.
     path("ordenes-entrega/", DeliveryOrdersView.as_view()),
+    path("ordenes-entrega/remito-bejerman/", DeliveryOrderBejermanRemitoView.as_view()),
+    path("ordenes-entrega/remito-bejerman/<str:group_id>/pdf/", DeliveryOrderBejermanRemitoPdfView.as_view()),
     path("ordenes-entrega/<str:order_id>/", DeliveryOrderDetailView.as_view()),
     path("ordenes-entrega/<str:order_id>/preparar/", DeliveryOrderPreparedView.as_view()),
     path("ordenes-entrega/<str:order_id>/entregar/", DeliveryOrderDeliveredView.as_view()),
@@ -192,8 +194,6 @@ urlpatterns = [
     path("ordenes-entrega/<str:order_id>/remito-ubicacion/", DeliveryOrderRemitoLocationView.as_view()),
     path("ordenes-entrega/<str:order_id>/items/<str:item_id>/articulo/", DeliveryOrderItemArticleView.as_view()),
     path("ordenes-entrega/<str:order_id>/items/<str:item_id>/partidas/", DeliveryOrderItemPartidasView.as_view()),
-    path("ordenes-entrega/remito-bejerman/", DeliveryOrderBejermanRemitoView.as_view()),
-    path("ordenes-entrega/remito-bejerman/<str:group_id>/pdf/", DeliveryOrderBejermanRemitoPdfView.as_view()),
     path("cobranzas/facturacion/clientes/", FacturacionCompanyOptionsView.as_view()),
     path("cobranzas/facturacion/documentos/", FacturacionClienteDocumentosView.as_view()),
     path("cobranzas/facturacion/documentos/<str:document_id>/pdf/", FacturacionDocumentoPdfView.as_view()),

@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { createBrowserRouter, RouterProvider, Navigate } from "react-router-dom";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import ErrorBoundary from "./components/ErrorBoundary";
 
@@ -48,7 +48,7 @@ import BejermanSync from "./pages/BejermanSync.jsx";
 import RecepcionDashboard from "./pages/RecepcionDashboard.jsx";
 import DeliveryOrders from "./pages/DeliveryOrders.jsx";
 import Billing from "./pages/Billing.jsx";
-import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
+import { canAny, PERMISSION_CODES } from "./lib/permissions";
 
 function NotFound() {
   return <div className="p-8 text-center text-gray-600">Página no encontrada</div>;
@@ -56,22 +56,19 @@ function NotFound() {
 
 function IndexRoute() {
   const { user } = useAuth();
-  const role = (user?.rol || "").toString().trim().toLowerCase();
-  if (role === "recepcion" && can(user, PERMISSION_CODES.PAGE_RECEPCION)) {
-    return <Navigate to="/recepcion" replace />;
+  if (
+    canAny(user, [
+      PERMISSION_CODES.PAGE_HOME_SEARCH,
+      PERMISSION_CODES.PAGE_RECEPCION,
+      PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
+      PERMISSION_CODES.PAGE_BILLING,
+      PERMISSION_CODES.ACTION_INGRESO_CREATE,
+      PERMISSION_CODES.PAGE_NEW_INGRESO,
+      PERMISSION_CODES.PAGE_LIBERADOS,
+    ])
+  ) {
+    return <WorkDashboard />;
   }
-  if (role === "cobranzas" && can(user, PERMISSION_CODES.PAGE_BILLING)) {
-    return <Navigate to="/cobranzas/facturacion" replace />;
-  }
-  if (role === "admin" && can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS)) {
-    return <Navigate to="/administracion/ordenes-entrega" replace />;
-  }
-  if (can(user, PERMISSION_CODES.PAGE_HOME_SEARCH)) return <WorkDashboard />;
-  if (canAny(user, [PERMISSION_CODES.ACTION_INGRESO_CREATE, PERMISSION_CODES.PAGE_NEW_INGRESO])) {
-    return <Navigate to="/ingresos/nuevo" replace />;
-  }
-  if (can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS)) return <Navigate to="/administracion/ordenes-entrega" replace />;
-  if (can(user, PERMISSION_CODES.PAGE_LIBERADOS)) return <Navigate to="/listos" replace />;
   return <Forbidden />;
 }
 

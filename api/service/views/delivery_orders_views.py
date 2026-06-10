@@ -5,6 +5,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from ..permissions import MappedPermissionGuard
 from ..bejerman_delivery import (
     BillingError,
     generate_bejerman_remito,
@@ -41,8 +42,11 @@ def _error_response(exc: Exception):
     raise exc
 
 
-class DeliveryOrdersView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderPermissionMixin:
+    permission_classes = [permissions.IsAuthenticated, MappedPermissionGuard]
+
+
+class DeliveryOrdersView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request):
         try:
@@ -60,8 +64,7 @@ class DeliveryOrdersView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderDetailView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderDetailView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, order_id):
         try:
@@ -70,8 +73,7 @@ class DeliveryOrderDetailView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderPreparedView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderPreparedView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
         try:
@@ -80,8 +82,7 @@ class DeliveryOrderPreparedView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderDeliveredView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderDeliveredView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
         try:
@@ -90,8 +91,7 @@ class DeliveryOrderDeliveredView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderInvoicedView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderInvoicedView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
         try:
@@ -100,8 +100,7 @@ class DeliveryOrderInvoicedView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderCancelView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderCancelView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
         try:
@@ -110,8 +109,7 @@ class DeliveryOrderCancelView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderRemitoLocationView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderRemitoLocationView(DeliveryOrderPermissionMixin, APIView):
 
     def patch(self, request, order_id):
         try:
@@ -120,8 +118,7 @@ class DeliveryOrderRemitoLocationView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderItemArticleView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderItemArticleView(DeliveryOrderPermissionMixin, APIView):
 
     def patch(self, request, order_id, item_id):
         try:
@@ -130,8 +127,7 @@ class DeliveryOrderItemArticleView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderItemPartidasView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderItemPartidasView(DeliveryOrderPermissionMixin, APIView):
 
     def patch(self, request, order_id, item_id):
         payload = request.data or {}
@@ -142,8 +138,7 @@ class DeliveryOrderItemPartidasView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderBejermanRemitoView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderBejermanRemitoView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request):
         payload = request.data or {}
@@ -153,8 +148,7 @@ class DeliveryOrderBejermanRemitoView(APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderBejermanRemitoPdfView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderBejermanRemitoPdfView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, group_id):
         try:
@@ -166,15 +160,13 @@ class DeliveryOrderBejermanRemitoPdfView(APIView):
         return response
 
 
-class FacturacionCompanyOptionsView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class FacturacionCompanyOptionsView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request):
         return Response({"items": list_facturacion_company_options()})
 
 
-class FacturacionClienteDocumentosView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class FacturacionClienteDocumentosView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request):
         customer_code = request.query_params.get("customerCode") or request.query_params.get("clienteCodigo")
@@ -184,8 +176,7 @@ class FacturacionClienteDocumentosView(APIView):
             return _error_response(exc)
 
 
-class FacturacionDocumentoPdfView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class FacturacionDocumentoPdfView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, document_id):
         customer_code = request.query_params.get("customerCode") or request.query_params.get("clienteCodigo")
