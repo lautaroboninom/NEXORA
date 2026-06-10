@@ -558,29 +558,29 @@ def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_even
         notification_event = "baja" if evento_norm == "baja" else "alta"
 
         if evento_norm == "baja":
-            subject = f"Notificacion de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
+            subject = f"Notificación de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
             intro = (
-                "Se registro la baja de un equipo en el sistema de reparaciones. "
+                "Se registró la baja de un equipo en NEXORA. "
                 "Por favor reflejar la baja en el sistema patrimonial."
             )
             fecha_label = "Fecha de baja"
-            diag_title = "Diagnostico / motivo de baja:"
+            diag_title = "Diagnóstico / motivo de baja:"
         elif evento_norm == "alta_mg":
-            subject = f"Notificacion de alta de MG - {os_txt} - {cliente or 'Sin cliente'}"
+            subject = f"Notificación de alta de MG - {os_txt} - {cliente or 'Sin cliente'}"
             intro = (
-                "Se registro el alta de MG de un equipo en el sistema de reparaciones. "
+                "Se registró el alta de MG de un equipo en NEXORA. "
                 "Por favor reflejar el alta en el sistema patrimonial."
             )
             fecha_label = "Fecha de alta de MG"
-            diag_title = "Diagnostico / estado actual:"
+            diag_title = "Diagnóstico / estado actual:"
         else:
-            subject = f"Notificacion de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
+            subject = f"Notificación de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
             intro = (
-                "Se registro el alta de un equipo en el sistema de reparaciones. "
+                "Se registró el alta de un equipo en NEXORA. "
                 "Por favor reflejar el alta en el sistema patrimonial."
             )
             fecha_label = "Fecha de alta"
-            diag_title = "Diagnostico / estado actual:"
+            diag_title = "Diagnóstico / estado actual:"
 
         lines = [
             intro,
@@ -1718,9 +1718,9 @@ class DarAltaIngresoView(APIView):
                     resolucion,
                     resolucion.replace("_", " ").capitalize() if resolucion else "",
                 )
-                subject = f"Notificacion de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
+                subject = f"Notificación de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
                 lines = [
-                    "Se registro el alta de un equipo en el sistema de reparaciones. Por favor reflejar el alta en el sistema patrimonial.",
+                    "Se registró el alta de un equipo en NEXORA. Por favor reflejar el alta en el sistema patrimonial.",
                     "",
                     "Detalle del ingreso:",
                     f"- OS: {os_txt}",
@@ -3576,7 +3576,7 @@ class IngresoSolicitarBajaView(APIView):
 
         subject = f"Solicitud de BAJA {os_txt} - {cliente or 'Sin cliente'}"
         lines = [
-            "Se solicito dar de baja un equipo en el sistema de reparaciones.",
+            "Se solicitó dar de baja un equipo en NEXORA.",
             "",
             "Detalle del ingreso:",
             f"- OS: {os_txt}",

@@ -1,5 +1,5 @@
 param(
-  [string]$TaskName = "SistemaReparaciones-RenovarCertificadoTailscale",
+  [string]$TaskName = "NEXORA-RenovarCertificadoTailscale",
   [string]$ScriptPath = "",
   [string]$At = "03:15"
 )
@@ -30,7 +30,7 @@ Register-ScheduledTask `
   -Action $action `
   -Trigger $trigger `
   -Settings $settings `
-  -Description "Renueva el certificado HTTPS Tailscale del Sistema de Reparaciones y recarga Nginx." `
+  -Description "Renueva el certificado HTTPS Tailscale de NEXORA y recarga Nginx." `
   -Force | Out-Null
 
 Write-Host "Tarea programada instalada: $TaskName"

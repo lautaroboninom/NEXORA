@@ -1,7 +1,7 @@
 {
-  "name": "Sistema de Reparaciones",
-  "short_name": "Reparaciones",
-  "description": "Gestión de ingresos, reparaciones y stock",
+  "name": "NEXORA",
+  "short_name": "NEXORA",
+  "description": "Gestión integral de ventas y servicio técnico",
   "lang": "es",
   "start_url": "/",
   "scope": "/",

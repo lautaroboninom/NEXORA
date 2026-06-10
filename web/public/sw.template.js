@@ -1,6 +1,6 @@
 // Minimal service worker for installability + basic offline fallback
 // El valor __BUILD_ID__ será reemplazado en prebuild por scripts/build-sw.mjs
-const CACHE_NAME = 'sr-app-cache-__BUILD_ID__';
+const CACHE_NAME = 'nexora-app-cache-__BUILD_ID__';
 const URLS_TO_CACHE = ['/', '/index.html'];
 
 self.addEventListener('install', (event) => {

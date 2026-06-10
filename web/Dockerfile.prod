@@ -20,7 +20,7 @@ FROM alpine:3.21 AS certgen
 RUN apk add --no-cache openssl
 RUN mkdir -p /out && \
     openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-      -subj "/CN=sistemadereparaciones.tail7bb880.ts.net" \
+      -subj "/CN=nexora.tail7bb880.ts.net" \
       -keyout /out/default.key \
       -out /out/default.crt
 

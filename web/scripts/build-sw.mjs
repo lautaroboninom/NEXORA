@@ -41,4 +41,4 @@ const tpl = fs.readFileSync(tplPath, 'utf-8');
 const out = tpl.replace(/__BUILD_ID__/g, buildId);
 fs.writeFileSync(outPath, out, 'utf-8');
 
-console.log(`SW generado: CACHE_NAME = sr-app-cache-${buildId}`);
+console.log(`SW generado: CACHE_NAME = nexora-app-cache-${buildId}`);

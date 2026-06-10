@@ -4,9 +4,9 @@ import os
 # Ajustes para despliegue estricto por dominio
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
 
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "sistemadereparaciones.tail7bb880.ts.net").split(",") if h.strip()]
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "nexora.tail7bb880.ts.net").split(",") if h.strip()]
 
-_default_origin = "https://sistemadereparaciones.tail7bb880.ts.net"
+_default_origin = "https://nexora.tail7bb880.ts.net"
 CORS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", _default_origin).split(",") if o.strip()]
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 

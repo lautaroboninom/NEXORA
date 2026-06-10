@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-CERT_PATH="${TLS_CERT_PATH:-/etc/nginx/certs/sistemadereparaciones.tail7bb880.ts.net.crt}"
-KEY_PATH="${TLS_KEY_PATH:-/etc/nginx/certs/sistemadereparaciones.tail7bb880.ts.net.key}"
+CERT_PATH="${TLS_CERT_PATH:-/etc/nginx/certs/nexora.tail7bb880.ts.net.crt}"
+KEY_PATH="${TLS_KEY_PATH:-/etc/nginx/certs/nexora.tail7bb880.ts.net.key}"
 FALLBACK_CERT="/etc/nginx/fallback-certs/default.crt"
 FALLBACK_KEY="/etc/nginx/fallback-certs/default.key"
 NGINX_CONF="/etc/nginx/conf.d/default.conf"

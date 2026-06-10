@@ -1,7 +1,7 @@
 param(
-  [string]$Domain = "sistemadereparaciones.tail7bb880.ts.net",
+  [string]$Domain = "nexora.tail7bb880.ts.net",
   [string]$CertDir = "C:\sepid_certs",
-  [string]$ContainerName = "sistemadereparaciones-web",
+  [string]$ContainerName = "nexora-web",
   [string]$MinValidity = "720h"
 )
 

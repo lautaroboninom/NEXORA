@@ -17,6 +17,6 @@ docker compose @compose logs -f api
 # Helpful commands:
 # docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs -f api
 # docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs -f frontend
-# docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs -f sistemadereparaciones-postgres
-# docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec sistemadereparaciones-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT NOW();"'
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs -f nexora-postgres
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec nexora-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT NOW();"'
 # docker compose -f docker-compose.yml -f docker-compose.prod.internet.yml --env-file .env.prod.internet up -d --build

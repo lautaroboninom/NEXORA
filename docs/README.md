@@ -1,4 +1,4 @@
-Manual del Sistema de Reparaciones
+Manual de NEXORA
 
 - Propósito
   - Documentar comportamientos funcionales, flujos, reglas y permisos del sistema.

@@ -1,5 +1,5 @@
 -- Uso (Docker Compose dev):
---  docker compose exec -T sistemadereparaciones-postgres \
+--  docker compose exec -T nexora-postgres \
 --    psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ingreso_id=28571 -f /docker-entrypoint-initdb.d/../ops/delete_derivaciones_for_ingreso.sql
 
 \set ON_ERROR_STOP on
@@ -22,4 +22,3 @@ UPDATE ingresos
  WHERE id = :ingreso_id AND estado = 'derivado';
 
 COMMIT;
-
