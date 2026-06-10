@@ -529,6 +529,21 @@ BASE_TEMPLATES: dict[str, dict[str, Any]] = {
 }
 
 
+ASPIRADOR_ELECTRICO_SECTIONS = copy.deepcopy(BASE_TEMPLATES["aspirador"]["sections"])
+if len(ASPIRADOR_ELECTRICO_SECTIONS) >= 2:
+    ASPIRADOR_ELECTRICO_SECTIONS[1]["items"] = [
+        copy.deepcopy(ASPIRADOR_ELECTRICO_SECTIONS[1]["items"][0]),
+        copy.deepcopy(ASPIRADOR_ELECTRICO_SECTIONS[1]["items"][1]),
+        {
+            "key": "asp_alimentacion_red",
+            "label": "Alimentación eléctrica",
+            "target": "Conexión estable a red y funcionamiento continuo sin cortes",
+            "unit": "",
+            "ref_ids": ["REF-01"],
+        },
+    ]
+
+
 TYPE_ALIASES: dict[str, list[str]] = {
     "aspirador": [
         "aspirador",
@@ -581,6 +596,19 @@ TYPE_ALIASES: dict[str, list[str]] = {
 
 
 MODEL_OVERRIDES: list[dict[str, Any]] = [
+    {
+        "name": "aspirador_electrico_a1_0137",
+        "type_key": "aspirador",
+        "match": {
+            "numero_serie_contains": "A1-0137",
+        },
+        "set_fields": {
+            "template_key": "aspirador_electrico_v1",
+            "template_version": "1.0.0",
+            "display_name": "Aspirador eléctrico",
+            "sections": ASPIRADOR_ELECTRICO_SECTIONS,
+        },
+    },
     {
         "name": "covidien_pb560_ch6_performance_verification",
         "type_key": "respirador",
@@ -1095,19 +1123,29 @@ def _append_item_refs(protocol: dict[str, Any], item_ref_ids: dict[str, list[str
                     refs.append(ref_id)
 
 
-def _match_override(override: dict[str, Any], marca: str, modelo: str) -> bool:
+def _match_override(override: dict[str, Any], marca: str, modelo: str, numero_serie: str = "") -> bool:
     match = override.get("match") or {}
     marca_contains = _norm(match.get("marca_contains") or "")
     modelo_contains = _norm(match.get("modelo_contains") or "")
+    numero_serie_contains = _norm(match.get("numero_serie_contains") or "")
     marca_n = _norm(marca)
     modelo_n = _norm(modelo)
+    numero_serie_n = _norm(numero_serie)
     marca_compact = re.sub(r"[^a-z0-9]", "", marca_n)
     modelo_compact = re.sub(r"[^a-z0-9]", "", modelo_n)
+    numero_serie_compact = re.sub(r"[^a-z0-9]", "", numero_serie_n)
     marca_contains_compact = re.sub(r"[^a-z0-9]", "", marca_contains)
     modelo_contains_compact = re.sub(r"[^a-z0-9]", "", modelo_contains)
+    numero_serie_contains_compact = re.sub(r"[^a-z0-9]", "", numero_serie_contains)
     if marca_contains and marca_contains not in marca_n and marca_contains_compact not in marca_compact:
         return False
     if modelo_contains and modelo_contains not in modelo_n and modelo_contains_compact not in modelo_compact:
+        return False
+    if (
+        numero_serie_contains
+        and numero_serie_contains not in numero_serie_n
+        and numero_serie_contains_compact not in numero_serie_compact
+    ):
         return False
     return True
 
@@ -1116,6 +1154,7 @@ def _apply_overrides(
     protocol: dict[str, Any],
     marca: str,
     modelo: str,
+    numero_serie: str = "",
     overrides: list[dict[str, Any]] | None = None,
 ) -> None:
     type_key = protocol.get("type_key")
@@ -1130,7 +1169,7 @@ def _apply_overrides(
             continue
         if not bool(override.get("active", True)):
             continue
-        if not _match_override(override, marca, modelo):
+        if not _match_override(override, marca, modelo, numero_serie=numero_serie):
             continue
         set_fields = override.get("set_fields") or {}
         if isinstance(set_fields, dict):
@@ -1144,7 +1183,12 @@ def _apply_overrides(
     protocol["applied_overrides"] = [x for x in applied if x]
 
 
-def get_protocol_by_type_key(type_key: str, marca: str = "", modelo: str = "") -> dict[str, Any] | None:
+def get_protocol_by_type_key(
+    type_key: str,
+    marca: str = "",
+    modelo: str = "",
+    numero_serie: str = "",
+) -> dict[str, Any] | None:
     type_key_n = str(type_key or "").strip().lower()
     if not type_key_n:
         return None
@@ -1157,8 +1201,23 @@ def get_protocol_by_type_key(type_key: str, marca: str = "", modelo: str = "") -
         if not protocol.get("type_key"):
             protocol["type_key"] = type_key_n
         overrides = copy.deepcopy(protocol.pop("overrides", []))
+        extra_overrides = copy.deepcopy(MODEL_OVERRIDES)
+        seen_names = {
+            str(override.get("name") or "").strip().lower()
+            for override in overrides
+            if isinstance(override, dict) and str(override.get("name") or "").strip()
+        }
+        for override in extra_overrides:
+            if not isinstance(override, dict):
+                continue
+            name = str(override.get("name") or "").strip().lower()
+            if name and name in seen_names:
+                continue
+            if name:
+                seen_names.add(name)
+            overrides.append(override)
         protocol.pop("aliases", None)
-        _apply_overrides(protocol, marca=marca, modelo=modelo, overrides=overrides)
+        _apply_overrides(protocol, marca=marca, modelo=modelo, numero_serie=numero_serie, overrides=overrides)
         protocol["result_options"] = copy.deepcopy(RESULT_OPTIONS)
         protocol["global_result_options"] = copy.deepcopy(GLOBAL_RESULT_OPTIONS)
         return protocol
@@ -1167,13 +1226,18 @@ def get_protocol_by_type_key(type_key: str, marca: str = "", modelo: str = "") -
     if not base:
         return None
     protocol = copy.deepcopy(base)
-    _apply_overrides(protocol, marca=marca, modelo=modelo)
+    _apply_overrides(protocol, marca=marca, modelo=modelo, numero_serie=numero_serie)
     protocol["result_options"] = copy.deepcopy(RESULT_OPTIONS)
     protocol["global_result_options"] = copy.deepcopy(GLOBAL_RESULT_OPTIONS)
     return protocol
 
 
-def get_protocol_by_template_key(template_key: str, marca: str = "", modelo: str = "") -> dict[str, Any] | None:
+def get_protocol_by_template_key(
+    template_key: str,
+    marca: str = "",
+    modelo: str = "",
+    numero_serie: str = "",
+) -> dict[str, Any] | None:
     needle = (template_key or "").strip().lower()
     if not needle:
         return None
@@ -1190,7 +1254,7 @@ def get_protocol_by_template_key(template_key: str, marca: str = "", modelo: str
         if not type_key or type_key in seen:
             continue
         seen.add(type_key)
-        protocol = get_protocol_by_type_key(type_key, marca=marca, modelo=modelo)
+        protocol = get_protocol_by_type_key(type_key, marca=marca, modelo=modelo, numero_serie=numero_serie)
         if not protocol:
             continue
         if (protocol.get("template_key") or "").strip().lower() == needle:
@@ -1198,11 +1262,16 @@ def get_protocol_by_template_key(template_key: str, marca: str = "", modelo: str
     return None
 
 
-def resolve_protocol_for_equipo(tipo_equipo: str, marca: str = "", modelo: str = "") -> dict[str, Any] | None:
+def resolve_protocol_for_equipo(
+    tipo_equipo: str,
+    marca: str = "",
+    modelo: str = "",
+    numero_serie: str = "",
+) -> dict[str, Any] | None:
     type_key = resolve_type_key(tipo_equipo)
     if not type_key:
         return None
-    return get_protocol_by_type_key(type_key, marca=marca, modelo=modelo)
+    return get_protocol_by_type_key(type_key, marca=marca, modelo=modelo, numero_serie=numero_serie)
 
 
 def flatten_items(protocol: dict[str, Any]) -> list[dict[str, Any]]:

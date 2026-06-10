@@ -125,11 +125,15 @@ class WorkUpgradeAPITest(TestCase):
                 CREATE TABLE IF NOT EXISTS quotes (
                     id {auto_inc},
                     ingreso_id INT NOT NULL,
+                    version_num INT NOT NULL DEFAULT 1,
+                    origen_quote_id INT NULL,
                     estado TEXT NOT NULL DEFAULT 'pendiente',
                     moneda TEXT NOT NULL DEFAULT 'ARS',
                     total NUMERIC(12,2) NOT NULL DEFAULT 0,
                     fecha_emitido {datetime_type} NULL,
-                    fecha_aprobado {datetime_type} NULL
+                    fecha_aprobado {datetime_type} NULL,
+                    fecha_rechazado {datetime_type} NULL,
+                    rechazo_comentario TEXT NULL
                 ){engine_suffix}
                 """
             )

@@ -90,6 +90,8 @@ class Ingreso(models.Model):
     recibido_por = models.IntegerField(null=True)
     comentarios = models.TextField(null=True)
     presupuesto_estado = models.TextField()
+    presupuesto_rechazado_cobro_neto = models.DecimalField(max_digits=12, decimal_places=2, null=True)
+    presupuesto_rechazado_quote_id = models.IntegerField(null=True)
     asignado_a = models.IntegerField(null=True)
     etiqueta_qr = models.TextField(null=True)
     etiq_garantia_ok = models.BooleanField(null=True)
@@ -100,7 +102,9 @@ class Ingreso(models.Model):
 
 class Quote(models.Model):
     id = models.AutoField(primary_key=True)
-    ingreso = models.OneToOneField(Ingreso, on_delete=models.CASCADE, db_column="ingreso_id")
+    ingreso = models.ForeignKey(Ingreso, on_delete=models.CASCADE, db_column="ingreso_id")
+    version_num = models.IntegerField()
+    origen_quote = models.ForeignKey("self", null=True, on_delete=models.SET_NULL, db_column="origen_quote_id")
     estado = models.TextField()
     moneda = models.TextField()
     subtotal = models.DecimalField(max_digits=12, decimal_places=2)
@@ -113,6 +117,8 @@ class Quote(models.Model):
     mant_oferta_txt = models.TextField(null=True)
     fecha_emitido = models.DateTimeField(null=True)
     fecha_aprobado = models.DateTimeField(null=True)
+    fecha_rechazado = models.DateTimeField(null=True)
+    rechazo_comentario = models.TextField(null=True)
     pdf_url = models.TextField(null=True)
 
     class Meta:

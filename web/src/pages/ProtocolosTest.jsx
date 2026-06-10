@@ -337,7 +337,7 @@ function validateSections(sections, validRefIds, itemKeyGlobal, pathPrefix) {
     if (secId) sectionIds.add(secId);
 
     if (!title) errors.push(`${basePath}.title es requerido`);
-    if (!VALID_ENTRY_MODES.has(entryMode)) errors.push(`${basePath}.entry_mode invalido`);
+    if (!VALID_ENTRY_MODES.has(entryMode)) errors.push(`${basePath}.entry_mode inválido`);
 
     if (!Array.isArray(section?.items) || section.items.length === 0) {
       errors.push(`${basePath}.items debe tener al menos un item`);
@@ -378,10 +378,10 @@ function validatePayload(payload) {
   const templateKey = trimText(payload?.template_key).toLowerCase();
 
   if (!typeKey) errors.push("type_key es requerido");
-  if (typeKey && !TYPE_KEY_RE.test(typeKey)) errors.push("type_key invalido (solo a-z, 0-9 y _)");
+  if (typeKey && !TYPE_KEY_RE.test(typeKey)) errors.push("type_key inválido (solo a-z, 0-9 y _)");
   if (!templateKey) errors.push("template_key es requerido");
   if (templateKey && !TEMPLATE_KEY_RE.test(templateKey)) {
-    errors.push("template_key invalido (solo a-z, 0-9 y _)");
+    errors.push("template_key inválido (solo a-z, 0-9 y _)");
   }
   if (!trimText(payload?.template_version)) errors.push("template_version es requerido");
   if (!trimText(payload?.display_name)) errors.push("display_name es requerido");
@@ -838,7 +838,7 @@ export default function ProtocolosTest() {
       const errors = validatePayload(payload);
       if (errors.length) {
         setValidationErrors(errors);
-        setJsonError("El JSON es valido pero no cumple validaciones.");
+        setJsonError("El JSON es válido pero no cumple validaciones.");
         return;
       }
       setDraft(nextDraft);
@@ -847,7 +847,7 @@ export default function ProtocolosTest() {
       setMsg("JSON aplicado al editor visual.");
       setActiveTab("visual");
     } catch (_) {
-      setJsonError("JSON invalido.");
+      setJsonError("JSON inválido.");
     }
   }
 

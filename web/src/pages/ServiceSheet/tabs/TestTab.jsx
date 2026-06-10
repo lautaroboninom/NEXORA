@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getIngresoTest, getIngresoTestPdfBlob, patchIngresoTest } from "../../../lib/api";
+import { getIngresoTest, getIngresoTestPdfBlob, getTestProtocols, patchIngresoTest } from "../../../lib/api";
 
 function refLabel(ref) {
   const rid = (ref?.ref_id || "").trim();
@@ -23,6 +23,8 @@ export default function TestTab({ id, setErr }) {
   const [error, setError] = useState("");
 
   const [templateInfo, setTemplateInfo] = useState({ key: "", version: "", tipo: "" });
+  const [selectedTemplateKey, setSelectedTemplateKey] = useState("");
+  const [protocolCatalog, setProtocolCatalog] = useState([]);
   const [references, setReferences] = useState([]);
   const [sections, setSections] = useState([]);
   const [resultOptions, setResultOptions] = useState([]);
@@ -38,6 +40,30 @@ export default function TestTab({ id, setErr }) {
 
   const hasReferences = (references || []).length > 0;
   const canMarkApto = hasReferences;
+  const templateOptions = useMemo(() => {
+    const rows = (protocolCatalog || [])
+      .filter((row) => row && row.active !== false)
+      .map((row) => {
+        const key = String(row?.template_key || "").trim();
+        if (!key) return null;
+        const labelBase = String(row?.display_name || row?.type_key || key).trim();
+        return {
+          value: key,
+          label: `${labelBase} | ${key}`,
+          typeKey: String(row?.type_key || "").trim(),
+        };
+      })
+      .filter(Boolean);
+    if (!rows.some((row) => row.value === "aspirador_electrico_v1")) {
+      rows.unshift({
+        value: "aspirador_electrico_v1",
+        label: "Aspirador eléctrico | aspirador_electrico_v1",
+        typeKey: "aspirador",
+      });
+    }
+    rows.sort((a, b) => a.label.localeCompare(b.label, "es"));
+    return rows;
+  }, [protocolCatalog]);
 
   const referencesById = useMemo(() => {
     const map = {};
@@ -59,6 +85,40 @@ export default function TestTab({ id, setErr }) {
   const draftPayloadKey = useMemo(() => JSON.stringify(draftPayload), [draftPayload]);
   const hasUnsavedChanges = loadedRef.current && draftPayloadKey !== lastSavedPayloadRef.current;
 
+  function hydrate(data) {
+    const loadedValues = data?.values && typeof data.values === "object" ? data.values : {};
+    const loadedResultadoGlobal = (data?.resultado_global || "pendiente").toString();
+    const loadedConclusion = (data?.conclusion || "").toString();
+    const loadedInstrumentos = (data?.instrumentos || "").toString();
+
+    setTemplateInfo({
+      key: data?.template_key || "",
+      version: data?.template_version || "",
+      tipo: data?.tipo_equipo_resuelto || "",
+    });
+    setSelectedTemplateKey(data?.template_key || "");
+    setReferences(Array.isArray(data?.schema?.references) ? data.schema.references : []);
+    setSections(Array.isArray(data?.schema?.sections) ? data.schema.sections : []);
+    setResultOptions(Array.isArray(data?.schema?.result_options) ? data.schema.result_options : []);
+    setGlobalResultOptions(Array.isArray(data?.schema?.global_result_options) ? data.schema.global_result_options : []);
+    setValues(loadedValues);
+    setResultadoGlobal(loadedResultadoGlobal);
+    setConclusion(loadedConclusion);
+    setInstrumentos(loadedInstrumentos);
+    lastSavedPayloadRef.current = JSON.stringify({
+      values: loadedValues,
+      resultado_global: loadedResultadoGlobal,
+      conclusion: loadedConclusion,
+      instrumentos: loadedInstrumentos,
+    });
+    loadedRef.current = true;
+  }
+
+  async function reload() {
+    const data = await getIngresoTest(id);
+    hydrate(data);
+  }
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -66,34 +126,13 @@ export default function TestTab({ id, setErr }) {
         setLoading(true);
         setError("");
         loadedRef.current = false;
-        const data = await getIngresoTest(id);
+        const [data, protocols] = await Promise.all([
+          getIngresoTest(id),
+          getTestProtocols().catch(() => []),
+        ]);
         if (cancelled) return;
-
-        const loadedValues = data?.values && typeof data.values === "object" ? data.values : {};
-        const loadedResultadoGlobal = (data?.resultado_global || "pendiente").toString();
-        const loadedConclusion = (data?.conclusion || "").toString();
-        const loadedInstrumentos = (data?.instrumentos || "").toString();
-
-        setTemplateInfo({
-          key: data?.template_key || "",
-          version: data?.template_version || "",
-          tipo: data?.tipo_equipo_resuelto || "",
-        });
-        setReferences(Array.isArray(data?.schema?.references) ? data.schema.references : []);
-        setSections(Array.isArray(data?.schema?.sections) ? data.schema.sections : []);
-        setResultOptions(Array.isArray(data?.schema?.result_options) ? data.schema.result_options : []);
-        setGlobalResultOptions(Array.isArray(data?.schema?.global_result_options) ? data.schema.global_result_options : []);
-        setValues(loadedValues);
-        setResultadoGlobal(loadedResultadoGlobal);
-        setConclusion(loadedConclusion);
-        setInstrumentos(loadedInstrumentos);
-        lastSavedPayloadRef.current = JSON.stringify({
-          values: loadedValues,
-          resultado_global: loadedResultadoGlobal,
-          conclusion: loadedConclusion,
-          instrumentos: loadedInstrumentos,
-        });
-        loadedRef.current = true;
+        setProtocolCatalog(Array.isArray(protocols) ? protocols : []);
+        hydrate(data);
       } catch (e) {
         if (cancelled) return;
         const detail = e?.message || "No se pudo cargar el test";
@@ -169,6 +208,34 @@ export default function TestTab({ id, setErr }) {
     }
   }
 
+  async function applySelectedTemplate() {
+    const nextTemplateKey = String(selectedTemplateKey || "").trim().toLowerCase();
+    if (!nextTemplateKey || nextTemplateKey === String(templateInfo.key || "").trim().toLowerCase()) return;
+    if (!window.confirm("Cambiar el protocolo va a recargar el formulario con la nueva plantilla. ¿Querés continuar?")) {
+      setSelectedTemplateKey(templateInfo.key || "");
+      return;
+    }
+    try {
+      setSaving(true);
+      setError("");
+      await patchIngresoTest(id, {
+        template_key: nextTemplateKey,
+        values: {},
+        resultado_global: "pendiente",
+        conclusion: "",
+        instrumentos: "",
+      });
+      await reload();
+    } catch (e) {
+      const detail = e?.message || "No se pudo cambiar el test";
+      setError(detail);
+      if (typeof setErr === "function") setErr(detail);
+      setSelectedTemplateKey(templateInfo.key || "");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) return <div className="border rounded p-4">Cargando test...</div>;
 
   return (
@@ -192,6 +259,37 @@ export default function TestTab({ id, setErr }) {
           >
             {printing ? "Generando PDF..." : "Imprimir informe"}
           </button>
+        </div>
+      </div>
+
+      <div className="mb-4 rounded border bg-blue-50 p-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block min-w-[280px] flex-1">
+            <span className="block text-sm font-medium text-gray-700 mb-1">Elegir protocolo manualmente</span>
+            <select
+              className="border rounded p-2 w-full bg-white"
+              value={selectedTemplateKey}
+              onChange={(e) => setSelectedTemplateKey(e.target.value)}
+            >
+              <option value="">-- seleccionar --</option>
+              {templateOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="px-3 py-2 rounded bg-blue-700 text-white disabled:opacity-60"
+            onClick={applySelectedTemplate}
+            disabled={saving || printing || !selectedTemplateKey || selectedTemplateKey === templateInfo.key}
+          >
+            Aplicar test
+          </button>
+        </div>
+        <div className="mt-2 text-xs text-gray-600">
+          Si cambiás el protocolo, se recarga el formulario con la nueva plantilla y se guardan sus referencias.
         </div>
       </div>
 

@@ -34,13 +34,17 @@ from .helpers import (
     require_roles,
     require_permission,
     ensure_default_locations,
+    money,
 )
 from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
-from .mg_state import is_mg_owner_device, resolve_mg_flags
+from .mg_state import is_mg_owner_device, normalize_mg, resolve_mg_flags
+from ..rejected_budget import (
+    get_rejected_quote_summary,
+    get_stored_rejected_budget_fields,
+    has_rejected_budget_charge_schema,
+)
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
-    enqueue_stock_entry_for_ingreso,
-    enqueue_stock_exit_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
     ingreso_is_internal_equipment,
 )
@@ -52,7 +56,8 @@ from ..serializers import (
     IngresoListItemSerializer,
 )
 from ..permissions import require_any_permission, user_has_any_permission, user_has_permission
-from ..warranty import compute_warranty
+from ..warranty import compute_warranty, compute_warranty_from_sale_date
+from ..bejerman_ris import get_ris_status_for_ingreso
 from ..notifications import (
     notify_estado_patrimonial,
     notify_ingreso_asignado,
@@ -195,14 +200,21 @@ def _has_mg_sale_extended_schema() -> bool:
 
 
 def _mg_list_select_sql(alias: str = "d") -> str:
+    alt_sql = (
+        f"COALESCE({alias}.mg_venta_numero_alternativo,'') AS mg_venta_numero_alternativo,"
+        if _has_mg_sale_extended_schema()
+        else "'' AS mg_venta_numero_alternativo,"
+    )
     if _has_mg_schema():
         return f"""
           COALESCE({alias}.mg_estado,'activo') AS mg_estado,
           (COALESCE({alias}.mg_estado,'activo') = 'inactivo_venta') AS mg_inactivo_venta,
+          {alt_sql}
         """
-    return """
+    return f"""
       'activo' AS mg_estado,
       FALSE AS mg_inactivo_venta,
+      {alt_sql}
     """
 
 
@@ -250,6 +262,11 @@ def _is_cotizacion_bloqueada_para_reparar(motivo, permite_reparacion) -> bool:
     return _motivo_is_cotizacion_equipo(motivo) and not bool(permite_reparacion)
 
 
+def _motivo_is_revision_tecnica(value: str) -> bool:
+    key = _norm_txt(value or "")
+    return key == _norm_txt("Revisión Técnica")
+
+
 def _mg_owner_customer_id():
     row = q(
         "SELECT id FROM customers WHERE LOWER(razon_social) LIKE %s ORDER BY id ASC LIMIT 1",
@@ -257,6 +274,32 @@ def _mg_owner_customer_id():
         one=True,
     )
     return row.get("id") if row else None
+
+
+def _is_mg_owner_customer(customer_id, mg_owner_id=None) -> bool:
+    try:
+        if not customer_id:
+            return False
+        owner_id = mg_owner_id if mg_owner_id is not None else _mg_owner_customer_id()
+        if not owner_id:
+            return False
+        return int(customer_id) == int(owner_id)
+    except Exception:
+        return False
+
+
+def _parse_rejected_budget_charge_or_raise(raw_value, *, required: bool) -> object:
+    if raw_value is None or (isinstance(raw_value, str) and raw_value.strip() == ""):
+        if required:
+            raise ValidationError("presupuesto_rechazado_cobro_neto requerido")
+        return None
+    try:
+        cobro_neto = money(raw_value)
+    except (TypeError, ValueError):
+        raise ValidationError("presupuesto_rechazado_cobro_neto debe ser numérico")
+    if cobro_neto < 0:
+        raise ValidationError("presupuesto_rechazado_cobro_neto no puede ser negativo")
+    return cobro_neto
 
 
 def _send_mail_with_fallback(subject, body, recipients):
@@ -386,6 +429,36 @@ def _table_exists(table_name: str) -> bool:
         return False
 
 
+def _ingreso_event_date_hitos(ingreso_id: int) -> dict:
+    if not _table_exists("ingreso_events"):
+        return {}
+    where_parts = []
+    params = []
+    if _has_table_column("ingreso_events", "ingreso_id"):
+        where_parts.append("ingreso_id = %s")
+        params.append(ingreso_id)
+    if _has_table_column("ingreso_events", "ticket_id"):
+        where_parts.append("ticket_id = %s")
+        params.append(ingreso_id)
+    if not where_parts:
+        return {}
+    try:
+        return q(
+            f"""
+            SELECT
+              MIN(CASE WHEN a_estado = 'diagnosticado' THEN ts END) AS fecha_diagnosticado,
+              MIN(CASE WHEN a_estado = 'reparado' THEN ts END) AS fecha_reparado,
+              MAX(CASE WHEN a_estado = 'liberado' THEN ts END) AS fecha_liberacion
+              FROM ingreso_events
+             WHERE {" OR ".join(where_parts)}
+            """,
+            params,
+            one=True,
+        ) or {}
+    except Exception:
+        return {}
+
+
 def _parse_bool_or_default(raw, default=True) -> bool:
     if raw is None:
         return bool(default)
@@ -410,7 +483,7 @@ def _parse_historical_effective_datetime(raw):
 
 def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_evento=None):
     evento_norm = (evento or "").strip().lower()
-    if evento_norm not in ("baja", "alta"):
+    if evento_norm not in ("baja", "alta", "alta_mg"):
         return
     try:
         info = q(
@@ -482,6 +555,8 @@ def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_even
             resolucion.replace("_", " ").capitalize() if resolucion else "",
         )
 
+        notification_event = "baja" if evento_norm == "baja" else "alta"
+
         if evento_norm == "baja":
             subject = f"Notificacion de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
             intro = (
@@ -490,6 +565,14 @@ def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_even
             )
             fecha_label = "Fecha de baja"
             diag_title = "Diagnostico / motivo de baja:"
+        elif evento_norm == "alta_mg":
+            subject = f"Notificacion de alta de MG - {os_txt} - {cliente or 'Sin cliente'}"
+            intro = (
+                "Se registro el alta de MG de un equipo en el sistema de reparaciones. "
+                "Por favor reflejar el alta en el sistema patrimonial."
+            )
+            fecha_label = "Fecha de alta de MG"
+            diag_title = "Diagnostico / estado actual:"
         else:
             subject = f"Notificacion de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
             intro = (
@@ -542,7 +625,7 @@ def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_even
             recips = [str(recips)] if recips else []
         recips = [r for r in recips if r]
         try:
-            notify_estado_patrimonial(ingreso_id, evento_norm, emails=recips)
+            notify_estado_patrimonial(ingreso_id, notification_event, emails=recips)
         except Exception:
             pass
         if not recips:
@@ -673,7 +756,7 @@ class PendientesPresupuestoView(APIView):
                 LEFT JOIN quotes q ON q.id = (
                   SELECT q2.id FROM quotes q2
                   WHERE q2.ingreso_id = t.id
-                  ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                  ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                   LIMIT 1
                 )
                 LEFT JOIN locations loc ON loc.id = t.ubicacion_id
@@ -732,7 +815,7 @@ class PresupuestadosView(APIView):
                 LEFT JOIN quotes q ON q.id = (
                   SELECT q2.id FROM quotes q2
                   WHERE q2.ingreso_id = t.id
-                  ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                  ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                   LIMIT 1
                 )
                 LEFT JOIN locations loc ON loc.id = t.ubicacion_id
@@ -805,7 +888,7 @@ class PresupuestadosExportView(APIView):
                 LEFT JOIN quotes q ON q.id = (
                   SELECT q2.id FROM quotes q2
                   WHERE q2.ingreso_id = t.id
-                  ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                  ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                   LIMIT 1
                 )
                WHERE t.id = ANY(%s)
@@ -964,10 +1047,7 @@ class MarcarReparadoView(APIView):
                 [ingreso_id],
                 one=True,
             ) or {}
-            ns = (info.get("numero_serie") or "").strip()
-            ni = (info.get("numero_interno") or "").strip()
-            is_mg = is_mg_owner_device(ni, ns)
-            if is_mg:
+            if ingreso_is_internal_equipment(ingreso_id):
                 should_enqueue_stl = True
                 # Asegurar existencia de ubicaciones por defecto y buscar ID canónico.
                 try:
@@ -1168,7 +1248,11 @@ class MarcarParaRepararView(APIView):
 
         if presu_cur == "presupuestado":
             try:
-                qid_row = q("SELECT id FROM quotes WHERE ingreso_id=%s ORDER BY id DESC LIMIT 1", [ingreso_id], one=True)
+                qid_row = q(
+                    "SELECT id FROM quotes WHERE ingreso_id=%s ORDER BY COALESCE(version_num, 1) DESC, id DESC LIMIT 1",
+                    [ingreso_id],
+                    one=True,
+                )
                 qid = qid_row and qid_row.get("id")
                 if qid:
                     exec_void(
@@ -1465,12 +1549,10 @@ class EntregarIngresoView(APIView):
             with transaction.atomic():
                 if ingreso_is_internal_equipment(ingreso_id):
                     enqueue_stock_transfer_for_ingreso(ingreso_id)
-                    enqueue_stock_exit_for_ingreso(ingreso_id)
                 else:
                     enqueue_client_ready_transfer_for_ingreso(ingreso_id)
-                    enqueue_stock_exit_for_ingreso(ingreso_id)
         except Exception:
-            logger.exception("No se pudo encolar la salida Bejerman RSS", extra={"ingreso_id": ingreso_id})
+            logger.exception("No se pudo encolar la transferencia Bejerman", extra={"ingreso_id": ingreso_id})
         return Response({"ok": True})
 
 
@@ -1483,13 +1565,23 @@ class DarBajaIngresoView(APIView):
         with transaction.atomic():
             with connection.cursor() as cur:
                 dash_id = _dash_location_id()
-                cur.execute("SELECT estado FROM ingresos WHERE id=%s", [ingreso_id])
+                cur.execute(
+                    """
+                    SELECT i.estado, d.customer_id
+                      FROM ingresos i
+                      LEFT JOIN devices d ON d.id = i.device_id
+                     WHERE i.id=%s
+                    """,
+                    [ingreso_id],
+                )
                 row = cur.fetchone()
                 if not row:
                     return Response({"detail": "Ingreso no encontrado"}, status=404)
                 estado_actual = (row[0] or "").lower()
                 if estado_actual == "baja":
                     return Response({"ok": True, "estado": "baja"})
+                if not _is_mg_owner_customer(row[1]):
+                    return Response({"detail": "Solo se puede dar de baja un equipo propio MG."}, status=400)
                 cur.execute(
                     """
                     UPDATE ingresos
@@ -1528,144 +1620,7 @@ class DarBajaIngresoView(APIView):
             # No bloquear si la tabla o inserción falla
             pass
         if marked_baja:
-            try:
-                info = q(
-                    """
-                    SELECT c.razon_social AS cliente,
-                           COALESCE(m.tipo_equipo,'') AS tipo_equipo,
-                           COALESCE(b.nombre,'') AS marca,
-                           COALESCE(m.nombre,'') AS modelo,
-                           COALESCE(d.numero_serie,'') AS numero_serie,
-                           COALESCE(d.numero_interno,'') AS numero_interno,
-                           COALESCE(t.informe_preliminar,'') AS informe_preliminar,
-                           COALESCE(t.descripcion_problema,'') AS descripcion_problema,
-                           COALESCE(t.trabajos_realizados,'') AS trabajos_realizados,
-                           COALESCE(t.comentarios,'') AS comentarios,
-                           COALESCE(t.resolucion,'') AS resolucion,
-                           COALESCE(CAST(t.motivo AS TEXT), '') AS motivo,
-                           COALESCE(loc.nombre,'') AS ubicacion_nombre
-                      FROM ingresos t
-                      JOIN devices d   ON d.id = t.device_id
-                      JOIN customers c ON c.id = d.customer_id
-                      LEFT JOIN marcas b ON b.id = d.marca_id
-                      LEFT JOIN models m ON m.id = d.model_id
-                      LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-                     WHERE t.id=%s
-                    """,
-                    [ingreso_id],
-                    one=True,
-                ) or {}
-                os_txt = os_label(ingreso_id)
-                cliente = info.get("cliente") or ""
-                equipo = " | ".join([p for p in [info.get("tipo_equipo") or "", info.get("marca") or "", info.get("modelo") or ""] if p])
-                numero_serie = info.get("numero_serie") or ""
-                numero_interno = info.get("numero_interno") or ""
-                informe_preliminar = (info.get("informe_preliminar") or "").strip()
-                descripcion_problema = (info.get("descripcion_problema") or "").strip()
-                trabajos_realizados = (info.get("trabajos_realizados") or "").strip()
-                comentarios = (info.get("comentarios") or "").strip()
-                resolucion = (info.get("resolucion") or "").strip()
-                motivo = (info.get("motivo") or "").strip()
-                ubicacion = info.get("ubicacion_nombre") or ""
-                actor_nombre = getattr(request.user, "nombre", None) or getattr(request.user, "username", "") or ""
-                actor_email = getattr(request.user, "email", "") or ""
-                fecha_baja = timezone.localtime().strftime("%Y-%m-%d %H:%M")
-                actor_line = actor_nombre or "-"
-                if actor_email:
-                    actor_line = f"{actor_line} ({actor_email})" if actor_line else actor_email
-                resolucion_labels = {
-                    "reparado": "Reparado",
-                    "no_reparado": "No reparado",
-                    "no_se_encontro_falla": "No se encontró falla",
-                    "presupuesto_rechazado": "Presupuesto rechazado",
-                    "cambio": "Cambio",
-                }
-                resolucion_label = resolucion_labels.get(
-                    resolucion,
-                    resolucion.replace("_", " ").capitalize() if resolucion else "",
-                )
-                subject = f"Notificación de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
-                lines = [
-                    "Se registró la baja de un equipo en el sistema de reparaciones. Por favor reflejar la baja en el sistema patrimonial.",
-                    "",
-                    "Detalle del ingreso:",
-                    f"- OS: {os_txt}",
-                    f"- Cliente: {cliente or '-'}",
-                    f"- Equipo: {equipo or '-'}",
-                    f"- Número de serie: {numero_serie or '-'}",
-                    f"- Número interno: {numero_interno or '-'}",
-                    f"- Ubicación actual: {ubicacion or '-'}",
-                    f"- Fecha de baja: {fecha_baja}",
-                    f"- Registrado por: {actor_line or '-'}",
-                ]
-                diag_lines = []
-                diag_lines.append(f"- Diagnóstico / descripción del problema: {descripcion_problema or '-'}")
-                diag_lines.append(f"- Trabajos realizados: {trabajos_realizados or '-'}")
-                diag_lines.append(f"- Comentarios: {comentarios or '-'}")
-                if informe_preliminar:
-                    diag_lines.append(f"- Informe preliminar: {informe_preliminar}")
-                if resolucion_label:
-                    diag_lines.append(f"- Resolución: {resolucion_label}")
-                if motivo:
-                    diag_lines.append(f"- Motivo de ingreso: {motivo}")
-                lines.append("")
-                lines.append("Diagnóstico / motivo de baja:")
-                lines.extend(diag_lines)
-                try:
-                    url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
-                    lines.append("")
-                    lines.append(f"Hoja de servicio: {url}")
-                except Exception:
-                    pass
-                body = "\n".join(lines)
-                try:
-                    body = _email_append_footer_text(body)
-                except Exception:
-                    pass
-                recips = getattr(settings, "BAJA_NOTIFY_RECIPIENTS", []) or []
-                if not isinstance(recips, (list, tuple)):
-                    recips = [str(recips)] if recips else []
-                recips = [r for r in recips if r]
-                try:
-                    notify_estado_patrimonial(ingreso_id, "baja", emails=recips)
-                except Exception:
-                    pass
-
-                def _send_baja_email():
-                    if not recips:
-                        logger.warning(
-                            "baja_notify_email no recipients configured",
-                            extra={"ingreso_id": ingreso_id},
-                        )
-                        return
-                    try:
-                        _sent, _dbg = _send_mail_with_fallback(subject, body, recips)
-                        logger.info(
-                            "baja_notify_email sent=%s ingreso_id=%s recipients=%s backend=%s",
-                            bool(_sent),
-                            ingreso_id,
-                            recips,
-                            getattr(settings, "EMAIL_BACKEND", ""),
-                        )
-                    except Exception:
-                        logger.exception(
-                            "baja_notify_email failed",
-                            extra={"ingreso_id": ingreso_id, "recipients": recips},
-                        )
-
-                try:
-                    conn = transaction.get_connection()
-                    if getattr(conn, "in_atomic_block", False):
-                        transaction.on_commit(_send_baja_email)
-                    else:
-                        _send_baja_email()
-                except Exception:
-                    _send_baja_email()
-            except Exception:
-                logger.exception(
-                    "baja_notify_email prepare failed",
-                    extra={"ingreso_id": ingreso_id},
-                )
+            transaction.on_commit(lambda: _notify_estado_patrimonial(request, ingreso_id, "baja"))
         return Response({"ok": True, "estado": "baja"})
 
 
@@ -1846,6 +1801,156 @@ class DarAltaIngresoView(APIView):
                     extra={"ingreso_id": ingreso_id},
                 )
         return Response({"ok": True, "estado": "ingresado"})
+
+
+class IngresoConvertirPropioMgView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, ingreso_id: int):
+        require_any_permission(request, ["action.devices_preventivos.manage", "action.ingreso.baja_alta"])
+        _set_audit_user(request)
+
+        data = request.data or {}
+        numero_interno_raw = (data.get("numero_interno") or "").strip()
+        if not numero_interno_raw:
+            return Response({"detail": "numero_interno requerido"}, status=400)
+
+        numero_interno = normalize_mg(numero_interno_raw)
+        if not numero_interno:
+            return Response(
+                {
+                    "detail": "El número interno debe tener formato MG 0001.",
+                    "conflict_type": "MG_NUMERO_INTERNO_INVALIDO",
+                },
+                status=400,
+            )
+
+        ingreso = q(
+            """
+            SELECT
+              i.id,
+              i.device_id,
+              COALESCE(CAST(i.motivo AS TEXT), '') AS motivo,
+              d.customer_id,
+              COALESCE(d.numero_interno,'') AS numero_interno_actual,
+              COALESCE(d.numero_serie,'') AS numero_serie,
+              COALESCE(d.alquilado,false) AS alquilado
+            FROM ingresos i
+            LEFT JOIN devices d ON d.id = i.device_id
+            WHERE i.id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
+        if not ingreso:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+
+        device_id = ingreso.get("device_id")
+        if not device_id:
+            return Response(
+                {
+                    "detail": "El ingreso no tiene un equipo asociado.",
+                    "conflict_type": "INGRESO_SIN_DEVICE",
+                },
+                status=400,
+            )
+
+        mg_owner_id = _mg_owner_customer_id()
+        if not mg_owner_id:
+            return Response(
+                {
+                    "detail": "No existe el cliente base 'MG BIO'.",
+                    "conflict_type": "MG_OWNER_CUSTOMER_MISSING",
+                },
+                status=404,
+            )
+
+        if _is_mg_owner_customer(ingreso.get("customer_id"), mg_owner_id):
+            return Response(
+                {
+                    "detail": "El equipo ya figura como equipo propio de MG BIO.",
+                    "conflict_type": "EQUIPO_YA_PROPIO_MG",
+                },
+                status=400,
+            )
+
+        if connection.vendor == "postgresql":
+            conflict = q(
+                """
+                SELECT id
+                  FROM devices
+                 WHERE id <> %s
+                   AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
+                   AND UPPER(REGEXP_REPLACE(numero_interno,
+                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
+                       UPPER(REGEXP_REPLACE(%s,
+                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                 LIMIT 1
+                """,
+                [device_id, numero_interno],
+                one=True,
+            )
+        else:
+            conflict = q(
+                "SELECT id FROM devices WHERE id <> %s AND numero_interno = %s LIMIT 1",
+                [device_id, numero_interno],
+                one=True,
+            )
+        if conflict:
+            return Response(
+                {
+                    "detail": "El número interno MG ya está asignado a otro equipo.",
+                    "conflict_type": "MG_DUPLICATE",
+                    "conflict_device_id": conflict.get("id"),
+                    "numero_interno_input": numero_interno,
+                },
+                status=400,
+            )
+
+        sets = [
+            "customer_id = %s",
+            "numero_interno = %s",
+        ]
+        params = [mg_owner_id, numero_interno]
+        if _has_table_column("devices", "alquilado"):
+            sets.append("alquilado = FALSE")
+        if _has_table_column("devices", "alquiler_a"):
+            sets.append("alquiler_a = NULL")
+        params.append(device_id)
+        exec_void(
+            f"UPDATE devices SET {', '.join(sets)} WHERE id=%s",
+            params,
+        )
+
+        mg_estado_sql = "COALESCE(d.mg_estado,'activo') AS mg_estado," if _has_mg_schema() else "'activo' AS mg_estado,"
+        row = q(
+            f"""
+            SELECT
+              d.id,
+              d.customer_id,
+              COALESCE(c.razon_social,'') AS customer_nombre,
+              COALESCE(d.numero_interno,'') AS numero_interno,
+              COALESCE(d.numero_serie,'') AS numero_serie,
+              COALESCE(d.alquilado,false) AS alquilado,
+              COALESCE(d.alquiler_a,'') AS alquiler_a,
+              {mg_estado_sql}
+              COALESCE(b.nombre,'') AS marca,
+              COALESCE(m.nombre,'') AS modelo
+            FROM devices d
+            LEFT JOIN customers c ON c.id = d.customer_id
+            LEFT JOIN marcas b ON b.id = d.marca_id
+            LEFT JOIN models m ON m.id = d.model_id
+            WHERE d.id=%s
+            """,
+            [device_id],
+            one=True,
+        ) or {}
+        row.update(resolve_mg_flags(row, mg_owner_id))
+        row["es_cliente_mg_owner"] = _is_mg_owner_customer(row.get("customer_id"), mg_owner_id)
+        transaction.on_commit(lambda: _notify_estado_patrimonial(request, ingreso_id, "alta_mg"))
+
+        return Response({"ok": True, "ingreso_id": ingreso_id, "device": row})
 
 
 class IngresoCorreccionesHistoricasView(APIView):
@@ -2133,7 +2238,7 @@ class GeneralPorClienteView(APIView):
                 LEFT JOIN quotes q ON q.id = (
                   SELECT q2.id FROM quotes q2
                   WHERE q2.ingreso_id = t.id
-                  ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                  ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                   LIMIT 1
                 )
                 LEFT JOIN locations loc ON loc.id = t.ubicacion_id
@@ -2342,7 +2447,7 @@ class AprobadosParaRepararView(APIView):
                 LEFT JOIN quotes q ON q.id = (
                   SELECT q2.id FROM quotes q2
                   WHERE q2.ingreso_id = t.id
-                  ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                  ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                   LIMIT 1
                 )
                 LEFT JOIN locations loc ON loc.id = t.ubicacion_id
@@ -2536,6 +2641,7 @@ class GeneralEquiposView(APIView):
             page_size = min(page_size, 500)
 
         mg_list_sql = _mg_list_select_sql()
+        has_mg_sale_extended = _has_mg_sale_extended_schema()
         with connection.cursor() as cur:
             _set_audit_user(request)
             wh, params = [], []
@@ -2598,10 +2704,14 @@ class GeneralEquiposView(APIView):
                     m_os = _re.match(r"^(?:OS\s*)?(\d+)$", needle, _re.IGNORECASE)
                     if m_mg:
                         mg_no_space = ("MG" + m_mg.group(1)).upper()
-                        wh.append("("
-                                  "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s OR "
-                                  "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s)")
-                        params.extend([mg_no_space, mg_no_space])
+                        clauses = [
+                            "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s",
+                            "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s",
+                        ]
+                        if has_mg_sale_extended:
+                            clauses.append("REPLACE(UPPER(COALESCE(d.mg_venta_numero_alternativo,'')),' ','') = %s")
+                        wh.append("(" + " OR ".join(clauses) + ")")
+                        params.extend([mg_no_space] * len(clauses))
                     else:
                         like = f"%{needle}%"
                         like_ns = f"%{needle_ns}%"
@@ -2622,10 +2732,17 @@ class GeneralEquiposView(APIView):
                             "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') LIKE %s",
                             "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') LIKE %s",
                         ])
+                        if has_mg_sale_extended:
+                            clauses.extend([
+                                "COALESCE(d.mg_venta_numero_alternativo,'') ILIKE %s",
+                                "REPLACE(UPPER(COALESCE(d.mg_venta_numero_alternativo,'')),' ','') LIKE %s",
+                            ])
                         wh.append("(" + " OR ".join(clauses) + ")")
                         if m_os:
                             params.append(int(m_os.group(1)))
                         params.extend([like] * 10 + [like_ns, like_ns])
+                        if has_mg_sale_extended:
+                            params.extend([like, like_ns])
 
             if os_raw:
                 try:
@@ -2694,7 +2811,7 @@ class GeneralEquiposView(APIView):
                 LEFT JOIN quotes q ON q.id = (
                   SELECT q2.id FROM quotes q2
                   WHERE q2.ingreso_id = t.id
-                  ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                  ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                   LIMIT 1
                 )
                 LEFT JOIN (
@@ -2710,6 +2827,10 @@ class GeneralEquiposView(APIView):
             """
             cur.execute(sql, params + limit_params)
             rows = _fetchall_dicts(cur)
+        mg_owner_id = _mg_owner_customer_id()
+        for row in rows:
+            row.update(resolve_mg_flags(row, mg_owner_id))
+            row["es_cliente_mg_owner"] = _is_mg_owner_customer(row.get("customer_id"), mg_owner_id)
         # compat: si no hay paginación pedida, seguir devolviendo lista
         if page_size == 0:
             return Response(rows)
@@ -2765,6 +2886,7 @@ class GeneralEquiposExportView(APIView):
         delivered = delivered_raw in ("1", "true", "yes", "y", "t")
 
         mg_list_sql = _mg_list_select_sql()
+        has_mg_sale_extended = _has_mg_sale_extended_schema()
         with connection.cursor() as cur:
             _set_audit_user(request)
             wh, params = [], []
@@ -2829,10 +2951,14 @@ class GeneralEquiposExportView(APIView):
                     m_os = _re.match(r"^(?:OS\s*)?(\d+)$", needle, _re.IGNORECASE)
                     if m_mg:
                         mg_no_space = ("MG" + m_mg.group(1)).upper()
-                        wh.append("("
-                                  "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s OR "
-                                  "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s)")
-                        params.extend([mg_no_space, mg_no_space])
+                        clauses = [
+                            "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s",
+                            "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s",
+                        ]
+                        if has_mg_sale_extended:
+                            clauses.append("REPLACE(UPPER(COALESCE(d.mg_venta_numero_alternativo,'')),' ','') = %s")
+                        wh.append("(" + " OR ".join(clauses) + ")")
+                        params.extend([mg_no_space] * len(clauses))
                     else:
                         like = f"%{needle}%"
                         like_ns = f"%{needle_ns}%"
@@ -2853,10 +2979,17 @@ class GeneralEquiposExportView(APIView):
                             "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') LIKE %s",
                             "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') LIKE %s",
                         ])
+                        if has_mg_sale_extended:
+                            clauses.extend([
+                                "COALESCE(d.mg_venta_numero_alternativo,'') ILIKE %s",
+                                "REPLACE(UPPER(COALESCE(d.mg_venta_numero_alternativo,'')),' ','') LIKE %s",
+                            ])
                         wh.append("(" + " OR ".join(clauses) + ")")
                         if m_os:
                             params.append(int(m_os.group(1)))
                         params.extend([like] * 10 + [like_ns, like_ns])
+                        if has_mg_sale_extended:
+                            params.extend([like, like_ns])
 
             if os_raw:
                 try:
@@ -3349,12 +3482,23 @@ class IngresoSolicitarBajaView(APIView):
         if not motivo:
             return Response({"detail": "El motivo es obligatorio"}, status=400)
 
-        row = q("SELECT estado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        row = q(
+            """
+            SELECT i.estado, d.customer_id
+              FROM ingresos i
+              LEFT JOIN devices d ON d.id = i.device_id
+             WHERE i.id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
         if not row:
             return Response({"detail": "Ingreso no encontrado"}, status=404)
         estado_actual = (row.get("estado") or "").lower()
         if estado_actual == "baja":
             return Response({"ok": True, "already_baja": True, "email_sent": False})
+        if not _is_mg_owner_customer(row.get("customer_id")):
+            return Response({"detail": "Solo se puede solicitar BAJA para equipos propios MG."}, status=400)
 
         pending = _pending_baja_request(ingreso_id)
         if pending:
@@ -4063,6 +4207,27 @@ class CerrarReparacionView(APIView):
                 return Response({"detail": "serial_cambio requerido para resolucion 'cambio'"}, status=400)
             serial_cambio = (serial_cambio or "").strip()
 
+        presupuesto_rechazado_cobro_neto = None
+        presupuesto_rechazado_quote_id = None
+        if r == "presupuesto_rechazado":
+            presupuesto_rechazado_cobro_neto = _parse_rejected_budget_charge_or_raise(
+                (request.data or {}).get("presupuesto_rechazado_cobro_neto"),
+                required=False,
+            )
+            if has_rejected_budget_charge_schema():
+                stored_fields = get_stored_rejected_budget_fields(ingreso_id)
+                if presupuesto_rechazado_cobro_neto is None:
+                    presupuesto_rechazado_cobro_neto = stored_fields.get("presupuesto_rechazado_cobro_neto")
+                latest_rejected_quote = get_rejected_quote_summary(ingreso_id)
+                presupuesto_rechazado_quote_id = (
+                    latest_rejected_quote.get("quote_id") if latest_rejected_quote else None
+                )
+            if presupuesto_rechazado_cobro_neto is None:
+                return Response(
+                    {"detail": "Debe informar el cobro neto del presupuesto rechazado."},
+                    status=400,
+                )
+
         with connection.cursor() as cur:
             _set_audit_user(request)
             # Detectar si existe columna serial_cambio
@@ -4075,6 +4240,7 @@ class CerrarReparacionView(APIView):
                 """
             )
             has_serial_col = cur.fetchone() is not None
+            has_rejected_budget_cols = has_rejected_budget_charge_schema()
             if r == "cambio" and has_serial_col:
                 cur.execute(
                     """
@@ -4084,6 +4250,22 @@ class CerrarReparacionView(APIView):
                      WHERE id = %s
                     """,
                     [r, serial_cambio, ingreso_id],
+                )
+            elif r == "presupuesto_rechazado" and has_rejected_budget_cols:
+                cur.execute(
+                    """
+                    UPDATE ingresos
+                       SET resolucion = %s,
+                           presupuesto_rechazado_cobro_neto = %s,
+                           presupuesto_rechazado_quote_id = %s
+                     WHERE id = %s
+                    """,
+                    [
+                        r,
+                        presupuesto_rechazado_cobro_neto,
+                        presupuesto_rechazado_quote_id,
+                        ingreso_id,
+                    ],
                 )
             else:
                 cur.execute(
@@ -4114,6 +4296,7 @@ class NuevoIngresoView(APIView):
         data = request.data or {}
         cliente = data.get("cliente") or {}
         equipo = data.get("equipo") or {}
+        bejerman_sale = data.get("bejerman_sale") or {}
 
         # Empresa a facturar (branding de PDFs). Default SEPID; valida solo dos valores.
         empresa_facturar = (data.get("empresa_facturar") or "SEPID").strip().upper()
@@ -4226,6 +4409,28 @@ class NuevoIngresoView(APIView):
             )
         except Exception:
             wcalc = {"garantia": None, "vence_el": None, "fecha_venta": None}
+        try:
+            sale_date = (
+                bejerman_sale.get("issueDate")
+                or bejerman_sale.get("saleDate")
+                or bejerman_sale.get("fecha_venta")
+            )
+            sale_serial = (
+                bejerman_sale.get("serial")
+                or bejerman_sale.get("numero_serie")
+                or numero_serie
+            )
+            sale_key = str(sale_serial or "").replace(" ", "").replace("-", "").upper()
+            if sale_date and ns_key and (not sale_key or sale_key == ns_key):
+                wcalc = compute_warranty_from_sale_date(
+                    sale_date,
+                    numero_serie=numero_serie,
+                    brand_id=equipo.get("marca_id"),
+                    model_id=equipo.get("modelo_id"),
+                    source="bejerman_sale",
+                )
+        except Exception:
+            pass
 
         # Chequeo adicional de duplicado por número interno (MG/NM/NV/CE ####):
         # si existe un ingreso abierto para el mismo MG, se reutiliza ese ingreso.
@@ -4681,12 +4886,6 @@ class NuevoIngresoView(APIView):
               [ingreso_id, acc_id, ref, desc]
             )
 
-        try:
-            with transaction.atomic():
-                enqueue_stock_entry_for_ingreso(ingreso_id)
-        except Exception:
-            logger.exception("No se pudo encolar el ingreso Bejerman RSI", extra={"ingreso_id": ingreso_id})
-
         return Response({"ok": True, "ingreso_id": ingreso_id, "os": os_label(ingreso_id)}, status=201)
 
 
@@ -4939,6 +5138,7 @@ class IngresoDetalleView(APIView):
               t.presupuesto_estado,
               t.resolucion,
               t.fecha_ingreso,
+              t.fecha_creacion,
               t.fecha_servicio,
               t.garantia_reparacion,
               COALESCE(t.etiq_garantia_ok, true) AS etiq_garantia_ok,
@@ -4995,17 +5195,25 @@ class IngresoDetalleView(APIView):
             one=True,
         )
 
+        if not row:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
         # Snapshot inmediato en devices (fase 2: fuente de verdad)
         try:
             exec_void(
                 "UPDATE devices SET propietario_nombre = NULLIF(%s,''), propietario_contacto = NULLIF(%s,''), propietario_doc = NULLIF(%s,'') WHERE id = %s",
-                [prop_nombre, prop_contacto, prop_doc, device_id]
+                [
+                    row.get("propietario_nombre") or "",
+                    row.get("propietario_contacto") or "",
+                    row.get("propietario_doc") or "",
+                    row.get("device_id"),
+                ],
             )
         except Exception:
             pass
-        if not row:
-            return Response({"detail": "Ingreso no encontrado"}, status=404)
-        row.update(resolve_mg_flags(row, _mg_owner_customer_id()))
+        mg_owner_id = _mg_owner_customer_id()
+        row.update(resolve_mg_flags(row, mg_owner_id))
+        row["es_cliente_mg_owner"] = _is_mg_owner_customer(row.get("customer_id"), mg_owner_id)
+        row["ris"] = get_ris_status_for_ingreso(ingreso_id)
         # Agregar serial_cambio si existe la columna
         try:
             with connection.cursor() as cur:
@@ -5023,6 +5231,15 @@ class IngresoDetalleView(APIView):
                     row["serial_cambio"] = (sc[0] if sc else None)
         except Exception:
             pass
+        try:
+            if has_rejected_budget_charge_schema():
+                row.update(get_stored_rejected_budget_fields(row["id"]))
+            else:
+                row["presupuesto_rechazado_cobro_neto"] = None
+                row["presupuesto_rechazado_quote_id"] = None
+        except Exception:
+            row["presupuesto_rechazado_cobro_neto"] = None
+            row["presupuesto_rechazado_quote_id"] = None
         # Si está en garantía de reparación, traer trabajos realizados del último servicio entregado
         if row.get("garantia_reparacion"):
             try:
@@ -5140,6 +5357,19 @@ class IngresoDetalleView(APIView):
             row["baja_solicitada_nombre"] = ""
             row["baja_solicitada_motivo"] = ""
             row["baja_solicitada_fecha"] = None
+        event_hitos = _ingreso_event_date_hitos(ingreso_id)
+        row["fechas_hitos"] = {
+            "fecha_creacion": row.get("fecha_creacion"),
+            "fecha_ingreso": row.get("fecha_ingreso"),
+            "fecha_diagnosticado": event_hitos.get("fecha_diagnosticado"),
+            "fecha_reparado": event_hitos.get("fecha_reparado"),
+            "fecha_liberacion": event_hitos.get("fecha_liberacion"),
+            "fecha_servicio": row.get("fecha_servicio"),
+            "fecha_entrega": row.get("fecha_entrega"),
+            "fecha_alquiler": row.get("alquiler_fecha"),
+            "fecha_venta_mg": row.get("mg_venta_fecha"),
+            "fecha_baja_solicitada": row.get("baja_solicitada_fecha"),
+        }
         return Response(IngresoDetailWithAccesoriosSerializer(row).data)
 
     def patch(self, request, ingreso_id: int):
@@ -5681,10 +5911,7 @@ class MarcarControladoSinDefectoView(APIView):
                 [ingreso_id],
                 one=True,
             ) or {}
-            ns = (info.get("numero_serie") or "").strip()
-            ni = (info.get("numero_interno") or "").strip()
-            is_mg = is_mg_owner_device(ni, ns)
-            if is_mg:
+            if ingreso_is_internal_equipment(ingreso_id):
                 should_enqueue_stl = True
                 try:
                     ensure_default_locations()

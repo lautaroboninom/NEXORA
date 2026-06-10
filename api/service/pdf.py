@@ -14,8 +14,9 @@ import os
 import re
 from datetime import datetime
 from reportlab.graphics import renderPDF
-from reportlab.graphics.barcode import qr
+from reportlab.graphics.barcode import code128, qr
 from reportlab.graphics.shapes import Drawing
+from .rejected_budget import get_rejected_budget_context
 
 # Resolución: mapeo de valores internos -> etiqueta amigable
 RESOLUTION_LABELS = {
@@ -56,6 +57,52 @@ def safe_name(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s[:80]
 
+
+def render_serial_barcode_pdf(value: str, title: str = "N/S", subtitle: str = ""):
+    serial = (value or "").strip()
+    if not serial:
+        return None, None
+
+    page_w, page_h = 58 * mm, 32 * mm
+    margin_x = 4 * mm
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=(page_w, page_h))
+    c.setTitle(f"Código de barras {serial}")
+
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 7.5)
+    c.drawCentredString(page_w / 2, page_h - 5 * mm, (title or "N/S")[:34])
+
+    max_w = page_w - 2 * margin_x
+    bar = code128.Code128(serial, barHeight=13 * mm, barWidth=0.22 * mm, humanReadable=False)
+    if bar.width > max_w:
+        ratio = max_w / bar.width
+        bar = code128.Code128(serial, barHeight=13 * mm, barWidth=max(0.12 * mm, 0.22 * mm * ratio), humanReadable=False)
+    bar_x = max(margin_x, (page_w - bar.width) / 2)
+    bar.drawOn(c, bar_x, 10.5 * mm)
+
+    label = serial
+    font_size = 8.5
+    while font_size > 5.5 and pdfmetrics.stringWidth(label, "Helvetica-Bold", font_size) > max_w:
+        font_size -= 0.5
+    c.setFont("Helvetica-Bold", font_size)
+    c.drawCentredString(page_w / 2, 7.0 * mm, label)
+
+    sub = (subtitle or "").strip()
+    if sub:
+        c.setFont("Helvetica", 5.6)
+        c.setFillColor(colors.grey)
+        c.drawCentredString(page_w / 2, 3.3 * mm, sub[:42])
+    c.showPage()
+    c.save()
+    return buf.getvalue(), f"codigo-barras-{safe_name(serial) or 'serie'}.pdf"
+
+
+def os_version_title(ingreso_id, version_num) -> str:
+    os_num = str(int(ingreso_id or 0)).zfill(5)
+    version = int(version_num or 1)
+    return f"OS {os_num}-{version}"
+
 def _q(sql, params=None, one=False):
     with connection.cursor() as cur:
         cur.execute(sql, params or [])
@@ -63,7 +110,25 @@ def _q(sql, params=None, one=False):
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     return (rows[0] if rows else None) if one else rows
 
-def _get_data(ingreso_id: int):
+
+def _latest_quote_row(ingreso_id: int):
+    return _q(
+        """
+        SELECT id, COALESCE(version_num, 1) AS version_num
+        FROM quotes
+        WHERE ingreso_id=%s
+        ORDER BY COALESCE(version_num, 1) DESC, id DESC
+        LIMIT 1
+        """,
+        [ingreso_id],
+        one=True,
+    )
+
+
+def _get_data(ingreso_id: int, quote_id: int | None = None):
+    if quote_id is None:
+        latest = _latest_quote_row(ingreso_id) or {}
+        quote_id = latest.get("id")
     head = _q("""
         SELECT
             t.id AS ingreso_id,
@@ -91,6 +156,7 @@ def _get_data(ingreso_id: int):
             COALESCE(b.nombre,'') AS marca,
             m.tipo_equipo as equipo,
             COALESCE(m.nombre,'') AS modelo,
+            COALESCE(q.version_num, 1) AS quote_version_num,
             q.id AS quote_id, q.estado AS quote_estado, q.moneda,
             COALESCE(q.subtotal,0) AS subtotal,
             COALESCE(q.iva_21,0) AS iva_21,
@@ -106,7 +172,7 @@ def _get_data(ingreso_id: int):
         JOIN customers c ON c.id=d.customer_id
         LEFT JOIN marcas b ON b.id=d.marca_id
         LEFT JOIN models m ON m.id=d.model_id
-        LEFT JOIN quotes q ON q.ingreso_id=t.id
+        LEFT JOIN quotes q ON q.id=%s AND q.ingreso_id=t.id
         WHERE t.id=%s
     """, [
         DEFAULT_AUTORIZADO_POR,
@@ -114,6 +180,7 @@ def _get_data(ingreso_id: int):
         DEFAULT_PLAZO_ENTREGA_TXT,
         DEFAULT_GARANTIA_TXT,
         DEFAULT_MANT_OFERTA_TXT,
+        quote_id,
         ingreso_id,
     ], one=True)
 
@@ -141,13 +208,17 @@ def _get_data(ingreso_id: int):
     except Exception:
         pass
 
-    items = _q("""
-        SELECT descripcion, qty
-        FROM quote_items qi
-        JOIN quotes q ON q.id=qi.quote_id
-        WHERE q.ingreso_id=%s
-        ORDER BY qi.id
-    """, [ingreso_id])
+    items = []
+    if quote_id is not None:
+        items = _q(
+            """
+            SELECT descripcion, qty
+            FROM quote_items
+            WHERE quote_id=%s
+            ORDER BY id
+            """,
+            [quote_id],
+        )
 
     # Accesorios normalizados -> construir texto amigable para el PDF
     accs = _q(
@@ -580,6 +651,59 @@ def _wrap_lines(text, font, size, max_width):
         lines.append(cur)
     return lines
 
+
+def _truncate_text_to_width(text, font, fsz, max_w):
+    text = str(text or "")
+    try:
+        if pdfmetrics.stringWidth(text, font, fsz) <= max_w:
+            return text
+    except Exception:
+        return text
+
+    ell = "..."
+    try:
+        ell_w = pdfmetrics.stringWidth(ell, font, fsz)
+    except Exception:
+        ell_w = 0
+    if max_w <= ell_w:
+        return ell
+
+    max_txt_w = max_w - ell_w
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        try:
+            w_mid = pdfmetrics.stringWidth(text[:mid], font, fsz)
+        except Exception:
+            w_mid = 0
+        if w_mid <= max_txt_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ell
+
+
+def _fit_text_to_width(text, font, fsz, max_w, min_fsz=7.2):
+    text = str(text or "-")
+    if max_w <= 0:
+        return text, fsz
+    try:
+        text_w = pdfmetrics.stringWidth(text, font, fsz)
+    except Exception:
+        return text, fsz
+    if text_w <= max_w:
+        return text, fsz
+
+    draw_fsz = max(min_fsz, fsz * (max_w / text_w))
+    try:
+        text_w = pdfmetrics.stringWidth(text, font, draw_fsz)
+    except Exception:
+        return text, draw_fsz
+    if text_w > max_w:
+        text = _truncate_text_to_width(text, font, draw_fsz, max_w)
+    return text, draw_fsz
+
+
 def _draw_block(c, x, y, title, value, width, font="Helvetica", fsize=9, leading=12):
     """Dibuja un tí­tulo y un bloque multilí­nea sin detallar precios."""
     c.setFont("Helvetica-Bold", 10)
@@ -622,12 +746,14 @@ def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_intern
 
     def col(ix, label, value, label_fsz=9):
         cx = col_x[ix] + 5*mm
+        max_text_w = max(8 * mm, col_ws[ix] - 7 * mm)
         c.setFont("Helvetica", label_fsz)
         c.setFillColor(colors.grey)
         c.drawString(cx, base_y, label)
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(cx, base_y - 6*mm, value or "-")
+        text, draw_fsz = _fit_text_to_width(value or "-", "Helvetica-Bold", 12, max_text_w, min_fsz=7.2)
+        c.setFont("Helvetica-Bold", draw_fsz)
+        c.drawString(cx, base_y - 6*mm, text)
 
     serial_txt = _compose_serial_internal(numero_serie, numero_interno)
     col(0, "Marca", (marca or "").upper())
@@ -642,23 +768,24 @@ def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_intern
         c.drawString(x + 42*mm, y - 28*mm, "Abiertas")
     return y - h - 8
 
-def render_quote_pdf(ingreso_id: int):
-    head, items = _get_data(ingreso_id)
+def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
+    head, items = _get_data(ingreso_id, quote_id=quote_id)
     if not head:
         return None, None
 
     # Recalcular totales desde items (evita depender de quotes.subtotal desactualizado)
     try:
-        row = _q(
-            """
-            SELECT COALESCE(SUM(qi.qty*qi.precio_u),0) AS subtotal
-            FROM quote_items qi
-            JOIN quotes q ON q.id=qi.quote_id
-            WHERE q.ingreso_id=%s
-            """,
-            [ingreso_id],
-            one=True,
-        ) or {"subtotal": 0}
+        row = {"subtotal": 0}
+        if head.get("quote_id"):
+            row = _q(
+                """
+                SELECT COALESCE(SUM(qty*precio_u),0) AS subtotal
+                FROM quote_items
+                WHERE quote_id=%s
+                """,
+                [head.get("quote_id")],
+                one=True,
+            ) or {"subtotal": 0}
         subtotal_calc = Decimal(row.get("subtotal") or 0)
         iva_21_calc = subtotal_calc * Decimal("0.21")
         total_calc = subtotal_calc + iva_21_calc
@@ -692,8 +819,7 @@ def render_quote_pdf(ingreso_id: int):
         pass
 
     cliente_display = (head.get("cliente") or "Cliente").strip()
-    os_label = f"OS {str(head['ingreso_id']).zfill(5)}"
-    title = f"{os_label} {cliente_display}".strip()
+    title = f"{os_version_title(head.get('ingreso_id'), head.get('quote_version_num'))} {cliente_display}".strip()
     filename = f"{safe_name(title)}.pdf"
 
     buf = BytesIO()
@@ -967,19 +1093,23 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     head, _items = _get_data(ingreso_id)
     if not head:
         return b"", f"Remito_{ingreso_id}.pdf"
+    rejected_budget_context = get_rejected_budget_context(ingreso_id)
+    rejected_quote = rejected_budget_context.get("rejected_quote")
+    effective_charge_neto = rejected_budget_context.get("presupuesto_rechazado_cobro_neto")
 
     # Recalculate totals from items to avoid stale quote data
     try:
-        row = _q(
-            """
-            SELECT COALESCE(SUM(qi.qty*qi.precio_u),0) AS subtotal
-            FROM quote_items qi
-            JOIN quotes q ON q.id=qi.quote_id
-            WHERE q.ingreso_id=%s
-            """,
-            [ingreso_id],
-            one=True,
-        ) or {"subtotal": 0}
+        row = {"subtotal": 0}
+        if head.get("quote_id"):
+            row = _q(
+                """
+                SELECT COALESCE(SUM(qty*precio_u),0) AS subtotal
+                FROM quote_items
+                WHERE quote_id=%s
+                """,
+                [head.get("quote_id")],
+                one=True,
+            ) or {"subtotal": 0}
         subtotal_calc = Decimal(row.get("subtotal") or 0)
         iva_21_calc = subtotal_calc * Decimal("0.21")
         total_calc = subtotal_calc + iva_21_calc
@@ -987,6 +1117,15 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     except Exception:
         # Si falla el calculo, continuamos con los valores existentes
         pass
+    if (head.get("resolucion") or "").strip().lower() == "presupuesto_rechazado" and effective_charge_neto is not None:
+        try:
+            subtotal_calc = Decimal(str(effective_charge_neto))
+            iva_21_calc = subtotal_calc * Decimal("0.21")
+            total_calc = subtotal_calc + iva_21_calc
+            head["subtotal"], head["iva_21"], head["total"] = subtotal_calc, iva_21_calc, total_calc
+        except Exception:
+            pass
+    head["presupuesto_rechazado_summary"] = rejected_quote
 
         # Ajustes de cliente/propietario para visualizacion (MGBIO y Particular)
     try:
@@ -1243,6 +1382,25 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
             pass
         paragraph_in_box(inner_x, y - obs_h, inner_w, obs_h, "Observaciones", obs_txt)
         y -= (obs_h + 2.6 * mm)
+
+        rejected_summary = head.get("presupuesto_rechazado_summary")
+        if rejected_summary:
+            try:
+                resumen_txt = (
+                    f"Neto $ {money_es(Decimal(rejected_summary.get('subtotal') or 0))}"
+                    f" | IVA 21% $ {money_es(Decimal(rejected_summary.get('iva_21') or 0))}"
+                    f" | Total $ {money_es(Decimal(rejected_summary.get('total') or 0))}"
+                )
+            except Exception:
+                resumen_txt = ""
+            if resumen_txt:
+                c.setFont("Helvetica", 6.8)
+                c.setFillColor(colors.grey)
+                c.drawString(inner_x, y, "Presupuesto rechazado:")
+                c.setFillColor(colors.black)
+                c.setFont("Helvetica-Bold", 6.8)
+                c.drawString(inner_x + 33 * mm, y, resumen_txt)
+                y -= 5.5 * mm
 
         # Firma y costo
         c.setFont("Helvetica", F_LABEL); c.setFillColor(colors.grey)

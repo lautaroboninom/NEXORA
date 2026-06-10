@@ -441,6 +441,16 @@ export const postModelo = (brandId, payloadOrNombre) => {
   /* =============== INGRESOS ================= */
   export const postNuevoIngreso = (payload) =>
     api.post("/api/ingresos/nuevo/", payload);
+  export const getIngresoRisStatus = (ingresoId) =>
+    api.get(`/api/ingresos/${ingresoId}/ris/`);
+  export const postIngresoRisEmitirBlob = (ingresoId) =>
+    getBlob(`/api/ingresos/${ingresoId}/ris/emitir/`, { method: "POST" });
+  export const getSerialBarcodeBlob = (value, params = {}) => {
+    const qs = new URLSearchParams({ value: value || "", ...(params || {}) }).toString();
+    return getBlob(`/api/barcodes/serial/?${qs}`);
+  };
+  export const getIngresoBarcodeBlob = (ingresoId) =>
+    getBlob(`/api/ingresos/${ingresoId}/barcode/`);
   export const postDerivarIngreso = (ingresoId, payload) =>
     api.post(`/api/ingresos/${ingresoId}/derivar/`, payload);
   export const getDerivacionesPorIngreso = (ingresoId) =>
@@ -575,6 +585,8 @@ export const postModelo = (brandId, payloadOrNombre) => {
   // Marcar alta (reactivar desde baja)
   export const postAltaIngreso = (ingresoId) =>
     api.post(`/api/ingresos/${ingresoId}/alta/`, {});
+  export const postIngresoConvertirPropioMg = (ingresoId, payload) =>
+    api.post(`/api/ingresos/${ingresoId}/convertir-propio-mg/`, payload || {});
   // Correcciones históricas forzadas
   export const postIngresoCorreccionHistorica = (ingresoId, payload) =>
     api.post(`/api/ingresos/${ingresoId}/correcciones-historicas/`, payload || {});
@@ -627,6 +639,11 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export const postBejermanJobRetry = (jobId) =>
     api.post(`/api/bejerman/jobs/${jobId}/retry/`, {});
+
+  export const getBejermanArticles = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/articles/${qs ? `?${qs}` : ""}`);
+  };
 
   export const postBejermanArticleMapping = (payload) =>
     api.post("/api/bejerman/article-mappings/", payload);
@@ -781,7 +798,13 @@ export const postModelo = (brandId, payloadOrNombre) => {
     api.post(`/api/catalogos/marcas/${marcaId}/tecnico/aplicar-a-modelos/`);
 
   /* =============== PRESUPUESTOS =============== */
-  export const getQuote = (ingresoId) => api.get(`/api/quotes/${ingresoId}/`);
+  export const getQuote = (ingresoId, params = {}) => {
+    const qs = new URLSearchParams();
+    Object.entries(params || {}).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+    });
+    return api.get(`/api/quotes/${ingresoId}/${qs.toString() ? `?${qs.toString()}` : ""}`);
+  };
 
   export const postQuoteItem = (ingresoId, payload) =>
     api.post(`/api/quotes/${ingresoId}/items/`, payload);
@@ -800,6 +823,12 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export const postQuoteAprobar = (ingresoId) =>
     api.post(`/api/quotes/${ingresoId}/aprobar/`);
+
+  export const postQuoteRechazar = (ingresoId, payload = {}) =>
+    api.post(`/api/quotes/${ingresoId}/rechazar/`, payload);
+
+  export const postQuoteNuevaVersion = (ingresoId) =>
+    api.post(`/api/quotes/${ingresoId}/versiones/`);
 
   export const postQuoteNoAplica = (ingresoId) =>
     api.post(`/api/quotes/${ingresoId}/no-aplica/`);

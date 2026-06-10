@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..activity_audit import classify_read_path
+from ..rejected_budget import has_rejected_budget_charge_schema
 from .helpers import (
     WORKDAY_END_HOUR,
     WORKDAY_START_HOUR,
@@ -1759,6 +1760,7 @@ class MetricasFinanzasView(APIView):
             "FROM ingreso_events WHERE a_estado='liberado' GROUP BY ingreso_id) ev "
             "ON ev.ingreso_id=i.id\n"
         )
+        financial_sql = _rejected_budget_financial_sql_fragments()
         quote_join = (
             "LEFT JOIN (SELECT ingreso_id, MAX(id) AS quote_id "
             "FROM quotes WHERE estado='aprobado' GROUP BY ingreso_id) qa "
@@ -1766,7 +1768,7 @@ class MetricasFinanzasView(APIView):
             "LEFT JOIN (SELECT ingreso_id, MAX(id) AS quote_id "
             "FROM quotes GROUP BY ingreso_id) ql "
             "ON ql.ingreso_id=i.id\n"
-            "LEFT JOIN quotes q ON q.id=COALESCE(qa.quote_id, ql.quote_id)\n"
+            f"LEFT JOIN quotes q ON q.id={financial_sql['selected_quote_expr']}\n"
         )
         items_join = (
             "LEFT JOIN ("
@@ -1786,10 +1788,10 @@ class MetricasFinanzasView(APIView):
         total_rows = q((
             f"SELECT {ym_ev} AS ym,\n"
             "       COUNT(*) AS liberados,\n"
-            "       ROUND(SUM(COALESCE(qs.subtotal,0)),2) AS cobro,\n"
-            "       ROUND(SUM(COALESCE(qs.mano_obra,0)),2) AS monto_mo,\n"
-            "       ROUND(SUM(CASE WHEN i.presupuesto_estado='no_aplica' THEN COALESCE(qs.costo_repuestos,0) ELSE COALESCE(qs.repuestos,0) END),2) AS monto_rep,\n"
-            "       ROUND(SUM(COALESCE(qs.costo_repuestos,0)),2) AS costos_repuestos\n"
+            f"       ROUND(SUM({financial_sql['cobro_expr']}),2) AS cobro,\n"
+            f"       ROUND(SUM({financial_sql['mano_obra_expr']}),2) AS monto_mo,\n"
+            f"       ROUND(SUM({financial_sql['repuestos_expr']}),2) AS monto_rep,\n"
+            f"       ROUND(SUM({financial_sql['costos_expr']}),2) AS costos_repuestos\n"
             "FROM ingresos i\n"
             f"{quote_join}"
             f"{items_join}"
@@ -1923,6 +1925,7 @@ class MetricasFinanzasLiberadosView(APIView):
             params.append(tipo)
             wh.append(" UPPER(TRIM(m.tipo_equipo)) = UPPER(TRIM(%s)) ")
         where_sql = (" AND " + " AND ".join(wh)) if wh else ""
+        financial_sql = _rejected_budget_financial_sql_fragments()
 
         rows = q((
             "SELECT\n"
@@ -1941,11 +1944,11 @@ class MetricasFinanzasLiberadosView(APIView):
             "  COALESCE(d.numero_interno,'') AS numero_interno,\n"
             "  q.id AS quote_id,\n"
             "  q.estado AS quote_estado,\n"
-            "  COALESCE(qs.subtotal, 0) AS ingresos_sin_iva,\n"
-            "  COALESCE(qs.mano_obra, 0) AS mano_obra,\n"
-            "  CASE WHEN i.presupuesto_estado='no_aplica' THEN COALESCE(qs.costo_repuestos,0) ELSE COALESCE(qs.repuestos,0) END AS repuestos,\n"
-            "  COALESCE(qs.costo_repuestos, 0) AS costo_repuestos,\n"
-            "  ROUND(COALESCE(qs.subtotal,0) - COALESCE(qs.costo_repuestos,0), 2) AS margen\n"
+            f"  {financial_sql['cobro_expr']} AS ingresos_sin_iva,\n"
+            f"  {financial_sql['mano_obra_expr']} AS mano_obra,\n"
+            f"  {financial_sql['repuestos_expr']} AS repuestos,\n"
+            f"  {financial_sql['costos_expr']} AS costo_repuestos,\n"
+            f"  ROUND({financial_sql['cobro_expr']} - {financial_sql['costos_expr']}, 2) AS margen\n"
             "FROM ingresos i\n"
             "JOIN devices d ON d.id=i.device_id\n"
             "JOIN customers c ON c.id=d.customer_id\n"
@@ -1958,7 +1961,7 @@ class MetricasFinanzasLiberadosView(APIView):
             "  ON qa.ingreso_id=i.id\n"
             "LEFT JOIN (SELECT ingreso_id, MAX(id) AS quote_id FROM quotes GROUP BY ingreso_id) ql\n"
             "  ON ql.ingreso_id=i.id\n"
-            "LEFT JOIN quotes q ON q.id=COALESCE(qa.quote_id, ql.quote_id)\n"
+            f"LEFT JOIN quotes q ON q.id={financial_sql['selected_quote_expr']}\n"
             "LEFT JOIN (\n"
             "  SELECT quote_id,\n"
             "         ROUND(SUM(qi.qty*qi.precio_u),2) AS subtotal,\n"
@@ -2289,7 +2292,7 @@ class MetricasResumenView(APIView):
         presup_rechazados = q((
             "SELECT COUNT(*) AS c FROM quotes q JOIN ingresos i ON i.id=q.ingreso_id\n"
             f"{join_dm}\n"
-            "WHERE q.estado='rechazado' AND q.fecha_aprobado BETWEEN %s AND %s"
+            "WHERE q.estado='rechazado' AND q.fecha_rechazado BETWEEN %s AND %s"
             f"{where_i}\n"
         ), [since, until, *where_params], one=True) or {"c": 0}
 
@@ -2446,3 +2449,48 @@ class MetricasResumenView(APIView):
                 "t_devuelto_a_entregado_dias": deriv_t_dev_a_ent_dias,
             },
         })
+def _rejected_budget_financial_sql_fragments():
+    if not has_rejected_budget_charge_schema():
+        return {
+            "selected_quote_expr": "COALESCE(qa.quote_id, ql.quote_id)",
+            "cobro_expr": "COALESCE(qs.subtotal,0)",
+            "mano_obra_expr": "COALESCE(qs.mano_obra,0)",
+            "repuestos_expr": "CASE WHEN i.presupuesto_estado='no_aplica' THEN COALESCE(qs.costo_repuestos,0) ELSE COALESCE(qs.repuestos,0) END",
+            "costos_expr": "COALESCE(qs.costo_repuestos,0)",
+        }
+    return {
+        "selected_quote_expr": (
+            "CASE "
+            "WHEN COALESCE(i.resolucion,'')='presupuesto_rechazado' "
+            "THEN COALESCE(i.presupuesto_rechazado_quote_id, ql.quote_id) "
+            "ELSE COALESCE(qa.quote_id, ql.quote_id) "
+            "END"
+        ),
+        "cobro_expr": (
+            "CASE "
+            "WHEN COALESCE(i.resolucion,'')='presupuesto_rechazado' "
+            "THEN COALESCE(i.presupuesto_rechazado_cobro_neto,0) "
+            "ELSE COALESCE(qs.subtotal,0) "
+            "END"
+        ),
+        "mano_obra_expr": (
+            "CASE "
+            "WHEN COALESCE(i.resolucion,'')='presupuesto_rechazado' "
+            "THEN COALESCE(i.presupuesto_rechazado_cobro_neto,0) "
+            "ELSE COALESCE(qs.mano_obra,0) "
+            "END"
+        ),
+        "repuestos_expr": (
+            "CASE "
+            "WHEN COALESCE(i.resolucion,'')='presupuesto_rechazado' THEN 0 "
+            "WHEN i.presupuesto_estado='no_aplica' THEN COALESCE(qs.costo_repuestos,0) "
+            "ELSE COALESCE(qs.repuestos,0) "
+            "END"
+        ),
+        "costos_expr": (
+            "CASE "
+            "WHEN COALESCE(i.resolucion,'')='presupuesto_rechazado' THEN 0 "
+            "ELSE COALESCE(qs.costo_repuestos,0) "
+            "END"
+        ),
+    }

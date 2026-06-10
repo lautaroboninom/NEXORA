@@ -2,10 +2,12 @@ import hashlib
 import hmac
 import ipaddress
 import json
+from urllib.parse import quote
 
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.db import connection, transaction
-from django.http import HttpResponse
+from django.http import FileResponse, HttpResponse
 from django.utils import timezone
 from rest_framework import permissions
 from rest_framework.renderers import BaseRenderer, JSONRenderer
@@ -17,6 +19,20 @@ from service.pdf import render_quote_pdf
 from service.ip_utils import get_client_ip
 
 from .helpers import _fetchall_dicts, _motivo_is_cotizacion_equipo, exec_void, money, os_label, q
+from .ingreso_tests_views import (
+    _default_instrumentos_for_protocol,
+    _extract_schema_snapshot,
+    _extract_values_from_payload,
+    _has_ingreso_tests_table,
+    _load_ingreso_context,
+    _load_test_row,
+    _merge_values,
+    _protocol_from_schema_snapshot,
+    _protocol_sections_with_values,
+    _resolve_protocol_for_row,
+    _safe_json,
+    _trim_text,
+)
 from .quotes_views import _ingresos_has_permite_reparacion_col, _send_stock_min_alerts
 
 
@@ -102,24 +118,29 @@ def _unauthorized():
 
 def _audit_portal_call(request, event_name, metadata=None, status_code=200):
     try:
-        with connection.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO audit_log (ts, user_id, role, method, path, ip, user_agent, status_code, body)
-                VALUES (now(), %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                """,
-                [
-                    None,
-                    "portal_integration",
-                    request.method,
-                    request.path,
-                    get_client_ip(request.META),
-                    (request.META.get("HTTP_USER_AGENT", "") or "")[:512],
-                    status_code,
-                    json.dumps({"event": event_name, **(metadata or {})}),
-                ],
-            )
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO audit_log (ts, user_id, role, method, path, ip, user_agent, status_code, body)
+                    VALUES (now(), %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    [
+                        None,
+                        "portal_integration",
+                        request.method,
+                        request.path,
+                        get_client_ip(request.META),
+                        (request.META.get("HTTP_USER_AGENT", "") or "")[:512],
+                        status_code,
+                        json.dumps({"event": event_name, **(metadata or {})}),
+                    ],
+                )
     except Exception:
+        try:
+            transaction.set_rollback(False)
+        except Exception:
+            pass
         pass
 
 
@@ -180,6 +201,141 @@ def _equipment_label(row):
     return " ".join(part for part in parts if part) or "Equipo sin modelo"
 
 
+def _table_exists(table_name):
+    try:
+        with connection.cursor() as cur:
+            if connection.vendor == "postgresql":
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM information_schema.tables
+                     WHERE table_name = %s
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """,
+                    [table_name],
+                )
+                return cur.fetchone() is not None
+            if connection.vendor == "sqlite":
+                cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=%s LIMIT 1", [table_name])
+                return cur.fetchone() is not None
+            cur.execute(
+                """
+                SELECT 1
+                  FROM information_schema.tables
+                 WHERE table_name = %s
+                 LIMIT 1
+                """,
+                [table_name],
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _article_variant_norm_expr():
+    raw = "COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,''), '')"
+    if connection.vendor == "postgresql":
+        return f"LOWER(TRIM(REGEXP_REPLACE({raw}, '[^[:alnum:]]+', ' ', 'g')))"
+    return f"LOWER(TRIM({raw}))"
+
+
+def _bejerman_article_mapping_sql():
+    if not _table_exists("bejerman_article_mappings"):
+        return (
+            "'' AS bejerman_article_code,\n              '' AS bejerman_article_description",
+            "",
+        )
+    return (
+        "COALESCE(bam.article_code,'') AS bejerman_article_code,\n"
+        "              COALESCE(bam.article_description,'') AS bejerman_article_description",
+        f"""
+            LEFT JOIN bejerman_article_mappings bam
+              ON bam.model_id = m.id
+             AND bam.variante_norm = {_article_variant_norm_expr()}
+        """,
+    )
+
+
+def _test_references(row, schema_snapshot):
+    references_snapshot = _safe_json((row or {}).get("references_snapshot"), [])
+    if not isinstance(references_snapshot, list):
+        references_snapshot = []
+    if not references_snapshot and schema_snapshot and isinstance(schema_snapshot.get("references"), list):
+        references_snapshot = schema_snapshot.get("references") or []
+    return references_snapshot
+
+
+def _load_test_summary(ingreso_id):
+    if not ingreso_id or not _has_ingreso_tests_table():
+        return None
+
+    row = _load_test_row(ingreso_id)
+    if not row:
+        return None
+
+    ingreso = _load_ingreso_context(ingreso_id) or {}
+    protocol_live = _resolve_protocol_for_row(ingreso, row)
+    schema_snapshot = _extract_schema_snapshot(row)
+    protocol = _protocol_from_schema_snapshot(schema_snapshot, protocol_live)
+    references_snapshot = _test_references(row, schema_snapshot)
+
+    return {
+        "ingresoId": str(ingreso_id),
+        "result": row.get("resultado_global") or "pendiente",
+        "templateKey": row.get("template_key") or schema_snapshot.get("template_key") or (protocol or {}).get("template_key") or "",
+        "templateVersion": row.get("template_version") or schema_snapshot.get("template_version") or (protocol or {}).get("template_version") or "",
+        "protocolLabel": (protocol or {}).get("display_name") or row.get("tipo_equipo_snapshot") or "",
+        "equipmentType": row.get("tipo_equipo_snapshot") or ingreso.get("tipo_equipo") or "",
+        "executedAt": _iso(row.get("fecha_ejecucion")),
+        "updatedAt": _iso(row.get("updated_at")),
+        "conclusion": row.get("conclusion") or "",
+        "instruments": row.get("instrumentos") or _default_instrumentos_for_protocol(protocol or {}),
+        "signedBy": row.get("firmado_por") or row.get("tecnico_nombre") or "",
+        "pdfAvailable": bool(protocol and references_snapshot),
+    }
+
+
+def _load_media_items(ingreso_id):
+    if not ingreso_id or not _table_exists("ingreso_media"):
+        return []
+
+    rows = q(
+        """
+        SELECT
+          id,
+          ingreso_id,
+          comentario,
+          mime_type,
+          size_bytes,
+          width,
+          height,
+          original_name,
+          created_at,
+          updated_at
+        FROM ingreso_media
+        WHERE ingreso_id = %s
+        ORDER BY created_at DESC, id DESC
+        """,
+        [ingreso_id],
+    ) or []
+    return [
+        {
+            "id": str(row.get("id")),
+            "ingresoId": str(row.get("ingreso_id") or ingreso_id),
+            "comment": row.get("comentario") or "",
+            "mimeType": row.get("mime_type") or "application/octet-stream",
+            "sizeBytes": row.get("size_bytes") or 0,
+            "width": row.get("width"),
+            "height": row.get("height"),
+            "originalName": row.get("original_name") or f"adjunto-{row.get('id')}",
+            "createdAt": _iso(row.get("created_at")),
+            "updatedAt": _iso(row.get("updated_at")),
+        }
+        for row in rows
+    ]
+
+
 def _number(value):
     if value is None:
         return 0.0
@@ -217,7 +373,7 @@ def _budget_base_payload(row):
         "status": status,
         "actionable": status == "Presupuestado",
         "issueDate": _iso(row.get("fecha_emitido")),
-        "decisionDate": _iso(row.get("fecha_aprobado")),
+        "decisionDate": _iso(row.get("fecha_rechazado") or row.get("fecha_aprobado")),
         "currency": _clean(row.get("moneda")) or "ARS",
         "subtotal": _number(row.get("quote_subtotal")),
         "iva21": _number(row.get("quote_iva_21")),
@@ -303,6 +459,13 @@ def _base_ingreso_payload(row):
         "locationName": _clean(row.get("ubicacion_nombre")),
         "budgetIssuedAt": _iso(row.get("presupuesto_fecha_emision")),
         "nexoraUrlPath": f"/ingresos/{ingreso_id}" if ingreso_id else "",
+        "serviceResolution": _clean(row.get("resolucion")),
+        "resolucion": _clean(row.get("resolucion")),
+        "technicalReport": _load_test_summary(ingreso_id),
+        "mediaItems": _load_media_items(ingreso_id),
+        "bejermanArticleCode": _clean(row.get("bejerman_article_code")),
+        "bejermanArticleName": _clean(row.get("bejerman_article_description")),
+        "bejermanArticleDescription": _clean(row.get("bejerman_article_description")),
     }
 
 
@@ -328,6 +491,8 @@ def _sla_for_row(row):
 def _work_queue_payload(row):
     base = _base_ingreso_payload(row)
     assigned_user_id = row.get("asignado_a")
+    estado = _clean(row.get("estado")).lower()
+    released_at = row.get("fecha_liberacion")
     return {
         "ingresoId": base["id"],
         "nexoraIngresoId": base["nexoraIngresoId"],
@@ -337,6 +502,7 @@ def _work_queue_payload(row):
         "equipoId": base["equipoId"],
         "equipoModel": base["equipoModel"],
         "equipoSerial": base["equipoSerial"],
+        "equipoInternalNumber": base["equipoInternalNumber"],
         "ingresoStatus": base["status"],
         "receivedAt": base["receivedAt"],
         "updatedAt": base["updatedAt"],
@@ -349,6 +515,13 @@ def _work_queue_payload(row):
         "checklistDone": 0,
         "notesCount": 0,
         "nexoraUrlPath": base["nexoraUrlPath"],
+        "serviceResolution": base["serviceResolution"],
+        "resolucion": base["resolucion"],
+        "releasedForDelivery": estado in {"liberado", "vendido_pendiente_entrega"} or released_at is not None,
+        "releasedAt": _iso(released_at),
+        "bejermanArticleCode": base["bejermanArticleCode"],
+        "bejermanArticleName": base["bejermanArticleName"],
+        "bejermanArticleDescription": base["bejermanArticleDescription"],
     }
 
 
@@ -401,6 +574,7 @@ def _client_general_rows(customer_id, ingreso_id=None):
     if ingreso_id is not None:
         filters.insert(1, ingreso_id)
         ingreso_clause = "AND t.id = %s"
+    article_select_sql, article_join_sql = _bejerman_article_mapping_sql()
 
     with connection.cursor() as cur:
         cur.execute(
@@ -409,6 +583,7 @@ def _client_general_rows(customer_id, ingreso_id=None):
               t.id,
               t.device_id,
               t.estado,
+              t.resolucion,
               t.presupuesto_estado,
               t.fecha_ingreso,
               t.fecha_creacion,
@@ -427,16 +602,18 @@ def _client_general_rows(customer_id, ingreso_id=None):
               COALESCE(b.nombre,'') AS marca,
               COALESCE(m.nombre,'') AS modelo,
               COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+              {article_select_sql},
               COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante
             FROM ingresos t
             JOIN devices d ON d.id = t.device_id
             JOIN customers c ON c.id = d.customer_id
             LEFT JOIN marcas b ON b.id = d.marca_id
             LEFT JOIN models m ON m.id = d.model_id
+            {article_join_sql}
             LEFT JOIN quotes q ON q.id = (
               SELECT q2.id FROM quotes q2
               WHERE q2.ingreso_id = t.id
-              ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+              ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
               LIMIT 1
             )
             LEFT JOIN locations loc ON loc.id = t.ubicacion_id
@@ -449,6 +626,175 @@ def _client_general_rows(customer_id, ingreso_id=None):
             filters,
         )
         return _fetchall_dicts(cur)
+
+
+def _ingreso_summary_row(ingreso_id, customer_id=None):
+    params = [ingreso_id]
+    customer_clause = ""
+    if customer_id is not None:
+        params.append(customer_id)
+        customer_clause = "AND c.id = %s"
+    article_select_sql, article_join_sql = _bejerman_article_mapping_sql()
+
+    with connection.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              t.id,
+              t.device_id,
+              t.estado,
+              t.resolucion,
+              t.presupuesto_estado,
+              t.fecha_ingreso,
+              t.fecha_creacion,
+              t.fecha_servicio,
+              GREATEST(
+                COALESCE(t.fecha_servicio, t.fecha_ingreso, t.fecha_creacion),
+                COALESCE(q.fecha_emitido, t.fecha_ingreso, t.fecha_creacion)
+              ) AS updated_at,
+              q.fecha_emitido AS presupuesto_fecha_emision,
+              q.estado AS quote_estado,
+              COALESCE(loc.nombre,'') AS ubicacion_nombre,
+              c.id AS customer_id,
+              c.razon_social,
+              d.numero_serie,
+              COALESCE(d.numero_interno,'') AS numero_interno,
+              COALESCE(b.nombre,'') AS marca,
+              COALESCE(m.nombre,'') AS modelo,
+              COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+              {article_select_sql},
+              COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante
+            FROM ingresos t
+            JOIN devices d ON d.id = t.device_id
+            JOIN customers c ON c.id = d.customer_id
+            LEFT JOIN marcas b ON b.id = d.marca_id
+            LEFT JOIN models m ON m.id = d.model_id
+            {article_join_sql}
+            LEFT JOIN quotes q ON q.id = (
+              SELECT q2.id FROM quotes q2
+              WHERE q2.ingreso_id = t.id
+              ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
+              LIMIT 1
+            )
+            LEFT JOIN locations loc ON loc.id = t.ubicacion_id
+            WHERE t.id = %s
+              {customer_clause}
+            """,
+            params,
+        )
+        rows = _fetchall_dicts(cur)
+    return rows[0] if rows else None
+
+
+def _load_media_row(ingreso_id, media_id, customer_id=None):
+    if not _table_exists("ingreso_media"):
+        return None
+
+    params = [ingreso_id, media_id]
+    customer_clause = ""
+    if customer_id is not None:
+        params.append(customer_id)
+        customer_clause = "AND c.id = %s"
+
+    return q(
+        f"""
+        SELECT
+          im.id,
+          im.ingreso_id,
+          im.storage_path,
+          im.thumbnail_path,
+          im.original_name,
+          im.mime_type,
+          im.size_bytes
+        FROM ingreso_media im
+        JOIN ingresos t ON t.id = im.ingreso_id
+        JOIN devices d ON d.id = t.device_id
+        JOIN customers c ON c.id = d.customer_id
+        WHERE im.ingreso_id = %s
+          AND im.id = %s
+          {customer_clause}
+        """,
+        params,
+        one=True,
+    )
+
+
+def _render_test_pdf_response(ingreso_id, customer_id=None):
+    summary_row = _ingreso_summary_row(ingreso_id, customer_id=customer_id)
+    if not summary_row:
+        return Response({"detail": "Not found"}, status=404)
+    if not _has_ingreso_tests_table():
+        return Response({"detail": "Tabla ingreso_tests inexistente"}, status=503)
+
+    row = _load_test_row(ingreso_id)
+    if not row:
+        return Response({"detail": "No existe test guardado para este ingreso"}, status=404)
+
+    ingreso = _load_ingreso_context(ingreso_id) or {}
+    protocol_live = _resolve_protocol_for_row(ingreso, row)
+    schema_snapshot = _extract_schema_snapshot(row)
+    protocol = _protocol_from_schema_snapshot(schema_snapshot, protocol_live)
+    if protocol is None:
+        return Response({"detail": "No se pudo resolver protocolo de test"}, status=409)
+
+    references_snapshot = _test_references(row, schema_snapshot)
+    if not references_snapshot:
+        return Response({"detail": "No hay referencias congeladas para este test"}, status=409)
+
+    values = _merge_values(_extract_values_from_payload(row.get("payload")), None, protocol)
+    resultado_global = _trim_text(row.get("resultado_global"), 50).lower()
+    report = {
+        "ingreso_id": ingreso_id,
+        "os": ingreso_id,
+        "fecha_ejecucion": row.get("fecha_ejecucion") or timezone.now(),
+        "cliente": ingreso.get("cliente") or summary_row.get("razon_social") or "",
+        "tipo_equipo": ingreso.get("tipo_equipo") or summary_row.get("tipo_equipo") or "",
+        "marca": ingreso.get("marca") or summary_row.get("marca") or "",
+        "modelo": ingreso.get("modelo") or summary_row.get("modelo") or "",
+        "numero_serie": ingreso.get("numero_serie") or summary_row.get("numero_serie") or "",
+        "numero_interno": ingreso.get("numero_interno") or summary_row.get("numero_interno") or "",
+        "template_key": row.get("template_key") or schema_snapshot.get("template_key") or protocol.get("template_key") or "",
+        "template_version": row.get("template_version") or schema_snapshot.get("template_version") or protocol.get("template_version") or "",
+        "resultado_global": resultado_global or "pendiente",
+        "conclusion": row.get("conclusion") or "",
+        "instrumentos": row.get("instrumentos") or _default_instrumentos_for_protocol(protocol),
+        "firmado_por": row.get("firmado_por") or "",
+        "references": references_snapshot,
+        "sections": _protocol_sections_with_values(protocol, values),
+    }
+    from ..test_pdf import render_ingreso_test_pdf
+
+    pdf_bytes, fname = render_ingreso_test_pdf(report, printed_by="Portal SEPID")
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = f'inline; filename="{fname}"'
+    return response
+
+
+def _media_file_response(ingreso_id, media_id, kind, customer_id=None):
+    row = _load_media_row(ingreso_id, media_id, customer_id=customer_id)
+    if not row:
+        return Response({"detail": "Adjunto no encontrado"}, status=404)
+
+    storage_path = row.get("thumbnail_path") if kind == "miniatura" else row.get("storage_path")
+    if not storage_path:
+        return Response({"detail": "Archivo no encontrado"}, status=404)
+
+    try:
+        file_obj = default_storage.open(storage_path, "rb")
+    except FileNotFoundError:
+        return Response({"detail": "Archivo no disponible"}, status=410)
+    except Exception:
+        return Response({"detail": "No se pudo abrir el archivo"}, status=500)
+
+    content_type = "image/jpeg" if kind == "miniatura" else (row.get("mime_type") or "application/octet-stream")
+    response = FileResponse(file_obj, content_type=content_type)
+    size_bytes = row.get("size_bytes")
+    if size_bytes and kind != "miniatura":
+        response["Content-Length"] = str(size_bytes)
+    filename = row.get("original_name") or f"ingreso-{ingreso_id}-adjunto-{media_id}"
+    response["Content-Disposition"] = f"{'inline' if kind == 'miniatura' else 'inline'}; filename*=UTF-8''{quote(str(filename))}"
+    response["Cache-Control"] = "private, max-age=86400"
+    return response
 
 
 def _budget_rows(customer_id, ingreso_id=None):
@@ -481,6 +827,7 @@ def _budget_rows(customer_id, ingreso_id=None):
               COALESCE(q.total, 0) AS quote_total,
               q.fecha_emitido,
               q.fecha_aprobado,
+              q.fecha_rechazado,
               COALESCE(q.autorizado_por, '') AS autorizado_por,
               COALESCE(q.forma_pago, '') AS forma_pago,
               COALESCE(q.plazo_entrega_txt, '') AS plazo_entrega_txt,
@@ -500,7 +847,7 @@ def _budget_rows(customer_id, ingreso_id=None):
             JOIN quotes q ON q.id = (
               SELECT q2.id FROM quotes q2
               WHERE q2.ingreso_id = t.id
-              ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+              ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
               LIMIT 1
             )
             LEFT JOIN marcas b ON b.id = d.marca_id
@@ -544,6 +891,7 @@ def _all_budget_rows():
               COALESCE(q.total, 0) AS quote_total,
               q.fecha_emitido,
               q.fecha_aprobado,
+              q.fecha_rechazado,
               COALESCE(q.autorizado_por, '') AS autorizado_por,
               COALESCE(q.forma_pago, '') AS forma_pago,
               COALESCE(q.plazo_entrega_txt, '') AS plazo_entrega_txt,
@@ -563,7 +911,7 @@ def _all_budget_rows():
             JOIN quotes q ON q.id = (
               SELECT q2.id FROM quotes q2
               WHERE q2.ingreso_id = t.id
-              ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+              ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
               LIMIT 1
             )
             LEFT JOIN marcas b ON b.id = d.marca_id
@@ -619,6 +967,70 @@ class PortalClienteIngresoSummaryView(PortalIntegrationBaseView):
         return Response(payload)
 
 
+class PortalInternalIngresoSummaryView(PortalIntegrationBaseView):
+    def get(self, request, ingreso_id):
+        unauthorized = self.authorize(request)
+        if unauthorized:
+            return unauthorized
+
+        row = _ingreso_summary_row(ingreso_id)
+        if not row:
+            _audit_portal_call(
+                request,
+                "portal_internal_ingreso_summary_not_found",
+                {"ingreso_id": ingreso_id},
+                status_code=404,
+            )
+            return Response({"detail": "Not found"}, status=404)
+
+        payload = {
+            "generatedAt": _iso(timezone.now()),
+            "item": _base_ingreso_payload(row),
+        }
+        _audit_portal_call(request, "portal_internal_ingreso_summary", {"ingreso_id": ingreso_id})
+        return Response(payload)
+
+
+class PortalClienteIngresoTestPdfView(PortalIntegrationBaseView):
+    renderer_classes = [PortalPdfRenderer, JSONRenderer]
+
+    def get(self, request, customer_id, ingreso_id):
+        unauthorized = self.authorize(request)
+        if unauthorized:
+            return unauthorized
+        return _render_test_pdf_response(ingreso_id, customer_id=customer_id)
+
+
+class PortalInternalIngresoTestPdfView(PortalIntegrationBaseView):
+    renderer_classes = [PortalPdfRenderer, JSONRenderer]
+
+    def get(self, request, ingreso_id):
+        unauthorized = self.authorize(request)
+        if unauthorized:
+            return unauthorized
+        return _render_test_pdf_response(ingreso_id)
+
+
+class PortalClienteIngresoMediaFileView(PortalIntegrationBaseView):
+    def get(self, request, customer_id, ingreso_id, media_id, kind):
+        unauthorized = self.authorize(request)
+        if unauthorized:
+            return unauthorized
+        if kind not in {"archivo", "miniatura"}:
+            return Response({"detail": "Tipo de archivo invalido"}, status=400)
+        return _media_file_response(ingreso_id, media_id, kind, customer_id=customer_id)
+
+
+class PortalInternalIngresoMediaFileView(PortalIntegrationBaseView):
+    def get(self, request, ingreso_id, media_id, kind):
+        unauthorized = self.authorize(request)
+        if unauthorized:
+            return unauthorized
+        if kind not in {"archivo", "miniatura"}:
+            return Response({"detail": "Tipo de archivo invalido"}, status=400)
+        return _media_file_response(ingreso_id, media_id, kind)
+
+
 def _jefe_user_ids():
     rows = q(
         """
@@ -665,17 +1077,22 @@ def _notify_budget_decision(row, decision, actor, reason=""):
     )
 
 
-def _save_budget_pdf_copy(ingreso_id):
+def _save_budget_pdf_copy(ingreso_id, quote_id=None):
     try:
-        fname, pdf = render_quote_pdf(ingreso_id)
-        save_dir = getattr(settings, "QUOTES_SAVE_DIR", None)
-        if save_dir and pdf:
-            import os
+        with transaction.atomic():
+            fname, pdf = render_quote_pdf(ingreso_id, quote_id=quote_id)
+            save_dir = getattr(settings, "QUOTES_SAVE_DIR", None)
+            if save_dir and pdf:
+                import os
 
-            os.makedirs(save_dir, exist_ok=True)
-            with open(os.path.join(save_dir, fname), "wb") as fh:
-                fh.write(pdf)
+                os.makedirs(save_dir, exist_ok=True)
+                with open(os.path.join(save_dir, fname), "wb") as fh:
+                    fh.write(pdf)
     except Exception:
+        try:
+            transaction.set_rollback(False)
+        except Exception:
+            pass
         pass
 
 
@@ -796,12 +1213,16 @@ def _approve_budget_from_portal(row):
         try:
             _send_stock_min_alerts(alert_items)
         except Exception:
+            try:
+                transaction.set_rollback(False)
+            except Exception:
+                pass
             pass
-    _save_budget_pdf_copy(ingreso_id)
+    _save_budget_pdf_copy(ingreso_id, quote_id=qid)
     return True, ""
 
 
-def _reject_budget_from_portal(row):
+def _reject_budget_from_portal(row, reason=""):
     ingreso_id = row.get("id")
     qid = row.get("quote_id")
     with transaction.atomic():
@@ -812,10 +1233,11 @@ def _reject_budget_from_portal(row):
             """
             UPDATE quotes
                SET estado='rechazado',
-                   fecha_aprobado=now()
+                   fecha_rechazado=now(),
+                   rechazo_comentario=%s
              WHERE id=%s
             """,
-            [qid],
+            [reason or None, qid],
         )
         exec_void("UPDATE ingresos SET presupuesto_estado='rechazado' WHERE id=%s", [ingreso_id])
     return True
@@ -882,7 +1304,7 @@ class PortalClientePresupuestoPdfView(PortalIntegrationBaseView):
             )
             return Response({"detail": "Not found"}, status=404)
 
-        fname, pdf = render_quote_pdf(ingreso_id)
+        fname, pdf = render_quote_pdf(ingreso_id, quote_id=row.get("quote_id"))
         if not pdf:
             return Response({"detail": "Not found"}, status=404)
         _audit_portal_call(request, "portal_client_budget_pdf", {"customer_id": customer_id, "ingreso_id": ingreso_id})
@@ -924,7 +1346,7 @@ class PortalClientePresupuestoDecisionView(PortalIntegrationBaseView):
                 return Response({"detail": "Reason required"}, status=400)
             if len(reason) > 1000:
                 return Response({"detail": "Reason too long"}, status=400)
-            if not _reject_budget_from_portal(row):
+            if not _reject_budget_from_portal(row, reason=reason):
                 return Response({"detail": "Budget already decided"}, status=409)
         else:
             return Response({"detail": "Invalid decision"}, status=400)
@@ -995,10 +1417,18 @@ class PortalInternalPresupuestosView(PortalIntegrationBaseView):
 
 
 def _work_where(request):
+    status_candidates = _state_candidates(request.GET.get("status"))
+    includes_released = any(
+        candidate in {"liberado", "vendido_pendiente_entrega"}
+        for candidate in status_candidates
+    )
     clauses = [
         "LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)",
-        "t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')",
     ]
+    if includes_released:
+        clauses.append("t.estado NOT IN ('entregado','alquilado','baja','vendido_entregado')")
+    else:
+        clauses.append("t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')")
     params = [TALLER_LOCATION]
 
     customer_id = _clean(request.GET.get("customer_id") or request.GET.get("companyId"))
@@ -1014,7 +1444,6 @@ def _work_where(request):
             clauses.append("t.asignado_a = %s")
             params.append(int(assigned))
 
-    status_candidates = _state_candidates(request.GET.get("status"))
     if status_candidates:
         clauses.append("LOWER(t.estado::text) = ANY(%s)")
         params.append(status_candidates)
@@ -1044,6 +1473,7 @@ def _work_queue_select(where_sql, params, limit=None, offset=None):
     if limit is not None and offset is not None:
         pagination_sql = "LIMIT %s OFFSET %s"
         pagination_params = [limit, offset]
+    article_select_sql, article_join_sql = _bejerman_article_mapping_sql()
 
     with connection.cursor() as cur:
         cur.execute(
@@ -1052,6 +1482,7 @@ def _work_queue_select(where_sql, params, limit=None, offset=None):
               t.id,
               t.device_id,
               t.estado,
+              t.resolucion,
               t.presupuesto_estado,
               t.motivo,
               t.fecha_ingreso,
@@ -1070,11 +1501,13 @@ def _work_queue_select(where_sql, params, limit=None, offset=None):
               COALESCE(b.nombre,'') AS marca,
               COALESCE(m.nombre,'') AS modelo,
               COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+              {article_select_sql},
               COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
               t.asignado_a,
               COALESCE(u.nombre,'') AS asignado_a_nombre,
               COALESCE(u.nombre,'') AS tecnico_nombre,
               COALESCE(loc.nombre,'') AS ubicacion_nombre,
+              ev.fecha_liberacion,
               GREATEST(0, (CURRENT_DATE - CAST(COALESCE(t.fecha_ingreso, t.fecha_creacion) AS DATE)))::int AS dias_espera,
               CASE WHEN ed.estado = 'devuelto' THEN true ELSE false END AS derivado_devuelto
             FROM ingresos t
@@ -1082,14 +1515,21 @@ def _work_queue_select(where_sql, params, limit=None, offset=None):
             JOIN customers c ON c.id = d.customer_id
             LEFT JOIN marcas b ON b.id = d.marca_id
             LEFT JOIN models m ON m.id = d.model_id
+            {article_join_sql}
             LEFT JOIN users u ON u.id = t.asignado_a
             LEFT JOIN quotes q ON q.id = (
               SELECT q2.id FROM quotes q2
               WHERE q2.ingreso_id = t.id
-              ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+              ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
               LIMIT 1
             )
             LEFT JOIN locations loc ON loc.id = t.ubicacion_id
+            LEFT JOIN (
+              SELECT ingreso_id, MAX(ts) AS fecha_liberacion
+              FROM ingreso_events
+              WHERE a_estado = 'liberado'
+              GROUP BY ingreso_id
+            ) ev ON ev.ingreso_id = t.id
             LEFT JOIN (
               SELECT e.*, ROW_NUMBER() OVER (
                 PARTITION BY e.ingreso_id ORDER BY e.fecha_deriv DESC, e.id DESC

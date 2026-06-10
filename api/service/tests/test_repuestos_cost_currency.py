@@ -344,6 +344,8 @@ class QuoteCostCurrencyAPITest(TestCase):
             CREATE TABLE IF NOT EXISTS quotes (
                 id {auto_inc},
                 ingreso_id INT NOT NULL,
+                version_num INT NOT NULL DEFAULT 1,
+                origen_quote_id INT NULL,
                 estado TEXT NOT NULL DEFAULT 'pendiente',
                 moneda TEXT NOT NULL DEFAULT 'ARS',
                 subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -356,6 +358,8 @@ class QuoteCostCurrencyAPITest(TestCase):
                 mant_oferta_txt TEXT NULL,
                 fecha_emitido {datetime_type} NULL,
                 fecha_aprobado {datetime_type} NULL,
+                fecha_rechazado {datetime_type} NULL,
+                rechazo_comentario TEXT NULL,
                 pdf_url TEXT NULL
             ){engine_suffix}
         """
@@ -444,15 +448,15 @@ class QuoteCostCurrencyAPITest(TestCase):
             )
             return _last_insert_id(cur)
 
-    def _seed_repuesto(self, *, codigo, nombre, costo_moneda, costo_usd=None, costo_neto=Decimal("0.00")):
+    def _seed_repuesto(self, *, codigo, nombre, costo_moneda, costo_usd=None, costo_neto=Decimal("0.00"), multiplicador=None):
         with connection.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO catalogo_repuestos
-                  (codigo, nombre, costo_neto, costo_usd, costo_moneda, activo)
-                VALUES (%s,%s,%s,%s,%s,%s)
+                  (codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [codigo, nombre, costo_neto, costo_usd, costo_moneda, 1],
+                [codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, 1],
             )
             return _last_insert_id(cur)
 
@@ -512,3 +516,67 @@ class QuoteCostCurrencyAPITest(TestCase):
             costo_u_neto, precio_u = cur.fetchone()
             self.assertEqual(Decimal(str(costo_u_neto)), Decimal("10000.00"))
             self.assertEqual(Decimal(str(precio_u)), Decimal("20000.00"))
+
+    def test_quote_item_manual_cost_autocompleta_precio_con_multiplicador_general(self):
+        ingreso_id = self._seed_ingreso()
+
+        resp = self.client.post(
+            f"/api/quotes/{ingreso_id}/items/",
+            {
+                "tipo": "repuesto",
+                "descripcion": "Servicio tercerizado",
+                "qty": 1,
+                "costo_u_neto": Decimal("300.00"),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        item = next(it for it in resp.data["items"] if it["descripcion"] == "Servicio tercerizado")
+        self.assertEqual(Decimal(str(item["costo_u_neto"])), Decimal("300.00"))
+        self.assertEqual(Decimal(str(item["precio_u"])), Decimal("600.00"))
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT costo_u_neto, precio_u FROM quote_items WHERE descripcion=%s",
+                ["Servicio tercerizado"],
+            )
+            costo_u_neto, precio_u = cur.fetchone()
+            self.assertEqual(Decimal(str(costo_u_neto)), Decimal("300.00"))
+            self.assertEqual(Decimal(str(precio_u)), Decimal("600.00"))
+
+    def test_quote_item_patch_costo_recalcula_precio_con_multiplicador_del_repuesto(self):
+        ingreso_id = self._seed_ingreso()
+        repuesto_id = self._seed_repuesto(
+            codigo="R-MULT",
+            nombre="Repuesto con multiplicador",
+            costo_moneda="ARS",
+            costo_neto=Decimal("500.00"),
+            multiplicador=Decimal("1.5000"),
+        )
+
+        created = self.client.post(
+            f"/api/quotes/{ingreso_id}/items/",
+            {"tipo": "repuesto", "repuesto_id": repuesto_id, "descripcion": "tmp", "qty": 1},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        item_id = next(int(it["id"]) for it in created.data["items"] if int(it["repuesto_id"]) == repuesto_id)
+
+        resp = self.client.patch(
+            f"/api/quotes/{ingreso_id}/items/{item_id}/",
+            {"costo_u_neto": Decimal("300.00")},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        item = next(it for it in resp.data["items"] if int(it["id"]) == item_id)
+        self.assertEqual(Decimal(str(item["costo_u_neto"])), Decimal("300.00"))
+        self.assertEqual(Decimal(str(item["precio_u"])), Decimal("450.00"))
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT costo_u_neto, precio_u FROM quote_items WHERE id=%s",
+                [item_id],
+            )
+            costo_u_neto, precio_u = cur.fetchone()
+            self.assertEqual(Decimal(str(costo_u_neto)), Decimal("300.00"))
+            self.assertEqual(Decimal(str(precio_u)), Decimal("450.00"))

@@ -4,6 +4,53 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import exec_void, exec_returning, q, require_roles, _set_audit_user
+from .tipo_equipo_utils import clean_tipo_equipo, matching_rows, preferred_row
+
+
+def _ensure_marca_tipo_id(marca_id: int, nombre: str, activo: bool = True):
+    clean = clean_tipo_equipo(nombre)
+    if not clean:
+        return None
+    rows = q(
+        "SELECT id, nombre, activo FROM marca_tipos_equipo WHERE marca_id=%s ORDER BY id",
+        [marca_id],
+    ) or []
+    row = preferred_row(rows, clean)
+    if row:
+        if clean_tipo_equipo(row.get("nombre")) != clean or bool(row.get("activo")) != bool(activo):
+            exec_void("UPDATE marca_tipos_equipo SET nombre=%s, activo=%s WHERE id=%s", [clean, bool(activo), row["id"]])
+        return row["id"]
+    if connection.vendor == "postgresql":
+        return exec_returning(
+            "INSERT INTO marca_tipos_equipo(marca_id, nombre, activo) VALUES (%s,%s,%s) RETURNING id",
+            [marca_id, clean, bool(activo)],
+        )
+    exec_void("INSERT INTO marca_tipos_equipo(marca_id, nombre, activo) VALUES (%s,%s,%s)", [marca_id, clean, bool(activo)])
+    row = q(
+        """
+        SELECT id
+          FROM marca_tipos_equipo
+         WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        [marca_id, clean],
+        one=True,
+    )
+    return row["id"] if row else None
+
+
+def _ensure_catalog_tipo(nombre: str) -> None:
+    clean = clean_tipo_equipo(nombre)
+    if not clean:
+        return
+    rows = q("SELECT id, nombre, activo FROM catalogo_tipos_equipo ORDER BY id") or []
+    row = preferred_row(rows, clean)
+    if row:
+        if clean_tipo_equipo(row.get("nombre")) != clean or not row.get("activo"):
+            exec_void("UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s", [clean, row["id"]])
+        return
+    exec_void("INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)", [clean])
 
 
 class CatalogoTiposView(APIView):
@@ -166,25 +213,19 @@ class CatalogoTiposCreateView(APIView):
         active = d.get("active")
         activo_val = bool(active) if active is not None else True
 
-        # PostgreSQL-only: upsert mediante DO NOTHING + SELECT existente
-        new_id = exec_returning(
-            """
-            INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-            VALUES (%s,%s,%s)
-            ON CONFLICT DO NOTHING
-            RETURNING id
-            """,
-            [marca_id, nombre, activo_val],
+        existing = preferred_row(
+            q("SELECT id, nombre, activo FROM marca_tipos_equipo WHERE marca_id=%s ORDER BY id", [marca_id]) or [],
+            nombre,
         )
+        new_id = _ensure_marca_tipo_id(marca_id, nombre, activo_val)
         if not new_id:
-            existing = q(
-                "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(nombre)=UPPER(%s)",
-                [marca_id, nombre], one=True,
-            )
-            if existing and active is not None:
-                exec_void("UPDATE marca_tipos_equipo SET activo=%s WHERE id=%s", [activo_val, existing["id"]])
-            return Response({"ok": True, "id": existing and existing.get("id"), "updated": False})
-        return Response({"ok": True, "id": new_id, "created": True})
+            return Response({"detail": "No se pudo crear o actualizar el tipo"}, status=500)
+        return Response({
+            "ok": True,
+            "id": new_id,
+            "updated": bool(existing),
+            "created": not bool(existing),
+        })
 
 
 class CatalogoTipoDetailView(APIView):
@@ -205,14 +246,12 @@ class CatalogoTipoDetailView(APIView):
         sets = []
         params = []
         if nombre is not None and nombre != row.get("nombre"):
-            clash = q(
-                "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND id<>%s AND UPPER(nombre)=UPPER(%s)",
-                [row["marca_id"], tipo_id, nombre], one=True,
-            )
+            rows = q("SELECT id, nombre FROM marca_tipos_equipo WHERE marca_id=%s ORDER BY id", [row["marca_id"]]) or []
+            clash = [r for r in matching_rows(rows, nombre) if r["id"] != tipo_id]
             if clash:
                 return Response({"detail": "ya existe un tipo con ese nombre"}, status=409)
             sets.append("nombre=%s")
-            params.append(nombre)
+            params.append(clean_tipo_equipo(nombre))
         if active is not None:
             sets.append("activo=%s")
             params.append(bool(active))
@@ -506,49 +545,8 @@ class ModeloTipoEquipoView(APIView):
         """, [tipo_nombre, modelo_id, marca_id])
 
         if tipo_nombre:
-            row = q(
-                """
-                SELECT id, nombre
-                  FROM marca_tipos_equipo
-                 WHERE marca_id=%s AND UPPER(TRIM(nombre)) = UPPER(TRIM(%s))
-                 LIMIT 1
-                """,
-                [marca_id, tipo_nombre],
-                one=True,
-            )
-            if row:
-                if (row.get("nombre") or "").strip() != tipo_nombre:
-                    exec_void("UPDATE marca_tipos_equipo SET nombre=%s WHERE id=%s", [tipo_nombre, row["id"]])
-            else:
-                exec_void(
-                    """
-                    INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                    VALUES (%s,%s,TRUE)
-                    ON CONFLICT (marca_id, nombre) DO UPDATE SET activo=EXCLUDED.activo
-                    """,
-                    [marca_id, tipo_nombre],
-                )
-
-            existing_tipo = q(
-                """
-                SELECT id
-                FROM catalogo_tipos_equipo
-                WHERE UPPER(TRIM(nombre)) = UPPER(TRIM(%s))
-                LIMIT 1
-                """,
-                [tipo_nombre],
-                one=True,
-            )
-            if existing_tipo:
-                exec_void(
-                    "UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s",
-                    [tipo_nombre, existing_tipo["id"]],
-                )
-            else:
-                exec_void(
-                    "INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)",
-                    [tipo_nombre],
-                )
+            _ensure_marca_tipo_id(marca_id, tipo_nombre, activo=True)
+            _ensure_catalog_tipo(tipo_nombre)
 
         return Response({"ok": True})
 

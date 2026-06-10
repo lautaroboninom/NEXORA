@@ -1,7 +1,7 @@
 import Row from "../../../components/Row";
 import StatusChip from "../../../components/StatusChip";
 import { useMemo, useState, useEffect, useCallback } from "react";
-import { formatDateTime as formatDateTimeHelper, isSaleTicketState, resolveFechaIngreso } from "../../../lib/ui-helpers";
+import { formatDateOnly as formatDateOnlyHelper, formatDateTime as formatDateTimeHelper, isSaleTicketState, resolveFechaIngreso } from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
 import {
@@ -165,6 +165,18 @@ export default function PrincipalTab(props) {
   const mgVendido = Boolean(data?.mg_inactivo_venta)
     || String(data?.mg_estado || "").trim().toLowerCase() === "inactivo_venta"
     || isSaleTicketState(estadoLower);
+  const ownershipFlag = data?.es_cliente_mg_owner ?? data?.es_propietario_mg;
+  const ownershipKnown = ownershipFlag !== null && ownershipFlag !== undefined;
+  const isOwnedByMgCustomer = ownershipFlag === true;
+  const numeroInternoActual = String((editBasics ? formBasics?.numero_interno : data?.numero_interno) || data?.numero_interno || "").trim();
+  const mgHistorico = Boolean(numeroInternoActual && mgVendido);
+  const propiedadLabel = ownershipKnown
+    ? (isOwnedByMgCustomer ? "MG BIO" : (mgHistorico ? "Cliente (Ex MG)" : "Cliente"))
+    : "-";
+  const propiedadClass = isOwnedByMgCustomer
+    ? "bg-emerald-100 text-emerald-800"
+    : "bg-gray-100 text-gray-700";
+  const mgHistoricoHelp = "Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.";
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
   const alquilerEditable = Boolean(canEditAlquiler && !mgVendido);
   const alquilerBloqueadoPorEntrega = Boolean(
@@ -213,6 +225,23 @@ export default function PrincipalTab(props) {
     const fecha = data?.baja_solicitada_fecha ? formatDateTimeHelper(data.baja_solicitada_fecha) : "";
     return fecha ? `${base} - ${fecha}` : base;
   }, [data?.baja_solicitada_fecha, data?.baja_solicitada_id, data?.baja_solicitada_nombre]);
+  const fechasHitos = data?.fechas_hitos || {};
+  const firstDateValue = (...values) => values.find((value) => value !== null && value !== undefined && String(value).trim() !== "");
+  const fechaAlquiler = firstDateValue(fechasHitos.fecha_alquiler, data?.alquiler_fecha);
+  const fechaVentaMg = firstDateValue(fechasHitos.fecha_venta_mg, data?.mg_venta_fecha);
+  const fechaBajaSolicitada = firstDateValue(fechasHitos.fecha_baja_solicitada, data?.baja_solicitada_fecha);
+  const fechasImportantes = [
+    { label: "Creación", value: firstDateValue(fechasHitos.fecha_creacion, data?.fecha_creacion) },
+    { label: "Ingreso", value: firstDateValue(fechasHitos.fecha_ingreso, resolveFechaIngreso(data)) },
+    { label: "Diagnóstico", value: fechasHitos.fecha_diagnosticado },
+    { label: "Reparación", value: fechasHitos.fecha_reparado },
+    { label: "Liberación", value: fechasHitos.fecha_liberacion },
+    { label: "Servicio", value: firstDateValue(fechasHitos.fecha_servicio, data?.fecha_servicio) },
+    { label: "Entrega", value: firstDateValue(fechasHitos.fecha_entrega, data?.fecha_entrega) },
+    ...(data?.alquilado || fechaAlquiler ? [{ label: "Alquiler", value: fechaAlquiler }] : []),
+    ...(data?.mg_inactivo_venta || fechaVentaMg ? [{ label: "Venta MG", value: fechaVentaMg }] : []),
+    ...(data?.baja_solicitada_id || fechaBajaSolicitada ? [{ label: "Solicitud baja", value: fechaBajaSolicitada }] : []),
+  ];
   // Labels auxiliares (evitar expresiones JSX complejas)
   const pendingLabel = (() => {
     if (data?.tecnico_solicitado_nombre) return `Solicitud de asignación pendiente: ${data.tecnico_solicitado_nombre}`;
@@ -226,7 +255,7 @@ export default function PrincipalTab(props) {
     return `Ya hay una solicitud pendiente para ${quien}.`;
   })();
 
-  // Cliente: validacion contra catalogo (igual que en NuevoIngreso)
+  // Cliente: validación contra catálogo (igual que en NuevoIngreso)
   const normClient = useCallback(
     (val) =>
       String(val || "")
@@ -485,7 +514,12 @@ export default function PrincipalTab(props) {
             </>
           )}
 
-          <h2 className="font-semibold mt-4 mb-2">Equipo</h2>
+          <div className="mt-4 mb-2 flex flex-wrap items-center gap-2">
+            <h2 className="font-semibold">Equipo</h2>
+            <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${propiedadClass}`}>
+              Propiedad: {propiedadLabel}
+            </span>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
             <Row label="Tipo de equipo">
               {editBasics ? (
@@ -601,18 +635,18 @@ export default function PrincipalTab(props) {
                     onChange={(e) => setFormBasics((s) => ({ ...s, numero_interno: e.target.value }))}
                     disabled={mgVendido}
                   />
-                  {mgVendido && (
+                  {mgHistorico && (
                     <div className="mt-1 max-w-md text-xs text-amber-700">
-                      Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.
+                      {mgHistoricoHelp}
                     </div>
                   )}
                 </div>
               ) : (
                 <div>
                   <span>{data.numero_interno || "-"}</span>
-                  {mgVendido && (
+                  {mgHistorico && (
                     <div className="mt-1 max-w-md text-xs text-amber-700">
-                      Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.
+                      {mgHistoricoHelp}
                     </div>
                   )}
                 </div>
@@ -626,7 +660,14 @@ export default function PrincipalTab(props) {
                   onChange={(e) => setFormBasics((s) => ({ ...s, remito_ingreso: e.target.value }))}
                 />
               ) : (
-                <span>{data.remito_ingreso || "-"}</span>
+                <span>
+                  {data.remito_ingreso || "-"}
+                  {data?.ris?.available && (
+                    <span className="block text-xs text-gray-500">
+                      RIS: {data?.ris?.remito_number || data?.ris?.status || "pendiente"}
+                    </span>
+                  )}
+                </span>
               )}
             </Row>
             <Row label={"Faja de garantía"}>
@@ -701,8 +742,17 @@ export default function PrincipalTab(props) {
             <Row label="Estado"><StatusChip value={data?.estado} title="Estado del equipo" /></Row>
             <Row label="Presupuesto"><StatusChip value={data?.presupuesto_estado} title={presupuestoLabel} /></Row>
             <Row label="Resolución">{data.resolucion ? resolutionLabel(data.resolucion) : "-"}</Row>
-            <Row label="Fecha ingreso">{formatDateTimeHelper(resolveFechaIngreso(data))}</Row>
-            <Row label="Fecha servicio">{data.fecha_servicio ? formatDateTimeHelper(data.fecha_servicio) : "-"}</Row>
+          </div>
+          <div className="mt-3 border-t pt-3">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Fechas importantes</div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3 xl:grid-cols-4">
+              {fechasImportantes.map((item) => (
+                <div key={item.label} className="min-w-0">
+                  <span className="text-gray-500">{item.label}: </span>
+                  <span className="font-medium text-gray-900">{item.value ? formatDateOnlyHelper(item.value) : "-"}</span>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="mt-1 text-xs text-gray-500">
             Ingresado por: {data?.ingresado_por_nombre || (data?.ingresado_por_id ? `ID ${data.ingresado_por_id}` : "-")}

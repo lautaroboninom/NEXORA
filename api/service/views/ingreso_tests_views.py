@@ -162,12 +162,27 @@ def _load_test_row(ingreso_id: int) -> dict[str, Any] | None:
 def _resolve_protocol_for_row(ingreso: dict[str, Any], row: dict[str, Any] | None) -> dict[str, Any] | None:
     marca = ingreso.get("marca") or ""
     modelo = ingreso.get("modelo") or ""
-    protocol = None
+    numero_serie = ingreso.get("numero_serie") or ""
+    protocol_live = resolve_protocol_for_equipo(
+        ingreso.get("tipo_equipo") or "",
+        marca=marca,
+        modelo=modelo,
+        numero_serie=numero_serie,
+    )
+    protocol_row = None
     if row and (row.get("template_key") or "").strip():
-        protocol = get_protocol_by_template_key(row.get("template_key") or "", marca=marca, modelo=modelo)
-    if protocol is None:
-        protocol = resolve_protocol_for_equipo(ingreso.get("tipo_equipo") or "", marca=marca, modelo=modelo)
-    return protocol
+        protocol_row = get_protocol_by_template_key(
+            row.get("template_key") or "",
+            marca=marca,
+            modelo=modelo,
+            numero_serie=numero_serie,
+        )
+
+    if (protocol_live or {}).get("template_key") == "aspirador_electrico_v1":
+        return protocol_live
+    if protocol_row is not None:
+        return protocol_row
+    return protocol_live
 
 
 def _extract_values_from_payload(payload: Any) -> dict[str, Any]:
@@ -437,6 +452,8 @@ def _protocol_from_schema_snapshot(
     snapshot: dict[str, Any],
     protocol_fallback: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if (protocol_fallback or {}).get("template_key") == "aspirador_electrico_v1":
+        return protocol_fallback
     if snapshot and isinstance(snapshot.get("sections"), list):
         out = {
             "type_key": (protocol_fallback or {}).get("type_key") or "",
@@ -558,8 +575,23 @@ class IngresoTestView(APIView):
             )
 
         d = request.data or {}
+        requested_template_key = _trim_text(d.get("template_key") if "template_key" in d else "", 100).lower()
         incoming_values = d.get("values") if "values" in d else None
         existing_values = _extract_values_from_payload((row or {}).get("payload"))
+        protocol_requested = None
+        if requested_template_key:
+            protocol_requested = get_protocol_by_template_key(
+                requested_template_key,
+                marca=ingreso.get("marca") or "",
+                modelo=ingreso.get("modelo") or "",
+                numero_serie=ingreso.get("numero_serie") or "",
+            )
+            if protocol_requested is None:
+                return Response({"detail": "template_key inválido o no disponible"}, status=400)
+
+        if protocol_requested is not None:
+            protocol = protocol_requested
+
         merged_values = _merge_values(existing_values, incoming_values, protocol)
 
         resultado_global = _trim_text(d.get("resultado_global") if "resultado_global" in d else (row or {}).get("resultado_global"), 50).lower()
@@ -580,6 +612,8 @@ class IngresoTestView(APIView):
             references_snapshot = []
         if not references_snapshot and schema_snapshot and isinstance(schema_snapshot.get("references"), list):
             references_snapshot = copy.deepcopy(schema_snapshot.get("references") or [])
+        if protocol_requested is not None:
+            references_snapshot = copy.deepcopy(protocol.get("references") or [])
         if not references_snapshot:
             references_snapshot = copy.deepcopy(protocol.get("references") or [])
 
@@ -589,20 +623,15 @@ class IngresoTestView(APIView):
                 status=400,
             )
 
-        if not schema_snapshot:
-            source_protocol = protocol_live or protocol
+        if not schema_snapshot or protocol_requested is not None:
+            source_protocol = protocol
             schema_snapshot = _build_schema_snapshot(source_protocol, references_snapshot)
 
-        template_key = (
-            (row or {}).get("template_key")
-            or schema_snapshot.get("template_key")
-            or protocol.get("template_key")
-            or ""
-        )
+        template_key = protocol.get("template_key") or schema_snapshot.get("template_key") or (row or {}).get("template_key") or ""
         template_version = (
-            (row or {}).get("template_version")
+            protocol.get("template_version")
             or schema_snapshot.get("template_version")
-            or protocol.get("template_version")
+            or (row or {}).get("template_version")
             or ""
         )
         tipo_equipo_snapshot = (row or {}).get("tipo_equipo_snapshot") or (ingreso.get("tipo_equipo") or "")

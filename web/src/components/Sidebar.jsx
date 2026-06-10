@@ -10,7 +10,6 @@ const VARIANT_BORDER = {
   blue: "border-blue-500",
   indigo: "border-indigo-500",
   cyan: "border-cyan-500",
-  black: "border-black",
   gray: "border-gray-400",
 };
 
@@ -26,8 +25,8 @@ function variantOfPath(to) {
   if (p === "/reparados") return "lime";
   if (p === "/listos") return "green";
   if (p === "/alquiler/stock") return "indigo";
-  if (p === "/depositos") return "black";
-  if (p === "/bejerman") return "black";
+  if (p === "/depositos") return null;
+  if (p === "/bejerman") return null;
   return null;
 }
 
@@ -64,7 +63,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canCatalogs = can(user, PERMISSION_CODES.PAGE_CATALOGS);
   const canSpareParts = can(user, PERMISSION_CODES.PAGE_SPARE_PARTS);
   const canWarranty = can(user, PERMISSION_CODES.PAGE_WARRANTY);
-  const canBejerman = can(user, PERMISSION_CODES.PAGE_BEJERMAN_SYNC) || canLogistics;
+  const canBejerman = can(user, PERMISSION_CODES.PAGE_BEJERMAN_SYNC);
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
 
   const showEquiposSection = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;

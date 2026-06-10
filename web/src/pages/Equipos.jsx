@@ -1452,6 +1452,7 @@ function DeviceRepuestosRevisionModal({
   const [fechaRealizada, setFechaRealizada] = useState(todayISO());
   const [resumen, setResumen] = useState("");
   const [selected, setSelected] = useState({});
+  const [resetRecuento, setResetRecuento] = useState({});
 
   useEffect(() => {
     const next = {};
@@ -1459,12 +1460,17 @@ function DeviceRepuestosRevisionModal({
       if (it?.id != null) next[it.id] = true;
     });
     setSelected(next);
+    setResetRecuento({});
     setFechaRealizada(todayISO());
     setResumen("");
   }, [row?.id, repuestos]);
 
   const selectedIds = Object.entries(selected)
     .filter(([, checked]) => !!checked)
+    .map(([id]) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  const resetRecuentoIds = Object.entries(resetRecuento)
+    .filter(([id, checked]) => !!checked && !!selected[id])
     .map(([id]) => Number(id))
     .filter((id) => Number.isFinite(id) && id > 0);
 
@@ -1491,6 +1497,10 @@ function DeviceRepuestosRevisionModal({
               </label>
             </div>
             <div className="border rounded max-h-72 overflow-auto mb-3">
+              <div className="bg-amber-50 border-b border-amber-200 text-amber-900 text-sm p-3">
+                Marcá "Reiniciar conteo" solo cuando también se reseteó el contador u horómetro del equipo.
+                Si solo registraste el cambio del repuesto, el trabajo queda en el historial pero no se mueve el próximo vencimiento.
+              </div>
               {(repuestos || []).length === 0 ? (
                 <div className="text-sm text-gray-500 p-3">Este plan no tiene repuestos.</div>
               ) : (
@@ -1502,6 +1512,7 @@ function DeviceRepuestosRevisionModal({
                       <th className="p-2">Última</th>
                       <th className="p-2">Próxima</th>
                       <th className="p-2">Estado</th>
+                      <th className="p-2">Reiniciar conteo</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1511,13 +1522,30 @@ function DeviceRepuestosRevisionModal({
                           <input
                             type="checkbox"
                             checked={!!selected[it.id]}
-                            onChange={(e) => setSelected((prev) => ({ ...prev, [it.id]: e.target.checked }))}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setSelected((prev) => ({ ...prev, [it.id]: checked }));
+                              if (!checked) {
+                                setResetRecuento((prev) => ({ ...prev, [it.id]: false }));
+                              }
+                            }}
                           />
                         </td>
                         <td className="p-2">{it.nombre_repuesto || "-"}</td>
                         <td className="p-2">{fmtDate(it.ultima_revision_fecha)}</td>
                         <td className="p-2">{fmtDate(it.proxima_revision_fecha)}</td>
                         <td className="p-2"><PreventivoBadge estado={it.preventivo_estado} dias={it.preventivo_dias_restantes} /></td>
+                        <td className="p-2">
+                          <label className="inline-flex items-center gap-2 text-xs text-gray-700">
+                            <input
+                              type="checkbox"
+                              checked={!!resetRecuento[it.id] && !!selected[it.id]}
+                              disabled={!selected[it.id]}
+                              onChange={(e) => setResetRecuento((prev) => ({ ...prev, [it.id]: e.target.checked }))}
+                            />
+                            Contador reseteado
+                          </label>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1536,6 +1564,7 @@ function DeviceRepuestosRevisionModal({
                 fecha_realizada: fechaRealizada || null,
                 resumen: resumen || "",
                 repuesto_ids: selectedIds,
+                reset_recuento_repuesto_ids: resetRecuentoIds,
               })
             }
           >

@@ -4,11 +4,24 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..bejerman_sync import (
+    BejermanBlockedError,
+    BejermanConfigError,
+    BejermanSDKClient,
+    BejermanTransientError,
+    LEGACY_BLOCKED_SYNC_TYPES,
+    NEXORA_STOCK_ENTRY_MESSAGE,
+    PORTAL_STOCK_EXIT_MESSAGE,
+    SYNC_TYPE_STOCK_ENTRY_STR,
+    SYNC_TYPE_STOCK_EXIT_RTS,
+    apply_article_mapping_to_job,
+    article_resolution_for_job_row,
     article_context_for_ingreso,
+    search_bejerman_articles_for_job,
     reopen_jobs_for_article_mapping,
     upsert_article_mapping,
+    validate_bejerman_article_choice,
 )
-from ..permissions import require_any_permission, require_permission
+from ..permissions import require_permission
 from .helpers import q
 
 
@@ -22,6 +35,11 @@ def _as_int(value):
 def _build_job_filters(params, *, include_status=True):
     where = []
     sql_params = []
+
+    if str(params.get("include_legacy") or "").strip() not in {"1", "true", "True"}:
+        placeholders = ",".join(["%s"] * len(LEGACY_BLOCKED_SYNC_TYPES))
+        where.append(f"j.sync_type NOT IN ({placeholders})")
+        sql_params.extend(LEGACY_BLOCKED_SYNC_TYPES)
 
     if include_status:
         status = (params.get("status") or "").strip()
@@ -78,7 +96,7 @@ class BejermanJobsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        require_any_permission(request, ["page.bejerman_sync", "page.logistics"])
+        require_permission(request, "page.bejerman_sync")
         where, sql_params = _build_job_filters(request.GET, include_status=True)
         where_sql = "WHERE " + " AND ".join(where) if where else ""
         rows = q(
@@ -100,6 +118,7 @@ class BejermanJobsView(APIView):
                    j.response_payload,
                    j.created_at,
                    j.updated_at,
+                   d.model_id,
                    COALESCE(d.numero_interno, '') AS numero_interno,
                    COALESCE(c.razon_social, '') AS cliente,
                    COALESCE(b.nombre, '') AS marca,
@@ -126,6 +145,10 @@ class BejermanJobsView(APIView):
             """,
             sql_params,
         ) or []
+        for row in rows:
+            resolution = article_resolution_for_job_row(row)
+            row["article_resolution"] = resolution
+            row["article_mapping"] = resolution.get("mapping")
 
         counter_where, counter_params = _build_job_filters(request.GET, include_status=False)
         counter_sql = "WHERE " + " AND ".join(counter_where) if counter_where else ""
@@ -157,11 +180,15 @@ class BejermanJobRetryView(APIView):
     def post(self, request, job_id: int):
         require_permission(request, "action.bejerman_sync.manage")
         with connection.cursor() as cur:
-            cur.execute("SELECT id, status FROM bejerman_sync_jobs WHERE id=%s", [job_id])
+            cur.execute("SELECT id, status, sync_type FROM bejerman_sync_jobs WHERE id=%s", [job_id])
             row = cur.fetchone()
             if not row:
                 return Response({"detail": "Operación Bejerman no encontrada"}, status=404)
             status = (row[1] or "").strip()
+            sync_type = (row[2] or "").strip()
+            if sync_type in LEGACY_BLOCKED_SYNC_TYPES:
+                detail = NEXORA_STOCK_ENTRY_MESSAGE if sync_type == SYNC_TYPE_STOCK_ENTRY_STR else PORTAL_STOCK_EXIT_MESSAGE
+                return Response({"detail": detail}, status=409)
             if status not in ("failed", "blocked"):
                 return Response({"detail": "Solo se pueden reintentar operaciones fallidas o bloqueadas"}, status=409)
             cur.execute(
@@ -196,6 +223,7 @@ class BejermanArticleMappingsView(APIView):
         model_id = _as_int(data.get("model_id"))
         variante = (data.get("variante") or "").strip()
         job_id = _as_int(data.get("job_id"))
+        context = None
         if job_id:
             row = q("SELECT ingreso_id FROM bejerman_sync_jobs WHERE id=%s", [job_id], one=True)
             if not row:
@@ -207,21 +235,69 @@ class BejermanArticleMappingsView(APIView):
         if not model_id:
             return Response({"detail": "Modelo requerido para mapear el artículo"}, status=400)
 
+        try:
+            candidate = validate_bejerman_article_choice(
+                article_code,
+                client=BejermanSDKClient(),
+                context=context or {},
+            )
+        except BejermanBlockedError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except (BejermanConfigError, BejermanTransientError) as exc:
+            return Response({"detail": str(exc)}, status=503)
+
         user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
         mapping = upsert_article_mapping(
             model_id=model_id,
             variante=variante,
             article_code=article_code,
-            article_description=article_description,
+            article_description=article_description or candidate.get("article_description") or "",
             match_source="manual",
+            source_payload={"source": "manual_resolution", "candidate": candidate},
             confirmed_by=user_id,
         )
         reopened = reopen_jobs_for_article_mapping(model_id, variante, article_code)
-        return Response({"mapping": mapping, "reopened_jobs": reopened})
+        try:
+            updated_job = apply_article_mapping_to_job(job_id, article_code) if job_id else False
+        except BejermanBlockedError as exc:
+            return Response({"detail": str(exc)}, status=409)
+        return Response(
+            {
+                "mapping": mapping,
+                "candidate": candidate,
+                "reopened_jobs": reopened,
+                "updated_job": updated_job,
+            }
+        )
+
+
+class BejermanArticlesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        require_permission(request, "action.bejerman_sync.manage")
+        job_id = _as_int(request.GET.get("job_id"))
+        if not job_id:
+            return Response({"detail": "Job Bejerman requerido"}, status=400)
+        query = (request.GET.get("q") or request.GET.get("query") or "").strip()
+        limit = _as_int(request.GET.get("limit")) or 20
+        try:
+            payload = search_bejerman_articles_for_job(
+                job_id=job_id,
+                query=query,
+                client=BejermanSDKClient(),
+                limit=min(max(limit, 1), 50),
+            )
+        except BejermanBlockedError as exc:
+            return Response({"detail": str(exc)}, status=404)
+        except (BejermanConfigError, BejermanTransientError) as exc:
+            return Response({"detail": str(exc)}, status=503)
+        return Response(payload)
 
 
 __all__ = [
     "BejermanJobsView",
     "BejermanJobRetryView",
     "BejermanArticleMappingsView",
+    "BejermanArticlesView",
 ]

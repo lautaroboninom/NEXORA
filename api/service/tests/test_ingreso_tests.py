@@ -231,6 +231,20 @@ class IngresoTestsAPITest(TestCase):
             )
             cls.ingreso_asp_id = cls._last_insert_id(cur)
 
+            cur.execute(
+                """
+                INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                [customer_id, marca_ei, model_asp, "A1-0137", "MG 0005", "Aspirador"],
+            )
+            device_asp_electrico = cls._last_insert_id(cur)
+            cur.execute(
+                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                [device_asp_electrico, "diagnosticado", cls.tech_user.id],
+            )
+            cls.ingreso_asp_electrico_id = cls._last_insert_id(cur)
+
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Fisher & Paykel"])
             marca_af = cls._last_insert_id(cur)
             cur.execute(
@@ -347,6 +361,95 @@ class IngresoTestsAPITest(TestCase):
         self.assertIsNotNone(battery)
         self.assertEqual(battery.get("target"), "Tensión de batería > 11 V luego de 15 min de prueba continua")
         self.assertEqual(battery.get("unit"), "V")
+
+    def test_aspirador_a1_0137_uses_electrical_protocol(self):
+        resp = self.client.get(self._url(self.ingreso_asp_electrico_id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("template_key"), "aspirador_electrico_v1")
+        self.assertEqual(resp.data.get("tipo_equipo_resuelto"), "Aspirador eléctrico")
+
+        sections = resp.data.get("schema", {}).get("sections") or []
+        keys = [it.get("key") for sec in sections for it in (sec.get("items") or [])]
+        self.assertIn("asp_vacio_max", keys)
+        self.assertIn("asp_caudal_libre", keys)
+        self.assertIn("asp_alimentacion_red", keys)
+        self.assertNotIn("asp_duracion_bateria", keys)
+
+        alimentacion = next(
+            (it for sec in sections for it in (sec.get("items") or []) if it.get("key") == "asp_alimentacion_red"),
+            None,
+        )
+        self.assertIsNotNone(alimentacion)
+        self.assertEqual(alimentacion.get("label"), "Alimentación eléctrica")
+
+    def test_aspirador_a1_0137_ignores_stale_saved_template(self):
+        stale_snapshot = {
+            "template_key": "aspirador_v1",
+            "template_version": "1.0.0",
+            "display_name": "Aspirador",
+            "default_instrumentos": test_protocols.BASE_TEMPLATES["aspirador"]["default_instrumentos"],
+            "references": test_protocols.BASE_TEMPLATES["aspirador"]["references"],
+            "sections": test_protocols.BASE_TEMPLATES["aspirador"]["sections"],
+            "result_options": test_protocols.RESULT_OPTIONS,
+            "global_result_options": test_protocols.GLOBAL_RESULT_OPTIONS,
+        }
+        with connection.cursor() as cur:
+            if connection.vendor == "postgresql":
+                cur.execute(
+                    """
+                    INSERT INTO ingreso_tests (
+                        ingreso_id, template_key, template_version, tipo_equipo_snapshot, payload,
+                        schema_snapshot, references_snapshot, resultado_global, conclusion, instrumentos,
+                        firmado_por, fecha_ejecucion, tecnico_id
+                    ) VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,now(),%s)
+                    """,
+                    [
+                        self.ingreso_asp_electrico_id,
+                        "aspirador_v1",
+                        "1.0.0",
+                        "Aspirador",
+                        json.dumps({"values": {}}, ensure_ascii=False),
+                        json.dumps(stale_snapshot, ensure_ascii=False),
+                        json.dumps(stale_snapshot["references"], ensure_ascii=False),
+                        "pendiente",
+                        None,
+                        "",
+                        "",
+                        self.tech_user.id,
+                    ],
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO ingreso_tests (
+                        ingreso_id, template_key, template_version, tipo_equipo_snapshot, payload,
+                        schema_snapshot, references_snapshot, resultado_global, conclusion, instrumentos,
+                        firmado_por, fecha_ejecucion, tecnico_id
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,datetime('now'),%s)
+                    """,
+                    [
+                        self.ingreso_asp_electrico_id,
+                        "aspirador_v1",
+                        "1.0.0",
+                        "Aspirador",
+                        json.dumps({"values": {}}, ensure_ascii=False),
+                        json.dumps(stale_snapshot, ensure_ascii=False),
+                        json.dumps(stale_snapshot["references"], ensure_ascii=False),
+                        "pendiente",
+                        None,
+                        "",
+                        "",
+                        self.tech_user.id,
+                    ],
+                )
+
+        resp = self.client.get(self._url(self.ingreso_asp_electrico_id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("template_key"), "aspirador_electrico_v1")
+        sections = resp.data.get("schema", {}).get("sections") or []
+        keys = [it.get("key") for sec in sections for it in (sec.get("items") or [])]
+        self.assertIn("asp_alimentacion_red", keys)
+        self.assertNotIn("asp_duracion_bateria", keys)
 
     def test_get_returns_alto_flujo_protocol(self):
         resp = self.client.get(self._url(self.ingreso_af_id))

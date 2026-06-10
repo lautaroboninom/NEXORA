@@ -116,17 +116,17 @@ class UsuariosView(APIView):
                     )
                     base = getattr(settings, "PUBLIC_WEB_URL", None) or getattr(settings, "FRONTEND_ORIGIN", "http://localhost:5173")
                     url = f"{(base or '').rstrip('/')}/restablecer?t={token}"
-                    subj = "Bienvenido a SEPID - Configura tu contrasena"
+                    subj = "Bienvenido a SEPID - Configura tu contraseña"
                     txt = (
                         f"Hola {user['nombre']},\n\n"
                         f"Te damos la bienvenida al sistema de reparaciones de SEPID. "
-                        f"Usa este enlace para establecer tu contrasena (valido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+                        f"Usa este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
                         f"Si no esperabas este correo, ignoralo."
                     )
                     html = f"""
                         <p>Hola {user['nombre']},</p>
                         <p>Bienvenido al sistema de reparaciones de <strong>SEPID</strong>.</p>
-                        <p>Usa este enlace para establecer tu contrasena (valido {TOKEN_TTL_MIN} minutos):</p>
+                        <p>Usa este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):</p>
                         <p><a href="{url}">{url}</a></p>
                         <p>Si no esperabas este correo, ignoralo.</p>
                     """
@@ -177,17 +177,17 @@ class UsuarioResetPassView(APIView):
         )
         base = getattr(settings, "PUBLIC_WEB_URL", None) or getattr(settings, "FRONTEND_ORIGIN", "http://localhost:5173")
         url = f"{(base or '').rstrip('/')}/restablecer?t={token}"
-        subj = "SEPID - Enlace para establecer tu contrasena"
+        subj = "SEPID - Enlace para establecer tu contraseña"
         txt = (
             f"Hola {user['nombre']},\n\n"
-            f"Solicitaron un enlace para establecer o restablecer tu contrasena. "
-            f"Usa este enlace (valido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+            f"Solicitaron un enlace para establecer o restablecer tu contraseña. "
+            f"Usa este enlace (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
             f"Si no fuiste vos, ignora este correo."
         )
         html = f"""
             <p>Hola {user['nombre']},</p>
-            <p>Solicitaron un enlace para establecer o restablecer tu contrasena.</p>
-            <p>Usa este enlace (valido {TOKEN_TTL_MIN} minutos):</p>
+            <p>Solicitaron un enlace para establecer o restablecer tu contraseña.</p>
+            <p>Usa este enlace (válido {TOKEN_TTL_MIN} minutos):</p>
             <p><a href="{url}">{url}</a></p>
             <p>Si no fuiste vos, ignora este correo.</p>
         """

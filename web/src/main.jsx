@@ -277,7 +277,7 @@ const router = createBrowserRouter([
       {
         path: "bejerman",
         element: (
-          <ProtectedRoute permissions={[PERMISSION_CODES.PAGE_BEJERMAN_SYNC, PERMISSION_CODES.PAGE_LOGISTICS]}>
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_BEJERMAN_SYNC}>
             <BejermanSync />
           </ProtectedRoute>
         ),

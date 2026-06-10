@@ -103,11 +103,14 @@ class IngresoDetailSerializer(serializers.Serializer):
     permite_reparacion = serializers.BooleanField(required=False)
     estado = serializers.CharField()
     presupuesto_estado = serializers.CharField(allow_null=True)
+    presupuesto_rechazado_cobro_neto = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
+    presupuesto_rechazado_quote_id = serializers.IntegerField(allow_null=True, required=False)
     fecha_ingreso = serializers.DateTimeField()
     fecha_servicio = serializers.DateTimeField(allow_null=True, required=False)
     fecha_entrega = serializers.DateTimeField(allow_null=True, required=False)
     remito_salida = serializers.CharField(allow_null=True, allow_blank=True, required=False)
     factura_numero = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+    ris = serializers.DictField(required=False)
     garantia_reparacion = serializers.BooleanField(required=False)
     garantia_reparacion_trabajos = serializers.CharField(allow_null=True, allow_blank=True, required=False)
     faja_garantia = serializers.CharField(allow_null=True, allow_blank=True, required=False)
@@ -160,6 +163,7 @@ class IngresoDetailSerializer(serializers.Serializer):
 
     # Cliente
     customer_id = serializers.IntegerField()
+    es_cliente_mg_owner = serializers.BooleanField(required=False)
     razon_social = serializers.CharField()
     cod_empresa = serializers.CharField(allow_blank=True)
     telefono = serializers.CharField(allow_blank=True)
@@ -183,6 +187,7 @@ class IngresoDetailSerializer(serializers.Serializer):
     baja_solicitada_nombre = serializers.CharField(allow_blank=True, required=False)
     baja_solicitada_motivo = serializers.CharField(allow_blank=True, required=False)
     baja_solicitada_fecha = serializers.DateTimeField(allow_null=True, required=False)
+    fechas_hitos = serializers.DictField(required=False)
 
 class IngresoAccesorioItemSerializer(serializers.Serializer):
     id = serializers.IntegerField()
@@ -226,9 +231,28 @@ class QuoteItemSerializer(serializers.Serializer):
     costo_total_neto = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
 
 
+class QuoteVersionSummarySerializer(serializers.Serializer):
+    quote_id = serializers.IntegerField()
+    version_num = serializers.IntegerField()
+    estado = serializers.CharField()
+    fecha_emitido = serializers.DateTimeField(required=False, allow_null=True)
+    fecha_aprobado = serializers.DateTimeField(required=False, allow_null=True)
+    fecha_rechazado = serializers.DateTimeField(required=False, allow_null=True)
+    rechazo_comentario = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2)
+    iva_21 = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pdf_url = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    is_current = serializers.BooleanField(required=False)
+
+
 class QuoteDetailSerializer(serializers.Serializer):
     ingreso_id = serializers.IntegerField()
     quote_id = serializers.IntegerField()
+    current_quote_id = serializers.IntegerField(required=False)
+    version_num = serializers.IntegerField(required=False)
+    current_version_num = serializers.IntegerField(required=False)
+    origen_quote_id = serializers.IntegerField(required=False, allow_null=True)
     estado = serializers.CharField()
     moneda = serializers.CharField()
     autorizado_por = serializers.CharField(allow_blank=True, allow_null=True, required=False)
@@ -236,7 +260,16 @@ class QuoteDetailSerializer(serializers.Serializer):
     plazo_entrega_txt = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     garantia_txt = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     mant_oferta_txt = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    fecha_emitido = serializers.DateTimeField(required=False, allow_null=True)
+    fecha_aprobado = serializers.DateTimeField(required=False, allow_null=True)
+    fecha_rechazado = serializers.DateTimeField(required=False, allow_null=True)
+    rechazo_comentario = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    is_current = serializers.BooleanField(required=False)
+    is_editable = serializers.BooleanField(required=False)
+    can_reject = serializers.BooleanField(required=False)
+    can_create_new_version = serializers.BooleanField(required=False)
     items = QuoteItemSerializer(many=True)
+    versions = QuoteVersionSummarySerializer(many=True, required=False)
     pdf_url = serializers.CharField(required=False, allow_blank=True)
     
     tot_repuestos = serializers.DecimalField(max_digits=12, decimal_places=2)

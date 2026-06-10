@@ -196,3 +196,38 @@ def compute_warranty(numero_serie: str,
         "days": days,
         "meta": meta or {"source": "excel_general", "file": getattr(settings, "TRAZABILIDAD_GENERAL_FILE", None)},
     }
+
+
+def compute_warranty_from_sale_date(
+    sale_date,
+    numero_serie: str = "",
+    brand_id: Optional[int] = None,
+    model_id: Optional[int] = None,
+    source: str = "bejerman_sale",
+) -> Dict[str, Any]:
+    """Calcula garantía con una fecha de venta ya resuelta."""
+    today = _dt.date.today()
+    parsed_sale_date = _parse_date(sale_date)
+    serial_norm = _norm_serial(numero_serie)
+
+    days = _rule_days_for(brand_id, model_id, serial_norm)
+    if days is None:
+        days = 365
+
+    if not parsed_sale_date:
+        return {
+            "garantia": None,
+            "vence_el": None,
+            "fecha_venta": None,
+            "days": days,
+            "meta": {"source": source, "sale_date": sale_date},
+        }
+
+    vence = parsed_sale_date + _dt.timedelta(days=int(days))
+    return {
+        "garantia": bool(today <= vence),
+        "vence_el": vence,
+        "fecha_venta": parsed_sale_date,
+        "days": days,
+        "meta": {"source": source, "sale_date": parsed_sale_date.isoformat()},
+    }

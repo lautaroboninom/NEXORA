@@ -17,6 +17,8 @@ import {
   getCatalogModelos,
   getCatalogVariantes,
   lookupScan,
+  postIngresoRisEmitirBlob,
+  getSerialBarcodeBlob,
 } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { canAny, PERMISSION_CODES } from "@/lib/permissions";
@@ -37,6 +39,18 @@ const Select = ({ className = "", ...p }) => (
 const TextArea = ({ className = "", ...p }) => (
   <textarea {...p} className={`${FIELD_BASE_CLASS} ${className}`} />
 );
+
+const TIPO_INGRESO = {
+  CLIENTE: "cliente",
+  PARTICULAR: "particular",
+};
+const PROPIETARIO_VACIO = { nombre: "", contacto: "", doc: "" };
+
+function openPdfBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank", "noopener,noreferrer");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
 
 function scrollPageTop() {
   try {
@@ -114,9 +128,9 @@ export default function NuevoIngreso() {
 
   // Clientes (autocompletar)
   const [clientes, setClientes] = useState([]);
-  const [selectedCliente, setSelectedCliente] = useState(null);
   const [clienteRsInput, setClienteRsInput] = useState("");
   const [clienteCodInput, setClienteCodInput] = useState("");
+  const [tipoIngreso, setTipoIngreso] = useState(TIPO_INGRESO.CLIENTE);
 
   // Variantes (opcional)
   const [varianteTxt, setVarianteTxt] = useState("");
@@ -149,16 +163,19 @@ export default function NuevoIngreso() {
   const [accItems, setAccItems] = useState([]);
 
   // Propietario y técnico
-  const [propietario, setPropietario] = useState({ nombre: "", contacto: "", doc: "" });
+  const [propietario, setPropietario] = useState(PROPIETARIO_VACIO);
   const [tecnicos, setTecnicos] = useState([]);
   const [tecnicoId, setTecnicoId] = useState(null);
   // Empresa a facturar (SEPID por defecto)
   const [empresaFact, setEmpresaFact] = useState("SEPID");
 
   const [loading, setLoading] = useState(false);
+  const [submitStage, setSubmitStage] = useState("");
   const [out, setOut] = useState(null);
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
+  const [bejermanSuggestion, setBejermanSuggestion] = useState(null);
+  const [barcodeLoading, setBarcodeLoading] = useState(false);
   const [dupPrompt, setDupPrompt] = useState({ open: false, ingresoId: null, fechaIngreso: null, os: "" });
 
   const [clientesPerm, setClientesPerm] = useState(true);
@@ -193,7 +210,6 @@ export default function NuevoIngreso() {
 
   function syncClienteFromInputs(rsVal, codVal) {
     const c = resolveCliente(rsVal, codVal);
-    setSelectedCliente(c);
     setForm((f0) => {
       const f = clone(f0);
       f.cliente = {
@@ -211,6 +227,12 @@ export default function NuevoIngreso() {
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
+  const normalizeSerialKey = (value) =>
+    String(value || "")
+      .trim()
+      .replace(/[\s\-_./]+/g, "")
+      .toUpperCase();
+
   const normalizeCustomerName = (value) =>
     String(value || "")
       .normalize("NFD")
@@ -222,6 +244,76 @@ export default function NuevoIngreso() {
     const key = normalizeCustomerName(value);
     return key.includes("mgbio");
   };
+
+  const isParticularCustomerName = (value) => normalizeCustomerName(value) === "particular";
+  const isParticularCustomer = (customer) => isParticularCustomerName(customer?.razon_social);
+  const isParticularIngreso = tipoIngreso === TIPO_INGRESO.PARTICULAR;
+
+  const particularCliente = useMemo(
+    () => (clientes || []).find((c) => isParticularCustomer(c)) || null,
+    [clientes]
+  );
+
+  const clientesIngreso = useMemo(
+    () =>
+      (Array.isArray(clientes) ? clientes : []).filter((c) =>
+        isParticularIngreso ? isParticularCustomer(c) : !isParticularCustomer(c)
+      ),
+    [clientes, isParticularIngreso]
+  );
+
+  function setClienteCatalogo(c) {
+    const razonSocial = c?.razon_social || "";
+    const codigo = c?.cod_empresa || "";
+    setClienteRsInput(razonSocial);
+    setClienteCodInput(codigo);
+    syncClienteFromInputs(razonSocial, codigo);
+  }
+
+  function clearClienteSeleccionado() {
+    setClienteRsInput("");
+    setClienteCodInput("");
+    setForm((f0) => ({
+      ...f0,
+      cliente: { id: null, razon_social: "", cod_empresa: "", telefono: "" },
+    }));
+  }
+
+  function seleccionarTipoIngreso(nextTipo) {
+    const next = nextTipo === TIPO_INGRESO.PARTICULAR ? TIPO_INGRESO.PARTICULAR : TIPO_INGRESO.CLIENTE;
+    setTipoIngreso(next);
+    if (next === TIPO_INGRESO.PARTICULAR) {
+      if (particularCliente) {
+        setClienteCatalogo(particularCliente);
+      } else {
+        setClienteRsInput("Particular");
+        setClienteCodInput("");
+        syncClienteFromInputs("Particular", "");
+      }
+      return;
+    }
+
+    setPropietario(PROPIETARIO_VACIO);
+    const clienteActual = resolveCliente(clienteRsInput, clienteCodInput);
+    if (isParticularCustomer(clienteActual) || isParticularCustomerName(clienteRsInput)) {
+      clearClienteSeleccionado();
+    }
+  }
+
+  useEffect(() => {
+    if (!isParticularIngreso || !particularCliente) return;
+    const clienteActual = resolveCliente(clienteRsInput, clienteCodInput);
+    if (Number(clienteActual?.id || 0) === Number(particularCliente.id)) return;
+    setClienteCatalogo(particularCliente);
+  }, [isParticularIngreso, particularCliente?.id]);
+
+  useEffect(() => {
+    if (isParticularIngreso) return;
+    setPropietario((prev) => {
+      if (!prev.nombre && !prev.contacto && !prev.doc) return prev;
+      return PROPIETARIO_VACIO;
+    });
+  }, [isParticularIngreso]);
 
   const isInternalLookupReady = (value) => /^(MG|NM|NV|CE)\s*\d{4}$/i.test(String(value || "").trim());
 
@@ -267,10 +359,9 @@ export default function NuevoIngreso() {
     if (snap.auto_cliente) {
       setClienteRsInput("");
       setClienteCodInput("");
-      setSelectedCliente(null);
     }
     if (snap.auto_propietario) {
-      setPropietario({ nombre: "", contacto: "", doc: "" });
+      setPropietario(PROPIETARIO_VACIO);
     }
 
     nsAutofillSnapshotRef.current = null;
@@ -321,7 +412,6 @@ export default function NuevoIngreso() {
     setModelos([]);
     setClienteRsInput("");
     setClienteCodInput("");
-    setSelectedCliente(null);
     setForm({
       etiq_garantia_ok: false,
       cliente: { id: null, razon_social: "", cod_empresa: "", telefono: "" },
@@ -334,12 +424,14 @@ export default function NuevoIngreso() {
       fecha_ingreso: "",
     });
     setAccItems([]);
-    setPropietario({ nombre: "", contacto: "", doc: "" });
+    setTipoIngreso(TIPO_INGRESO.CLIENTE);
+    setPropietario(PROPIETARIO_VACIO);
     setTecnicoId(null);
     setEmpresaFact("SEPID");
     setVarianteTxt("");
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
+    setBejermanSuggestion(null);
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
     nsAutofillSnapshotRef.current = null;
@@ -378,16 +470,28 @@ export default function NuevoIngreso() {
     }
     const variantePrefill = prefill.variante || prefill.equipo_variante || "";
     if (variantePrefill) setVarianteTxt(variantePrefill);
+    const prefillClienteNombre = prefill.customer_nombre || prefill.alquiler_a || "";
+    const prefillTienePropietario = !!(
+      prefill.propietario_nombre ||
+      prefill.propietario_contacto ||
+      prefill.propietario_doc
+    );
+    const prefillEsParticular =
+      isParticularCustomerName(prefillClienteNombre) || (!prefillClienteNombre && prefillTienePropietario);
+    setTipoIngreso(prefillEsParticular ? TIPO_INGRESO.PARTICULAR : TIPO_INGRESO.CLIENTE);
+
     if (prefill.customer_nombre || prefill.alquiler_a) {
       setClienteRsInput(prefill.customer_nombre || prefill.alquiler_a || "");
       setClienteCodInput(prefill.customer_cod || "");
     }
-    if (prefill.propietario_nombre || prefill.propietario_contacto || prefill.propietario_doc) {
+    if (prefillEsParticular && prefillTienePropietario) {
       setPropietario({
         nombre: prefill.propietario_nombre || "",
         contacto: prefill.propietario_contacto || "",
         doc: prefill.propietario_doc || "",
       });
+    } else {
+      setPropietario(PROPIETARIO_VACIO);
     }
     if (prefill.alquilado && prefill.alquiler_a) {
       setNotice(`Equipo alquilado a ${prefill.alquiler_a}. Completa los datos restantes.`);
@@ -431,12 +535,12 @@ export default function NuevoIngreso() {
     syncClienteFromInputs(rsVal, codVal);
     prefillClienteAppliedRef.current = true;
   }, [clientes]);
-  // Lookup manual por N/S o Numero interno (Enter o blur/Tab)
+  // Lookup manual por N/S o número interno (Enter o blur/Tab)
   useEffect(() => {
     if (!lookupRequest?.nonce) return;
     const lookupByInterno = lookupRequest.source === "interno";
     const lookupCode = String(lookupRequest.code || "").trim();
-    const lookupLabel = lookupByInterno ? "Numero interno" : "N/S";
+    const lookupLabel = lookupByInterno ? "número interno" : "N/S";
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
     const seq = ++mgLookupSeqRef.current;
     (async () => {
@@ -445,9 +549,19 @@ export default function NuevoIngreso() {
         const res = await lookupScan(lookupCode);
         if (mgLookupSeqRef.current !== seq) return;
 
+        if (res?.kind === "bejerman_sale" && res?.suggestion) {
+          clearNsAutofillFields();
+          setMgInactiveInfo(null);
+          setBejermanSuggestion(res.suggestion);
+          setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
+          setNsAutofillInfo("Venta encontrada en Bejerman. Podés aplicar la sugerencia de equipo y decidir el cliente.");
+          return;
+        }
+
         if (res?.kind !== "device" || !res?.device) {
           clearNsAutofillFields();
           setMgInactiveInfo(null);
+          setBejermanSuggestion(null);
           setMgLookup({ loading: false, notFound: true, checkedNs: lookupCode });
           return;
         }
@@ -455,6 +569,7 @@ export default function NuevoIngreso() {
         const device = res.device || {};
         const ingreso = res.ingreso || {};
         const flags = res.flags || {};
+        setBejermanSuggestion(null);
 
         const marcaIdFromDevice = toIntOrNull(device.marca_id);
         const modelIdFromDevice = toIntOrNull(device.model_id);
@@ -493,13 +608,16 @@ export default function NuevoIngreso() {
           : "";
         const clienteWarning = shouldAutofillCliente && !clienteMatch
           ? useAlquilerCliente
-            ? `El cliente alquilado "${clienteRawRs}" no existe en el catalogo. Seleccionalo manualmente antes de guardar.`
-            : `El cliente dueno "${clienteRawRs || clienteRawCod}" no existe en el catalogo. Seleccionalo manualmente antes de guardar.`
+            ? `El cliente alquilado "${clienteRawRs}" no existe en el catálogo. Seleccioná un cliente válido antes de guardar.`
+            : `El cliente dueño "${clienteRawRs || clienteRawCod}" no existe en el catálogo. Seleccioná un cliente válido antes de guardar.`
           : "";
 
         const propietarioNombre = String(device.propietario_nombre || "").trim();
         const propietarioContacto = String(device.propietario_contacto || "").trim();
         const propietarioDoc = String(device.propietario_doc || "").trim();
+        const tienePropietarioAutofill = !!(propietarioNombre || propietarioContacto || propietarioDoc);
+        const autofillEsParticular =
+          isParticularCustomerName(clienteRs) || (!shouldAutofillCliente && tienePropietarioAutofill);
 
         const marcaFromCatalog = marcaIdFromDevice
           ? (marcas || []).find((m) => Number(m.id) === marcaIdFromDevice)
@@ -544,26 +662,29 @@ export default function NuevoIngreso() {
         setMarcaTxt(marcaNombre);
         setVarianteTxt(varianteFromDevice);
         setTecnicoId(tecnicoAutoId);
-        setPropietario({
-          nombre: propietarioNombre,
-          contacto: propietarioContacto,
-          doc: propietarioDoc,
-        });
+        setTipoIngreso(autofillEsParticular ? TIPO_INGRESO.PARTICULAR : TIPO_INGRESO.CLIENTE);
+        setPropietario(
+          autofillEsParticular
+            ? {
+                nombre: propietarioNombre,
+                contacto: propietarioContacto,
+                doc: propietarioDoc,
+              }
+            : PROPIETARIO_VACIO
+        );
 
         if (shouldAutofillCliente) {
           setClienteRsInput(clienteRs);
           setClienteCodInput(clienteCod);
-          setSelectedCliente(clienteMatch || null);
         } else if (prevAutoCliente) {
           setClienteRsInput("");
           setClienteCodInput("");
-          setSelectedCliente(null);
         }
 
         if (mgInactiveBySale) {
           setMgInactiveInfo({
             numero_interno: mgFromDevice || (lookupByInterno ? lookupCode : ""),
-            msg: "MG historico inactivo por venta; no operativo para nuevos ingresos.",
+            msg: "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
           });
         } else {
           setMgInactiveInfo(null);
@@ -580,7 +701,7 @@ export default function NuevoIngreso() {
           auto_variante: true,
           auto_tecnico: true,
           auto_cliente: shouldAutofillCliente,
-          auto_propietario: true,
+          auto_propietario: autofillEsParticular,
         };
         const hasAutofillData = !!(
           marcaIdFromDevice ||
@@ -591,12 +712,12 @@ export default function NuevoIngreso() {
           mgFromDevice ||
           tecnicoAutoId ||
           shouldAutofillCliente ||
-          propietarioNombre ||
-          propietarioContacto ||
-          propietarioDoc ||
+          (autofillEsParticular && propietarioNombre) ||
+          (autofillEsParticular && propietarioContacto) ||
+          (autofillEsParticular && propietarioDoc) ||
           mgInactiveBySale
         );
-        setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Podes editarlos.` : "");
+        setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Podés editarlos.` : "");
         setNsAutofillClienteWarning(clienteWarning);
         setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
       } catch {
@@ -864,6 +985,7 @@ export default function NuevoIngreso() {
 
   const onNumeroSerieChange = (e) => {
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
+    setBejermanSuggestion(null);
     onChange("equipo.numero_serie")(e);
   };
 
@@ -931,15 +1053,97 @@ export default function NuevoIngreso() {
   function onClienteRsChange(v) {
     setClienteRsInput(v);
     const c = findClienteByRS(v);
+    if (isParticularCustomer(c)) {
+      setTipoIngreso(TIPO_INGRESO.PARTICULAR);
+    } else if (isParticularIngreso && c && !isParticularCustomer(c)) {
+      setTipoIngreso(TIPO_INGRESO.CLIENTE);
+      setPropietario(PROPIETARIO_VACIO);
+    }
     const nextCod = c?.cod_empresa || "";
     setClienteCodInput(nextCod);
     syncClienteFromInputs(v, nextCod);
   }
 
+  const applyBejermanSuggestion = () => {
+    const s = bejermanSuggestion || {};
+    const equipment = s.equipment || {};
+    const suggestedMarcaId = toIntOrNull(equipment.marca_id);
+    const suggestedModeloId = toIntOrNull(equipment.modelo_id);
+    const serial = String(s.serial || form.equipo.numero_serie || "").trim();
+    const modelInCurrentList = suggestedModeloId
+      ? (modelos || []).find((m) => Number(m.id) === suggestedModeloId)
+      : null;
+
+    setForm((prev) => {
+      const next = clone(prev);
+      next.equipo.numero_serie = serial;
+      if (suggestedMarcaId) next.equipo.marca_id = String(suggestedMarcaId);
+      next.equipo.modelo_id = modelInCurrentList?.id ? String(modelInCurrentList.id) : "";
+      if (typeof s?.warranty?.garantia === "boolean") {
+        next.equipo.garantia = s.warranty.garantia;
+      }
+      return next;
+    });
+
+    if (equipment.tipo_equipo) {
+      prefillSkipTipoResetRef.current = true;
+      setTipoSel(equipment.tipo_equipo);
+    }
+    if (suggestedMarcaId) {
+      setMarcaId(suggestedMarcaId);
+      setMarcaTxt(equipment.marca || "");
+    }
+    setVarianteTxt(equipment.variante || "");
+    nsAutoDesiredBrandRef.current = suggestedMarcaId;
+    nsAutoDesiredModelRef.current = modelInCurrentList?.id ? null : suggestedModeloId;
+    setNsAutofillInfo("Sugerencia Bejerman aplicada. Verificá cliente, motivo y accesorios antes de guardar.");
+  };
+
+  const applyBejermanCustomerSuggestion = () => {
+    const local = bejermanSuggestion?.customer?.local_customer;
+    if (!local?.id) return;
+    setTipoIngreso(TIPO_INGRESO.CLIENTE);
+    setPropietario(PROPIETARIO_VACIO);
+    setClienteCatalogo(local);
+  };
+
+  const printSerialBarcode = async () => {
+    const serial = (form.equipo.numero_serie || form.equipo.numero_interno || "").trim();
+    if (!serial) {
+      setErr("Ingresá un número de serie o interno para imprimir la etiqueta.");
+      return;
+    }
+    try {
+      setBarcodeLoading(true);
+      const blob = await getSerialBarcodeBlob(serial, { title: "Equipo" });
+      openPdfBlob(blob);
+    } catch (error) {
+      setErr(error?.message || "No se pudo imprimir el código de barras");
+    } finally {
+      setBarcodeLoading(false);
+    }
+  };
+
+  const bejermanSalePayloadForSubmit = () => {
+    const s = bejermanSuggestion;
+    const serial = (form.equipo.numero_serie || "").trim();
+    if (!s || !serial || normalizeSerialKey(s.serial) !== normalizeSerialKey(serial)) return null;
+    return {
+      serial: s.serial || serial,
+      issueDate: s.document?.issueDate || s.warranty?.fecha_venta || null,
+      articleCode: s.article?.code || "",
+      articleDescription: s.article?.description || "",
+      customerCode: s.customer?.code || "",
+      customerName: s.customer?.name || "",
+      documentLabel: s.document?.label || "",
+    };
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     scrollPageTop();
     setLoading(true);
+    setSubmitStage("Guardando ingreso...");
     setErr("");
     setOut(null);
     setNotice("");
@@ -947,24 +1151,48 @@ export default function NuevoIngreso() {
 
     if (!form.equipo.marca_id) {
       setLoading(false);
-      setErr("Seleccion? una marca v?lida de la lista.");
+      setErr("Seleccioná una marca válida de la lista.");
       return;
     }
     if (!form.equipo.modelo_id) {
       setLoading(false);
-      setErr("Seleccion? un modelo.");
+      setErr("Seleccioná un modelo.");
       return;
     }
     if (!form.motivo) {
       setLoading(false);
-      setErr("Seleccion? un motivo.");
+      setErr("Seleccioná un motivo.");
       return;
     }
 
     const c = resolveCliente(clienteRsInput, clienteCodInput);
     if (!c?.id) {
       setLoading(false);
-      setErr("Deb?s seleccionar un cliente v?lido de la lista.");
+      setErr("Debés seleccionar un cliente válido de la lista.");
+      return;
+    }
+    const clienteEsParticular = isParticularCustomer(c);
+    if (isParticularIngreso && !clienteEsParticular) {
+      setLoading(false);
+      setErr("Para un ingreso particular debe seleccionarse el cliente Particular.");
+      return;
+    }
+    if (!isParticularIngreso && clienteEsParticular) {
+      setLoading(false);
+      setErr("Para usar el cliente Particular, seleccioná el tipo Particular.");
+      return;
+    }
+
+    const propietarioPayload = isParticularIngreso
+      ? {
+          nombre: (propietario.nombre || "").trim(),
+          contacto: (propietario.contacto || "").trim(),
+          doc: (propietario.doc || "").trim(),
+        }
+      : { ...PROPIETARIO_VACIO };
+    if (isParticularIngreso && (!propietarioPayload.nombre || !propietarioPayload.doc)) {
+      setLoading(false);
+      setErr("Para un ingreso particular es obligatorio completar nombre y CUIT del propietario.");
       return;
     }
 
@@ -1009,13 +1237,10 @@ export default function NuevoIngreso() {
         })),
         tecnico_id: tecnicoId ? Number(tecnicoId) : null,
         garantia_reparacion: !!form.garantia_reparacion,
-        propietario: {
-          nombre: propietario.nombre || "",
-          contacto: propietario.contacto || "",
-          doc: propietario.doc || "",
-        },
+        propietario: propietarioPayload,
         empresa_facturar: (empresaFact || "SEPID").toUpperCase(),
-        // Checkbox representa "fajas abiertas" => etiq_garantia_ok debe ser la negaci?n
+        bejerman_sale: bejermanSalePayloadForSubmit(),
+        // Checkbox representa "fajas abiertas" => etiq_garantia_ok debe ser la negación
         etiq_garantia_ok: !form.etiq_garantia_ok,
       };
 
@@ -1029,8 +1254,20 @@ export default function NuevoIngreso() {
         });
         return;
       }
+      let risNotice = "Ingreso creado.";
+      if (r?.ingreso_id) {
+        try {
+          setSubmitStage("Emitiendo RIS...");
+          const blob = await postIngresoRisEmitirBlob(r.ingreso_id);
+          openPdfBlob(blob);
+          risNotice = "Ingreso creado y RIS emitido. Se abrió el PDF imprimible.";
+        } catch (risError) {
+          risNotice = `Ingreso creado. No se pudo emitir o abrir el RIS: ${risError?.message || "error desconocido"}. Reintentá desde la hoja de servicio.`;
+        }
+      }
       resetFormFields();
       setOut(r);
+      setNotice(risNotice);
       if (r?.ingreso_id && canAutoOpenCreatedIngreso) navigate(`/ingresos/${r.ingreso_id}`);
     } catch (e2) {
       if (e2?.data?.conflict_type === "MG_INACTIVO_VENTA") {
@@ -1044,13 +1281,21 @@ export default function NuevoIngreso() {
       setErr(e2?.message || "Error creando ingreso");
     } finally {
       setLoading(false);
+      setSubmitStage("");
     }
   };
 
   const rsMatch = clienteRsInput ? findClienteByRS(clienteRsInput) : null;
   const codMatch = clienteCodInput ? findClienteByCod(clienteCodInput) : null;
   const clienteMismatch = rsMatch && codMatch && rsMatch.id !== codMatch.id;
-  const canSubmitCliente = !!resolveCliente(clienteRsInput, clienteCodInput)?.id;
+  const clienteResuelto = resolveCliente(clienteRsInput, clienteCodInput);
+  const clienteResueltoEsParticular = isParticularCustomer(clienteResuelto);
+  const propietarioCompleto =
+    !isParticularIngreso || (!!(propietario.nombre || "").trim() && !!(propietario.doc || "").trim());
+  const canSubmitCliente =
+    !!clienteResuelto?.id &&
+    propietarioCompleto &&
+    (isParticularIngreso ? clienteResueltoEsParticular : !clienteResueltoEsParticular);
   const closeDupPrompt = () => setDupPrompt({ open: false, ingresoId: null, fechaIngreso: null, os: "" });
   const confirmDupPrompt = () => {
     if (dupPrompt.ingresoId) navigate(`/ingresos/${dupPrompt.ingresoId}`);
@@ -1124,11 +1369,71 @@ export default function NuevoIngreso() {
             {nsAutofillClienteWarning}
           </div>
         )}
+        {bejermanSuggestion && (
+          <div className="border border-sky-200 bg-sky-50 rounded p-3 text-sm text-sky-950">
+            <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="font-semibold">Venta encontrada en Bejerman</div>
+                <div className="text-xs text-sky-800">
+                  {bejermanSuggestion.document?.label || "Comprobante sin número"} ·{" "}
+                  {bejermanSuggestion.document?.issueDate || "sin fecha"} · Serie{" "}
+                  {bejermanSuggestion.serial || "-"}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="rounded bg-sky-700 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-800"
+                onClick={applyBejermanSuggestion}
+              >
+                Aplicar equipo
+              </button>
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase text-sky-700">Artículo</div>
+                <div className="font-semibold">{bejermanSuggestion.article?.code || "-"}</div>
+                <div className="text-xs text-sky-800">{bejermanSuggestion.article?.description || "-"}</div>
+              </div>
+              <div>
+                <div className="text-[11px] font-semibold uppercase text-sky-700">Cliente facturado sugerido</div>
+                <div className="font-semibold">{bejermanSuggestion.customer?.name || "-"}</div>
+                <div className="text-xs text-sky-800">{bejermanSuggestion.customer?.code || "-"}</div>
+                {bejermanSuggestion.customer?.local_customer?.id ? (
+                  <button
+                    type="button"
+                    className="mt-1 rounded border border-sky-300 bg-white px-2 py-1 text-xs font-semibold text-sky-800 hover:bg-sky-100"
+                    onClick={applyBejermanCustomerSuggestion}
+                  >
+                    Usar cliente sugerido
+                  </button>
+                ) : (
+                  <div className="mt-1 text-xs text-amber-700">No se fuerza: elegí el cliente que dejó el equipo.</div>
+                )}
+              </div>
+              <div>
+                <div className="text-[11px] font-semibold uppercase text-sky-700">Equipo sugerido</div>
+                <div className="font-semibold">
+                  {[bejermanSuggestion.equipment?.tipo_equipo, bejermanSuggestion.equipment?.marca, bejermanSuggestion.equipment?.modelo]
+                    .filter(Boolean)
+                    .join(" · ") || "-"}
+                </div>
+                <div className="text-xs text-sky-800">
+                  {bejermanSuggestion.equipment?.variante || "Sin variante"} ·{" "}
+                  {bejermanSuggestion.warranty?.garantia === true
+                    ? `En garantía hasta ${bejermanSuggestion.warranty?.vence_el || "-"}`
+                    : bejermanSuggestion.warranty?.garantia === false
+                      ? `Sin garantía vigente desde venta ${bejermanSuggestion.warranty?.fecha_venta || "-"}`
+                      : "Garantía sin fecha de venta"}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
-        {/* Equipo - datos de identificacion y garantias */}
+        {/* Equipo - datos de identificación y garantías */}
         <fieldset className="border rounded p-3">
           <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <h3 className="font-semibold">Equipo - Identificacion</h3>
+            <h3 className="font-semibold">Equipo - Identificación</h3>
             <div className="flex items-center gap-2">
               <label className="text-xs text-gray-700">Autocompletado por:</label>
               <Select
@@ -1141,28 +1446,39 @@ export default function NuevoIngreso() {
                   setMgLookup({ loading: false, notFound: false, checkedNs: "" });
                 }}
               >
-                <option value="serie">Numero de serie</option>
-                <option value="interno">Numero interno</option>
+                <option value="serie">Número de serie</option>
+                <option value="interno">Número interno</option>
               </Select>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className={`md:col-span-7 ${autofillBy === "serie" ? "md:order-1" : "md:order-2"}`}>
-              <label className={FIELD_LABEL_CLASS}>Numero de serie</label>
-              <Input
-                value={form.equipo.numero_serie}
-                onChange={onNumeroSerieChange}
-                onBlur={onLookupFieldBlur("serie")}
-                onKeyDown={onLookupFieldKeyDown("serie")}
-              />
+              <label className={FIELD_LABEL_CLASS}>Número de serie</label>
+              <div className="flex gap-2">
+                <Input
+                  value={form.equipo.numero_serie}
+                  onChange={onNumeroSerieChange}
+                  onBlur={onLookupFieldBlur("serie")}
+                  onKeyDown={onLookupFieldKeyDown("serie")}
+                />
+                <button
+                  type="button"
+                  className="shrink-0 rounded border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={printSerialBarcode}
+                  disabled={barcodeLoading || !(form.equipo.numero_serie || form.equipo.numero_interno || "").trim()}
+                  title="Imprimir código de barras"
+                >
+                  {barcodeLoading ? "..." : "Código"}
+                </button>
+              </div>
             </div>
 
             <div className={`md:col-span-5 ${autofillBy === "serie" ? "md:order-2" : "md:order-1"}`}>
               <div className="flex items-center justify-between gap-2">
-                <label className={FIELD_LABEL_CLASS}>Numero Interno</label>
+                <label className={FIELD_LABEL_CLASS}>Número interno</label>
                 {mgLookup.notFound && (
                   <span className="text-xs text-amber-600">
-                    Equipo no encontrado por {autofillBy === "serie" ? "N/S" : "Numero interno"}
+                    Equipo no encontrado por {autofillBy === "serie" ? "N/S" : "número interno"}
                   </span>
                 )}
               </div>
@@ -1175,7 +1491,7 @@ export default function NuevoIngreso() {
               />
               {autofillBy === "interno" && (form.equipo.numero_interno || "").trim() && !isInternalLookupReady(form.equipo.numero_interno) && (
                 <div className="text-xs text-gray-500 mt-1">
-                  Para autocompletar, ingresa el codigo completo (ej. MG 7293).
+                  Para autocompletar, ingresá el código completo (ej. MG 7293).
                 </div>
               )}
               {mgInactiveInfo?.msg && (
@@ -1187,17 +1503,17 @@ export default function NuevoIngreso() {
             </div>
             <div className="md:col-span-12 md:order-3 text-[11px] text-gray-500 mt-1">
               {autofillBy === "serie"
-                ? "Para autocompletar por N/S, presiona Enter o Tab."
-                : "Para autocompletar por numero interno, presiona Enter o Tab."}
+                ? "Para autocompletar por N/S, presioná Enter o Tab."
+                : "Para autocompletar por número interno, presioná Enter o Tab."}
             </div>
 
             <div className="flex items-center gap-2 md:col-span-4 md:order-4">
               <input id="gar" type="checkbox" checked={form.equipo.garantia} onChange={onChange("equipo.garantia")} />
-              <label htmlFor="gar" className="text-sm font-medium text-gray-800">En Garantia</label>
+              <label htmlFor="gar" className="text-sm font-medium text-gray-800">En garantía</label>
             </div>
             <div className="flex items-center gap-2 md:col-span-4 md:order-5">
               <input type="checkbox" checked={form.garantia_reparacion} onChange={(e) => setForm((f) => ({ ...f, garantia_reparacion: e.target.checked }))} />
-              <span className="text-sm">Garantia de reparacion</span>
+              <span className="text-sm">Garantía de reparación</span>
               {garRepLoading && <span className="text-xs text-gray-500">...</span>}
               {!garRepLoading && garRepError && <span className="text-xs text-gray-400">No disponible</span>}
             </div>
@@ -1218,25 +1534,58 @@ export default function NuevoIngreso() {
           {!clientesPerm && (
             <div className="text-xs text-gray-600 mb-2">No tenés permisos para listar clientes</div>
           )}
+          <div className="mb-3">
+            <label className={FIELD_LABEL_CLASS}>Tipo</label>
+            <div className="inline-flex overflow-hidden rounded border border-gray-300 bg-white">
+              <button
+                type="button"
+                aria-pressed={!isParticularIngreso}
+                onClick={() => seleccionarTipoIngreso(TIPO_INGRESO.CLIENTE)}
+                className={`px-4 py-2 text-sm font-semibold ${
+                  !isParticularIngreso
+                    ? "bg-blue-600 text-white"
+                    : "text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Cliente
+              </button>
+              <button
+                type="button"
+                aria-pressed={isParticularIngreso}
+                onClick={() => seleccionarTipoIngreso(TIPO_INGRESO.PARTICULAR)}
+                className={`border-l border-gray-300 px-4 py-2 text-sm font-semibold ${
+                  isParticularIngreso
+                    ? "bg-blue-600 text-white"
+                    : "text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Particular
+              </button>
+            </div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-6">
               <label className={FIELD_LABEL_CLASS}>Razón social</label>
               <Input
-                list={clientesPerm ? "clientes_rs" : undefined}
+                list={clientesPerm && !isParticularIngreso ? "clientes_rs" : undefined}
                 value={clienteRsInput}
                 onChange={(e) => onClienteRsChange(e.target.value)}
-                placeholder="Escribí y elegí de la lista"
+                readOnly={isParticularIngreso}
+                placeholder={isParticularIngreso ? "Particular" : "Escribí y elegí de la lista"}
                 required
               />
               {clientesPerm && (
                 <datalist id="clientes_rs">
-                  {(Array.isArray(clientes) ? clientes : []).map((c) => (
+                  {clientesIngreso.map((c) => (
                     <option key={c.id} value={c.razon_social} />
                   ))}
                 </datalist>
               )}
-              {clienteRsInput && !rsMatch && (
+              {!isParticularIngreso && clienteRsInput && !rsMatch && (
                 <div className="text-xs text-red-600 mt-1">Debés seleccionar de la lista</div>
+              )}
+              {isParticularIngreso && clienteRsInput && !rsMatch && (
+                <div className="text-xs text-red-600 mt-1">No se encontró el cliente Particular en el catálogo.</div>
               )}
             </div>
             <div className="md:col-span-3">
@@ -1260,41 +1609,39 @@ export default function NuevoIngreso() {
           )}
         </fieldset>
 
-        {/* Propietario: requerido si cliente es Particular */}
-        <div className="mt-4 border rounded p-3">
-          <h3 className="font-semibold mb-2">Propietario</h3>
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-            <div className="md:col-span-4">
-              <label className={FIELD_LABEL_CLASS}>Nombre</label>
-              <Input
-                value={propietario.nombre}
-                onChange={(e) => setPropietario((p) => ({ ...p, nombre: e.target.value }))}
-                placeholder="Nombre del propietario"
-                required={selectedCliente?.razon_social?.trim().toLowerCase() === 'particular'}
-              />
-            </div>
-            <div className="md:col-span-4">
-              <label className={FIELD_LABEL_CLASS}>Contacto</label>
-              <Input
-                value={propietario.contacto}
-                onChange={(e) => setPropietario((p) => ({ ...p, contacto: e.target.value }))}
-                placeholder="Contacto (opcional)"
-              />
-            </div>
-            <div className="md:col-span-4">
-              <label className={FIELD_LABEL_CLASS}>CUIT</label>
-              <Input
-                value={propietario.doc}
-                onChange={(e) => setPropietario((p) => ({ ...p, doc: e.target.value }))}
-                placeholder="CUIT"
-                required={selectedCliente?.razon_social?.trim().toLowerCase() === 'particular'}
-              />
+        {isParticularIngreso && (
+          <div className="mt-4 border rounded p-3">
+            <h3 className="font-semibold mb-2">Propietario</h3>
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-4">
+                <label className={FIELD_LABEL_CLASS}>Nombre</label>
+                <Input
+                  value={propietario.nombre}
+                  onChange={(e) => setPropietario((p) => ({ ...p, nombre: e.target.value }))}
+                  placeholder="Nombre del propietario"
+                  required
+                />
+              </div>
+              <div className="md:col-span-4">
+                <label className={FIELD_LABEL_CLASS}>Contacto</label>
+                <Input
+                  value={propietario.contacto}
+                  onChange={(e) => setPropietario((p) => ({ ...p, contacto: e.target.value }))}
+                  placeholder="Contacto (opcional)"
+                />
+              </div>
+              <div className="md:col-span-4">
+                <label className={FIELD_LABEL_CLASS}>CUIT</label>
+                <Input
+                  value={propietario.doc}
+                  onChange={(e) => setPropietario((p) => ({ ...p, doc: e.target.value }))}
+                  placeholder="CUIT"
+                  required
+                />
+              </div>
             </div>
           </div>
-          <div className="text-xs text-gray-500 mt-1">
-            Obligatorio cuando el cliente es "Particular".
-          </div>
-        </div>
+        )}
 
         {/* Empresa a facturar */}
         <div className="border rounded p-3">
@@ -1382,7 +1729,8 @@ export default function NuevoIngreso() {
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Número de remito</label>
-              <Input value={form.remito_ingreso} onChange={onChange("remito_ingreso")} placeholder="Opcional" />
+              <Input value={form.remito_ingreso} onChange={onChange("remito_ingreso")} placeholder="Se completa al emitir RIS" />
+              <div className="text-xs text-gray-500 mt-1">No es obligatorio para crear el ingreso.</div>
             </div>
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Fecha de ingreso</label>
@@ -1467,7 +1815,7 @@ export default function NuevoIngreso() {
                 : "bg-blue-600"
             }`}
           >
-            {loading ? "Guardando..." : "Crear Ingreso"}
+            {loading ? submitStage || "Guardando..." : "Crear ingreso y emitir RIS"}
           </button>
         </div>
       </form>

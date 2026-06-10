@@ -17,7 +17,7 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'motivo_ingreso') THEN
     CREATE TYPE motivo_ingreso AS ENUM (
-      'reparación','service preventivo','baja alquiler','reparación alquiler','urgente control','devolución demo','cotización de equipo','otros'
+      'reparación','service preventivo','baja alquiler','reparación alquiler','urgente control','devolución demo','cotización de equipo','Revisión Técnica','otros'
     );
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'disposicion_type') THEN
@@ -43,6 +43,22 @@ DO $$ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'preventivo_item_state') THEN
     CREATE TYPE preventivo_item_state AS ENUM ('pendiente','ok','retirado','no_controlado');
+  END IF;
+END $$;
+
+-- Agregar motivo de revisión técnica en bases ya existentes.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'motivo_ingreso') THEN
+    IF NOT EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'motivo_ingreso'
+         AND e.enumlabel = 'Revisión Técnica'
+    ) THEN
+      ALTER TYPE motivo_ingreso ADD VALUE 'Revisión Técnica';
+    END IF;
   END IF;
 END $$;
 
@@ -134,22 +150,36 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION sync_quote_with_ingreso()
 RETURNS TRIGGER AS $$
 DECLARE
+  v_ingreso_id INTEGER;
   v_cur_estado ticket_state;
-  v_new_estado quote_estado;
+  v_quote_estado quote_estado := 'pendiente'::quote_estado;
   v_permite_reparacion BOOLEAN := TRUE;
   v_motivo TEXT := '';
 BEGIN
-  v_new_estado := NEW.estado;
+  IF TG_OP = 'DELETE' THEN
+    v_ingreso_id := OLD.ingreso_id;
+  ELSE
+    v_ingreso_id := NEW.ingreso_id;
+  END IF;
   SELECT
     estado,
     COALESCE(permite_reparacion, TRUE),
     COALESCE(CAST(motivo AS TEXT), '')
   INTO v_cur_estado, v_permite_reparacion, v_motivo
   FROM ingresos
-  WHERE id = NEW.ingreso_id;
+  WHERE id = v_ingreso_id;
+
+  SELECT q.estado
+  INTO v_quote_estado
+  FROM quotes q
+  WHERE q.ingreso_id = v_ingreso_id
+  ORDER BY COALESCE(q.version_num, 1) DESC, q.id DESC
+  LIMIT 1;
+
+  v_quote_estado := COALESCE(v_quote_estado, 'pendiente'::quote_estado);
   UPDATE ingresos
      SET presupuesto_estado = (
-            CASE v_new_estado
+            CASE v_quote_estado
               WHEN 'emitido' THEN 'presupuestado'::quote_estado
               WHEN 'presupuestado' THEN 'presupuestado'::quote_estado
               WHEN 'aprobado' THEN 'aprobado'::quote_estado
@@ -160,7 +190,7 @@ BEGIN
          ),
          estado = (
             CASE
-              WHEN v_new_estado = 'aprobado'
+              WHEN v_quote_estado = 'aprobado'
                    AND v_cur_estado IN ('ingresado','diagnosticado','presupuestado')
                    AND NOT (
                      LOWER(v_motivo) IN ('cotización de equipo', 'cotizacion de equipo')
@@ -170,7 +200,10 @@ BEGIN
               ELSE v_cur_estado
             END
          )
-   WHERE id = NEW.ingreso_id;
+   WHERE id = v_ingreso_id;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -342,6 +375,8 @@ CREATE TABLE IF NOT EXISTS ingresos (
   faja_garantia        TEXT,
   etiq_garantia_ok     BOOLEAN,
   presupuesto_estado   quote_estado NOT NULL DEFAULT 'pendiente',
+  presupuesto_rechazado_cobro_neto NUMERIC(12,2) NULL,
+  presupuesto_rechazado_quote_id INTEGER NULL,
   asignado_a           INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   etiqueta_qr          TEXT NULL,
   alquilado            BOOLEAN,
@@ -356,6 +391,9 @@ CREATE TABLE IF NOT EXISTS ingresos (
   serial_cambio         TEXT,
   resolucion           TEXT NULL
 );
+
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_cobro_neto NUMERIC(12,2);
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_quote_id INTEGER;
 
 -- Compat de schema para bases legacy (evita parches manuales fase 1/2)
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT;
@@ -687,6 +725,8 @@ FOR EACH ROW EXECUTE FUNCTION sync_device_snapshot();
 CREATE TABLE IF NOT EXISTS quotes (
   id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ingreso_id      INTEGER  NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  version_num     INTEGER NOT NULL DEFAULT 1,
+  origen_quote_id INTEGER NULL REFERENCES quotes(id) ON DELETE SET NULL,
   estado          quote_estado NOT NULL DEFAULT 'pendiente',
   moneda          VARCHAR(10) NOT NULL DEFAULT 'ARS',
   subtotal        NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -699,14 +739,72 @@ CREATE TABLE IF NOT EXISTS quotes (
   mant_oferta_txt TEXT,
   fecha_emitido   TIMESTAMPTZ NULL,
   fecha_aprobado  TIMESTAMPTZ NULL,
-  pdf_url         TEXT,
-  CONSTRAINT uq_quotes_ingreso UNIQUE (ingreso_id)
+  fecha_rechazado TIMESTAMPTZ NULL,
+  rechazo_comentario TEXT,
+  pdf_url         TEXT
 );
 
 -- Compat con schemas previos de quotes
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS version_num INTEGER;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS origen_quote_id INTEGER;
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS plazo_entrega_txt TEXT;
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS garantia_txt TEXT;
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS mant_oferta_txt TEXT;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS fecha_rechazado TIMESTAMPTZ;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS rechazo_comentario TEXT;
+UPDATE quotes q
+   SET version_num = ranked.version_num_rank
+  FROM (
+    SELECT
+      id,
+      ROW_NUMBER() OVER (
+        PARTITION BY ingreso_id
+        ORDER BY COALESCE(version_num, 1), id
+      ) AS version_num_rank
+    FROM quotes
+  ) ranked
+ WHERE ranked.id = q.id
+   AND COALESCE(q.version_num, 0) <> ranked.version_num_rank;
+UPDATE quotes SET version_num = 1 WHERE version_num IS NULL;
+ALTER TABLE quotes ALTER COLUMN version_num SET DEFAULT 1;
+ALTER TABLE quotes ALTER COLUMN version_num SET NOT NULL;
+ALTER TABLE quotes DROP CONSTRAINT IF EXISTS uq_quotes_ingreso;
+DROP INDEX IF EXISTS uq_quotes_ingreso;
+DROP INDEX IF EXISTS quotes_ingreso_id_key;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'fk_quotes_origen_quote'
+  ) THEN
+    ALTER TABLE quotes
+      ADD CONSTRAINT fk_quotes_origen_quote
+      FOREIGN KEY (origen_quote_id)
+      REFERENCES quotes(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'fk_ingresos_presupuesto_rechazado_quote'
+  ) THEN
+    ALTER TABLE ingresos
+      ADD CONSTRAINT fk_ingresos_presupuesto_rechazado_quote
+      FOREIGN KEY (presupuesto_rechazado_quote_id)
+      REFERENCES quotes(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_ingresos_presupuesto_rechazado_quote_id
+  ON ingresos(presupuesto_rechazado_quote_id);
 
 CREATE TABLE IF NOT EXISTS quote_items (
   id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -779,6 +877,34 @@ CREATE TABLE IF NOT EXISTS bejerman_article_mappings (
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT chk_bejerman_article_mappings_code CHECK (NULLIF(TRIM(article_code), '') IS NOT NULL),
   CONSTRAINT chk_bejerman_article_mappings_source CHECK (match_source IN ('manual','auto'))
+);
+
+CREATE TABLE IF NOT EXISTS bejerman_ingreso_remitos (
+  id                     INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ingreso_id             INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  status                 TEXT NOT NULL DEFAULT 'pending',
+  pdf_status             TEXT NOT NULL DEFAULT 'pending',
+  attempts               INTEGER NOT NULL DEFAULT 0,
+  last_error             TEXT NULL,
+  request_payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  comprobante_tipo       TEXT NULL,
+  comprobante_letra      TEXT NULL,
+  comprobante_pto_venta  TEXT NULL,
+  comprobante_numero     TEXT NULL,
+  remito_number          TEXT NULL,
+  customer_code          TEXT NULL,
+  customer_name          TEXT NULL,
+  issue_date             DATE NULL,
+  generated_at           TIMESTAMPTZ NULL,
+  created_by             INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_ingreso_remitos_status
+    CHECK (status IN ('pending','running','generated','failed')),
+  CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
+    CHECK (pdf_status IN ('pending','ready','failed')),
+  CONSTRAINT chk_bejerman_ingreso_remitos_attempts CHECK (attempts >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS ingreso_historical_corrections (
@@ -1657,8 +1783,11 @@ CREATE INDEX IF NOT EXISTS idx_ingresos_asignado ON ingresos(asignado_a);
 CREATE INDEX IF NOT EXISTS ix_ingresos_asignado_estado ON ingresos(asignado_a, estado);
 
 CREATE INDEX IF NOT EXISTS idx_quotes_ingreso ON quotes(ingreso_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quotes_ingreso_version ON quotes(ingreso_id, version_num);
+CREATE INDEX IF NOT EXISTS ix_quotes_ingreso_version_desc ON quotes(ingreso_id, version_num DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_quotes_emitido ON quotes(fecha_emitido);
 CREATE INDEX IF NOT EXISTS ix_quotes_aprobado ON quotes(fecha_aprobado);
+CREATE INDEX IF NOT EXISTS ix_quotes_rechazado ON quotes(fecha_rechazado);
 
 CREATE INDEX IF NOT EXISTS idx_items_quote ON quote_items(quote_id);
 CREATE INDEX IF NOT EXISTS idx_quote_items_repuesto_codigo ON quote_items(repuesto_codigo);
@@ -1678,6 +1807,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
   ON bejerman_article_mappings(model_id, variante_norm);
 CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_article_code
   ON bejerman_article_mappings(article_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_ingreso_remitos_ingreso
+  ON bejerman_ingreso_remitos(ingreso_id);
+CREATE INDEX IF NOT EXISTS ix_bejerman_ingreso_remitos_status
+  ON bejerman_ingreso_remitos(status, pdf_status, updated_at);
+CREATE INDEX IF NOT EXISTS ix_bejerman_ingreso_remitos_remito
+  ON bejerman_ingreso_remitos(comprobante_tipo, comprobante_pto_venta, comprobante_numero);
 
 CREATE INDEX IF NOT EXISTS idx_ingreso_acc_ingreso ON ingreso_accesorios(ingreso_id);
 CREATE INDEX IF NOT EXISTS idx_ingreso_acc_accesorio ON ingreso_accesorios(accesorio_id);
@@ -1770,6 +1905,11 @@ DO $$ BEGIN
     BEFORE UPDATE ON bejerman_article_mappings
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_ingreso_remitos_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_ingreso_remitos_set_updated_at
+    BEFORE UPDATE ON bejerman_ingreso_remitos
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_ingreso_presupuesto_alerts_set_updated_at') THEN
     CREATE TRIGGER trg_ingreso_presupuesto_alerts_set_updated_at
     BEFORE UPDATE ON ingreso_presupuesto_alerts
@@ -1835,10 +1975,41 @@ DO $$ BEGIN
     FOR EACH ROW EXECUTE FUNCTION sync_quote_with_ingreso();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_quote_sync_upd') THEN
-    CREATE TRIGGER trg_quote_sync_upd AFTER UPDATE OF estado, subtotal, fecha_emitido, fecha_aprobado ON quotes
+    CREATE TRIGGER trg_quote_sync_upd AFTER UPDATE OF estado, subtotal, fecha_emitido, fecha_aprobado, fecha_rechazado, version_num ON quotes
     FOR EACH ROW EXECUTE FUNCTION sync_quote_with_ingreso();
   END IF;
 END $$;
+
+-- Normalizar presupuestos emitidos por versiones anteriores y sincronizar el estado visible del ingreso.
+UPDATE quotes
+   SET estado='presupuestado'
+ WHERE estado::text='emitido';
+
+WITH current_quotes AS (
+  SELECT DISTINCT ON (ingreso_id)
+    ingreso_id,
+    estado
+  FROM quotes
+  ORDER BY ingreso_id, COALESCE(version_num, 1) DESC, id DESC
+),
+normalized AS (
+  SELECT
+    ingreso_id,
+    CASE estado
+      WHEN 'emitido' THEN 'presupuestado'::quote_estado
+      WHEN 'presupuestado' THEN 'presupuestado'::quote_estado
+      WHEN 'aprobado' THEN 'aprobado'::quote_estado
+      WHEN 'rechazado' THEN 'rechazado'::quote_estado
+      WHEN 'no_aplica' THEN 'no_aplica'::quote_estado
+      ELSE 'pendiente'::quote_estado
+    END AS presupuesto_estado
+  FROM current_quotes
+)
+UPDATE ingresos i
+   SET presupuesto_estado = normalized.presupuesto_estado
+  FROM normalized
+ WHERE i.id = normalized.ingreso_id
+   AND i.presupuesto_estado IS DISTINCT FROM normalized.presupuesto_estado;
 
 -- Activar triggers de auditoría por fila (si no existen)
 DO $$ BEGIN

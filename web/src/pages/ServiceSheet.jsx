@@ -9,6 +9,7 @@ import {
   getGeneralEquipos,
   postBajaIngreso,
   postAltaIngreso,
+  postIngresoConvertirPropioMg,
   postSolicitarBaja,
   postRechazarSolicitudBaja,
   getClientes,
@@ -20,6 +21,8 @@ import {
   postDeviceMgVenta,
   postDeviceMgReactivar,
   postIngresoCorreccionHistorica,
+  postIngresoRisEmitirBlob,
+  getIngresoBarcodeBlob,
 } from "../lib/api";
 import { getMarcas, getModelosByBrand, getVariantesPorMarca, checkGarantiaFabrica, patchModeloTipoEquipo } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -29,7 +32,9 @@ import {
   resolveFechaIngreso,
   resolveFechaCreacion,
   isMotivoCotizacionEquipo,
+  isMotivoRevisionTecnica,
   isSaleTicketState,
+  deviceIdentifierPartsOf,
   nsPreferInternoOf,
 } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
@@ -43,9 +48,16 @@ import TestTab from "./ServiceSheet/tabs/TestTab";
 import PrincipalTab from "./ServiceSheet/tabs/PrincipalTab";
 import DerivacionesTab from "./ServiceSheet/tabs/DerivacionesTab";
 import ServiceCriticalStrip from "../components/ServiceCriticalStrip.jsx";
+import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 
 const TAB_VALUES = ["principal", "diagnostico", "test", "presupuesto", "derivaciones", "historial", "archivos"];
 const isValidTab = (value) => TAB_VALUES.includes((value || "").toString().trim());
+
+function openPdfBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank", "noopener,noreferrer");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
 
 const Tabs = ({ value, onChange, items, extraRight }) => (
   <div className="border-b mb-4 flex items-center">
@@ -331,6 +343,8 @@ export default function ServiceSheet() {
   const canEditDiagPermission = can(user, PERMISSION_CODES.ACTION_INGRESO_EDIT_DIAGNOSIS);
   const canRepairTransitions = can(user, PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS);
   const canReleaseOrder = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
+  const canEmitIngressOrder = can(user, PERMISSION_CODES.ACTION_INGRESO_EMIT_INGRESS_ORDER);
+  const canPrintBarcode = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE);
   const canBajaAltaPermission = can(user, PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA);
   const canForceHistorical = can(user, PERMISSION_CODES.ACTION_INGRESO_FORCE_HISTORICAL);
   const canManageDevices = can(user, PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_MANAGE);
@@ -498,6 +512,8 @@ export default function ServiceSheet() {
   const [savingBasics, setSavingBasics] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsMenuRef = useRef(null);
+  const [risBusy, setRisBusy] = useState(false);
+  const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [savingBaja, setSavingBaja] = useState(false);
   const [savingAlta, setSavingAlta] = useState(false);
   const [solicitarBajaOpen, setSolicitarBajaOpen] = useState(false);
@@ -506,6 +522,8 @@ export default function ServiceSheet() {
   const [rejectingBajaRequest, setRejectingBajaRequest] = useState(false);
   const [mgModalOpen, setMgModalOpen] = useState(false);
   const [mgSaving, setMgSaving] = useState(false);
+  const [propioMgModalOpen, setPropioMgModalOpen] = useState(false);
+  const [propioMgSaving, setPropioMgSaving] = useState(false);
   const [mgAddCustomerOpen, setMgAddCustomerOpen] = useState(false);
   const [mgAddCustomerSaving, setMgAddCustomerSaving] = useState(false);
   const [mgAddCustomerErr, setMgAddCustomerErr] = useState("");
@@ -537,6 +555,9 @@ export default function ServiceSheet() {
     observaciones: "",
     venta_customer_id: "",
     venta_numero_alternativo: "",
+  });
+  const [propioMgForm, setPropioMgForm] = useState({
+    numero_interno: "",
   });
 
   // Helpers de clientes (validación de selección)
@@ -773,6 +794,37 @@ export default function ServiceSheet() {
       setData(ing);
     } catch (e) {
       setErr(e?.message || "No se pudo refrescar el ingreso");
+    }
+  }
+
+  async function emitirRisIngreso() {
+    if (risBusy) return;
+    try {
+      setRisBusy(true);
+      setActionsOpen(false);
+      const blob = await postIngresoRisEmitirBlob(id);
+      openPdfBlob(blob);
+      setToastMsg("RIS listo para imprimir");
+      setTimeout(() => setToastMsg(""), 2500);
+      await refreshIngreso({ strong: 1 });
+    } catch (e) {
+      setErr(e?.message || "No se pudo emitir o reimprimir el RIS");
+    } finally {
+      setRisBusy(false);
+    }
+  }
+
+  async function imprimirCodigoBarrasIngreso() {
+    if (barcodeBusy) return;
+    try {
+      setBarcodeBusy(true);
+      setActionsOpen(false);
+      const blob = await getIngresoBarcodeBlob(id);
+      openPdfBlob(blob);
+    } catch (e) {
+      setErr(e?.message || "No se pudo imprimir el código de barras");
+    } finally {
+      setBarcodeBusy(false);
     }
   }
 
@@ -1028,7 +1080,7 @@ export default function ServiceSheet() {
       };
     }
     if (!clienteSel) {
-      setErr("Debes seleccionar un cliente valido de la lista.");
+      setErr("Debes seleccionar un cliente válido de la lista.");
       return;
     }
     const diff = {};
@@ -1362,7 +1414,36 @@ export default function ServiceSheet() {
     }
   }
 
-  // cargar catalogos base
+  function abrirAltaMg() {
+    setErr("");
+    setPropioMgForm({
+      numero_interno: String(data?.numero_interno || "").trim(),
+    });
+    setPropioMgModalOpen(true);
+    setActionsOpen(false);
+  }
+
+  async function guardarAltaMg() {
+    if (!id || propioMgSaving) return;
+    const numeroInterno = String(propioMgForm.numero_interno || "").trim();
+    if (!numeroInterno) {
+      setErr("Debes indicar el número MG para dar de alta el equipo como propio.");
+      return;
+    }
+    try {
+      setPropioMgSaving(true);
+      await postIngresoConvertirPropioMg(id, { numero_interno: numeroInterno });
+      await refreshIngreso({ strong: 1 });
+      setErr("");
+      setPropioMgModalOpen(false);
+    } catch (e) {
+      setErr(e?.message || "No se pudo dar de alta el MG.");
+    } finally {
+      setPropioMgSaving(false);
+    }
+  }
+
+  // cargar catálogos base
   useEffect(() => {
     if (!canEditDiagPermission && !canEditAlquiler) return;
     (async () => { try { setAccesCatalogo(await getAccesoriosCatalogo()); } catch {} })();
@@ -1501,21 +1582,25 @@ export default function ServiceSheet() {
   const userId = Number(user?.id || 0);
   const assignedToMe = userId && data?.asignado_a === userId;
   const isCotizacion = isMotivoCotizacionEquipo(data?.motivo);
+  const isOwnedByMgCustomer = Boolean(data?.es_cliente_mg_owner);
   const permiteReparacion = Boolean(data?.permite_reparacion ?? true);
   const canEditDiag = canEditDiagPermission && (canAssignTecnico || assignedToMe);
   const canManagePhotos = canEditDiag;
   const canMarkReparado = canRepairTransitions && (canAssignTecnico || assignedToMe);
   const canResolve = canRepairTransitions && isJefe(user);
   const canAutorizarReparar = canRepairTransitions && (canAssignTecnico || assignedToMe);
-  const canDarBaja = canBajaAltaPermission;
+  const canDarBaja = Boolean(canBajaAltaPermission && isOwnedByMgCustomer);
+  const canDarAlta = Boolean(canBajaAltaPermission && estadoLower === "baja");
   const canRequestBaja = Boolean(
-    canEditBasics
-      || canEditDiagPermission
-      || canEditLocation
-      || canEditEntrega
-      || canManageDerivations
-      || canRepairTransitions
-      || canManagePresupuesto
+    isOwnedByMgCustomer && (
+      canEditBasics
+        || canEditDiagPermission
+        || canEditLocation
+        || canEditEntrega
+        || canManageDerivations
+        || canRepairTransitions
+        || canManagePresupuesto
+    )
   );
   const hasPendingBajaRequest = Boolean(
     data?.baja_solicitada_id
@@ -1523,16 +1608,28 @@ export default function ServiceSheet() {
       || data?.baja_solicitada_fecha
       || String(data?.baja_solicitada_nombre || "").trim()
   );
-  const showDecisionBajaModal = canDarBaja && hasPendingBajaRequest && estadoLower !== "baja";
+  const showDecisionBajaModal = canBajaAltaPermission && hasPendingBajaRequest && estadoLower !== "baja";
   const canSolicitarBaja = !canDarBaja && canRequestBaja && estadoLower !== "baja";
   const canOpenSolicitarBaja = canSolicitarBaja && !hasPendingBajaRequest;
   const canEditAccesorios = canEditDiag;
-  const canManageMgFromMenu = Boolean(canManageDevices && data?.es_propietario_mg);
+  const canManageMgFromMenu = Boolean(canManageDevices && isOwnedByMgCustomer);
+  const canConvertToOwnMg = Boolean((canManageDevices || canBajaAltaPermission) && data?.device_id && !isOwnedByMgCustomer);
+  const canShowRisAction = Boolean(canEmitIngressOrder);
+  const canPrintIngresoBarcode = Boolean(canPrintBarcode && (data?.numero_serie || data?.numero_interno));
   const maxDateOnly = maxLocalNow.slice(0, 10);
   const hasMenuActions = Boolean(
-    (canSeeHistory && numeroSerie) || canDarBaja || canSolicitarBaja || canManageMgFromMenu || canForceHistorical
+    (canSeeHistory && numeroSerie)
+      || canShowRisAction
+      || canPrintIngresoBarcode
+      || canDarBaja
+      || canDarAlta
+      || canSolicitarBaja
+      || canManageMgFromMenu
+      || canConvertToOwnMg
+      || canForceHistorical
   );
-  const serialLabel = nsPreferInternoOf(data, "-");
+  const serialIdentifier = deviceIdentifierPartsOf(data, "-");
+  const serialLabel = serialIdentifier.primary;
   const activeTab = isTabAllowed(tab) ? tab : "principal";
   const serviceTabItems = [
     { value: "principal", label: "Principal" },
@@ -1550,9 +1647,11 @@ export default function ServiceSheet() {
         Volver
       </button>
       <div className="flex items-start justify-between gap-3 mb-2">
-        <h1 className="text-2xl font-bold">
-          Hoja de servicio - OS: {formatOSHelper(data, id)} - NS/MG: {serialLabel}
-        </h1>
+        <div>
+          <h1 className="text-2xl font-bold">
+            Hoja de servicio - OS: {formatOSHelper(data, id)} - NS/MG: {serialLabel}
+          </h1>
+        </div>
         {hasMenuActions && (
           <div className="relative" ref={actionsMenuRef}>
             <button
@@ -1586,6 +1685,30 @@ export default function ServiceSheet() {
                       Historial de cambios
                     </button>
                   )}
+                  {canShowRisAction && (
+                    <button
+                      type="button"
+                      onClick={emitirRisIngreso}
+                      disabled={risBusy}
+                      className="w-full text-left px-3 py-2 text-sm text-sky-700 hover:bg-sky-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {risBusy
+                        ? "Preparando RIS..."
+                        : data?.ris?.remito_number
+                          ? "Reimprimir RIS"
+                          : "Emitir RIS"}
+                    </button>
+                  )}
+                  {canPrintIngresoBarcode && (
+                    <button
+                      type="button"
+                      onClick={imprimirCodigoBarrasIngreso}
+                      disabled={barcodeBusy}
+                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {barcodeBusy ? "Preparando etiqueta..." : "Imprimir código de barras"}
+                    </button>
+                  )}
                   {canForceHistorical && (
                     <button
                       type="button"
@@ -1607,7 +1730,16 @@ export default function ServiceSheet() {
                       {data?.mg_inactivo_venta ? "Venta MG / Reactivar" : "Venta del equipo (MG)"}
                     </button>
                   )}
-                  {canDarBaja && (
+                  {canConvertToOwnMg && (
+                    <button
+                      type="button"
+                      onClick={abrirAltaMg}
+                      className="w-full text-left px-3 py-2 text-sm text-emerald-700 hover:bg-emerald-50"
+                    >
+                      Alta de MG
+                    </button>
+                  )}
+                  {(canDarBaja || canDarAlta) && (
                     estadoLower === "baja" ? (
                       <button
                         type="button"
@@ -1657,6 +1789,11 @@ export default function ServiceSheet() {
         )}
       </div>
       <ServiceCriticalStrip data={data} isCotizacion={isCotizacion} />
+      {data?.ris?.available && (data?.ris?.status === "failed" || data?.ris?.pdf_status === "failed") && (
+        <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-800">
+          RIS pendiente: {data?.ris?.last_error || "no se pudo completar la emisión o el PDF."}
+        </div>
+      )}
       
 
       {err && <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-4">{err}</div>}
@@ -1728,6 +1865,7 @@ export default function ServiceSheet() {
         <DiagnosticoTab
           id={id}
           data={data}
+          money={money}
           canEditAcc={canEditAccesorios && !isEntregadoOBaja}
           accesCatalogo={accesCatalogo}
           nuevoAcc={nuevoAcc}
@@ -1741,7 +1879,7 @@ export default function ServiceSheet() {
           maxLocalNow={maxLocalNow}
           canResolve={canResolve}
           resolucion={resolucion}
-          setResolucion ={setResolucion}
+          setResolucion={setResolucion}
           canAutorizarReparar={canAutorizarReparar}
           isCotizacion={isCotizacion}
           permiteReparacion={permiteReparacion}
@@ -1809,6 +1947,7 @@ export default function ServiceSheet() {
                     <thead>
                       <tr className="text-left">
                         <th className="p-2">OS</th>
+                        <th className="p-2">Identificación</th>
                         <th className="p-2">Estado</th>
                         <th className="p-2">Presupuesto</th>
                         <th className="p-2">Fecha ingreso</th>
@@ -1823,6 +1962,7 @@ export default function ServiceSheet() {
                         return (
                           <tr key={ingresoId} className={`border-t hover:bg-gray-50 cursor-pointer ${isCurrent ? 'bg-blue-50' : ''}`} onClick={() => { setRelatedOpen(false); if (ingresoId) navigate(`/ingresos/${ingresoId}`); }}>
                             <td className="p-2 underline">{formatOSHelper(ingresoId)}</td>
+                            <td className="p-2"><DeviceIdentifier row={r} /></td>
                             <td className="p-2">{estadoLabel(r?.estado) || '-'}</td>
                             <td className="p-2">{(() => {
                               const v = r?.presupuesto_estado;
@@ -1876,11 +2016,16 @@ export default function ServiceSheet() {
                 type="button"
                 className="px-3 py-2 rounded bg-red-700 text-white hover:bg-red-800 disabled:opacity-60"
                 onClick={aceptarSolicitudBaja}
-                disabled={savingBaja || rejectingBajaRequest}
+                disabled={savingBaja || rejectingBajaRequest || !isOwnedByMgCustomer}
               >
                 {savingBaja ? "Aceptando..." : "Aceptar"}
               </button>
             </div>
+            {!isOwnedByMgCustomer && (
+              <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                Solo se puede aceptar la baja para equipos propios MG.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2149,7 +2294,7 @@ export default function ServiceSheet() {
             {data?.mg_inactivo_venta ? (
               <div className="space-y-3 text-sm">
                 <div className="text-amber-700">
-                  MG historico inactivo por venta; no operativo para nuevos ingresos.
+                  MG histórico inactivo por venta; no operativo para nuevos ingresos.
                 </div>
                 <div>Fecha venta: {data?.mg_venta_fecha ? formatDateTimeHelper(data.mg_venta_fecha) : "-"}</div>
                 <div>Factura venta: {data?.mg_venta_factura_numero || "-"}</div>
@@ -2158,7 +2303,7 @@ export default function ServiceSheet() {
                 <div>Número alternativo: {data?.mg_venta_numero_alternativo || "-"}</div>
                 <div>Observaciones: {data?.mg_venta_observaciones || "-"}</div>
                 <label className="block">
-                  <div className="text-xs text-gray-600 mb-1">Observaciones de reactivacion</div>
+                  <div className="text-xs text-gray-600 mb-1">Observaciones de reactivación</div>
                   <textarea
                     className="border rounded p-2 w-full min-h-[80px]"
                     value={mgForm.observaciones}
@@ -2365,6 +2510,77 @@ export default function ServiceSheet() {
               >
                 {mgAddCustomerSaving ? "Guardando..." : "Crear cliente"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {propioMgModalOpen && canConvertToOwnMg && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!propioMgSaving) setPropioMgModalOpen(false); }}
+        >
+          <div className="bg-white rounded shadow-xl max-w-xl w-full p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h2 className="text-lg font-semibold">Alta de MG</h2>
+                <div className="text-sm text-gray-600">
+                  Este equipo pasará a pertenecer a MG BIO como equipo propio y conservará el mismo historial.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="text-sm text-gray-500 hover:text-gray-900 disabled:opacity-60"
+                onClick={() => setPropioMgModalOpen(false)}
+                disabled={propioMgSaving}
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="space-y-3 text-sm">
+              <div className="rounded border border-emerald-200 bg-emerald-50 p-3">
+                <div><span className="font-medium">Equipo:</span> {data?.marca || "-"} {data?.modelo || ""}</div>
+                <div><span className="font-medium">Cliente actual:</span> {data?.razon_social || "-"}</div>
+                <div><span className="font-medium">N/S actual:</span> {(data?.numero_serie || "").trim() || "-"}</div>
+                <div><span className="font-medium">Motivo:</span> {data?.motivo || "-"}</div>
+              </div>
+
+              <label className="block">
+                <div className="text-xs text-gray-600 mb-1">Número interno MG</div>
+                <input
+                  className="border rounded p-2 w-full"
+                  placeholder="MG 0123"
+                  value={propioMgForm.numero_interno}
+                  onChange={(e) => setPropioMgForm((s) => ({ ...s, numero_interno: e.target.value }))}
+                  disabled={propioMgSaving}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500">
+                Se validará que el MG no exista en otro equipo antes de guardar.
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-60"
+                  onClick={() => setPropioMgModalOpen(false)}
+                  disabled={propioMgSaving}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+                  onClick={guardarAltaMg}
+                  disabled={propioMgSaving || !String(propioMgForm.numero_interno || "").trim()}
+                >
+                  {propioMgSaving ? "Guardando..." : "Dar de alta MG"}
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -1465,12 +1465,11 @@ class DevicePreventivoPlanView(APIView):
                 uid,
             ],
         )
-        seeded_repuestos = _seed_plan_repuestos_from_template(plan_id=int(plan_id), device_id=device_id, uid=uid)
         return Response(
             {
                 "ok": True,
                 "plan_id": plan_id,
-                "seeded_repuestos": seeded_repuestos,
+                "seeded_repuestos": 0,
                 "plan": _serialize_plan(_fetch_active_plan("device", device_id)),
             },
             status=201,
@@ -1577,6 +1576,18 @@ class DevicePreventivoRevisionCreateView(APIView):
         else:
             raise ValidationError({"repuesto_ids": "debe ser lista de ids"})
 
+        reset_recuento_ids = []
+        reset_recuento_ids_raw = d.get("reset_recuento_repuesto_ids")
+        if reset_recuento_ids_raw not in (None, ""):
+            if not isinstance(reset_recuento_ids_raw, (list, tuple)):
+                raise ValidationError({"reset_recuento_repuesto_ids": "debe ser lista de ids"})
+            for raw in reset_recuento_ids_raw:
+                parsed = _parse_int(raw, "reset_recuento_repuesto_ids", required=True, min_value=1)
+                if parsed not in reset_recuento_ids:
+                    reset_recuento_ids.append(parsed)
+        if not repuesto_ids and reset_recuento_ids:
+            raise ValidationError({"reset_recuento_repuesto_ids": "solo aplica cuando se envían repuesto_ids"})
+
         revision_id = exec_returning(
             """
             INSERT INTO preventivo_revisiones(
@@ -1601,38 +1612,47 @@ class DevicePreventivoRevisionCreateView(APIView):
             missing = [rid for rid in repuesto_ids if rid not in by_id]
             if missing:
                 raise ValidationError({"repuesto_ids": f"ids inexistentes en el plan: {missing}"})
+            reset_missing = [rid for rid in reset_recuento_ids if rid not in by_id]
+            if reset_missing:
+                raise ValidationError({"reset_recuento_repuesto_ids": f"ids no incluidos en repuesto_ids: {reset_missing}"})
+            reset_recuento_set = set(reset_recuento_ids)
             for orden, rid in enumerate(repuesto_ids, start=1):
                 rep = by_id.get(rid)
                 rep_name = _txt_norm(rep.get("nombre_repuesto")) or f"Repuesto #{rid}"
+                reset_recuento = rid in reset_recuento_set
                 exec_void(
                     """
                     INSERT INTO preventivo_revision_items(
                       revision_id, orden, device_id, equipo_snapshot, serie_snapshot,
                       interno_snapshot, estado_item, motivo_no_control, ubicacion_detalle,
                       accesorios_cambiados, accesorios_detalle, notas, arrastrar_proxima
-                    ) VALUES (%s, %s, NULL, %s, NULL, NULL, 'ok', NULL, NULL, false, NULL, NULL, true)
+                    ) VALUES (%s, %s, NULL, %s, NULL, NULL, 'ok', NULL, NULL, false, NULL, %s, true)
                     """,
                     [
                         revision_id,
                         orden,
                         f"Repuesto: {rep_name}",
+                        "Recuento preventivo reiniciado manualmente."
+                        if reset_recuento
+                        else "Trabajo registrado sin reiniciar el recuento preventivo.",
                     ],
                 )
-                proxima_rep = _add_period(
-                    fecha_realizada,
-                    int(rep.get("periodicidad_valor") or 0),
-                    rep.get("periodicidad_unidad"),
-                )
-                exec_void(
-                    """
-                    UPDATE preventivo_plan_repuestos
-                       SET ultima_revision_fecha=%s,
-                           proxima_revision_fecha=%s,
-                           updated_by=%s
-                     WHERE id=%s
-                    """,
-                    [fecha_realizada, proxima_rep, uid, rid],
-                )
+                if reset_recuento:
+                    proxima_rep = _add_period(
+                        fecha_realizada,
+                        int(rep.get("periodicidad_valor") or 0),
+                        rep.get("periodicidad_unidad"),
+                    )
+                    exec_void(
+                        """
+                        UPDATE preventivo_plan_repuestos
+                           SET ultima_revision_fecha=%s,
+                               proxima_revision_fecha=%s,
+                               updated_by=%s
+                         WHERE id=%s
+                        """,
+                        [fecha_realizada, proxima_rep, uid, rid],
+                    )
         else:
             normalized = _normalize_item_payload(d, device_id=device_id)
             exec_void(
@@ -1659,21 +1679,21 @@ class DevicePreventivoRevisionCreateView(APIView):
                 ],
             )
 
-        proxima = _add_period(
-            fecha_realizada,
-            int(plan.get("periodicidad_valor") or 0),
-            plan.get("periodicidad_unidad"),
-        )
-        exec_void(
-            """
-            UPDATE preventivo_planes
-               SET ultima_revision_fecha=%s,
-                   proxima_revision_fecha=%s,
-                   updated_by=%s
-             WHERE id=%s
-            """,
-            [fecha_realizada, proxima, uid, plan.get("id")],
-        )
+            proxima = _add_period(
+                fecha_realizada,
+                int(plan.get("periodicidad_valor") or 0),
+                plan.get("periodicidad_unidad"),
+            )
+            exec_void(
+                """
+                UPDATE preventivo_planes
+                   SET ultima_revision_fecha=%s,
+                       proxima_revision_fecha=%s,
+                       updated_by=%s
+                 WHERE id=%s
+                """,
+                [fecha_realizada, proxima, uid, plan.get("id")],
+            )
 
         rev = _fetch_revision(revision_id)
         return Response(
@@ -1725,31 +1745,16 @@ class DevicePreventivoRepuestosView(APIView):
             return Response({"detail": "El repuesto ya existe en este plan"}, status=409)
 
         uid = _uid(request)
-        plan_ids, signature = _equivalent_plan_ids_from_plan(plan.get("id"))
-        if not plan_ids:
-            plan_ids = [int(plan.get("id"))]
-
         origin_id = _insert_plan_repuesto(plan.get("id"), payload, uid, copy_dates=True)
-        replicated = 0
-        skipped = 0
-        for pid in plan_ids:
-            if int(pid) == int(plan.get("id")):
-                continue
-            inserted = _insert_plan_repuesto(int(pid), payload, uid, copy_dates=False)
-            if inserted:
-                replicated += 1
-            else:
-                skipped += 1
-        _upsert_template_item(signature, payload, uid)
         created = _fetch_plan_repuesto_item(plan.get("id"), origin_id)
         return Response(
             {
                 "ok": True,
                 "item": _serialize_plan_repuesto(created),
                 "replicacion": {
-                    "planes_equivalentes": max(0, len(plan_ids) - 1),
-                    "insertados": replicated,
-                    "omitidos_existentes": skipped,
+                    "planes_equivalentes": 0,
+                    "insertados": 0,
+                    "omitidos_existentes": 0,
                 },
             },
             status=201,
@@ -1811,92 +1816,28 @@ class DevicePreventivoRepuestoDetailView(APIView):
             )
 
         uid = _uid(request)
-        repuesto_key = current.get("repuesto_key")
-        plan_ids, signature = _equivalent_plan_ids_from_plan(plan.get("id"))
-        if not plan_ids:
-            plan_ids = [int(plan.get("id"))]
-
-        replicated_updated = 0
-        replicated_inserted = 0
-        for pid in plan_ids:
-            target = _fetch_plan_repuesto_item_by_key(pid, repuesto_key)
-            if int(pid) == int(plan.get("id")):
-                exec_void(
-                    """
-                    UPDATE preventivo_plan_repuestos
-                       SET nombre_repuesto=%s,
-                           periodicidad_valor=%s,
-                           periodicidad_unidad=%s,
-                           aviso_anticipacion_dias=%s,
-                           ultima_revision_fecha=%s,
-                           proxima_revision_fecha=%s,
-                           updated_by=%s
-                     WHERE id=%s
-                    """,
-                    [
-                        merged.get("nombre_repuesto"),
-                        merged.get("periodicidad_valor"),
-                        merged.get("periodicidad_unidad"),
-                        merged.get("aviso_anticipacion_dias"),
-                        merged.get("ultima_revision_fecha"),
-                        merged.get("proxima_revision_fecha"),
-                        uid,
-                        current.get("id"),
-                    ],
-                )
-                continue
-
-            if target:
-                exec_void(
-                    """
-                    UPDATE preventivo_plan_repuestos
-                       SET nombre_repuesto=%s,
-                           periodicidad_valor=%s,
-                           periodicidad_unidad=%s,
-                           aviso_anticipacion_dias=%s,
-                           updated_by=%s
-                     WHERE id=%s
-                    """,
-                    [
-                        merged.get("nombre_repuesto"),
-                        merged.get("periodicidad_valor"),
-                        merged.get("periodicidad_unidad"),
-                        merged.get("aviso_anticipacion_dias"),
-                        uid,
-                        target.get("id"),
-                    ],
-                )
-                replicated_updated += 1
-            else:
-                inserted = _insert_plan_repuesto(
-                    plan_id=int(pid),
-                    repuesto_payload={
-                        "repuesto_key": repuesto_key,
-                        "catalogo_repuesto_id": current.get("catalogo_repuesto_id"),
-                        "nombre_repuesto": merged.get("nombre_repuesto"),
-                        "periodicidad_valor": merged.get("periodicidad_valor"),
-                        "periodicidad_unidad": merged.get("periodicidad_unidad"),
-                        "aviso_anticipacion_dias": merged.get("aviso_anticipacion_dias"),
-                        "ultima_revision_fecha": None,
-                        "proxima_revision_fecha": None,
-                    },
-                    uid=uid,
-                    copy_dates=False,
-                )
-                if inserted:
-                    replicated_inserted += 1
-
-        _upsert_template_item(
-            signature,
-            {
-                "repuesto_key": repuesto_key,
-                "catalogo_repuesto_id": current.get("catalogo_repuesto_id"),
-                "nombre_repuesto": merged.get("nombre_repuesto"),
-                "periodicidad_valor": merged.get("periodicidad_valor"),
-                "periodicidad_unidad": merged.get("periodicidad_unidad"),
-                "aviso_anticipacion_dias": merged.get("aviso_anticipacion_dias"),
-            },
-            uid,
+        exec_void(
+            """
+            UPDATE preventivo_plan_repuestos
+               SET nombre_repuesto=%s,
+                   periodicidad_valor=%s,
+                   periodicidad_unidad=%s,
+                   aviso_anticipacion_dias=%s,
+                   ultima_revision_fecha=%s,
+                   proxima_revision_fecha=%s,
+                   updated_by=%s
+             WHERE id=%s
+            """,
+            [
+                merged.get("nombre_repuesto"),
+                merged.get("periodicidad_valor"),
+                merged.get("periodicidad_unidad"),
+                merged.get("aviso_anticipacion_dias"),
+                merged.get("ultima_revision_fecha"),
+                merged.get("proxima_revision_fecha"),
+                uid,
+                current.get("id"),
+            ],
         )
         updated = _fetch_plan_repuesto_item(plan.get("id"), item_id)
         return Response(
@@ -1904,9 +1845,9 @@ class DevicePreventivoRepuestoDetailView(APIView):
                 "ok": True,
                 "item": _serialize_plan_repuesto(updated),
                 "replicacion": {
-                    "planes_equivalentes": max(0, len(plan_ids) - 1),
-                    "actualizados": replicated_updated,
-                    "insertados_faltantes": replicated_inserted,
+                    "planes_equivalentes": 0,
+                    "actualizados": 0,
+                    "insertados_faltantes": 0,
                 },
             }
         )
@@ -1924,40 +1865,19 @@ class DevicePreventivoRepuestoDetailView(APIView):
         if not current:
             return Response({"detail": "Repuesto preventivo inexistente"}, status=404)
 
-        repuesto_key = current.get("repuesto_key")
-        plan_ids, signature = _equivalent_plan_ids_from_plan(plan.get("id"))
-        if not plan_ids:
-            plan_ids = [int(plan.get("id"))]
-
-        deleted = 0
-        for pid in plan_ids:
-            row = q(
-                """
-                SELECT COUNT(*) AS n
-                FROM preventivo_plan_repuestos
-                WHERE plan_id=%s
-                  AND repuesto_key=%s
-                  AND activa=true
-                """,
-                [pid, repuesto_key],
-                one=True,
-            ) or {}
-            deleted += int(row.get("n") or 0)
-            exec_void(
-                """
-                DELETE FROM preventivo_plan_repuestos
-                WHERE plan_id=%s
-                  AND repuesto_key=%s
-                  AND activa=true
-                """,
-                [pid, repuesto_key],
-            )
-        _delete_template_item(signature, repuesto_key)
+        deleted = 1
+        exec_void(
+            """
+            DELETE FROM preventivo_plan_repuestos
+            WHERE id=%s
+            """,
+            [current.get("id")],
+        )
         return Response(
             {
                 "ok": True,
                 "deleted": deleted,
-                "planes_equivalentes": max(0, len(plan_ids) - 1),
+                "planes_equivalentes": 0,
             }
         )
 

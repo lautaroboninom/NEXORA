@@ -4,6 +4,8 @@ from django.contrib.auth.hashers import make_password
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
+from service.views.tipo_equipo_utils import clean_tipo_equipo, preferred_row, tipo_equipo_key
+
 
 DEFAULT_EMAIL = "lbonino@sepid.com.ar"
 DEFAULT_NOMBRE = "Lucas Bonino"
@@ -64,8 +66,14 @@ class Command(BaseCommand):
         return dict(zip(cols, row))
 
     @staticmethod
+    def _fetchall_dict(cur):
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    @staticmethod
     def _norm(value):
-        return " ".join(str(value or "").split()).strip()
+        return clean_tipo_equipo(value)
 
     def _upsert_user(self, cur, *, nombre, email, rol, password, reset_password):
         cur.execute(
@@ -181,16 +189,18 @@ class Command(BaseCommand):
 
         cur.execute(
             """
-            SELECT id
+            SELECT id, nombre, activo
             FROM catalogo_tipos_equipo
-            WHERE UPPER(TRIM(nombre)) = UPPER(TRIM(%s))
-            LIMIT 1
+            ORDER BY id
             """,
-            [tipo],
+            [],
         )
-        row = self._fetchone_dict(cur)
+        row = preferred_row(self._fetchall_dict(cur), tipo)
         if row:
-            cur.execute("UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s", [tipo, row["id"]])
+            cur.execute(
+                "UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s",
+                [tipo, row["id"]],
+            )
             return False
 
         cur.execute("INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)", [tipo])
@@ -217,16 +227,19 @@ class Command(BaseCommand):
         tipo = self._norm(tipo_nombre)
         cur.execute(
             """
-            SELECT id
+            SELECT id, nombre, activo
             FROM marca_tipos_equipo
-            WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))
-            LIMIT 1
+            WHERE marca_id=%s
+            ORDER BY id
             """,
-            [marca_id, tipo],
+            [marca_id],
         )
-        row = self._fetchone_dict(cur)
+        row = preferred_row(self._fetchall_dict(cur), tipo)
         if row:
-            cur.execute("UPDATE marca_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s", [tipo, row["id"]])
+            cur.execute(
+                "UPDATE marca_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s",
+                [tipo, row["id"]],
+            )
             return False
 
         cur.execute(
@@ -255,7 +268,7 @@ class Command(BaseCommand):
 
         if row:
             tipo_actual = self._norm(row.get("tipo_actual"))
-            if not tipo_actual or tipo_actual.upper() == tipo.upper():
+            if not tipo_actual or tipo_equipo_key(tipo_actual) == tipo_equipo_key(tipo):
                 cur.execute(
                     "UPDATE models SET nombre=%s, tipo_equipo=%s WHERE id=%s",
                     [modelo, tipo or None, row["id"]],

@@ -27,16 +27,16 @@ export default function ForgotPassword() {
     <div className="min-h-screen flex flex-col">
       <main className="flex-1">
         <div className="max-w-sm mx-auto mt-16 border rounded p-4 bg-white">
-          <h1 className="text-xl font-semibold mb-3">Recuperar contrasea</h1>
+          <h1 className="text-xl font-semibold mb-3">Recuperar contraseña</h1>
           {sent ? (
             <div className="text-sm text-gray-700">
-              Si el correo existe, te enviamos un enlace para restablecer la contrasea.
-              Revis tu bandeja de entrada y el spam.
+              Si el correo existe, te enviamos un enlace para restablecer la contraseña.
+              Revisa tu bandeja de entrada y el spam.
             </div>
           ) : (
             <form onSubmit={submit} className="space-y-3">
               {err && <div className="bg-red-100 text-red-700 p-2 rounded">{err}</div>}
-              <input className="border rounded p-2 w-full" placeholder="tu@sepid.com.ar"
+              <input className="border rounded p-2 w-full" placeholder="mail"
                      value={email} onChange={e=>setEmail(e.target.value)} />
               <button type="submit" disabled={sending || !email.trim()} className={`w-full p-2 rounded text-white ${sending ? "bg-blue-400 cursor-not-allowed" : "bg-blue-600"}`}>
                 {sending ? "Enviando..." : "Enviar enlace"}

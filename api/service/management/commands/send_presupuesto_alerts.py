@@ -173,7 +173,7 @@ class Command(BaseCommand):
               LEFT JOIN quotes q ON q.id = (
                 SELECT q2.id FROM quotes q2
                 WHERE q2.ingreso_id = t.id
-                ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+                ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
                 LIMIT 1
               )
               LEFT JOIN ingreso_presupuesto_alerts ipa ON ipa.ingreso_id = t.id

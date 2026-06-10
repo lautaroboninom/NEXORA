@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 from unittest import skipUnless
 
 from django.core.management import call_command
@@ -26,7 +27,6 @@ class ActivityAuditRulesTest(SimpleTestCase):
 class MetricasActividadTecnicosAPITest(TestCase):
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -113,7 +113,13 @@ class MetricasActividadTecnicosAPITest(TestCase):
                 CREATE TABLE IF NOT EXISTS quotes (
                   id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                   ingreso_id INTEGER NOT NULL,
-                  estado TEXT NOT NULL DEFAULT 'pendiente'
+                  version_num INTEGER NOT NULL DEFAULT 1,
+                  origen_quote_id INTEGER NULL,
+                  estado TEXT NOT NULL DEFAULT 'pendiente',
+                  fecha_emitido TIMESTAMPTZ NULL,
+                  fecha_aprobado TIMESTAMPTZ NULL,
+                  fecha_rechazado TIMESTAMPTZ NULL,
+                  rechazo_comentario TEXT NULL
                 )
                 """
             )
@@ -199,9 +205,25 @@ class MetricasActividadTecnicosAPITest(TestCase):
                 )
                 """
             )
+            for ddl in (
+                "ALTER TABLE models ADD COLUMN IF NOT EXISTS tipo_equipo TEXT NULL",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT NULL",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS variante TEXT NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_estado TEXT",
+                "ALTER TABLE quotes ADD COLUMN IF NOT EXISTS version_num INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE quotes ADD COLUMN IF NOT EXISTS origen_quote_id INTEGER NULL",
+                "ALTER TABLE quotes ADD COLUMN IF NOT EXISTS fecha_rechazado TIMESTAMPTZ NULL",
+                "ALTER TABLE quotes ADD COLUMN IF NOT EXISTS rechazo_comentario TEXT NULL",
+            ):
+                try:
+                    cur.execute(ddl)
+                except Exception:
+                    connection.rollback()
+                    pass
 
         call_command("apply_user_permissions_schema", verbosity=0)
         call_command("apply_metricas_actividad_schema", verbosity=0)
+        super().setUpClass()
 
     @classmethod
     def setUpTestData(cls):
@@ -264,9 +286,33 @@ class MetricasActividadTecnicosAPITest(TestCase):
             cur.execute("DELETE FROM catalogo_repuestos")
 
     def _insert_returning_id(self, sql, params):
-        with connection.cursor() as cur:
-            cur.execute(sql, params)
-            return int(cur.fetchone()[0])
+        try:
+            with connection.cursor() as cur:
+                cur.execute(sql, params)
+                return int(cur.fetchone()[0])
+        except Exception as exc:
+            if connection.vendor != "postgresql" or 'null value in column "id"' not in str(exc).lower():
+                raise
+            connection.rollback()
+            sql_no_returning = re.sub(r"\s+RETURNING\s+id\s*$", "", sql.strip(), flags=re.IGNORECASE | re.DOTALL)
+            table_match = re.search(r"INSERT\s+INTO\s+([a-zA-Z0-9_.]+)\s*\(", sql_no_returning, flags=re.IGNORECASE)
+            if not table_match:
+                raise
+            table_name = table_match.group(1)
+            with connection.cursor() as cur:
+                cur.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table_name}")
+                next_id = int(cur.fetchone()[0])
+            sql_with_id = re.sub(
+                r"INSERT\s+INTO\s+([a-zA-Z0-9_.]+)\s*\(\s*",
+                rf"INSERT INTO {table_name} (id, ",
+                sql_no_returning,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            sql_with_id = re.sub(r"VALUES\s*\(\s*", "VALUES (%s, ", sql_with_id, count=1, flags=re.IGNORECASE)
+            with connection.cursor() as cur:
+                cur.execute(sql_with_id, [next_id, *params])
+            return next_id
 
     def _seed_activity_data(self):
         now = timezone.now()

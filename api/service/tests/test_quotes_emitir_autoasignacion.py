@@ -45,7 +45,7 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
                 email VARCHAR(320) UNIQUE,
                 hash_pw TEXT,
                 rol TEXT,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT TRUE
             ){engine_suffix}
         """
         marcas_sql = f"""
@@ -83,6 +83,8 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
             CREATE TABLE IF NOT EXISTS quotes (
                 id {auto_inc},
                 ingreso_id INT NOT NULL,
+                version_num INT NOT NULL DEFAULT 1,
+                origen_quote_id INT NULL,
                 estado TEXT NOT NULL DEFAULT 'pendiente',
                 moneda TEXT NOT NULL DEFAULT 'ARS',
                 subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -95,6 +97,8 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
                 mant_oferta_txt TEXT NULL,
                 fecha_emitido {datetime_type} NULL,
                 fecha_aprobado {datetime_type} NULL,
+                fecha_rechazado {datetime_type} NULL,
+                rechazo_comentario TEXT NULL,
                 pdf_url TEXT NULL
             ){engine_suffix}
         """
@@ -117,7 +121,21 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
                 codigo TEXT NULL,
                 nombre TEXT NULL,
                 estado TEXT NULL,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT TRUE
+            ){engine_suffix}
+        """
+        audit_log_sql = f"""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id {auto_inc},
+                ts {datetime_type} DEFAULT CURRENT_TIMESTAMP,
+                user_id INT NULL,
+                role TEXT NULL,
+                method TEXT NULL,
+                path TEXT NULL,
+                ip TEXT NULL,
+                user_agent TEXT NULL,
+                status_code INT NULL,
+                body TEXT NULL
             ){engine_suffix}
         """
 
@@ -130,6 +148,18 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
             cur.execute(quotes_sql)
             cur.execute(quote_items_sql)
             cur.execute(catalogo_repuestos_sql)
+            cur.execute(audit_log_sql)
+            for ddl in (
+                "ALTER TABLE models ADD COLUMN IF NOT EXISTS variante TEXT NULL",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS variante TEXT NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS equipo_variante TEXT NULL",
+                "ALTER TABLE catalogo_repuestos ADD COLUMN IF NOT EXISTS estado TEXT NULL",
+            ):
+                try:
+                    cur.execute(ddl)
+                except Exception:
+                    connection.rollback()
+                    pass
         super().setUpClass()
 
     @classmethod
@@ -199,7 +229,7 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
             )
             return _last_insert_id(cur)
 
-    def _seed_repuesto(self, codigo: str, estado: str | None = None, activo: int = 1) -> int:
+    def _seed_repuesto(self, codigo: str, estado: str | None = None, activo: bool = True) -> int:
         with connection.cursor() as cur:
             cur.execute(
                 """

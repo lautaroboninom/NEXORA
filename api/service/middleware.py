@@ -1,9 +1,16 @@
-from django.db import connection
+from django.db import connection, transaction
 from django.conf import settings
 from .activity_audit import should_audit_read_request
 from .ip_utils import get_client_ip
 from .views.helpers import _set_audit_user
 import json
+
+
+def _safe_clear_rollback():
+    try:
+        transaction.set_rollback(False)
+    except Exception:
+        pass
 
 
 class RLSMiddleware:
@@ -24,6 +31,7 @@ class AuditUserMiddleware:
         try:
             _set_audit_user(request)
         except Exception:
+            _safe_clear_rollback()
             pass
         return self.get_response(request)
 
@@ -64,30 +72,33 @@ class ActivityLogMiddleware:
                     raw = request.body[: getattr(settings, "AUDIT_LOG_MAX_BODY", 4096)]
                     body_json = json.loads(raw.decode("utf-8", errors="ignore"))
             except Exception:
+                _safe_clear_rollback()
                 body_json = None
 
         response = self.get_response(request)
 
         if should_log:
             try:
-                with connection.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO audit_log (ts, user_id, role, method, path, ip, user_agent, status_code, body)
-                        VALUES (now(), %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                        """,
-                        [
-                            user_id,
-                            role,
-                            request.method,
-                            path,
-                            ip,
-                            ua,
-                            getattr(response, "status_code", None),
-                            json.dumps(body_json) if body_json is not None else None,
-                        ],
-                    )
+                with transaction.atomic():
+                    with connection.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO audit_log (ts, user_id, role, method, path, ip, user_agent, status_code, body)
+                            VALUES (now(), %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                            """,
+                            [
+                                user_id,
+                                role,
+                                request.method,
+                                path,
+                                ip,
+                                ua,
+                                getattr(response, "status_code", None),
+                                json.dumps(body_json) if body_json is not None else None,
+                            ],
+                        )
             except Exception:
+                _safe_clear_rollback()
                 pass  # nunca romper la request por problemas de log
 
         return response

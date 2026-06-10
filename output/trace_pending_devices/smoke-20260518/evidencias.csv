@@ -1,0 +1,2220 @@
+﻿ingreso_id,device_id,source,source_priority,match_type,serial_busqueda,serial_encontrado,fecha_fuente,factura,remito,deposito,os_access,confidence_hint,detalle,classification,conclusion_operativa
+29288,29021,bejerman_sync_jobs,3,stock_entry_str,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,STR,,baja,pending,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,fecha_ingreso: 0026-05-18T03:53:48+00:00,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,remito_ingreso: 4341,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,ubicacion_id: 1,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,accesorios,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,id: 29288,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,disposicion: normal,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,etiq_garantia_ok: true,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,permite_reparacion: true,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,asignado_a: 10,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,motivo: baja alquiler,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,garantia_reparacion: false,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,device_id: 29021,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,estado: ingresado,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,presupuesto_estado: pendiente,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,informe_preliminar,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,recibido_por: 7,,
+29288,29021,audit,3,ingresos,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:10.153584-03:00,,,,,baja,fecha_creacion: 2026-05-18T15:17:10.153584+00:00,,
+29288,29021,audit,3,GET,BDJ16B41002,BDJ16B41002,2026-05-18 15:48:17.402703-03:00,,,,,baja,/api/ingresos/29288/,,
+29288,29021,audit,3,GET,BDJ16B41002,BDJ16B41002,2026-05-18 12:17:12.599177-03:00,,,,,baja,/api/ingresos/29288/,,
+25221,25221,ingreso_events,3,liberado,5536,5536,2025-11-19 09:57:03.832104-03:00,,,,,media,Orden de salida impresa,,
+25221,25221,ingreso_events,3,entregado,5536,5536,2025-09-24 12:25:00-03:00,,,,,media,Cambio de estado,,
+25221,25221,ingreso_events,3,ingresado,5536,5536,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+25221,25221,audit,3,devices,5536,5536,2026-02-05 10:55:12.281975-03:00,,,,,baja,propietario: Alejandro Ferrando,,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 10:55:12.281975-03:00,,,,,baja,propietario_nombre: Alejandro Ferrando,,
+25221,25221,audit,3,devices,5536,5536,2026-02-05 10:55:12.281975-03:00,,,,,baja,propietario_nombre: Alejandro Ferrando,,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:56:35.314195-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - BLOCK de aluminio - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER - Celda de O2
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:56:31.924679-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - BLOCK de aluminio - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER - Celda de 02
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:56:29.444609-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - BLOCK de aluminio - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER - Celda de =2
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:56:28.173418-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - BLOCK de aluminio - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER - Celda de 
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:56:27.338819-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - BLOCK de aluminio - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER - Celda de
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:59.691394-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK.
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:58.124919-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:53.089932-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  conector a pantalla ROTO
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:47.441871-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK y ficha LCD rota conector a pantalla ROTO
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:42.953658-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK Placa control: ficha LCD rota conector a pantalla ROTO
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:35.780276-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:31.970634-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:27.722742-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:49:25.354601-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK",,
+25221,25221,audit,3,ingresos,5536,5536,2026-02-05 09:48:50.162169-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 14:55:52.055235-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+válvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 11:49:40.119675-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+Block de aluminio con perdida
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 11:49:34.179252-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+BLOCK de
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 11:49:33.208139-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+BLOCK 
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 11:49:31.142704-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 11:49:22.405342-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 11:49:13.720723-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - BLOCK de aluminio - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:58:24.018151-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - VALVULA REGULADORA DE PRESIÓN - PLACA PRINCIPAL - CABLE PANTALLA - ENCODER
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:58:11.826083-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+se usa block de aluminio para arreglar la 6142",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:58:10.618725-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+
+encoder ROTO
+
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+se usa block de aluminio para arreglar la 6142",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:58:05.694918-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - VALVULA REGULADORA DE PRESIÓN - PLACA PRINCIPAL - CABLE PANTALLA
+",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:57:46.142245-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+se usa block de aluminio para arreglar la 6142",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:57:36.660664-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+se usa block de aluminio para arreglar la",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:56:42.994410-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:56.407415-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora<<<<<<<<<<",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:44.955253-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula proporcional 200 FALLA
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:41.250128-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:40.237832-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:24.878361-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla ROTO
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200 FALLA
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:23.712023-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector a pantalla 
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200 FALLA
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:21.175932-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  y conector 
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200 FALLA
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2026-01-20 10:54:18.528908-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK  
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200 FALLA
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:38:19.422664-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - VALVULA REGULADORA DE PRESIÓN - PLACA PRINCIPAL
+",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:38:15.829822-03:00,,,,,baja,"trabajos_realizados: Piezas a reemplazar: VÁLVULA PROPORCIONAL DE 200LPM - VALVULA REGULADORA DE PRESIÓN - PLACA 
+",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:40.222600-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200 FALLA
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:37.813611-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:36.523551-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula proporcional 200
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:31.552721-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+valvula fail
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:29.686786-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:28.086271-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:13.596970-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas inllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula fail
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,ingresos,5536,5536,2025-11-26 09:37:12.833283-03:00,,,,,baja,"descripcion_problema: FALLA EN PLACA NO DESACTIVA EL LOCK
+
+válvula solenoide OK
+válvulas innllet Ok 
+pantalla LCD ok
+táctil OK
+encoder ROTO
+
+Cable pantalla ROTO
+valvula fail
+Placa control: ficha LCD rota
+
+pierde por valvula reguladora",,
+25221,25221,audit,3,GET,5536,5536,2026-05-18 10:01:46.523823-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,GET,5536,5536,2026-05-15 09:37:19.607785-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,GET,5536,5536,2026-05-15 09:37:15.597499-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 10:55:12.308134-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:56:47.416394-03:00,,,,,baja,/api/quotes/25221/items/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:56:35.318511-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:56:31.930428-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:56:29.450832-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:56:28.180315-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:56:27.346399-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:50:08.764451-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:59.698163-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:58.131811-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:53.097574-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:47.450438-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:42.960474-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:35.789266-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:31.977833-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:27.731056-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-02-05 09:49:25.363630-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:48:50.516081-03:00,,,,,baja,/api/quotes/25221/emitir/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:48:36.471652-03:00,,,,,baja,/api/quotes/25221/items/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:48:01.614289-03:00,,,,,baja,/api/quotes/25221/items/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:47:51.403804-03:00,,,,,baja,/api/quotes/25221/items/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:47:42.080869-03:00,,,,,baja,/api/quotes/25221/items/,,
+25221,25221,audit,3,POST,5536,5536,2026-02-05 09:47:31.737244-03:00,,,,,baja,/api/quotes/25221/items/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 14:55:52.173110-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 11:49:40.128681-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 11:49:34.183578-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 11:49:33.218751-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 11:49:31.169469-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 11:49:22.427802-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 11:49:13.810346-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:58:24.021943-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:58:11.831173-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:58:10.623660-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:58:05.702311-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:57:46.150204-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:57:36.667566-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:56:59.959271-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:56:43.003241-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:56.413831-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:44.962412-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:41.254398-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:40.242362-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:24.884808-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:23.719322-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:21.184177-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2026-01-20 10:54:18.537818-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,audit,3,PATCH,5536,5536,2025-11-26 09:38:19.429945-03:00,,,,,baja,/api/ingresos/25221/,,
+25221,25221,access_servicio,4,os_exact_serial,5536,5536,2023-09-29 00:00:00,,25221,,25221,baja,"Access coincide por OS y por número de serie. | Estado=1 | Comentarios=En el test abierto: Falla Flujo Ar+O2, célda de o2 y sensor proximal.                              En test cerrado: falla válvula exp",access_os_match,access_complementario
+25222,25222,ingreso_events,3,entregado,6142,6142,2025-09-24 12:25:00-03:00,,,,,media,Cambio de estado,,
+25222,25222,ingreso_events,3,ingresado,6142,6142,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+25222,25222,audit,3,devices,6142,6142,2026-02-05 10:54:34.255571-03:00,,,,,baja,propietario: Alejandro Ferrando,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:54:34.255571-03:00,,,,,baja,propietario_nombre: Alejandro Ferrando,,
+25222,25222,audit,3,devices,6142,6142,2026-02-05 10:54:34.255571-03:00,,,,,baja,propietario_nombre: Alejandro Ferrando,,
+25222,25222,audit,3,devices,6142,6142,2026-02-05 10:16:53.374626-03:00,,,,,baja,propietario: LABELES RIGONI,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:16:53.374626-03:00,,,,,baja,propietario_nombre: LABELES RIGONI,,
+25222,25222,audit,3,devices,6142,6142,2026-02-05 10:16:53.374626-03:00,,,,,baja,propietario_nombre: LABELES RIGONI,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:15:31.079441-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:15:17.105609-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM - Placa Principal,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:15:15.303276-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM - Placa ,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:15:12.448461-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM - P,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:15:10.492532-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM ,,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:34.291789-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea pantalla, conectores no funcionales
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:27.351349-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea pantalla, conectores 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:25.367526-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea pantalla,
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:22.719221-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea pantalla
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:14.191385-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea pantalla, mecánica de botones rotos.
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:10.845248-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patanlla, mecánica de botones rotos.
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:04.456660-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patanlla, botones me
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:01.896034-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patanlla, botones rot
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:14:01.030617-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patanlla, botones roto
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:59.683332-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patanlla, botones 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:56.654159-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patanlla
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:55.615848-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea patan
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:54.160855-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware, no bloquea 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:28.469390-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:23.780482-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware no anda correctamente los botones
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:20.968526-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware no anda correctamente 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:19.398258-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware no anda correc
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:14.417414-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware no
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:06.737553-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware no desploquea
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:02.689245-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware no 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:13:00.714038-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hardware 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:12:59.109209-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla en hard
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:12:56.451670-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Placa con falla 
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:12:48.912444-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+No anda bloqueo de pantalla
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:12:47.623789-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+
+Celda 02 AGOTADA
+No anda bloqueo de pantalla
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:12:38.906619-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 200: Falla
+block con perdida
+Celda 02 AGOTADA
+No anda bloqueo de pantalla
+
+Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 10:12:34.073720-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK",,
+25222,25222,audit,3,ingresos,6142,6142,2026-02-05 09:53:24.969658-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM,,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:31.859551-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM o block de aluminio,,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:25.018931-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK
+
+Válvula proporcional de 200: Falla
+block con perdida
+Celda 02 AGOTADA
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:22.094251-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+Pantalla LCD: ok
+táctil: OK
+
+Válvula proporcional de 200: Falla
+block con perdida
+Celda 02 AGOTADA
+
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:19.585703-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+
+Válvula proporcional de 200: Falla
+block con perdida
+Celda 02 AGOTADA
+
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:09.596978-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+
+Válvula proporcional de 200: Falla
+block con perdida
+Celda 02 AGOTADA
+Pantalla LCD: ok
+táctil: OK
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:06.778805-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+
+Válvula proporcional de 200: Falla
+
+Celda 02 AGOTADA
+Pantalla LCD: ok
+táctil: OK
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:04.877775-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+
+Válvula proporcional de 200: Falla
+Celda 02 AGOTADA
+Pantalla LCD: ok
+táctil: OK
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:53:02.669747-03:00,,,,,baja,"descripcion_problema: Válvula proporcional de 30: OK
+Válvula espiratoria: OK
+Válvula de sobrepresión: OK
+Válvula reguladora: OK
+Sensor de Flujo interno: OK
+
+
+Celda 02 AGOTADA
+Pantalla LCD: ok
+táctil: OK
+No anda bloqueo de pantalla",,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:52:34.844968-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM o block de alu,,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:52:32.345541-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM o block,,
+25222,25222,audit,3,ingresos,6142,6142,2026-01-20 10:51:46.116711-03:00,,,,,baja,trabajos_realizados: Piezas a reemplazar: Celda 02 - Válvula proporcional 200LPM,,
+25222,25222,audit,3,GET,6142,6142,2026-05-15 14:21:05.210031-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-19 14:26:19.452581-03:00,,,,,baja,/api/quotes/25222/resumen/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-09 16:28:36.013376-03:00,,,,,baja,/api/quotes/25222/resumen/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-09 16:28:28.462734-03:00,,,,,baja,/api/quotes/25222/resumen/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:54:34.288527-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:16:53.400243-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:15:33.023144-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,POST,6142,6142,2026-02-05 10:15:31.328741-03:00,,,,,baja,/api/quotes/25222/emitir/,,
+25222,25222,audit,3,POST,6142,6142,2026-02-05 10:15:27.754697-03:00,,,,,baja,/api/quotes/25222/items/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:15:17.114299-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:15:15.308118-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:15:12.454280-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:15:10.498328-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,POST,6142,6142,2026-02-05 10:15:04.140075-03:00,,,,,baja,/api/quotes/25222/items/,,
+25222,25222,audit,3,DELETE,6142,6142,2026-02-05 10:14:56.900188-03:00,,,,,baja,/api/quotes/25222/items/3849/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:51.425252-03:00,,,,,baja,/api/quotes/25222/items/3849/,,
+25222,25222,audit,3,POST,6142,6142,2026-02-05 10:14:48.603724-03:00,,,,,baja,/api/quotes/25222/items/,,
+25222,25222,audit,3,POST,6142,6142,2026-02-05 10:14:41.241421-03:00,,,,,baja,/api/quotes/25222/items/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:34.296014-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:27.356856-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:25.376003-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:22.723610-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:14.195409-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:10.851373-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:04.466031-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:01.901410-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:14:01.037853-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:59.691092-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:56.661424-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:55.622933-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:54.169539-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:28.475622-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:23.785962-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:20.978002-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:19.403667-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:14.440188-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:06.742579-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:02.693584-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:13:00.719372-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:59.114980-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:56.456904-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:48.917055-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:47.630606-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:38.916676-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:37.176846-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 10:12:34.106933-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-02-05 09:53:24.979134-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-01-20 10:53:31.864211-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-01-20 10:53:25.024896-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,audit,3,PATCH,6142,6142,2026-01-20 10:53:22.099476-03:00,,,,,baja,/api/ingresos/25222/,,
+25222,25222,access_servicio,4,os_exact_serial,6142,6142,2023-11-08 00:00:00,,25222,,25222,baja,Access coincide por OS y por número de serie. | Estado=1 | Comentarios=Pantalla rota. En test abierto: falla 02.                                                                                                En test cerrado: falla válvula espiratoria y sensor proximal,access_os_match,access_complementario
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,fecha_ingreso: 2025-02-20T03:00:00+00:00,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,remito_ingreso: 2700,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,ubicacion_id: 1,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,accesorios,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,id: 29218,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,disposicion: normal,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,etiq_garantia_ok: true,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,asignado_a: 1001,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,motivo: baja alquiler,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,garantia_reparacion: false,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,device_id: 22775,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,estado: ingresado,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,presupuesto_estado: pendiente,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,informe_preliminar,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,recibido_por: 7,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,fecha_creacion: 2026-04-21T20:01:40.124046+00:00,,
+29218,22775,audit,3,ingresos,B3-00438,B3-00438,2026-04-21 17:01:40.124046-03:00,,,,,baja,garantia_fabrica: false,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 10:31:51.824315-03:00,,,,,baja,/api/ingresos/29218/,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 10:23:10.152216-03:00,,,,,baja,/api/ingresos/29218/,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 10:18:20.443864-03:00,,,,,baja,/api/ingresos/29218/,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 10:14:12.852310-03:00,,,,,baja,/api/ingresos/29218/,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 10:02:43.970245-03:00,,,,,baja,/api/ingresos/29218/,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 09:55:45.883770-03:00,,,,,baja,/api/ingresos/29218/,,
+29218,22775,audit,3,GET,B3-00438,B3-00438,2026-05-14 09:48:53.342409-03:00,,,,,baja,/api/ingresos/29218/,,
+27426,27426,ingreso_events,3,ingresado,775421,775421,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+27426,27426,audit,3,ingresos,775421,775421,2026-02-09 17:04:13.541973-03:00,,,,,baja,asignado_a: 1000,,
+27426,27426,audit,3,ingresos,775421,775421,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+27426,27426,audit,3,ingresos,775421,775421,2025-10-27 11:46:33.790009-03:00,,,,,baja,equipo_variante: 5L,,
+27426,27426,audit,3,ingresos,775421,775421,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1004,,
+27426,27426,audit,3,ingresos,775421,775421,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+27426,27426,audit,3,GET,775421,775421,2026-05-18 10:07:41.299102-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-18 10:06:16.656057-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-18 10:05:30.713197-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-18 09:54:22.735197-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-18 09:51:42.830346-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-18 09:45:22.129148-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-15 12:55:28.510619-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-15 12:25:54.720092-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-15 12:25:50.914302-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-15 11:38:45.268950-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-15 11:28:44.415417-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,GET,775421,775421,2026-05-14 16:27:41.237820-03:00,,,,,baja,/api/ingresos/27426/,,
+27426,27426,audit,3,PATCH,775421,775421,2026-02-09 17:04:14.489217-03:00,,,,,baja,/api/ingresos/27426/asignar-tecnico/,,
+27426,27426,access_servicio,4,os_exact_serial,775421,775421,2025-03-20 00:00:00,,,,27426,baja,Access coincide por OS y por número de serie. | Estado=1,access_os_match,access_complementario
+27692,15587,ingreso_events,3,ingresado,5132438,5132438,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+27692,15587,audit,3,ingresos,5132438,5132438,2025-10-30 15:54:01.376165-03:00,,,,,baja,device_id: 15587,,
+27692,15587,audit,3,ingresos,5132438,5132438,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+27692,15587,audit,3,ingresos,5132438,5132438,2025-10-27 11:46:33.790009-03:00,,,,,baja,equipo_variante: 5L,,
+27692,15587,audit,3,ingresos,5132438,5132438,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1004,,
+27692,15587,audit,3,ingresos,5132438,5132438,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+27692,15587,audit,3,PATCH,5132438,5132438,2026-02-27 15:21:16.981009-03:00,,,,,baja,/api/ingresos/27692/test/,,
+27692,15587,access_servicio,4,os_exact_mg_en_numero_serie,5132438,MG 0884,2025-05-19 00:00:00,,,,27692,baja,Access coincide por OS y usa el MG MG 0884 dentro de NumeroSerie. | Estado=1,access_os_match,access_complementario
+27920,27090,ingreso_events,3,ingresado,17556,17556,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+27920,27090,audit,3,ingresos,17556,17556,2026-03-19 11:01:25.499803-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+27920,27090,audit,3,devices,17556,17556,2026-01-28 12:02:35.107322-03:00,,,,,baja,customer_id: 9,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 12:19:31.150624-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 509188017)
+
+Actualización IHM y Ventilador
+Calibración sensores",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 12:19:27.986865-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 509188017)
+
+Actualización IHM y Ventilador
+",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 12:19:19.667008-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 509188017)
+
+",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:13:25.656645-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 509188017)",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:13:24.535832-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 509188017",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:13:23.449253-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 5091880",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:13:22.521550-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN 509188",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:13:18.160465-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno (SN ",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:41.680791-03:00,,,,,baja,"trabajos_realizados: Cambio de block de aluminio.
+Cambio de celda de oxígeno",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:30.645659-03:00,,,,,baja,trabajos_realizados: Cambio de block de,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:25.647126-03:00,,,,,baja,trabajos_realizados: Cambio de block de ,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:23.880473-03:00,,,,,baja,trabajos_realizados: Cambio de blo,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:21.950150-03:00,,,,,baja,trabajos_realizados: Cambio de,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:19.742264-03:00,,,,,baja,"descripcion_problema: Entró por perdidas en el regulador de presión de entrada. las pérdidas se originaron por un exceso de presión en la entrada del equipo.
+Celda de oxígeno agotada",,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:06.125066-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada. las pérdidas se originaron por un exceso de presión en la entrada del equipo.,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:12:02.148472-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada. las perdidas se originaron por un exceso de presión en la entrada del equipo.,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:54.234384-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada. las perdidas se originaron por un exseso,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:52.504732-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada. las perdidas se originaron por un ex,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:50.608182-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada. las perdidas se originaron por,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:45.501928-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada.,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:43.145109-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada. C,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:41.223256-03:00,,,,,baja,descripcion_problema: Entró por perdidas en el regulador de presión de entrada.,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:26.051875-03:00,,,,,baja,estado: diagnosticado,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:26.051875-03:00,,,,,baja,descripcion_problema: Entró por,,
+27920,27090,audit,3,ingresos,17556,17556,2026-01-16 11:11:26.051875-03:00,,,,,baja,fecha_servicio: 2026-01-16T14:11:26.056124+00:00,,
+27920,27090,audit,3,ingresos,17556,17556,2025-10-30 15:54:01.376165-03:00,,,,,baja,device_id: 27090,,
+27920,27090,audit,3,ingresos,17556,17556,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+27920,27090,audit,3,ingresos,17556,17556,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 2,,
+27920,27090,audit,3,ingresos,17556,17556,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+27920,27090,audit,3,POST,17556,17556,2026-03-19 11:01:25.513512-03:00,,,,,baja,/api/quotes/27920/no-aplica/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-28 12:02:35.150928-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 12:19:31.167773-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 12:19:28.003640-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 12:19:19.720881-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:13:25.660999-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:13:24.539537-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:13:23.453909-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:13:22.529638-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:13:18.170347-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:41.688598-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:30.649320-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:25.651771-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:23.885677-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:21.955874-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:19.746348-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:11.119766-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:06.133803-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:12:02.153383-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:54.237954-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:52.512476-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:50.612751-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:45.509295-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:43.152421-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:41.230786-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,audit,3,PATCH,17556,17556,2026-01-16 11:11:26.065857-03:00,,,,,baja,/api/ingresos/27920/,,
+27920,27090,access_servicio,4,os_exact_mg_en_numero_serie,17556,MG 7273,2025-05-19 00:00:00,,,,27920,baja,Access coincide por OS y usa el MG MG 7273 dentro de NumeroSerie. | Estado=1,access_os_match,access_complementario
+28015,28015,ingreso_historical_corrections,3,baja_alquiler,H2122716298,H2122716298,2026-04-27 09:31:00-03:00,,,,,media,0,,
+28015,28015,ingreso_events,3,ingresado,H2122716298,H2122716298,2026-04-27 09:31:00-03:00,,,,,media,Corrección histórica forzada: baja_alquiler,,
+28015,28015,ingreso_events,3,ingresado,H2122716298,H2122716298,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-28 15:26:22.361745-03:00,,,,,baja,estado: controlado_sin_defecto,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-28 15:26:22.361745-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-28 15:26:21.399257-03:00,,,,,baja,estado: diagnosticado,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-28 15:26:21.399257-03:00,,,,,baja,fecha_servicio: 2026-04-28T03:00:00+00:00,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-27 09:31:39.790206-03:00,,,,,baja,ubicacion_id: 1,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-27 09:31:39.790206-03:00,,,,,baja,estado: ingresado,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-27 09:31:39.790206-03:00,,,,,baja,alquilado: false,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2026-04-27 09:31:39.790206-03:00,,,,,baja,alquiler_a,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-11-27 09:58:28.471473-03:00,,,,,baja,ubicacion_id: 10,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-11-27 09:58:28.471473-03:00,,,,,baja,estado: alquilado,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-10-30 14:52:10.743759-03:00,,,,,baja,ubicacion_id: 8,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-10-30 12:13:04.561095-03:00,,,,,baja,alquilado: true,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-10-30 12:13:04.561095-03:00,,,,,baja,alquiler_a: LANCET CORP. ARGENTINA S.R.L.,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1001,,
+28015,28015,audit,3,ingresos,H2122716298,H2122716298,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 5,,
+28015,28015,audit,3,GET,H2122716298,H2122716298,2026-05-15 09:37:44.202713-03:00,,,,,baja,/api/ingresos/28015/,,
+28015,28015,audit,3,POST,H2122716298,H2122716298,2026-04-28 15:26:22.377384-03:00,,,,,baja,/api/ingresos/28015/controlado-sin-defecto/,,
+28015,28015,audit,3,PATCH,H2122716298,H2122716298,2026-04-28 15:26:21.440678-03:00,,,,,baja,/api/ingresos/28015/,,
+28015,28015,audit,3,POST,H2122716298,H2122716298,2026-04-27 09:31:39.818660-03:00,,,,,baja,/api/ingresos/28015/correcciones-historicas/,,
+28015,28015,bejerman,2,serial_exact,H2122716298,H2122716298,,,,STR,,complementaria,Artículo 1111001  | Depósito STR: el equipo sigue en stock/servicio y no acredita venta ni alquiler.,stock_servicio,sin_indicio_salida
+28015,28015,access_servicio,4,os_exact_mg_en_numero_serie,H2122716298,MG 7174,2025-06-19 00:00:00,,,,28015,baja,Access coincide por OS y usa el MG MG 7174 dentro de NumeroSerie. | Estado=6,access_os_match,access_complementario
+28016,28016,ingreso_historical_corrections,3,baja_alquiler,H2120705345,H2120705345,2026-04-24 13:26:00-03:00,,,,,media,0,,
+28016,28016,ingreso_events,3,ingresado,H2120705345,H2120705345,2026-04-24 13:26:00-03:00,,,,,media,Corrección histórica forzada: baja_alquiler,,
+28016,28016,ingreso_events,3,ingresado,H2120705345,H2120705345,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-28 15:26:41.543600-03:00,,,,,baja,estado: controlado_sin_defecto,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-28 15:26:41.543600-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-28 15:26:40.922275-03:00,,,,,baja,estado: diagnosticado,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-28 15:26:40.922275-03:00,,,,,baja,fecha_servicio: 2026-04-28T03:00:00+00:00,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-24 13:27:02.025130-03:00,,,,,baja,ubicacion_id: 1,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-24 13:27:02.025130-03:00,,,,,baja,estado: ingresado,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-24 13:27:02.025130-03:00,,,,,baja,alquilado: false,,
+28016,28016,audit,3,devices,H2120705345,H2120705345,2026-04-24 13:26:53.292005-03:00,,,,,baja,alquiler_a,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2026-04-24 13:26:53.292005-03:00,,,,,baja,alquiler_a,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-11-27 09:58:28.471473-03:00,,,,,baja,ubicacion_id: 10,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-11-27 09:58:28.471473-03:00,,,,,baja,estado: alquilado,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-10-30 14:52:10.743759-03:00,,,,,baja,ubicacion_id: 8,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-10-30 12:13:04.561095-03:00,,,,,baja,alquilado: true,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-10-30 12:13:04.561095-03:00,,,,,baja,alquiler_a: LANCET CORP. ARGENTINA S.R.L.,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1001,,
+28016,28016,audit,3,ingresos,H2120705345,H2120705345,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 5,,
+28016,28016,audit,3,GET,H2120705345,H2120705345,2026-05-14 16:27:54.483614-03:00,,,,,baja,/api/ingresos/28016/,,
+28016,28016,audit,3,POST,H2120705345,H2120705345,2026-04-28 15:26:41.553842-03:00,,,,,baja,/api/ingresos/28016/controlado-sin-defecto/,,
+28016,28016,audit,3,PATCH,H2120705345,H2120705345,2026-04-28 15:26:40.972924-03:00,,,,,baja,/api/ingresos/28016/,,
+28016,28016,audit,3,POST,H2120705345,H2120705345,2026-04-24 13:27:02.053321-03:00,,,,,baja,/api/ingresos/28016/correcciones-historicas/,,
+28016,28016,audit,3,PATCH,H2120705345,H2120705345,2026-04-24 13:26:53.307478-03:00,,,,,baja,/api/ingresos/28016/,,
+28016,28016,bejerman,2,serial_exact,H2120705345,H2120705345,,,,STR,,complementaria,Artículo 1111001  | Depósito STR: el equipo sigue en stock/servicio y no acredita venta ni alquiler.,stock_servicio,sin_indicio_salida
+28016,28016,access_servicio,4,os_exact_mg_en_numero_serie,H2120705345,MG 6812,2025-06-19 00:00:00,,,,28016,baja,Access coincide por OS y usa el MG MG 6812 dentro de NumeroSerie. | Estado=6,access_os_match,access_complementario
+28035,28035,ingreso_events,3,ingresado,A05520J200CE,A05520J200CE,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28035,28035,audit,3,ingresos,A05520J200CE,A05520J200CE,2026-02-10 14:14:09.122729-03:00,,,,,baja,asignado_a: 1000,,
+28035,28035,audit,3,ingresos,A05520J200CE,A05520J200CE,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28035,28035,audit,3,ingresos,A05520J200CE,A05520J200CE,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1004,,
+28035,28035,audit,3,ingresos,A05520J200CE,A05520J200CE,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28035,28035,audit,3,GET,A05520J200CE,A05520J200CE,2026-05-18 09:49:10.816534-03:00,,,,,baja,/api/ingresos/28035/,,
+28035,28035,audit,3,GET,A05520J200CE,A05520J200CE,2026-05-15 12:55:39.355523-03:00,,,,,baja,/api/ingresos/28035/,,
+28035,28035,audit,3,GET,A05520J200CE,A05520J200CE,2026-05-15 12:52:01.749982-03:00,,,,,baja,/api/ingresos/28035/,,
+28035,28035,audit,3,GET,A05520J200CE,A05520J200CE,2026-05-15 12:04:13.499087-03:00,,,,,baja,/api/ingresos/28035/,,
+28035,28035,audit,3,GET,A05520J200CE,A05520J200CE,2026-05-15 12:02:44.429578-03:00,,,,,baja,/api/ingresos/28035/,,
+28035,28035,audit,3,GET,A05520J200CE,A05520J200CE,2026-05-15 11:33:51.417476-03:00,,,,,baja,/api/ingresos/28035/,,
+28035,28035,audit,3,PATCH,A05520J200CE,A05520J200CE,2026-02-10 14:14:09.533456-03:00,,,,,baja,/api/ingresos/28035/asignar-tecnico/,,
+28035,28035,access_servicio,4,os_exact_serial,A05520J200CE,A05520J200CE,2025-06-24 00:00:00,,,,28035,baja,Access coincide por OS y por número de serie. | Estado=1,access_os_match,access_complementario
+28036,27240,ingreso_events,3,ingresado,F8566,F8566,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28036,27240,audit,3,ingresos,F8566,F8566,2025-10-30 15:54:01.376165-03:00,,,,,baja,device_id: 27240,,
+28036,27240,audit,3,ingresos,F8566,F8566,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28036,27240,audit,3,ingresos,F8566,F8566,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1004,,
+28036,27240,audit,3,ingresos,F8566,F8566,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28036,27240,access_servicio,4,os_exact_serial,F8566,F8566,2025-06-24 00:00:00,,,,28036,baja,Access coincide por OS y por número de serie. | Estado=1,access_os_match,access_complementario
+28127,28127,ingreso_events,3,ingresado,MC2200040014,MC2200040014,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2026-02-12 17:19:12.909153-03:00,,,,,baja,trabajos_realizados: REQUIERE CAMBIO DE CEOLITAS.,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2026-02-12 17:19:11.310248-03:00,,,,,baja,"trabajos_realizados: 
+REQUIERE CAMBIO DE CEOLITAS.",,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2026-02-12 17:17:58.036587-03:00,,,,,baja,"trabajos_realizados: 
+",,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2026-02-10 15:35:36.873247-03:00,,,,,baja,estado: diagnosticado,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2026-02-10 15:35:36.873247-03:00,,,,,baja,fecha_servicio: 2026-02-10T18:35:36.886771+00:00,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2026-02-10 12:02:06.807960-03:00,,,,,baja,asignado_a: 1000,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1004,,
+28127,28127,audit,3,ingresos,MC2200040014,MC2200040014,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-18 13:55:49.236731-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-15 11:44:33.395781-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-15 11:44:33.242498-03:00,,,,,baja,/api/quotes/28127/,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-15 11:40:44.070030-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,POST,MC2200040014,MC2200040014,2026-05-15 11:40:43.911739-03:00,,,,,baja,/api/ingresos/28127/solicitar-baja/,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-15 11:40:22.148134-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-15 11:21:59.596497-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,GET,MC2200040014,MC2200040014,2026-05-15 10:02:28.650280-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,DELETE,MC2200040014,MC2200040014,2026-02-24 10:12:51.828559-03:00,,,,,baja,/api/quotes/28127/items/3022/,,
+28127,28127,audit,3,PATCH,MC2200040014,MC2200040014,2026-02-12 17:19:12.916652-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,PATCH,MC2200040014,MC2200040014,2026-02-12 17:19:11.316585-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,PATCH,MC2200040014,MC2200040014,2026-02-12 17:17:58.045450-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,PATCH,MC2200040014,MC2200040014,2026-02-10 15:35:36.943374-03:00,,,,,baja,/api/ingresos/28127/,,
+28127,28127,audit,3,PATCH,MC2200040014,MC2200040014,2026-02-10 12:02:07.293293-03:00,,,,,baja,/api/ingresos/28127/asignar-tecnico/,,
+28127,28127,audit,3,POST,MC2200040014,MC2200040014,2026-02-10 11:36:36.196803-03:00,,,,,baja,/api/ingresos/28127/solicitar-asignacion/,,
+28127,28127,access_servicio,4,os_exact_serial,MC2200040014,MC2200040014,2025-06-26 00:00:00,,,,28127,baja,Access coincide por OS y por número de serie. | Estado=5,access_os_match,access_complementario
+28169,28169,excel_ventas_mg,1,serial_exact,MA23080040049,MA23080040049,,PENDIENTE 09/2025,RT R 00001-00023776,,,alta,Aspirador portátil Konsung 9E-B  (18l/min) (fila 97),,
+28169,28169,ingreso_historical_corrections,3,baja_alquiler,MA23080040049,MA23080040049,2026-04-27 11:16:00-03:00,,,,,media,0,,
+28169,28169,ingreso_events,3,ingresado,MA23080040049,MA23080040049,2026-04-27 11:16:00-03:00,,,,,media,Corrección histórica forzada: baja_alquiler,,
+28169,28169,ingreso_events,3,ingresado,MA23080040049,MA23080040049,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2026-04-27 11:16:17.382318-03:00,,,,,baja,ubicacion_id: 1,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2026-04-27 11:16:17.382318-03:00,,,,,baja,estado: ingresado,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2026-04-27 11:16:17.382318-03:00,,,,,baja,alquilado: false,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2026-04-27 11:16:17.382318-03:00,,,,,baja,alquiler_a,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-11-27 09:58:28.471473-03:00,,,,,baja,ubicacion_id: 10,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-11-27 09:58:28.471473-03:00,,,,,baja,estado: alquilado,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-10-30 14:52:10.743759-03:00,,,,,baja,ubicacion_id: 8,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-10-30 12:13:04.561095-03:00,,,,,baja,alquilado: true,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-10-30 12:13:04.561095-03:00,,,,,baja,alquiler_a: LANCET CORP. ARGENTINA S.R.L.,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1001,,
+28169,28169,audit,3,ingresos,MA23080040049,MA23080040049,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 5,,
+28169,28169,audit,3,POST,MA23080040049,MA23080040049,2026-04-27 11:16:17.411597-03:00,,,,,baja,/api/ingresos/28169/correcciones-historicas/,,
+28169,28169,access_servicio,4,os_exact_mg_en_numero_serie,MA23080040049,MG 7306,2025-07-17 00:00:00,,,,28169,baja,Access coincide por OS y usa el MG MG 7306 dentro de NumeroSerie. | Estado=6,access_os_match,access_complementario
+28174,22885,ingreso_events,3,ingresado,MZJ5S121764,MZJ5S121764,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-24 10:17:17.448885-03:00,,,,,baja,device_id: 22885,,
+28174,22885,audit,3,devices,MZJ5S121764,MZJ5S121764,2026-02-24 10:15:48.691113-03:00,,,,,baja,numero_interno: mg 5031,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:27.061184-03:00,,,,,baja,descripcion_problema: es debe probar,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:22.971730-03:00,,,,,baja,descripcion_problema: probar,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:07.268963-03:00,,,,,baja,descripcion_problema: para probar,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:04.288880-03:00,,,,,baja,descripcion_problema,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:02.688282-03:00,,,,,baja,estado: diagnosticado,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:02.688282-03:00,,,,,baja,descripcion_problema: PARA,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:02.688282-03:00,,,,,baja,fecha_servicio: 2026-02-10T18:37:02.699369+00:00,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1000,,
+28174,22885,audit,3,ingresos,MZJ5S121764,MZJ5S121764,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28174,22885,audit,3,GET,MZJ5S121764,MZJ5S121764,2026-05-18 14:57:20.523721-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-24 10:15:55.430006-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-24 10:15:48.724206-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:27.068974-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:22.976433-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:07.276362-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:04.302023-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,audit,3,PATCH,MZJ5S121764,MZJ5S121764,2026-02-10 15:37:02.719881-03:00,,,,,baja,/api/ingresos/28174/,,
+28174,22885,access_servicio,4,os_exact_serial,MZJ5S121764,MZJ5S121764,2025-07-17 00:00:00,,,,28174,baja,Access coincide por OS y por número de serie. | Estado=1,access_os_match,access_complementario
+28490,20667,ingreso_events,3,ingresado,MZJ5S121938,MZJ5S121938,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28490,20667,audit,3,devices,MZJ5S121938,MZJ5S121938,2026-05-08 16:36:43.813005-03:00,,,,,baja,model_id: 1663,,
+28490,20667,audit,3,devices,MZJ5S121938,MZJ5S121938,2026-05-08 16:36:32.727249-03:00,,,,,baja,garantia_vence: 2025-07-08,,
+28490,20667,audit,3,devices,MZJ5S121938,MZJ5S121938,2026-05-08 16:36:32.727249-03:00,,,,,baja,ubicacion_id: 1,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 16:36:32.727249-03:00,,,,,baja,device_id: 20667,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:57.968758-03:00,,,,,baja,trabajos_realizados,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:51.772328-03:00,,,,,baja,"trabajos_realizados: OS: 28490
+JAY-5
+MZJ5S121938",,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:43.217111-03:00,,,,,baja,"trabajos_realizados: OS: 28490
+JAY-5
+",,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:41.021722-03:00,,,,,baja,"trabajos_realizados: OS: 28490
+JAY-5",,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:33.751480-03:00,,,,,baja,"trabajos_realizados: 
+JAY-5",,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:28.197675-03:00,,,,,baja,"trabajos_realizados: Piezas reemplazadas: 
+JAY-5",,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-02-10 14:15:34.704369-03:00,,,,,baja,asignado_a: 1000,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-01-09 10:53:24.267236-03:00,,,,,baja,estado: reparar,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2026-01-09 10:53:24.267236-03:00,,,,,baja,presupuesto_estado: aprobado,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2025-10-30 15:54:01.376165-03:00,,,,,baja,device_id: 27420,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2025-10-14 09:12:34.942003-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2025-10-07 17:53:18.528094-03:00,,,,,baja,fecha_servicio: 2025-09-10T00:00:00-03:00,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 10,,
+28490,20667,audit,3,ingresos,MZJ5S121938,MZJ5S121938,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28490,20667,audit,3,GET,MZJ5S121938,MZJ5S121938,2026-05-14 17:32:54.372775-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,GET,MZJ5S121938,MZJ5S121938,2026-05-14 11:10:05.550179-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:54:07.075740-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:53:52.579916-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:53:50.650470-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:53:46.801538-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:38:05.602347-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:36:37.265084-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:36:32.566866-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:36:30.946755-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:36:25.028678-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:36:21.202789-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 17:36:18.969331-03:00,,,,,baja,/api/ingresos/28490/test/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 16:36:45.954430-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 16:36:34.949117-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:57.974321-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:51.778001-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:43.226777-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:41.031917-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:33.761110-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-05-08 14:51:28.214970-03:00,,,,,baja,/api/ingresos/28490/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2026-02-10 14:15:34.949179-03:00,,,,,baja,/api/ingresos/28490/asignar-tecnico/,,
+28490,20667,audit,3,POST,MZJ5S121938,MZJ5S121938,2026-02-10 14:15:02.791275-03:00,,,,,baja,/api/ingresos/28490/solicitar-asignacion/,,
+28490,20667,audit,3,POST,MZJ5S121938,MZJ5S121938,2026-01-09 10:53:24.800146-03:00,,,,,baja,/api/quotes/28490/aprobar/,,
+28490,20667,audit,3,POST,MZJ5S121938,MZJ5S121938,2025-10-14 09:12:35.335472-03:00,,,,,baja,/api/quotes/28490/emitir/,,
+28490,20667,audit,3,POST,MZJ5S121938,MZJ5S121938,2025-10-14 09:12:31.405363-03:00,,,,,baja,/api/quotes/28490/items/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2025-10-14 09:11:45.862921-03:00,,,,,baja,/api/quotes/28490/items/3175/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2025-10-14 09:11:37.915871-03:00,,,,,baja,/api/quotes/28490/items/3175/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2025-10-14 09:11:31.843173-03:00,,,,,baja,/api/quotes/28490/items/3175/,,
+28490,20667,audit,3,PATCH,MZJ5S121938,MZJ5S121938,2025-10-14 09:11:23.932363-03:00,,,,,baja,/api/quotes/28490/items/3175/,,
+28490,20667,audit,3,POST,MZJ5S121938,MZJ5S121938,2025-10-14 09:11:16.203090-03:00,,,,,baja,/api/quotes/28490/items/,,
+28490,20667,access_servicio,4,os_exact_serial,MZJ5S121938,MZJ5S121938,2025-09-08 00:00:00,,,,28490,baja,Access coincide por OS y por número de serie. | Estado=1,access_os_match,access_complementario
+28497,28497,ingreso_events,3,ingresado,MZJ2P00012,MZJ2P00012,2025-09-15 14:11:13-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28497,28497,audit,3,ingresos,MZJ2P00012,MZJ2P00012,2026-05-14 11:08:22.181928-03:00,,,,,baja,garantia_fabrica,,
+28497,28497,audit,3,devices,MZJ2P00012,MZJ2P00012,2026-05-14 11:08:22.181928-03:00,,,,,baja,model_id: 1664,,
+28497,28497,audit,3,ingresos,MZJ2P00012,MZJ2P00012,2026-02-10 14:15:37.914684-03:00,,,,,baja,asignado_a: 1000,,
+28497,28497,audit,3,ingresos,MZJ2P00012,MZJ2P00012,2025-12-05 17:18:07.281274-03:00,,,,,baja,asignado_a: 1004,,
+28497,28497,audit,3,ingresos,MZJ2P00012,MZJ2P00012,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28497,28497,audit,3,ingresos,MZJ2P00012,MZJ2P00012,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 2,,
+28497,28497,audit,3,ingresos,MZJ2P00012,MZJ2P00012,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-18 14:56:59.188196-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-18 10:02:37.993387-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-15 12:56:46.483980-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-15 12:55:25.046068-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-15 11:59:56.871070-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-14 11:08:25.050235-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,PATCH,MZJ2P00012,MZJ2P00012,2026-05-14 11:08:24.941548-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-14 11:08:09.496459-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-14 11:05:34.341960-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,GET,MZJ2P00012,MZJ2P00012,2026-05-14 10:49:46.481601-03:00,,,,,baja,/api/ingresos/28497/,,
+28497,28497,audit,3,PATCH,MZJ2P00012,MZJ2P00012,2026-02-10 14:15:38.197326-03:00,,,,,baja,/api/ingresos/28497/asignar-tecnico/,,
+28497,28497,audit,3,POST,MZJ2P00012,MZJ2P00012,2026-02-10 14:15:10.826212-03:00,,,,,baja,/api/ingresos/28497/solicitar-asignacion/,,
+28497,28497,audit,3,PATCH,MZJ2P00012,MZJ2P00012,2025-12-05 17:18:08.190994-03:00,,,,,baja,/api/ingresos/28497/asignar-tecnico/,,
+28497,28497,access_servicio,4,os_exact_serial,MZJ2P00012,MZJ2P00012,2025-09-12 00:00:00,,,,28497,baja,Access coincide por OS y por número de serie. | Estado=1,access_os_match,access_complementario
+28517,25152,ingreso_events,3,diagnosticado,MZJ5S121649,MZJ5S121649,2025-10-02 09:45:09-03:00,,,,,media,Cambio de estado,,
+28517,25152,ingreso_events,3,ingresado,MZJ5S121649,MZJ5S121649,2025-09-26 10:36:52-03:00,,,,,media,CreaciÃ³n de ingreso,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-15 12:22:18.045024-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-13 09:29:20.846077-03:00,,,,,baja,estado: diagnosticado,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-13 09:29:20.846077-03:00,,,,,baja,trabajos_realizados,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-13 09:29:20.846077-03:00,,,,,baja,descripcion_problema: zeolita degradada - cambio de filtros - adaptación de tapa -,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-07 17:53:18.528094-03:00,,,,,baja,fecha_servicio: 2025-09-17T00:00:00-03:00,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-06 10:08:25.692396-03:00,,,,,baja,asignado_a: 1000,,
+28517,25152,audit,3,ingresos,MZJ5S121649,MZJ5S121649,2025-10-06 09:26:32.838682-03:00,,,,,baja,ubicacion_id: 1,,
+28517,25152,audit,3,POST,MZJ5S121649,MZJ5S121649,2025-10-15 12:22:18.061579-03:00,,,,,baja,/api/quotes/28517/no-aplica/,,
+28517,25152,audit,3,PATCH,MZJ5S121649,MZJ5S121649,2025-10-13 09:29:20.858427-03:00,,,,,baja,/api/ingresos/28517/,,
+28517,25152,access_servicio,4,os_exact_mg_en_numero_serie,MZJ5S121649,MG 4982,2025-09-17 00:00:00,,,,28517,baja,Access coincide por OS y usa el MG MG 4982 dentro de NumeroSerie. | Estado=1,access_os_match,access_complementario
+28601,28650,audit,3,devices,Ma23060040025,Ma23060040025,2026-05-06 10:46:31.794005-03:00,,,,,baja,ubicacion_id: 1,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2026-05-06 10:46:31.794005-03:00,,,,,baja,ubicacion_id: 1,,
+28601,28650,audit,3,devices,Ma23060040025,Ma23060040025,2025-11-19 15:19:43.081020-03:00,,,,,baja,ubicacion_id: 5,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-19 15:19:43.081020-03:00,,,,,baja,ubicacion_id: 5,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:53.498087-03:00,,,,,baja,estado: reparado,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:34.863665-03:00,,,,,baja,"trabajos_realizados: CAMBIO DE BATERIA LOTE 9868, MODIFICACION CIRCUITO ELECTRONICO",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:33.071991-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA LOTE 9868 MODIFICACION CIRCUITO ELECTRONICO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:31.748180-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA LOTE 98 MODIFICACION CIRCUITO ELECTRONICO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:29.378822-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA LOTE  MODIFICACION CIRCUITO ELECTRONICO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:24.597584-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA LOTE MODIFICACION CIRCUITO ELECTRONICO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:22.834404-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA  MODIFICACION CIRCUITO ELECTRONICO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 16:28:20.556276-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA MODIFICACION CIRCUITO ELECTRONICO,,
+28601,28650,audit,3,devices,Ma23060040025,Ma23060040025,2025-11-12 15:38:26.824471-03:00,,,,,baja,numero_serie: Ma23060040025,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 13:59:56.716871-03:00,,,,,baja,estado: reparar,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-12 13:59:56.716871-03:00,,,,,baja,presupuesto_estado: aprobado,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-11-05 11:29:25.954875-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-29 15:06:23.619037-03:00,,,,,baja,garantia_fabrica: false,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:52.056115-03:00,,,,,baja,"trabajos_realizados: CAMBIO DE BATERIA, MODIFICACION CIRCUITO ELECTRONICO",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:44.085237-03:00,,,,,baja,"trabajos_realizados: CAMBIO DE BATERIA, MODIFICACION",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:40.899396-03:00,,,,,baja,"trabajos_realizados: CAMBIO DE BATERIA, MODIF",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:37.859508-03:00,,,,,baja,"trabajos_realizados: CAMBIO DE BATERIA, MODI",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:32.027189-03:00,,,,,baja,"trabajos_realizados: CAMBIO DE BATERIA, ",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:21.109214-03:00,,,,,baja,trabajos_realizados: CAMBIO DE BATERIA,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:18.259304-03:00,,,,,baja,trabajos_realizados: CA DE BATERIA,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:13:15.999285-03:00,,,,,baja,"trabajos_realizados: CA,MMBI DE BATERIA",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:12:56.640716-03:00,,,,,baja,"trabajos_realizados: CA,MMBIO DE BATERIA",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:12:50.550974-03:00,,,,,baja,"trabajos_realizados: CA,MMBIO DE BATERIAS",,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:12:25.736937-03:00,,,,,baja,descripcion_problema: NO FUNCIONA A BATERIAS,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:12:21.389351-03:00,,,,,baja,descripcion_problema: NO FUNCIO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:12:19.556741-03:00,,,,,baja,descripcion_problema: NO FU,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:12:17.550925-03:00,,,,,baja,descripcion_problema: NO,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:11:51.329003-03:00,,,,,baja,estado: diagnosticado,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:11:51.329003-03:00,,,,,baja,fecha_servicio: 2025-10-28T19:11:00+00:00,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:11:21.250223-03:00,,,,,baja,alquiler_fecha,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-28 16:10:19.538781-03:00,,,,,baja,alquiler_fecha: 2025-10-28,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-24 11:21:22.599752-03:00,,,,,baja,asignado_a: 1001,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,fecha_ingreso: 2025-10-21T03:00:00+00:00,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,remito_ingreso: 25679,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,ubicacion_id: 1,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,accesorios,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,id: 28601,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,disposicion: normal,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,asignado_a: 10,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,motivo: reparación,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,garantia_reparacion: false,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,device_id: 28650,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,estado: ingresado,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,informe_preliminar,,
+28601,28650,audit,3,ingresos,Ma23060040025,Ma23060040025,2025-10-21 17:11:13.638243-03:00,,,,,baja,recibido_por: 7,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2026-05-06 10:46:31.815620-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-19 15:19:43.092132-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,POST,Ma23060040025,Ma23060040025,2025-11-12 16:28:55.287148-03:00,,,,,baja,/api/ingresos/28601/reparado/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:34.870486-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:33.076027-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:31.752295-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:29.411307-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:24.603741-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:22.874734-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 16:28:20.695791-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-11-12 15:38:26.892971-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,POST,Ma23060040025,Ma23060040025,2025-11-12 13:59:59.907177-03:00,,,,,baja,/api/quotes/28601/aprobar/,,
+28601,28650,audit,3,POST,Ma23060040025,Ma23060040025,2025-11-05 11:29:26.140601-03:00,,,,,baja,/api/quotes/28601/emitir/,,
+28601,28650,audit,3,POST,Ma23060040025,Ma23060040025,2025-11-05 11:29:10.936620-03:00,,,,,baja,/api/quotes/28601/items/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:52.064310-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:44.089731-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:40.903964-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:37.871171-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:32.030742-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:21.113300-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:18.263480-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:13:16.006372-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:12:56.644755-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:12:50.555048-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:12:25.740805-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:12:21.396780-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:12:19.566162-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:12:17.558374-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:11:51.337561-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:11:21.258472-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-28 16:10:19.589985-03:00,,,,,baja,/api/ingresos/28601/,,
+28601,28650,audit,3,PATCH,Ma23060040025,Ma23060040025,2025-10-24 11:21:23.187333-03:00,,,,,baja,/api/ingresos/28601/asignar-tecnico/,,
+28601,28650,audit,3,POST,Ma23060040025,Ma23060040025,2025-10-24 11:20:47.993384-03:00,,,,,baja,/api/ingresos/28601/solicitar-asignacion/,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:51:11.841084-03:00,,,,,baja,estado: reparar,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:51:11.841084-03:00,,,,,baja,presupuesto_estado: aprobado,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:42.955572-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina del ES422B51222 propiedad de respiflow),,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:40.790826-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina del ES422B51222 propiedad de respiflow,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:35.846740-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina del ES422B51222 propieda de respiflow,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:33.612099-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina del ES422B51222 propieda de ,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:30.777920-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina del ES422B51222 ,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:13.623289-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina del,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:12.177765-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (Se toma turbina de,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:49:07.910064-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA (,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 14:48:51.139629-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-05-18 13:24:06.135541-03:00,,,,,baja,equipo_variante,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2026-02-06 14:37:06.215074-03:00,,,,,baja,equipo_variante: E-20A-H-O,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:22:27.031970-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:22:20.983867-03:00,,,,,baja,"trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA
+
+NO APLICA GARANTÍA - Descuento del 16% aplicado",,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:22:18.167886-03:00,,,,,baja,"trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA
+
+NO APLICA GARANTÍA - Descuento del 16%",,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:22:12.572443-03:00,,,,,baja,"trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA
+
+NO APLICA GARANTÍA ",,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:20:17.058618-03:00,,,,,baja,"trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA
+
+NO APLICA GARANTÍA",,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:20:15.482820-03:00,,,,,baja,"trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA
+
+NO APLICA GARANT",,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-12-04 12:20:14.391865-03:00,,,,,baja,"trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA
+
+NO APLICA GARANTÏA",,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-28 12:22:13.411417-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - LIMPIEZA INTERIOR Y EXTERIOR - REQUIERE CAMBIO DE TURBINA,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-28 12:21:58.784023-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO DE PLACA OK - TURBINA RUIDOSA - ,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-28 12:18:57.339610-03:00,,,,,baja,descripcion_problema: TURBINA RUIDOSA POR INGRESO DE LIQUIDO EN SU INTERIOR,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-28 12:05:27.249515-03:00,,,,,baja,descripcion_problema: TURBINA RUIDOSA,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-28 12:05:22.913572-03:00,,,,,baja,estado: diagnosticado,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-28 12:05:22.913572-03:00,,,,,baja,fecha_servicio: 2025-11-28T03:00:00+00:00,,
+28779,28761,audit,3,ingreso_accesorios,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,id: 142,,
+28779,28761,audit,3,ingreso_accesorios,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,accesorio_id: 19,,
+28779,28761,audit,3,ingreso_accesorios,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,referencia: 22A01208414,,
+28779,28761,audit,3,ingreso_accesorios,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,ingreso_id: 28779,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,fecha_ingreso: 2025-11-27T03:00:00+00:00,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,remito_ingreso: 25528,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,ubicacion_id: 1,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,accesorios,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,id: 28779,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,disposicion: normal,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,etiq_garantia_ok: true,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,asignado_a: 10,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,motivo: reparación,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,garantia_reparacion: false,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,device_id: 28761,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,estado: ingresado,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,informe_preliminar,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,recibido_por: 7,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,fecha_creacion: 2025-11-27T19:01:13.545255+00:00,,
+28779,28761,audit,3,ingresos,E2324505218,E2324505218,2025-11-27 16:01:13.545255-03:00,,,,,baja,garantia_fabrica: true,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 15:50:56.387091-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 15:48:52.496125-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:51:12.083937-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,POST,E2324505218,E2324505218,2026-05-18 14:51:12.046855-03:00,,,,,baja,/api/quotes/28779/aprobar/,,
+28779,28761,audit,3,DELETE,E2324505218,E2324505218,2026-05-18 14:50:36.581058-03:00,,,,,baja,/api/quotes/28779/items/3621/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:50:31.288884-03:00,,,,,baja,/api/quotes/28779/resumen/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:49.242031-03:00,,,,,baja,/api/quotes/28779/resumen/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:49:45.752459-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:42.965446-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:40.801409-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:35.857472-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:33.623560-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:30.789644-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:49:23.464182-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:49:21.713836-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:13.628697-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:12.188256-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:49:07.920192-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:48:52.752499-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 14:48:51.151156-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:48:43.146907-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 14:48:36.661587-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:26:04.838410-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:26:01.748178-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:24:06.180069-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 13:24:06.147191-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:23:47.407735-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:20:18.626300-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:20:13.904574-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 13:18:45.917756-03:00,,,,,baja,/api/quotes/28779/items/3621/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2026-05-18 13:17:47.498607-03:00,,,,,baja,/api/quotes/28779/items/3621/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:17:08.219351-03:00,,,,,baja,/api/quotes/28779/,,
+28779,28761,audit,3,GET,E2324505218,E2324505218,2026-05-18 13:17:04.774277-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,POST,E2324505218,E2324505218,2025-12-04 12:22:27.195300-03:00,,,,,baja,/api/quotes/28779/emitir/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-12-04 12:22:20.988506-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-12-04 12:22:18.174147-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-12-04 12:22:12.579138-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,POST,E2324505218,E2324505218,2025-12-04 12:21:34.808857-03:00,,,,,baja,/api/quotes/28779/items/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-12-04 12:20:17.062616-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-12-04 12:20:15.496049-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-12-04 12:20:14.413052-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-11-28 12:22:13.417821-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-11-28 12:21:58.791325-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-11-28 12:18:57.349513-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-11-28 12:05:27.256253-03:00,,,,,baja,/api/ingresos/28779/,,
+28779,28761,audit,3,PATCH,E2324505218,E2324505218,2025-11-28 12:05:22.923890-03:00,,,,,baja,/api/ingresos/28779/,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,fecha_ingreso: 2025-12-05T03:00:00+00:00,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,remito_ingreso: 23867,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,ubicacion_id: 1,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,accesorios,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,id: 28845,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,disposicion: normal,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,etiq_garantia_ok: true,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,asignado_a: 10,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,motivo: baja alquiler,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,garantia_reparacion: false,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,device_id: 28800,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,estado: ingresado,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,informe_preliminar,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,recibido_por: 7,,
+28845,28800,audit,3,ingresos,213060424,213060424,2025-12-09 15:50:51.914108-03:00,,,,,baja,fecha_creacion: 2025-12-09T18:50:51.914108+00:00,,
+28845,28800,audit,3,GET,213060424,213060424,2026-05-14 10:15:10.337402-03:00,,,,,baja,/api/ingresos/28845/,,
+28845,28800,audit,3,GET,213060424,213060424,2026-05-14 10:11:38.309191-03:00,,,,,baja,/api/ingresos/28845/,,
+28867,17948,excel_prestamo,1,serial_variant_con_n,N5167674,N5167674,,,,,,media,Concentrador de Oxígeno AIR SEP NEW LIFE (fila 5),,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:50.826200-03:00,,,,,baja,estado: reparado,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:49.128026-03:00,,,,,baja,trabajos_realizados: cambio zeolita (CAN 0034/35) - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:48.251619-03:00,,,,,baja,trabajos_realizados: cambio zeolita (CAN 0034/35 - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:45.579013-03:00,,,,,baja,trabajos_realizados: cambio zeolita (CAN 00 - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:44.195074-03:00,,,,,baja,trabajos_realizados: cambio zeolita (CAN  - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:43.130149-03:00,,,,,baja,trabajos_realizados: cambio zeolita (CAN - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:41.596586-03:00,,,,,baja,trabajos_realizados: cambio zeolita ( - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:37.636265-03:00,,,,,baja,trabajos_realizados: cambio zeolita - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 16:22:35.848816-03:00,,,,,baja,trabajos_realizados: cambi zeolita - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2026-01-14 15:44:18.150118-03:00,,,,,baja,estado: reparar,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-16 10:09:35.610924-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:34.072160-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada
+electroválvula degradada",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:30.072881-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio - cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:27.362749-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio- cambio de electroválvula - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:23.876020-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio- cambio de electroválvula- cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:22.178741-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio- cambio de electrová- cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:20.380073-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio- cambio de electro- cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:15.344769-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio- - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:10.979305-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada
+electroválvula degradad",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:08:09.794939-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada
+electroválvula degra",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:58.929125-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada
+electroválvula",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:55.829354-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada
+electrov",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:54.879993-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada
+electro",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:32.823529-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de alivio - cambio de filtros ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:25.370389-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válvula de aliv,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:22.154654-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de válv,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:21.023906-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de vá,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:19.817686-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de v,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:17.989888-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de val,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:12.873405-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:07:11.689911-03:00,,,,,baja,trabajos_realizados: cambiar zeolita ,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:57.841176-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita degradada",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:54.810844-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:51.973876-03:00,,,,,baja,"descripcion_problema: válvula de alivio rota
+zeolita contaminada",,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:44.274798-03:00,,,,,baja,descripcion_problema: válvula de alivio rota,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:42.731481-03:00,,,,,baja,descripcion_problema: válvula de alivio,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:41.173682-03:00,,,,,baja,descripcion_problema: válvula de ali,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:36.370918-03:00,,,,,baja,descripcion_problema: v,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:34.804419-03:00,,,,,baja,descripcion_problema: va,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:33.439115-03:00,,,,,baja,estado: diagnosticado,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-11 15:06:33.439115-03:00,,,,,baja,fecha_servicio: 2025-12-11T03:00:00+00:00,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-10 16:03:43.284115-03:00,,,,,baja,asignado_a: 1000,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,fecha_ingreso: 2025-12-09T03:00:00+00:00,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,remito_ingreso: 25792,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,ubicacion_id: 1,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,accesorios,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,id: 28867,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,disposicion: normal,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,etiq_garantia_ok: true,,
+28867,17948,audit,3,ingresos,5167674,5167674,2025-12-09 17:05:49.730379-03:00,,,,,baja,asignado_a: 1004,,
+28867,17948,audit,3,GET,5167674,5167674,2026-05-15 11:43:17.937710-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,POST,5167674,5167674,2026-01-14 16:22:50.864610-03:00,,,,,baja,/api/ingresos/28867/reparado/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:49.133040-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:48.256336-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:45.589718-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:44.200124-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:43.136902-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:41.602170-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:37.643974-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2026-01-14 16:22:35.873139-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,POST,5167674,5167674,2026-01-14 15:50:11.791160-03:00,,,,,baja,/api/quotes/28867/items/,,
+28867,17948,audit,3,POST,5167674,5167674,2026-01-14 15:50:00.147849-03:00,,,,,baja,/api/quotes/28867/items/,,
+28867,17948,audit,3,POST,5167674,5167674,2026-01-14 15:44:18.789528-03:00,,,,,baja,/api/ingresos/28867/reparar/,,
+28867,17948,audit,3,POST,5167674,5167674,2025-12-16 10:09:35.628818-03:00,,,,,baja,/api/quotes/28867/no-aplica/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:34.076841-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:30.079648-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:27.367577-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:23.881859-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:22.185314-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:20.384405-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:15.348716-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:10.983924-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:08:09.799258-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:58.935268-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:55.835753-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:54.887287-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:32.827684-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:25.374578-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:22.158490-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:21.028412-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:19.821946-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:17.995051-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:12.876773-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:07:11.693411-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:58.577660-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:57.844973-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:54.815272-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:51.977667-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:45.028663-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:44.279900-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:42.737728-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:41.179951-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:36.377300-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:34.808937-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-11 15:06:33.449184-03:00,,,,,baja,/api/ingresos/28867/,,
+28867,17948,audit,3,PATCH,5167674,5167674,2025-12-10 16:03:44.255025-03:00,,,,,baja,/api/ingresos/28867/asignar-tecnico/,,
+28867,17948,audit,3,POST,5167674,5167674,2025-12-10 15:50:22.519085-03:00,,,,,baja,/api/ingresos/28867/solicitar-asignacion/,,
+28867,17948,bejerman,2,serial_variant_con_n,N5167674,N5167674,,,,STR,,complementaria,Artículo 1115007  | Depósito STR: el equipo sigue en stock/servicio y no acredita venta ni alquiler.,stock_servicio,sin_indicio_salida
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2026-04-08 16:06:26.061359-03:00,,,,,baja,estado: controlado_sin_defecto,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2026-04-08 16:06:26.061359-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2026-02-06 14:37:06.215074-03:00,,,,,baja,equipo_variante: E-20A-H-O,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-18 14:38:14.823508-03:00,,,,,baja,estado: reparar,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-18 14:38:14.823508-03:00,,,,,baja,presupuesto_estado: aprobado,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-18 14:38:01.009114-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 10:25:59.803099-03:00,,,,,baja,trabajos_realizados: control de funcionamiento ok - calibracion de equipo - cambio de filtro,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 10:25:57.710331-03:00,,,,,baja,trabajos_realizados: control de funcionamiento ok - calibracion de equipo - ,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 09:43:57.630043-03:00,,,,,baja,trabajos_realizados: control de funcionamiento ok - calibracion de equipo,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 09:43:56.737657-03:00,,,,,baja,trabajos_realizados: control de funcionamiento ok - calibracion de equipo ¡,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 09:43:45.505625-03:00,,,,,baja,trabajos_realizados: control de funcionamiento ok - ,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 09:43:36.032324-03:00,,,,,baja,estado: diagnosticado,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-17 09:43:36.032324-03:00,,,,,baja,fecha_servicio: 2025-12-17T03:00:00+00:00,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,id: 187,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,accesorio_id: 19,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,referencia: 24603009459,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,ingreso_id: 28878,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,id: 186,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,accesorio_id: 24,,
+28878,28821,audit,3,ingreso_accesorios,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,ingreso_id: 28878,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,fecha_ingreso: 2025-12-11T03:00:00+00:00,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,remito_ingreso: 25796,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,ubicacion_id: 1,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,accesorios,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,id: 28878,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,disposicion: normal,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,etiq_garantia_ok: true,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,asignado_a: 10,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,motivo: reparación,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,garantia_reparacion: false,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,device_id: 28821,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,estado: ingresado,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,informe_preliminar,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,recibido_por: 7,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,fecha_creacion: 2025-12-15T17:51:40.708586+00:00,,
+28878,28821,audit,3,ingresos,E23BDB01253,E23BDB01253,2025-12-15 14:51:40.708586-03:00,,,,,baja,garantia_fabrica: true,,
+28878,28821,audit,3,POST,E23BDB01253,E23BDB01253,2026-04-08 16:06:26.081420-03:00,,,,,baja,/api/ingresos/28878/controlado-sin-defecto/,,
+28878,28821,audit,3,POST,E23BDB01253,E23BDB01253,2025-12-18 14:38:18.524788-03:00,,,,,baja,/api/quotes/28878/aprobar/,,
+28878,28821,audit,3,POST,E23BDB01253,E23BDB01253,2025-12-18 14:38:01.204781-03:00,,,,,baja,/api/quotes/28878/emitir/,,
+28878,28821,audit,3,PATCH,E23BDB01253,E23BDB01253,2025-12-17 10:25:59.809477-03:00,,,,,baja,/api/ingresos/28878/,,
+28878,28821,audit,3,PATCH,E23BDB01253,E23BDB01253,2025-12-17 10:25:57.775139-03:00,,,,,baja,/api/ingresos/28878/,,
+28878,28821,audit,3,PATCH,E23BDB01253,E23BDB01253,2025-12-17 09:43:57.634410-03:00,,,,,baja,/api/ingresos/28878/,,
+28878,28821,audit,3,PATCH,E23BDB01253,E23BDB01253,2025-12-17 09:43:56.743989-03:00,,,,,baja,/api/ingresos/28878/,,
+28878,28821,audit,3,PATCH,E23BDB01253,E23BDB01253,2025-12-17 09:43:45.515334-03:00,,,,,baja,/api/ingresos/28878/,,
+28878,28821,audit,3,PATCH,E23BDB01253,E23BDB01253,2025-12-17 09:43:36.066231-03:00,,,,,baja,/api/ingresos/28878/,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2026-04-08 16:07:09.256040-03:00,,,,,baja,estado: controlado_sin_defecto,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2026-04-08 16:07:09.256040-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2026-01-15 10:41:24.745720-03:00,,,,,baja,estado: reparar,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2026-01-15 10:41:24.745720-03:00,,,,,baja,presupuesto_estado: aprobado,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2026-01-15 10:41:06.260292-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2026-01-09 12:13:39.732856-03:00,,,,,baja,informe_preliminar: no calienta humidificador,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:10:06.952747-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO OK DEL EQUIPO - SE PROBO HUMIDIFICADOR EN TODOS LOS NIVELES DE TEMPERATURA Y FUNCIONO CORRECTAMENTE - INCORPORACION DE TAPA DE FILTRO,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:10:04.231526-03:00,,,,,baja,descripcion_problema: informe preliminar : no calienta humidificador - EQUIPO SIN TAPA DE FILTRO,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:10:02.275656-03:00,,,,,baja,descripcion_problema: informe preliminar : no calienta humidificador - EQUIPO SIN TAPA,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:49.271528-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO OK DEL EQUIPO - SE PROBO HUMIDIFICADOR EN TODOS LOS NIVELES DE TEMPERATURA Y FUNCIONO CORRECTAMENTE - INCORPORACION DE TAPA,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:44.051189-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO OK DEL EQUIPO - SE PROBO HUMIDIFICADOR EN TODOS LOS NIVELES DE TEMPERATURA Y FUNCIONO CORRECTAMENTE - ,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:29.911341-03:00,,,,,baja,trabajos_realizados: CONTROL DE FUNCIONAMIENTO OK DEL EQUIPO - SE PROBO ,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:16.373601-03:00,,,,,baja,descripcion_problema: informe preliminar : no calienta humidificador,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:13.672082-03:00,,,,,baja,descripcion_problema: informe preeliminar : no calienta humidificador,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:12.121853-03:00,,,,,baja,descripcion_problema: informe preeliminar : no calienta humidi,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:01.351709-03:00,,,,,baja,estado: diagnosticado,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-24 11:09:01.351709-03:00,,,,,baja,fecha_servicio: 2025-12-24T03:00:00+00:00,,
+28913,28833,audit,3,ingreso_accesorios,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,id: 203,,
+28913,28833,audit,3,ingreso_accesorios,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,accesorio_id: 10,,
+28913,28833,audit,3,ingreso_accesorios,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,referencia: CJD19631196,,
+28913,28833,audit,3,ingreso_accesorios,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,ingreso_id: 28913,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,fecha_ingreso: 2025-12-22T03:00:00+00:00,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,remito_ingreso: 25835,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,ubicacion_id: 1,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,accesorios,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,id: 28913,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,disposicion: normal,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,etiq_garantia_ok: true,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,asignado_a: 10,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,motivo: reparación,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,garantia_reparacion: false,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,device_id: 28833,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,estado: ingresado,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,informe_preliminar,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,recibido_por: 7,,
+28913,28833,audit,3,ingresos,CSX1965K088,CSX1965K088,2025-12-23 17:15:28.691295-03:00,,,,,baja,fecha_creacion: 2025-12-23T20:15:28.691295+00:00,,
+28913,28833,audit,3,GET,CSX1965K088,CSX1965K088,2026-05-14 14:58:51.908087-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,POST,CSX1965K088,CSX1965K088,2026-04-08 16:07:09.265011-03:00,,,,,baja,/api/ingresos/28913/controlado-sin-defecto/,,
+28913,28833,audit,3,POST,CSX1965K088,CSX1965K088,2026-01-15 10:41:25.432507-03:00,,,,,baja,/api/quotes/28913/aprobar/,,
+28913,28833,audit,3,POST,CSX1965K088,CSX1965K088,2026-01-15 10:41:06.473030-03:00,,,,,baja,/api/quotes/28913/emitir/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2026-01-15 10:41:04.856907-03:00,,,,,baja,/api/quotes/28913/resumen/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2026-01-09 12:13:39.745658-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:10:06.959317-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:10:04.669841-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:10:02.300091-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:49.276319-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:44.057130-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:29.945926-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:20.450641-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:16.377580-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:13.676583-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:12.128270-03:00,,,,,baja,/api/ingresos/28913/,,
+28913,28833,audit,3,PATCH,CSX1965K088,CSX1965K088,2025-12-24 11:09:01.385925-03:00,,,,,baja,/api/ingresos/28913/,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-05-13 10:40:07.563180-03:00,,,,,baja,trabajos_realizados: REQUIERE CAMBIO DE PLACA,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-05-13 10:40:05.724885-03:00,,,,,baja,trabajos_realizados:  - REQUIERE CAMBIO DE PLACA,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-05-13 10:40:04.890331-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO 
+- FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR 
+- TURBINA OK",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-05-13 10:40:02.030075-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO 
+- FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR 
+- TURBINA OK - REQUIERE CAMBIO DE PLACA",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-05-13 10:39:57.637649-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO 
+- FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-01-09 12:12:05.205448-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-01-09 11:14:27.993983-03:00,,,,,baja,comentarios: - LAS PLACAS DE REPUESTOS QUE TENEMOS NO SON COMPATIBLES CON LAS TURBINA DEL EQUIPO - SE CAMBIA PLACA Y TURBINA CON UNA QUE TENEMOS COMPATIBLE Y NOS QUEDAMOS CON LA TURBINA DEL EQUIPO COMO REPUESTO,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2026-01-09 11:14:16.065512-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:35:12.949946-03:00,,,,,baja,fecha_servicio: 2025-12-23T03:00:00+00:00,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:35:08.504367-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA - LAS PLACAS DE REPUESTOS QUE TENEMOS NO SON COMPATIBLES CON LAS TURBINA DEL EQUIPO - SE CAMBIA PLACA Y TURBINA CON UNA QUE TENEMOS COMPATIBLE Y NOS QUEDAMOS CON LA TURBINA DEL EQUIPO COMO REPUESTO",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:35:02.306710-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA - LAS PLACAS DE REPUESTOS QUE TENEMOS NO SON COMPATIBLES CON LAS TURBINA DEL EQUIPO - SE CAMBIA PLACA Y TURBINA CON UNA QUE TENEMOS COMPATIBLE Y NOS QUEDAMOS",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:34:47.018559-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA - LAS PLACAS DE REPUESTOS QUE TENEMOS NO SON COMPATIBLES CON LAS TURBINA DEL EQUIPO",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:34:45.161581-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA - LAS PLACAS DE REPUESTOS QUE TENEMOS NO SON COMPATIBLES CON LAS TURBINA",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:34:40.478432-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA - LAS PLACAS DE REPUESTOS QUE TENEMOS NO SON COMPATIBLES CON LAS TURBINAS",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:34:26.892001-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK - REQUIERE CAMBIO DE PLACA",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:34:12.075814-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - FALLA EN PLACA CAUSADO POR INGRESO DE LIQUIDO EN SU INTERIOR - TURBINA OK",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:34:01.522507-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO - ERROR",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:55.145023-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DEL EQUIPO -",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:52.294513-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFTWARE DE",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:50.204301-03:00,,,,,baja,"descripcion_problema: ERROR 97, ES UN ERROR DE SOFT",,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:42.965316-03:00,,,,,baja,descripcion_problema: ERROR 97 -,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:37.458773-03:00,,,,,baja,estado: diagnosticado,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:37.458773-03:00,,,,,baja,descripcion_problema: ERROR 97,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-24 10:33:37.458773-03:00,,,,,baja,fecha_servicio: 2025-12-24T13:33:37.4624+00:00,,
+28914,28834,audit,3,ingreso_accesorios,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,id: 204,,
+28914,28834,audit,3,ingreso_accesorios,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,accesorio_id: 24,,
+28914,28834,audit,3,ingreso_accesorios,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,ingreso_id: 28914,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,fecha_ingreso: 2025-12-22T03:00:00+00:00,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,remito_ingreso: 25835,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,ubicacion_id: 1,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,accesorios,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,id: 28914,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,disposicion: normal,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,etiq_garantia_ok: true,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,asignado_a: 10,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,motivo: reparación,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,garantia_reparacion: false,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,device_id: 28834,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,estado: ingresado,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,informe_preliminar,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,recibido_por: 7,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,fecha_creacion: 2025-12-23T20:16:30.05995+00:00,,
+28914,28834,audit,3,ingresos,ES423803076,ES423803076,2025-12-23 17:16:30.059950-03:00,,,,,baja,garantia_fabrica: true,,
+28914,28834,audit,3,GET,ES423803076,ES423803076,2026-05-18 16:52:29.850359-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-05-13 10:40:07.573294-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-05-13 10:40:05.734951-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-05-13 10:40:04.900005-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-05-13 10:40:02.036802-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-05-13 10:39:57.645274-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,POST,ES423803076,ES423803076,2026-01-09 12:12:05.564601-03:00,,,,,baja,/api/quotes/28914/emitir/,,
+28914,28834,audit,3,POST,ES423803076,ES423803076,2026-01-09 12:12:03.194808-03:00,,,,,baja,/api/quotes/28914/items/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-01-09 11:14:28.741591-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-01-09 11:14:28.000730-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2026-01-09 11:14:16.073927-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,POST,ES423803076,ES423803076,2025-12-24 11:07:48.609318-03:00,,,,,baja,/api/ingresos/28914/fotos/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:35:12.957377-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:35:08.511985-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:35:02.313094-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:34:47.022831-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:34:45.167966-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:34:40.484848-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:34:26.898357-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:34:12.080112-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:34:01.525847-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:33:55.152093-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:33:52.301013-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:33:50.214163-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:33:42.972874-03:00,,,,,baja,/api/ingresos/28914/,,
+28914,28834,audit,3,PATCH,ES423803076,ES423803076,2025-12-24 10:33:37.470664-03:00,,,,,baja,/api/ingresos/28914/,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:05:11.637319-03:00,,,,,baja,"trabajos_realizados: control ok
+",,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:04:28.842870-03:00,,,,,baja,estado: controlado_sin_defecto,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:04:28.842870-03:00,,,,,baja,presupuesto_estado: no_aplica,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:04:28.229547-03:00,,,,,baja,fecha_servicio: 2026-03-27T03:00:00+00:00,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:04:25.823737-03:00,,,,,baja,estado: diagnosticado,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:04:25.823737-03:00,,,,,baja,descripcion_problema: control ok,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-03-27 12:04:25.823737-03:00,,,,,baja,fecha_servicio: 2026-03-27T15:04:25.82686+00:00,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,fecha_ingreso: 2025-12-22T03:00:00+00:00,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,remito_ingreso: 25835,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,ubicacion_id: 1,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,accesorios,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,id: 28926,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,disposicion: normal,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,etiq_garantia_ok: true,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,asignado_a: 10,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,motivo: reparación,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,garantia_reparacion: false,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,device_id: 28837,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,estado: ingresado,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,informe_preliminar,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,recibido_por: 7,,
+28926,28837,audit,3,ingresos,CJD19631196,CJD19631196,2026-01-05 09:47:40.090340-03:00,,,,,baja,fecha_creacion: 2026-01-05T12:47:40.09034+00:00,,
+28926,28837,audit,3,PATCH,CJD19631196,CJD19631196,2026-03-27 12:05:11.643514-03:00,,,,,baja,/api/ingresos/28926/,,
+28926,28837,audit,3,POST,CJD19631196,CJD19631196,2026-03-27 12:04:28.849897-03:00,,,,,baja,/api/ingresos/28926/controlado-sin-defecto/,,
+28926,28837,audit,3,PATCH,CJD19631196,CJD19631196,2026-03-27 12:04:28.237346-03:00,,,,,baja,/api/ingresos/28926/,,
+28926,28837,audit,3,PATCH,CJD19631196,CJD19631196,2026-03-27 12:04:25.835202-03:00,,,,,baja,/api/ingresos/28926/,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,fecha_ingreso: 2025-12-23T03:00:00+00:00,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,remito_ingreso: 25843,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,ubicacion_id: 1,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,accesorios,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,id: 28904,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,disposicion: normal,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,etiq_garantia_ok: true,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,comentarios: LUZ NARANJA,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,asignado_a: 1004,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,motivo: reparación,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,garantia_reparacion: false,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,device_id: 28829,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,estado: ingresado,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,informe_preliminar,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,recibido_por: 7,,
+28904,28829,audit,3,ingresos,357998,357998,2025-12-23 16:53:23.245093-03:00,,,,,baja,fecha_creacion: 2025-12-23T19:53:23.245093+00:00,,
+28919,26348,audit,3,devices,E7922,E7922,2026-05-15 13:33:12.242303-03:00,,,,,baja,ubicacion_id: 1,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-05-15 13:33:12.242303-03:00,,,,,baja,ubicacion_id: 1,,
+28919,26348,audit,3,devices,E7922,E7922,2026-05-15 11:42:53.217771-03:00,,,,,baja,ubicacion_id: 10,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-05-15 11:42:53.217771-03:00,,,,,baja,ubicacion_id: 10,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-05-15 11:40:00.156454-03:00,,,,,baja,presupuesto_estado: presupuestado,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:31.126450-03:00,,,,,baja,estado: reparado,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:29.333337-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG 4927) - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:28.554606-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG 4927 - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:26.604494-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG 42 - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:20.575912-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG  - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:15.631005-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG  - cambio de filtros - control y limpieza del,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:12.171770-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG  - cambio de filtros - control y limpieza del equipo4927,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:10.863485-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG  - cambio de filtros - control y limpieza del equipo4,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:04.510232-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo MG  - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:53:03.127441-03:00,,,,,baja,trabajos_realizados: cambio de zeolita (vino del equipo M - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:52:53.223197-03:00,,,,,baja,trabajos_realizados: cambio de zeolita - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2026-04-29 16:52:51.542741-03:00,,,,,baja,trabajos_realizados: cambi zeolita - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:58.150364-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de filtros - control y limpieza del equipo,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:53.161293-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de filtros - control y limpieza,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:47.251703-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de filtros - control y limipieza,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:40.085349-03:00,,,,,baja,trabajos_realizados: cambiar zeolita - cambio de filtros,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:34.165813-03:00,,,,,baja,trabajos_realizados: cambiar zeolita ,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:21.701965-03:00,,,,,baja,descripcion_problema: zeolita degradada,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:15.617008-03:00,,,,,baja,descripcion_problema: zeolita,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:12.971137-03:00,,,,,baja,estado: diagnosticado,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 10:38:12.971137-03:00,,,,,baja,fecha_servicio: 2025-12-29T03:00:00+00:00,,
+28919,26348,audit,3,ingreso_accesorios,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,id: 209,,
+28919,26348,audit,3,ingreso_accesorios,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,accesorio_id: 1,,
+28919,26348,audit,3,ingreso_accesorios,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,ingreso_id: 28919,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,fecha_ingreso: 2025-12-29T03:00:00+00:00,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,remito_ingreso: 25854,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,ubicacion_id: 1,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,accesorios,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,id: 28919,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,disposicion: normal,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,etiq_garantia_ok: true,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,comentarios: Tapa rota,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,asignado_a: 1000,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,motivo: reparación,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,garantia_reparacion: false,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,device_id: 26348,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,estado: ingresado,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,informe_preliminar,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,recibido_por: 1003,,
+28919,26348,audit,3,ingresos,E7922,E7922,2025-12-30 09:50:57.176293-03:00,,,,,baja,fecha_creacion: 2025-12-30T12:50:57.176293+00:00,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 13:33:52.859914-03:00,,,,,baja,/api/quotes/28919/,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 13:33:27.638896-03:00,,,,,baja,/api/quotes/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-05-15 13:33:12.258993-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 13:32:49.987494-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-05-15 11:42:53.228442-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 11:42:21.408830-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 11:40:00.357954-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,POST,E7922,E7922,2026-05-15 11:40:00.327757-03:00,,,,,baja,/api/quotes/28919/emitir/,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 11:39:51.400410-03:00,,,,,baja,/api/quotes/28919/,,
+28919,26348,audit,3,GET,E7922,E7922,2026-05-15 11:39:49.858962-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,POST,E7922,E7922,2026-04-29 16:53:31.146544-03:00,,,,,baja,/api/ingresos/28919/reparado/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:29.349589-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:28.561861-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:26.613490-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:20.591877-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:15.644308-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:12.200983-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:10.872383-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:04.518796-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:53:03.136744-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:52:53.231067-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2026-04-29 16:52:51.557929-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,DELETE,E7922,E7922,2026-01-15 10:06:05.821077-03:00,,,,,baja,/api/quotes/28919/items/3714/,,
+28919,26348,audit,3,POST,E7922,E7922,2026-01-15 09:54:17.469782-03:00,,,,,baja,/api/quotes/28919/items/,,
+28919,26348,audit,3,POST,E7922,E7922,2026-01-15 09:51:24.540572-03:00,,,,,baja,/api/quotes/28919/items/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:58.154788-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:53.166860-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:47.259529-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:40.104965-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:34.236068-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:21.705577-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:16.499233-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:15.621887-03:00,,,,,baja,/api/ingresos/28919/,,
+28919,26348,audit,3,PATCH,E7922,E7922,2025-12-30 10:38:12.978892-03:00,,,,,baja,/api/ingresos/28919/,,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:09:00.044359-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo concentra 85/6% en 5L",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:58.571807-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo concentra 85/6% en ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:56.937539-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo concentra 85/6% ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:54.660225-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo concentra 85/6",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:53.452848-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo concentra 85",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:51.171309-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo concentra ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:47.977865-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en otro equipo ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:44.010362-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la zeolita en ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:39.555536-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlo la",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:38.730834-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  control la",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:37.158801-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlaro la",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:34.928540-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlaron la",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:33.594974-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlaron las",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:31.982990-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlaro",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:30.977455-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  controlar",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:27.746586-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+
+se  cont",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:08:24.624183-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros 
+",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:59.661840-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:58.300252-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal - cambiar filtros",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:51.404031-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:50.508623-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa frontal",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:48.687266-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar carcasa fr",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:45.661015-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar caraca",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:41.514531-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - cambiar caracas",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:36.395487-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - ca",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:33.197370-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar placa principal - ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:25.587353-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambiar pa",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:21.932078-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - cambi",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:19.431604-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita - ",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:14.345186-03:00,,,,,baja,"trabajos_realizados: se necesita:
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:12.816390-03:00,,,,,baja,"trabajos_realizados: se necesita
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:11.385094-03:00,,,,,baja,"trabajos_realizados: se nece
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:09.799290-03:00,,,,,baja,"trabajos_realizados: se necet
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:08.417899-03:00,,,,,baja,"trabajos_realizados: se necd
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:02.545782-03:00,,,,,baja,"trabajos_realizados: se
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:07:01.489756-03:00,,,,,baja,"trabajos_realizados: 
+cambiar compresor - cambiar zeolita",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:55.455650-03:00,,,,,baja,trabajos_realizados: cambiar compresor - cambiar zeolita,,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:49.476305-03:00,,,,,baja,trabajos_realizados: cambiar compresor ,,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:42.430533-03:00,,,,,baja,trabajos_realizados: cam,,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:23.706773-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal
+compresor roto
+zeolita degradada",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:22.595378-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal
+compresor roto
+zeolita degradad",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:19.389478-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal
+compresor roto
+zeolit",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:16.844139-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal
+compresor roto",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:06:15.497136-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal
+compresor rot",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:03:17.994619-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal
+compresor",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:03:07.988038-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa principal",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 14:03:06.883143-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en alarma en placa princi",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 13:52:43.539808-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fallo en",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 13:52:41.481032-03:00,,,,,baja,"descripcion_problema: carcasa frontal con plástico de pantalla roto
+fa",,
+28923,17119,audit,3,ingresos,mzj5s59905,mzj5s59905,2025-12-30 13:50:42.696437-03:00,,,,,baja,descripcion_problema: carcasa frontal con plástico de pantalla roto,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:09:00.049043-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:58.580246-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:56.945060-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:54.665590-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:53.460405-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:51.178336-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:47.982096-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:44.013800-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:39.559769-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:38.736672-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:37.166920-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:34.945553-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:33.599983-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:31.993637-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:30.981882-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:27.751224-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:08:24.633452-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:59.665880-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:58.308000-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:51.412121-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:50.516026-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:48.694043-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:45.668471-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:41.518628-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:36.417843-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:33.201557-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:25.591271-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:21.937073-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:19.435721-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:14.349535-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:12.829577-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:11.402145-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:09.803708-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:08.425096-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:02.559725-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:07:01.494088-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:55.465116-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:49.484197-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:42.443562-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:23.712812-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:22.604247-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:19.407534-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:16.853936-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:06:15.529250-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:03:18.009792-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:03:08.790557-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:03:07.995159-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 14:03:06.905421-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 13:52:43.546262-03:00,,,,,baja,/api/ingresos/28923/,,
+28923,17119,audit,3,PATCH,mzj5s59905,mzj5s59905,2025-12-30 13:52:41.492555-03:00,,,,,baja,/api/ingresos/28923/,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:54:14.439889-03:00,,,,,baja,estado: reparado,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:53:47.755124-03:00,,,,,baja,trabajos_realizados: reparacion limpieza y kit compresor.,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:53:43.435700-03:00,,,,,baja,trabajos_realizados: reparacion limpieza y kit comresor.,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:53:29.852236-03:00,,,,,baja,trabajos_realizados: reparacion limpieza y kit ,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:53:25.406866-03:00,,,,,baja,trabajos_realizados: reparacion limpieza y kit,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:53:08.656645-03:00,,,,,baja,fecha_servicio: 2026-04-17T03:00:00+00:00,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:52:53.722265-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro, limpieza y control.",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:52:51.551756-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro, limpieza y control. (",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:52:42.006207-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro, limpieza y control. (ver zeolita",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:52:38.865001-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro, limpieza y control. (ver",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:52:37.351523-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro, limpieza y control. (",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:59.907202-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro, limpieza y control.",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:51.369130-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit, reemplazo de filtro",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:31.314040-03:00,,,,,baja,"descripcion_problema: reparación de compresor kit,",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:26.549613-03:00,,,,,baja,"descripcion_problema: reparacion de compresor kit,",,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:22.272879-03:00,,,,,baja,descripcion_problema: reparacion de compresor,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:13.571619-03:00,,,,,baja,descripcion_problema: reparacion de,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:05.895720-03:00,,,,,baja,estado: diagnosticado,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:05.895720-03:00,,,,,baja,descripcion_problema: re,,
+28932,28840,audit,3,ingresos,910003,910003,2026-04-17 15:51:05.895720-03:00,,,,,baja,fecha_servicio: 2026-04-17T18:51:05.898725+00:00,,
+28932,28840,audit,3,ingresos,910003,910003,2026-03-19 10:46:55.786821-03:00,,,,,baja,asignado_a: 1004,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,fecha_ingreso: 2025-12-31T03:00:00+00:00,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,remito_ingreso: 25865,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,ubicacion_id: 1,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,accesorios,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,id: 28932,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,disposicion: normal,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,etiq_garantia_ok: true,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,motivo: baja alquiler,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,garantia_reparacion: false,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,device_id: 28840,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,estado: ingresado,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,presupuesto_estado: pendiente,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,informe_preliminar,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,recibido_por: 7,,
+28932,28840,audit,3,ingresos,910003,910003,2026-01-05 16:22:44.355304-03:00,,,,,baja,fecha_creacion: 2026-01-05T19:22:44.355304+00:00,,
+28932,28840,audit,3,GET,910003,910003,2026-05-15 11:41:33.792004-03:00,,,,,baja,/api/quotes/28932/,,
+28932,28840,audit,3,GET,910003,910003,2026-05-15 11:41:32.626356-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:54:15.239316-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,POST,910003,910003,2026-04-17 15:54:14.449588-03:00,,,,,baja,/api/ingresos/28932/reparado/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:53:47.763782-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:53:43.443939-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:53:29.862721-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:53:25.414677-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:53:08.666822-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:52:53.733636-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:52:51.559059-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:52:42.014409-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:52:38.872469-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:52:37.361410-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:52:36.371001-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:59.915040-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:51.378088-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:31.318531-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:26.556132-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:22.281412-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:13.578196-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-04-17 15:51:05.912870-03:00,,,,,baja,/api/ingresos/28932/,,
+28932,28840,audit,3,PATCH,910003,910003,2026-03-19 10:46:56.121580-03:00,,,,,baja,/api/ingresos/28932/asignar-tecnico/,,

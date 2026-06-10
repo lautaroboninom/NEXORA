@@ -88,7 +88,7 @@ export default function Login() {
             <input
               className="input"
               type="email"
-              placeholder="...@sepid.com.ar"
+              placeholder="Mail"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"
@@ -97,7 +97,7 @@ export default function Login() {
             <input
               className="input"
               type="password"
-              placeholder="Contrasena"
+              placeholder="Contraseña"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
@@ -109,7 +109,7 @@ export default function Login() {
             </button>
 
             <Link to="/recuperar" className="text-sm text-blue-700 underline inline-block mt-1">
-              Olvidaste tu contrasena?
+              ¿Olvidaste tu contraseña?
             </Link>
           </form>
         </div>

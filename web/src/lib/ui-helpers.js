@@ -18,7 +18,7 @@ export const formatDateTime = (s, locale = "es-AR") =>
 export const resolveFechaIngreso = (row) => row?.fecha_ingreso ?? row?.fecha_creacion ?? null;
 export const resolveFechaCreacion = (row) => row?.fecha_creacion ?? row?.fecha_ingreso ?? null;
 
-// Parseador seguro para fechas "YYYY-MM-DD": trtalas como hora local 00:00
+// Parseador seguro para fechas "YYYY-MM-DD": tratarlas como hora local 00:00
 export const parseDateLocal = (s) => {
   if (!s) return null;
   if (typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s)) {
@@ -55,7 +55,7 @@ export const modeloSerieVarianteOf = (row, fallback = "-") => {
     return [modelo, variante].filter(Boolean).join(" ").trim();
   }
 
-  // Fallback histrico: serie/variante consolidado
+  // Fallback histórico: serie/variante consolidado
   const serie = firstNonEmpty(
     row?.modelo_serie_variante,
     row?.modelo_serie,
@@ -118,33 +118,65 @@ export const isMgInactiveBySale = (row) => {
 
 export const deviceIdentifierPartsOf = (row, fallback = "-") => {
   if (!row) {
-    return { primary: fallback, secondary: "", sold: false, numeroSerie: "", numeroInterno: "" };
+    return {
+      primary: fallback,
+      secondary: "",
+      identifiers: [],
+      sold: false,
+      clientOwned: false,
+      numeroSerie: "",
+      numeroInterno: "",
+      numeroAlternativo: "",
+    };
   }
   const str = (v) => (v == null ? "" : String(v).trim());
   const sold = isMgInactiveBySale(row);
+  const ownershipFlag =
+    row?.es_cliente_mg_owner ??
+    row?.es_propietario_mg ??
+    row?.equipo?.es_cliente_mg_owner ??
+    row?.equipo?.es_propietario_mg;
+  const clientOwned = ownershipFlag === false;
   const interno =
     str(row?.numero_interno) ||
     str(row?.equipo?.numero_interno);
   const serie = str(row?.numero_serie) || str(row?.equipo?.numero_serie);
-  const primary = sold ? (serie || interno || fallback) : (interno || serie || fallback);
+  const alternativo =
+    str(row?.mg_venta_numero_alternativo) ||
+    str(row?.equipo?.mg_venta_numero_alternativo) ||
+    str(row?.numero_alternativo) ||
+    str(row?.equipo?.numero_alternativo);
+  const historicalMg = sold;
+  const primary = (sold || clientOwned) ? (serie || interno || fallback) : (interno || serie || fallback);
+  const isMgOwner = ownershipFlag === true && !sold;
+  const ownerLabel = isMgOwner ? "propio" : "cliente";
+  const internalOwnerLabel = sold ? "MG histórico" : ownerLabel;
+  const identifiers = [
+    serie ? { label: `N/S (${ownerLabel})`, value: serie, kind: "serie" } : null,
+    interno ? { label: `N° interno (${internalOwnerLabel})`, value: interno, kind: "interno" } : null,
+    alternativo ? { label: "N° alternativo (cliente)", value: alternativo, kind: "alternativo" } : null,
+  ].filter(Boolean);
   return {
     primary,
-    secondary: sold && interno ? `MG histórico: ${interno}` : "",
+    secondary: historicalMg && interno ? `MG histórico: ${interno}` : "",
+    identifiers,
     sold,
+    clientOwned,
     numeroSerie: serie,
     numeroInterno: interno,
+    numeroAlternativo: alternativo,
   };
 };
 
 // Devuelve la etiqueta principal para tablas/listados.
-// MG activo: prioriza número interno. MG vendido: prioriza N/S.
+// MG propio activo: prioriza número interno. Cliente o MG histórico vendido: prioriza N/S.
 export const nsPreferInternoOf = (row, fallback = "-") => {
   return deviceIdentifierPartsOf(row, fallback).primary;
 };
 export const norm = (v) => {
   const s = (v ?? "").toString().toLowerCase().trim();
   try {
-    // Remover acentos/diacrticos para comparaciones robustas
+    // Remover acentos/diacríticos para comparaciones robustas
     return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   } catch {
     return s;
@@ -154,6 +186,11 @@ export const norm = (v) => {
 export const isMotivoCotizacionEquipo = (motivo) => {
   const key = norm(motivo).replace(/\s+/g, " ");
   return key === "cotizacion de equipo";
+};
+
+export const isMotivoRevisionTecnica = (motivo) => {
+  const key = norm(motivo).replace(/\s+/g, " ");
+  return key === "revision tecnica";
 };
 
 export const formatMoney = (amount, currency = "ARS", locale = "es-AR") => {

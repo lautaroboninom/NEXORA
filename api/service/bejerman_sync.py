@@ -19,7 +19,17 @@ SYNC_TYPE_STOCK_ENTRY_STR = "stock_entry_str"
 SYNC_TYPE_STOCK_STR_TO_STL = "stock_str_to_stl"
 SYNC_TYPE_STOCK_STR_TO_STC = "stock_str_to_stc"
 SYNC_TYPE_STOCK_STR_TO_STCL = "stock_str_to_stcl"  # Alias legacy previo a STC.
-SYNC_TYPE_STOCK_EXIT_RTS = "stock_exit_rts"  # Nombre legacy; emite comprobante RSS.
+SYNC_TYPE_STOCK_EXIT_RTS = "stock_exit_rts"  # Nombre legacy; la salida física la gestiona Portal.
+ARTICLE_RECONCILE_SYNC_TYPES = (
+    SYNC_TYPE_STOCK_STR_TO_STL,
+    SYNC_TYPE_STOCK_STR_TO_STC,
+    SYNC_TYPE_STOCK_STR_TO_STCL,
+)
+TARGET_STOCK_RESTORE_SYNC_TYPES = (
+    SYNC_TYPE_STOCK_STR_TO_STL,
+    SYNC_TYPE_STOCK_STR_TO_STC,
+    SYNC_TYPE_STOCK_STR_TO_STCL,
+)
 
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
@@ -28,6 +38,17 @@ JOB_STATUS_FAILED = "failed"
 JOB_STATUS_BLOCKED = "blocked"
 
 INTERNAL_CODE_RE = re.compile(r"^MG\s*\d{1,4}$", re.IGNORECASE)
+TRANSFER_PHASE_SAL_DONE = "sal_done"
+TRANSFER_PHASE_ENT_PENDING = "ent_pending"
+TRANSFER_PHASE_DONE = "done"
+TRANSFER_PHASE_TARGET_ENTRY_DONE = "target_entry_done"
+NEXORA_STOCK_ENTRY_MESSAGE = (
+    "El RIS/RDA de ingreso se emite en Bejerman antes de NEXORA; "
+    "NEXORA no emite ENT/RIS de ingreso. Verificar remito emitido o stock en STR."
+)
+PORTAL_STOCK_EXIT_MESSAGE = "Salida física Bejerman gestionada por Portal; NEXORA no emite salida final"
+LEGACY_BLOCKED_SYNC_TYPES = (SYNC_TYPE_STOCK_ENTRY_STR, SYNC_TYPE_STOCK_EXIT_RTS)
+RESTORE_TARGET_STOCK_ERROR_PREFIX = "No se pudo restaurar stock en destino"
 
 
 class BejermanSyncError(Exception):
@@ -140,6 +161,11 @@ def _iter_dicts(value: Any):
             yield from _iter_dicts(item)
 
 
+def _dict_payload(value: Any) -> dict[str, Any]:
+    parsed = _parse_json_maybe(value)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _norm(value: Any) -> str:
     return str(value or "").strip().upper()
 
@@ -162,6 +188,27 @@ def _is_internal_equipment(numero_interno: str, numero_serie: str = "") -> bool:
     )
 
 
+def _mg_owner_customer_id() -> int | None:
+    row = q(
+        "SELECT id FROM customers WHERE LOWER(razon_social) LIKE %s ORDER BY id ASC LIMIT 1",
+        ["%mg%bio%"],
+        one=True,
+    )
+    return row.get("id") if row else None
+
+
+def _is_mg_owner_customer(customer_id: Any, mg_owner_id: Any = None) -> bool:
+    try:
+        if not customer_id:
+            return False
+        owner_id = mg_owner_id if mg_owner_id is not None else _mg_owner_customer_id()
+        if not owner_id:
+            return False
+        return int(customer_id) == int(owner_id)
+    except Exception:
+        return False
+
+
 def _tokens(value: Any) -> set[str]:
     return {part for part in _text_key(value).split(" ") if len(part) >= 2}
 
@@ -178,6 +225,7 @@ def _first_value(record: dict[str, Any], candidates: tuple[str, ...]) -> Any:
 
 
 ARTICLE_CODE_FIELDS = (
+    "article_code",
     "Comprobante_Art_CodGen",
     "Art_CodGenerico",
     "Art_CodGen",
@@ -192,6 +240,7 @@ ARTICLE_CODE_FIELDS = (
 )
 
 ARTICLE_DESCRIPTION_FIELDS = (
+    "article_description",
     "Art_DescripcionGeneral",
     "Art_DescripcionReducida",
     "Art_DescricpionAdicional",
@@ -218,6 +267,140 @@ def _article_description_from_record(record: dict[str, Any]) -> str:
         if text and text not in parts:
             parts.append(text)
     return " ".join(parts).strip()
+
+
+def _bool_from_record(record: dict[str, Any], fields: tuple[str, ...]) -> bool | None:
+    value = _first_value(record, fields)
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "s", "si", "sí", "true", "t", "yes", "y"}:
+        return True
+    if text in {"0", "n", "no", "false", "f"}:
+        return False
+    return None
+
+
+def _article_type_from_record(record: dict[str, Any]) -> str:
+    return str(_first_value(record, ("Art_Tipo", "Tipo", "article_type")) or "").strip()
+
+
+def _article_deposit_from_record(record: dict[str, Any]) -> str:
+    return _deposit_from_record(record) or str(_first_value(record, ("Art_CodDeposito", "article_deposit")) or "").strip()
+
+
+def _article_flags_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "stock_by_partida": _bool_from_record(record, ("Art_StockPorPartida", "stock_by_partida")),
+        "participates_stock": _bool_from_record(record, ("Art_ParticipaCircuitoStock", "participates_stock")),
+        "participates_sales": _bool_from_record(record, ("Art_ParticipaCircuitoVentas", "participates_sales")),
+        "includes_price_list": _bool_from_record(record, ("Art_IncluirEnListaPrecios", "includes_price_list")),
+        "controls_stock": _bool_from_record(record, ("Art_ControlaStock", "controls_stock")),
+        "article_type": _article_type_from_record(record),
+        "deposit": _article_deposit_from_record(record),
+    }
+
+
+def _looks_like_spare_or_accessory(description: str) -> bool:
+    tokens = _tokens(description)
+    spare_tokens = {
+        "accesorio",
+        "bateria",
+        "bolso",
+        "cable",
+        "filtro",
+        "fuente",
+        "globo",
+        "kit",
+        "placa",
+        "repuesto",
+        "set",
+        "soporte",
+        "transformer",
+        "turbina",
+        "valvula",
+    }
+    return bool(tokens & spare_tokens)
+
+
+def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, str]:
+    return (int(candidate.get("score") or 0), str(candidate.get("article_code") or ""))
+
+
+def normalize_bejerman_article_candidate(
+    record: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    context = context or {}
+    code = _article_code_from_record(record)
+    description = _article_description_from_record(record)
+    haystack = " ".join([code, description, _json_param(record)])
+    hay_tokens = _tokens(haystack)
+    brand_tokens = _tokens(context.get("marca"))
+    model_tokens = _tokens(context.get("modelo"))
+    variant_tokens = _tokens(context.get("variante"))
+    query_tokens = _tokens(query)
+
+    brand_matches = sorted(brand_tokens & hay_tokens)
+    model_matches = sorted(model_tokens & hay_tokens)
+    variant_matches = sorted(variant_tokens & hay_tokens)
+    query_matches = sorted(query_tokens & hay_tokens)
+    flags = _article_flags_from_record(record)
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    if brand_matches:
+        reasons.append("Coincide con la marca")
+    if model_matches:
+        reasons.append("Coincide con el modelo")
+    if variant_matches:
+        reasons.append("Coincide con la variante")
+    if query_matches:
+        reasons.append("Coincide con la búsqueda")
+    if query and _norm(code) == _norm(query):
+        reasons.append("Código exacto")
+    if flags.get("stock_by_partida") is True:
+        reasons.append("Usa partida/número de serie")
+
+    if flags.get("stock_by_partida") is False:
+        warnings.append("No informa stock por partida")
+    if flags.get("participates_stock") is False:
+        warnings.append("No participa en stock")
+    if flags.get("article_type") and flags.get("article_type") != "1":
+        warnings.append("Tipo de artículo distinto de equipo")
+    if _looks_like_spare_or_accessory(description):
+        warnings.append("Parece repuesto o accesorio")
+
+    score = 0
+    score += len(model_matches) * 35
+    score += len(variant_matches) * 25
+    score += len(brand_matches) * 20
+    score += len(query_matches) * 10
+    if query and _norm(code) == _norm(query):
+        score += 50
+    if flags.get("stock_by_partida") is True:
+        score += 10
+    if flags.get("participates_stock") is True:
+        score += 5
+    score -= len(warnings) * 5
+
+    return {
+        "article_code": code,
+        "article_description": description,
+        "score": score,
+        "brand_score": len(brand_matches),
+        "model_score": len(model_matches),
+        "variant_score": len(variant_matches),
+        "query_score": len(query_matches),
+        "reasons": reasons,
+        "warnings": warnings,
+        "flags": flags,
+        "raw": record,
+    }
 
 
 def _extract_article_code(records: list[dict[str, Any]]) -> str:
@@ -281,7 +464,9 @@ def _deposit_from_record(record: dict[str, Any]) -> str:
     return str(value or "").strip()
 
 
-def _records_for_partida(response: dict[str, Any], serial: str, deposit: str | None = None) -> list[dict[str, Any]]:
+def _records_for_partida_any_quantity(
+    response: dict[str, Any], serial: str, deposit: str | None = None
+) -> list[dict[str, Any]]:
     serial_norm = _norm(serial)
     deposit_norm = _norm(deposit) if deposit else ""
     records: list[dict[str, Any]] = []
@@ -292,6 +477,13 @@ def _records_for_partida(response: dict[str, Any], serial: str, deposit: str | N
             continue
         if deposit_norm and deposito and _norm(deposito) != deposit_norm:
             continue
+        records.append(record)
+    return records
+
+
+def _records_for_partida(response: dict[str, Any], serial: str, deposit: str | None = None) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for record in _records_for_partida_any_quantity(response, serial, deposit):
         qty = _quantity_from_record(record)
         if qty is not None and qty <= 0:
             continue
@@ -308,6 +500,73 @@ def _other_positive_records(response: dict[str, Any], serial: str, expected_depo
             continue
         out.append(record)
     return out
+
+
+def _stock_record_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "deposito": _deposit_from_record(record),
+        "partida": _partida_from_record(record),
+        "article_code": _article_code_from_record(record),
+        "article_description": _article_description_from_record(record),
+        "quantity": _quantity_from_record(record),
+    }
+
+
+def _stock_records_summary(records: list[dict[str, Any]], *, limit: int = 10) -> list[dict[str, Any]]:
+    return [_stock_record_summary(record) for record in records[:limit]]
+
+
+def _job_response_payload(job_id: int) -> dict[str, Any]:
+    row = q("SELECT response_payload FROM bejerman_sync_jobs WHERE id = %s", [job_id], one=True)
+    return _dict_payload((row or {}).get("response_payload"))
+
+
+def _restore_stock_diagnostic_payload(
+    *,
+    serial: str,
+    source: str,
+    target: str,
+    source_records: list[dict[str, Any]],
+    target_records: list[dict[str, Any]],
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "serial": serial,
+        "source_deposit": source,
+        "target_deposit": target,
+        "source_record_count": len(source_records),
+        "target_record_count": len(target_records),
+        "source_records": _stock_records_summary(source_records),
+        "target_records": _stock_records_summary(target_records),
+        "article_resolution_error": error,
+    }
+
+
+def _restore_stock_error_message(
+    *,
+    serial: str,
+    source: str,
+    target: str,
+    source_records: list[dict[str, Any]],
+    target_records: list[dict[str, Any]],
+    error: str,
+) -> str:
+    records = [*source_records, *target_records]
+    deposits = sorted(
+        {
+            _deposit_from_record(record) or "-"
+            for record in records
+            if _deposit_from_record(record) or _article_code_from_record(record) or _partida_from_record(record)
+        }
+    )
+    if deposits:
+        stock_detail = f"Bejerman devolvió la partida en depósito(s) {', '.join(deposits)}."
+    else:
+        stock_detail = f"Se consultó la partida en {source} y {target}, pero Bejerman no devolvió stock con artículo."
+    return (
+        f"{RESTORE_TARGET_STOCK_ERROR_PREFIX}: falta definir el artículo Bejerman para la partida {serial}. "
+        f"{stock_detail} Resolución de artículo: {error}"
+    )
 
 
 def _column_exists(table: str, column: str) -> bool:
@@ -448,14 +707,37 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
     device_variante_sql = "COALESCE(d.variante, '')" if _column_exists("devices", "variante") else "''"
     model_variante_sql = "COALESCE(m.variante, '')" if _column_exists("models", "variante") else "''"
     model_tipo_sql = "COALESCE(m.tipo_equipo, '')" if _column_exists("models", "tipo_equipo") else "''"
+    mg_estado_sql = "COALESCE(d.mg_estado, 'activo')" if _column_exists("devices", "mg_estado") else "'activo'"
+    mg_venta_fecha_sql = "d.mg_venta_fecha" if _column_exists("devices", "mg_venta_fecha") else "NULL"
+    mg_venta_factura_sql = (
+        "COALESCE(d.mg_venta_factura_numero, '')"
+        if _column_exists("devices", "mg_venta_factura_numero")
+        else "''"
+    )
+    mg_venta_remito_sql = (
+        "COALESCE(d.mg_venta_remito_numero, '')"
+        if _column_exists("devices", "mg_venta_remito_numero")
+        else "''"
+    )
+    mg_venta_customer_sql = (
+        "d.mg_venta_customer_id" if _column_exists("devices", "mg_venta_customer_id") else "NULL"
+    )
     row = q(
         f"""
         SELECT t.id AS ingreso_id,
                d.id AS device_id,
+               d.customer_id,
                d.model_id,
                d.marca_id,
+               COALESCE(c.cod_empresa, '') AS customer_code,
+               COALESCE(c.razon_social, '') AS customer_name,
                COALESCE(d.numero_serie, '') AS numero_serie,
                COALESCE(d.numero_interno, '') AS numero_interno,
+               {mg_estado_sql} AS mg_estado,
+               {mg_venta_fecha_sql} AS mg_venta_fecha,
+               {mg_venta_factura_sql} AS mg_venta_factura_numero,
+               {mg_venta_remito_sql} AS mg_venta_remito_numero,
+               {mg_venta_customer_sql} AS mg_venta_customer_id,
                COALESCE(m.nombre, '') AS modelo,
                {model_tipo_sql} AS tipo_equipo,
                {ingreso_variante_sql} AS ingreso_variante,
@@ -464,6 +746,7 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
                COALESCE(b.nombre, '') AS marca
           FROM ingresos t
           JOIN devices d ON d.id = t.device_id
+          LEFT JOIN customers c ON c.id = d.customer_id
           LEFT JOIN models m ON m.id = d.model_id
           LEFT JOIN marcas b ON b.id = d.marca_id
          WHERE t.id = %s
@@ -486,9 +769,20 @@ def article_context_for_ingreso(ingreso_id: int) -> dict[str, Any]:
     return _ingreso_context(ingreso_id)
 
 
+def _ingreso_has_mg_sale(row: dict[str, Any]) -> bool:
+    if str(row.get("mg_estado") or "").strip().lower() == "inactivo_venta":
+        return True
+    return bool(
+        row.get("mg_venta_fecha")
+        or row.get("mg_venta_factura_numero")
+        or row.get("mg_venta_remito_numero")
+        or row.get("mg_venta_customer_id")
+    )
+
+
 def ingreso_is_internal_equipment(ingreso_id: int) -> bool:
     row = _ingreso_context(ingreso_id)
-    return _is_internal_equipment(row.get("numero_interno") or "", row.get("numero_serie") or "")
+    return _is_mg_owner_customer(row.get("customer_id")) and not _ingreso_has_mg_sale(row)
 
 
 def _last_liberado_event_id(ingreso_id: int) -> int | None:
@@ -570,13 +864,27 @@ def _enqueue_stock_job(
 
 def enqueue_stock_entry_for_ingreso(ingreso_id: int, ingreso_event_id: int | None = None) -> dict[str, Any]:
     target_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
-    return _enqueue_stock_job(
+    job = _enqueue_stock_job(
         ingreso_id=ingreso_id,
         sync_type=SYNC_TYPE_STOCK_ENTRY_STR,
         source_deposit="NEXORA",
         target_deposit=target_deposit,
         trigger="ingreso_creado",
         ingreso_event_id=ingreso_event_id,
+    )
+    if job.get("status") == JOB_STATUS_SUCCEEDED:
+        return job
+    return q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = %s,
+               last_error = %s,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+        RETURNING id, status, attempts
+        """,
+        [JOB_STATUS_BLOCKED, NEXORA_STOCK_ENTRY_MESSAGE, job["id"]],
+        one=True,
     )
 
 
@@ -624,13 +932,25 @@ def enqueue_stock_exit_for_ingreso(
             source_deposit = str(_setting("BEJERMAN_CLIENT_TARGET_DEPOSIT", "STC") or "STC").strip() or "STC"
     if ingreso_event_id is None:
         ingreso_event_id = _last_liberado_event_id(ingreso_id)
-    return _enqueue_stock_job(
+    job = _enqueue_stock_job(
         ingreso_id=ingreso_id,
         sync_type=SYNC_TYPE_STOCK_EXIT_RTS,
         source_deposit=source_deposit,
         target_deposit="SALIDA",
         trigger="remito_salida_rss",
         ingreso_event_id=ingreso_event_id,
+    )
+    return q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = %s,
+               last_error = %s,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+        RETURNING id, status, attempts
+        """,
+        [JOB_STATUS_BLOCKED, PORTAL_STOCK_EXIT_MESSAGE, job["id"]],
+        one=True,
     )
 
 
@@ -734,6 +1054,18 @@ def _mapping_for_context(context: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+def _record_payload_for_article_match(job: dict[str, Any], record: dict[str, Any], source: str) -> dict[str, Any]:
+    return {
+        "source": source,
+        "sync_job_id": job.get("id"),
+        "ingreso_id": job.get("ingreso_id"),
+        "numero_serie": job.get("numero_serie") or "",
+        "deposito": _deposit_from_record(record),
+        "partida": _partida_from_record(record),
+        "record": record,
+    }
+
+
 def upsert_article_mapping(
     *,
     model_id: int,
@@ -785,7 +1117,69 @@ def upsert_article_mapping(
     return row or {}
 
 
-def reopen_jobs_for_article_mapping(model_id: int, variante: str, article_code: str) -> int:
+def article_mapping_summary_for_context(model_id: int | None, variante: str = "") -> dict[str, Any] | None:
+    if not model_id:
+        return None
+    mapping = _mapping_for_context({"model_id": model_id, "variante": variante})
+    if not mapping:
+        return None
+    return {
+        "id": mapping.get("id"),
+        "model_id": mapping.get("model_id"),
+        "variante": mapping.get("variante") or "",
+        "variante_norm": mapping.get("variante_norm") or "",
+        "article_code": mapping.get("article_code") or "",
+        "article_description": mapping.get("article_description") or "",
+        "match_source": mapping.get("match_source") or "",
+        "confirmed_at": mapping.get("confirmed_at"),
+        "updated_at": mapping.get("updated_at"),
+    }
+
+
+def remember_article_mapping_from_stock_record(
+    job: dict[str, Any],
+    record: dict[str, Any] | None,
+    *,
+    source: str,
+) -> str:
+    if not record:
+        return ""
+    code = _article_code_from_record(record)
+    if not code:
+        return ""
+    try:
+        context = _ingreso_context(int(job["ingreso_id"]))
+        mapping = _mapping_for_context(context)
+        existing_code = (mapping or {}).get("article_code") or ""
+        if mapping and (mapping.get("match_source") or "") == "manual" and existing_code.strip() != code:
+            return code
+        upsert_article_mapping(
+            model_id=int(context["model_id"]),
+            variante=context.get("variante") or "",
+            article_code=code,
+            article_description=_article_description_from_record(record),
+            match_source="auto",
+            source_payload=_record_payload_for_article_match(job, record, source),
+        )
+    except Exception:
+        logger.exception("No se pudo asentar artículo Bejerman por serie para job %s", job.get("id"))
+    return code
+
+
+def remember_article_mapping_from_stock_records(
+    job: dict[str, Any],
+    records: list[dict[str, Any]],
+    *,
+    source: str,
+) -> str:
+    for record in records:
+        code = remember_article_mapping_from_stock_record(job, record, source=source)
+        if code:
+            return code
+    return ""
+
+
+def _blocked_article_job_ids_for_context(model_id: int, variante: str) -> list[int]:
     variant_norm = normalize_article_variant(variante)
     rows = q(
         """
@@ -797,9 +1191,10 @@ def reopen_jobs_for_article_mapping(model_id: int, variante: str, article_code: 
            AND j.status = 'blocked'
            AND COALESCE(j.article_code, '') = ''
            AND (
-             COALESCE(j.last_error, '') ILIKE '%%artículo%%'
+             COALESCE(j.last_error, '') ILIKE '%%art%%culo%%'
              OR COALESCE(j.last_error, '') ILIKE '%%articulo%%'
              OR j.response_payload ? 'candidates'
+             OR j.response_payload ? 'stock_restore_diagnostic'
            )
         """,
         [model_id],
@@ -812,6 +1207,15 @@ def reopen_jobs_for_article_mapping(model_id: int, variante: str, article_code: 
             continue
         if normalize_article_variant(context.get("variante")) == variant_norm:
             ids.append(int(row["id"]))
+    return ids
+
+
+def count_blocked_article_jobs_for_context(model_id: int, variante: str) -> int:
+    return len(_blocked_article_job_ids_for_context(model_id, variante))
+
+
+def reopen_jobs_for_article_mapping(model_id: int, variante: str, article_code: str) -> int:
+    ids = _blocked_article_job_ids_for_context(model_id, variante)
     if not ids:
         return 0
     q(
@@ -829,32 +1233,208 @@ def reopen_jobs_for_article_mapping(model_id: int, variante: str, article_code: 
     return len(ids)
 
 
+def apply_article_mapping_to_job(job_id: int | None, article_code: str) -> bool:
+    if not job_id:
+        return False
+    code = (article_code or "").strip()
+    if not code:
+        raise BejermanBlockedError("Código de artículo Bejerman requerido")
+    row = q(
+        "SELECT id, status, sync_type FROM bejerman_sync_jobs WHERE id=%s",
+        [job_id],
+        one=True,
+    )
+    if not row:
+        raise BejermanBlockedError("Operación Bejerman no encontrada")
+    sync_type = (row.get("sync_type") or "").strip()
+    if sync_type in LEGACY_BLOCKED_SYNC_TYPES:
+        detail = NEXORA_STOCK_ENTRY_MESSAGE if sync_type == SYNC_TYPE_STOCK_ENTRY_STR else PORTAL_STOCK_EXIT_MESSAGE
+        raise BejermanBlockedError(detail)
+    status = (row.get("status") or "").strip()
+    if status not in (JOB_STATUS_PENDING, JOB_STATUS_FAILED, JOB_STATUS_BLOCKED):
+        return False
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = CASE
+                 WHEN status IN ('failed', 'blocked') THEN 'pending'
+                 ELSE status
+               END,
+               attempts = CASE
+                 WHEN status IN ('failed', 'blocked') THEN 0
+                 ELSE attempts
+               END,
+               article_code = %s,
+               last_error = CASE
+                 WHEN status IN ('failed', 'blocked') THEN NULL
+                 ELSE last_error
+               END,
+               next_attempt_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+        """,
+        [code, job_id],
+    )
+    return True
+
+
 def _article_candidates(context: dict[str, Any], response: dict[str, Any]) -> list[dict[str, Any]]:
     model_tokens = _tokens(context.get("modelo"))
     variant_tokens = _tokens(context.get("variante"))
-    brand_tokens = _tokens(context.get("marca"))
     required = model_tokens | variant_tokens
     candidates: list[dict[str, Any]] = []
     for record in _iter_dicts(response.get("DatosJSON")):
-        code = _article_code_from_record(record)
-        description = _article_description_from_record(record)
-        haystack = " ".join([code, description, _json_param(record)])
+        candidate = normalize_bejerman_article_candidate(record, context=context)
+        code = candidate.get("article_code") or ""
+        haystack = " ".join([code, candidate.get("article_description") or "", _json_param(record)])
         hay_tokens = _tokens(haystack)
         if not code:
             continue
         if required and not required.issubset(hay_tokens):
             continue
-        brand_score = len(brand_tokens & hay_tokens)
-        candidates.append(
-            {
-                "article_code": code,
-                "article_description": description,
-                "brand_score": brand_score,
-                "raw": record,
-            }
-        )
-    candidates.sort(key=lambda item: (item["brand_score"], item["article_code"]), reverse=True)
+        candidates.append(candidate)
+    candidates.sort(key=_candidate_sort_key, reverse=True)
     return candidates[:20]
+
+
+def _article_search_matches(candidate: dict[str, Any], query: str) -> bool:
+    query = (query or "").strip()
+    if not query:
+        return True
+    code = str(candidate.get("article_code") or "")
+    description = str(candidate.get("article_description") or "")
+    hay_tokens = _tokens(" ".join([code, description, _json_param(candidate.get("raw") or {})]))
+    query_tokens = _tokens(query)
+    if _norm(query) in _norm(code):
+        return True
+    if not query_tokens:
+        return True
+    return query_tokens.issubset(hay_tokens)
+
+
+def _candidate_has_required_context(candidate: dict[str, Any], context: dict[str, Any]) -> bool:
+    required = _tokens(context.get("modelo")) | _tokens(context.get("variante"))
+    if not required:
+        return True
+    hay_tokens = _tokens(
+        " ".join(
+            [
+                candidate.get("article_code") or "",
+                candidate.get("article_description") or "",
+                _json_param(candidate.get("raw") or {}),
+            ]
+        )
+    )
+    return required.issubset(hay_tokens)
+
+
+def search_bejerman_articles_for_job(
+    *,
+    job_id: int,
+    query: str = "",
+    client: BejermanSDKClient | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    row = q("SELECT ingreso_id FROM bejerman_sync_jobs WHERE id=%s", [job_id], one=True)
+    if not row:
+        raise BejermanBlockedError("Operación Bejerman no encontrada")
+    context = _ingreso_context(int(row["ingreso_id"]))
+    client = client or BejermanSDKClient()
+    query = (query or "").strip()
+    response = client.obtener_articulos(query)
+    candidates: list[dict[str, Any]] = []
+    for record in _iter_dicts(response.get("DatosJSON")):
+        candidate = normalize_bejerman_article_candidate(record, context=context, query=query)
+        if not candidate.get("article_code"):
+            continue
+        if not _article_search_matches(candidate, query):
+            continue
+        if not (query or "").strip() and not _candidate_has_required_context(candidate, context):
+            continue
+        candidates.append(candidate)
+    if query and not candidates:
+        response = client.obtener_articulos()
+        for record in _iter_dicts(response.get("DatosJSON")):
+            candidate = normalize_bejerman_article_candidate(record, context=context, query=query)
+            if not candidate.get("article_code"):
+                continue
+            if not _article_search_matches(candidate, query):
+                continue
+            candidates.append(candidate)
+    candidates.sort(key=_candidate_sort_key, reverse=True)
+    return {
+        "context": {
+            "job_id": job_id,
+            "ingreso_id": context.get("ingreso_id"),
+            "model_id": context.get("model_id"),
+            "marca": context.get("marca") or "",
+            "modelo": context.get("modelo") or "",
+            "variante": context.get("variante") or "",
+            "scope": "modelo_variante",
+        },
+        "related_blocked_jobs": count_blocked_article_jobs_for_context(
+            int(context["model_id"]), context.get("variante") or ""
+        ),
+        "items": candidates[: max(1, int(limit or 1))],
+    }
+
+
+def validate_bejerman_article_choice(
+    article_code: str,
+    *,
+    client: BejermanSDKClient | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    code = (article_code or "").strip()
+    if not code:
+        raise BejermanBlockedError("Código de artículo Bejerman requerido")
+    client = client or BejermanSDKClient()
+    response = client.obtener_articulos(code)
+    candidates = [
+        normalize_bejerman_article_candidate(record, context=context or {}, query=code)
+        for record in _iter_dicts(response.get("DatosJSON"))
+    ]
+    exact = [candidate for candidate in candidates if _norm(candidate.get("article_code")) == _norm(code)]
+    if not exact:
+        raise BejermanBlockedError(f"No se encontró el artículo Bejerman {code}")
+    exact.sort(key=_candidate_sort_key, reverse=True)
+    return exact[0]
+
+
+def article_resolution_for_job_row(row: dict[str, Any]) -> dict[str, Any]:
+    response_payload = _dict_payload(row.get("response_payload"))
+    context = {
+        "marca": row.get("marca") or "",
+        "modelo": row.get("modelo") or "",
+        "variante": row.get("variante") or "",
+    }
+    raw_candidates = response_payload.get("candidates") if isinstance(response_payload, dict) else None
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, list):
+        for item in raw_candidates:
+            if not isinstance(item, dict):
+                continue
+            record = item.get("raw") if isinstance(item.get("raw"), dict) else item
+            candidates.append(normalize_bejerman_article_candidate(record, context=context))
+    candidates.sort(key=_candidate_sort_key, reverse=True)
+    related = 0
+    mapping = None
+    model_id = row.get("model_id")
+    if model_id:
+        try:
+            related = count_blocked_article_jobs_for_context(int(model_id), row.get("variante") or "")
+            mapping = article_mapping_summary_for_context(int(model_id), row.get("variante") or "")
+        except Exception:
+            related = 0
+            mapping = None
+    return {
+        "scope": "modelo_variante",
+        "scope_label": "marca + modelo + variante",
+        "context": context,
+        "related_blocked_jobs": related,
+        "mapping": mapping,
+        "candidates": candidates,
+    }
 
 
 def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> str:
@@ -899,14 +1479,13 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
     raise BejermanBlockedError("Hay más de un artículo Bejerman posible para este modelo/variante")
 
 
-def build_stock_transfer_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
+def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobante: str, deposit: str) -> dict[str, Any]:
     document_date = _stock_document_date()
     reference = f"NEXORA-OS-{job['ingreso_id']}"
     serial = (job.get("numero_serie") or "").strip()
-    tipo_operacion = str(_setting("BEJERMAN_STOCK_TRANSFER_TIPO_OPERACION", "") or "").strip()
-    common = {
+    return {
         "Comprobante_FechaEmision": document_date,
-        "Comprobante_Tipo": str(_setting("BEJERMAN_STOCK_TRANSFER_COMPROBANTE", "TRA") or "").strip(),
+        "Comprobante_Tipo": comprobante,
         "Comprobante_Letra": "",
         "Comprobante_PtoVenta": "",
         "Comprobante_Numero": f"{int(job['ingreso_id']) % 100000000:08d}",
@@ -914,198 +1493,200 @@ def build_stock_transfer_payload(job: dict[str, Any], article_code: str) -> list
         "Comprobante_ArtPartida": serial,
         "Comprobante_DescArticulo": f"NEXORA {serial}"[:50],
         "Comprobante_ArtCodTipo": "1",
+        "Comprobante_ArtDeposito": deposit,
+        "Comprobante_CantidadUM1": 1,
+        "Comprobante_CantidadUM2": 1,
         "Comprobante_PrecioTotalMonLocal": 0,
         "Partida_Observaciones": reference[:20],
     }
-    if tipo_operacion:
-        common["Comprobante_TipoOperacion"] = tipo_operacion
-    source_quantity = -1
-    target_quantity = 1
-    source = {
-        **common,
-        "Comprobante_ArtDeposito": job.get("source_deposit") or "STR",
-        "Comprobante_CantidadUM1": source_quantity,
-        "Comprobante_CantidadUM2": source_quantity,
-        "Comprobante_IdOrigen": f"{reference}-{job.get('source_deposit') or 'STR'}",
-    }
-    target = {
-        **common,
-        "Comprobante_ArtDeposito": job.get("target_deposit") or "STL",
-        "Comprobante_CantidadUM1": target_quantity,
-        "Comprobante_CantidadUM2": target_quantity,
-        "Comprobante_IdOrigen": f"{reference}-{job.get('target_deposit') or 'STL'}",
-    }
-    return [source, target]
 
 
-def build_stock_entry_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
-    document_date = _stock_document_date()
-    reference = f"NEXORA-OS-{job['ingreso_id']}"
-    serial = (job.get("numero_serie") or "").strip()
-    comprobante = str(_setting("BEJERMAN_STOCK_ENTRY_COMPROBANTE", "") or "").strip()
+def build_stock_transfer_out_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
+    source_deposit = job.get("source_deposit") or "STR"
+    comprobante = str(_setting("BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE", "SAL") or "").strip()
+    item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
+    item["Comprobante_CantidadUM1"] = -1
+    item["Comprobante_CantidadUM2"] = -1
+    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-SAL-{source_deposit}"
+    return [item]
+
+
+def build_stock_transfer_in_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
+    target_deposit = job.get("target_deposit") or "STL"
+    comprobante = str(_setting("BEJERMAN_STOCK_TRANSFER_IN_COMPROBANTE", "ENT") or "").strip()
+    item = _base_stock_transfer_item(job, article_code, comprobante, target_deposit)
+    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-ENT-{target_deposit}"
+    return [item]
+
+
+def build_stock_transfer_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
     return [
-        {
-            "Comprobante_FechaEmision": document_date,
-            "Comprobante_Tipo": comprobante,
-            "Comprobante_Letra": "",
-            "Comprobante_PtoVenta": "",
-            "Comprobante_Numero": f"{int(job['ingreso_id']) % 100000000:08d}",
-            "Comprobante_Art_CodGen": article_code,
-            "Comprobante_ArtPartida": serial,
-            "Comprobante_DescArticulo": f"NEXORA {serial}"[:50],
-            "Comprobante_ArtCodTipo": "1",
-            "Comprobante_ArtDeposito": job.get("target_deposit") or "STR",
-            "Comprobante_CantidadUM1": 1,
-            "Comprobante_CantidadUM2": 1,
-            "Comprobante_PrecioTotalMonLocal": 0,
-            "Comprobante_IdOrigen": f"{reference}-RIS-{job.get('target_deposit') or 'STR'}",
-            "Partida_Observaciones": reference[:20],
-        }
-    ]
-
-
-def build_stock_exit_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
-    document_date = _stock_document_date()
-    reference = f"NEXORA-OS-{job['ingreso_id']}"
-    serial = (job.get("numero_serie") or "").strip()
-    source_deposit = job.get("source_deposit") or "STC"
-    return [
-        {
-            "Comprobante_FechaEmision": document_date,
-            "Comprobante_Tipo": str(_setting("BEJERMAN_STOCK_EXIT_COMPROBANTE", "RSS") or "").strip(),
-            "Comprobante_Letra": "",
-            "Comprobante_PtoVenta": "",
-            "Comprobante_Numero": f"{int(job['ingreso_id']) % 100000000:08d}",
-            "Comprobante_Art_CodGen": article_code,
-            "Comprobante_ArtPartida": serial,
-            "Comprobante_DescArticulo": f"NEXORA {serial}"[:50],
-            "Comprobante_ArtCodTipo": "1",
-            "Comprobante_ArtDeposito": source_deposit,
-            "Comprobante_CantidadUM1": -1,
-            "Comprobante_CantidadUM2": -1,
-            "Comprobante_PrecioTotalMonLocal": 0,
-            "Comprobante_IdOrigen": f"{reference}-RSS-{source_deposit}",
-            "Partida_Observaciones": reference[:20],
-        }
+        *build_stock_transfer_out_payload(job, article_code),
+        *build_stock_transfer_in_payload(job, article_code),
     ]
 
 
 def _process_stock_entry(job: dict[str, Any], client: BejermanSDKClient) -> str:
-    validate_bejerman_config(comprobante="BEJERMAN_STOCK_ENTRY_COMPROBANTE")
+    raise BejermanBlockedError(NEXORA_STOCK_ENTRY_MESSAGE)
+
+
+def _process_stock_exit(job: dict[str, Any], client: BejermanSDKClient) -> str:
+    raise BejermanBlockedError(PORTAL_STOCK_EXIT_MESSAGE)
+
+
+def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> str:
+    validate_bejerman_config()
+    sync_type = (job.get("sync_type") or "").strip()
+    request_payload = _dict_payload(job.get("request_payload"))
+    response_payload = _dict_payload(job.get("response_payload"))
+    if sync_type == SYNC_TYPE_STOCK_STR_TO_STL and not ingreso_is_internal_equipment(int(job["ingreso_id"])):
+        _finish_job(
+            job["id"],
+            JOB_STATUS_SUCCEEDED,
+            request_payload={
+                **request_payload,
+                "skipped_not_applicable": True,
+                "reason": "Equipo vendido o de cliente; no corresponde transferir a STL.",
+                "expected_target_deposit": str(_setting("BEJERMAN_CLIENT_TARGET_DEPOSIT", "STC") or "STC").strip()
+                or "STC",
+            },
+            response_payload=response_payload,
+        )
+        return JOB_STATUS_SUCCEEDED
+
     serial = (job.get("numero_serie") or "").strip()
     if not serial:
         raise BejermanBlockedError("Número de serie requerido para sincronizar Bejerman")
 
-    target = job.get("target_deposit") or str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR")
-    stock_response = client.stock_by_deposit_partida(target, serial)
-    target_records = _records_for_partida(stock_response, serial, target)
+    source = job.get("source_deposit") or "STR"
+    target = job.get("target_deposit") or "STL"
+    sal_done = bool(request_payload.get("sal_done")) or request_payload.get("transfer_phase") in {
+        TRANSFER_PHASE_SAL_DONE,
+        TRANSFER_PHASE_ENT_PENDING,
+        TRANSFER_PHASE_DONE,
+        TRANSFER_PHASE_TARGET_ENTRY_DONE,
+    }
+
+    target_response = client.stock_by_deposit_partida(target, serial)
+    target_all_records = _records_for_partida_any_quantity(target_response, serial)
+    stock_article_code = remember_article_mapping_from_stock_records(
+        job, target_all_records, source="stock_transfer_target_partida"
+    )
+    target_records = _records_for_partida(target_response, serial, target)
+
     if target_records:
-        article_code = _extract_article_code(target_records) or (job.get("article_code") or "")
+        article_code = _extract_article_code(target_records) or stock_article_code or (job.get("article_code") or "")
         _finish_job(
             job["id"],
             JOB_STATUS_SUCCEEDED,
-            request_payload={"idempotent": True, "numero_serie": serial, "target_deposit": target},
-            response_payload={"target": stock_response},
+            request_payload={
+                **request_payload,
+                "idempotent": True,
+                "numero_serie": serial,
+                "target_deposit": target,
+                "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+            },
+            response_payload={**response_payload, "target": target_response},
             article_code=article_code,
         )
         return JOB_STATUS_SUCCEEDED
 
-    other_records = _other_positive_records(stock_response, serial, target)
+    source_response = client.stock_by_deposit_partida(source, serial)
+    source_all_records = _records_for_partida_any_quantity(source_response, serial)
+    source_records = _records_for_partida(source_response, serial, source)
+    stock_article_code = (
+        stock_article_code
+        or remember_article_mapping_from_stock_records(
+            job,
+            [*source_all_records, *target_all_records],
+            source="stock_transfer_partida",
+        )
+    )
+
+    other_records = [
+        record
+        for record in _other_positive_records(target_response, serial, target)
+        if _norm(_deposit_from_record(record) or "") != _norm(source)
+    ]
     if other_records:
         deposits = sorted({_deposit_from_record(record) or "-" for record in other_records})
-        _finish_job(job["id"], JOB_STATUS_BLOCKED, response_payload={"stock": stock_response})
+        _finish_job(
+            job["id"],
+            JOB_STATUS_BLOCKED,
+            response_payload={**response_payload, "source": source_response, "target": target_response},
+            article_code=stock_article_code,
+        )
         raise BejermanBlockedError(
             f"Partida {serial} encontrada en otro depósito ({', '.join(deposits)}); requiere conciliación"
         )
 
-    article_code = _resolve_article_for_job(job, client)
-    comprobantes = build_stock_entry_payload(job, article_code)
-    _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload={"comprobantes": comprobantes}, article_code=article_code)
-    response = client.ingresar_lista_comprobantes_json(comprobantes)
-    _finish_job(
-        job["id"],
-        JOB_STATUS_SUCCEEDED,
-        request_payload={"comprobantes": comprobantes},
-        response_payload=response,
-        article_code=article_code,
+    article_code = (
+        (job.get("article_code") or "").strip()
+        or str(request_payload.get("article_code") or "").strip()
+        or _extract_article_code(source_records)
+        or _extract_article_code(source_all_records)
+        or stock_article_code
     )
-    return JOB_STATUS_SUCCEEDED
-
-
-def _process_stock_exit(job: dict[str, Any], client: BejermanSDKClient) -> str:
-    validate_bejerman_config(comprobante="BEJERMAN_STOCK_EXIT_COMPROBANTE")
-    serial = (job.get("numero_serie") or "").strip()
-    if not serial:
-        raise BejermanBlockedError("Número de serie requerido para sincronizar Bejerman")
-
-    source = job.get("source_deposit") or "STC"
-    stock_response = client.stock_by_deposit_partida(source, serial)
-    source_records = _records_for_partida(stock_response, serial, source)
-    if not source_records:
-        other_records = _other_positive_records(stock_response, serial, source)
-        if other_records:
-            deposits = sorted({_deposit_from_record(record) or "-" for record in other_records})
-            _finish_job(job["id"], JOB_STATUS_BLOCKED, response_payload={"stock": stock_response})
-            raise BejermanBlockedError(
-                f"Partida {serial} encontrada en otro depósito ({', '.join(deposits)}); falta transferencia a {source}"
-            )
-        raise BejermanBlockedError(f"Partida {serial} no encontrada en depósito {source} para emitir RSS")
-
-    article_code = (job.get("article_code") or "").strip() or _extract_article_code(source_records)
     if not article_code:
         article_code = _resolve_article_for_job(job, client)
 
-    comprobantes = build_stock_exit_payload(job, article_code)
-    _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload={"comprobantes": comprobantes}, article_code=article_code)
-    response = client.ingresar_lista_comprobantes_json(comprobantes)
-    _finish_job(
-        job["id"],
-        JOB_STATUS_SUCCEEDED,
-        request_payload={"comprobantes": comprobantes},
-        response_payload=response,
-        article_code=article_code,
-    )
-    return JOB_STATUS_SUCCEEDED
-
-
-def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> str:
-    validate_bejerman_config(comprobante="BEJERMAN_STOCK_TRANSFER_COMPROBANTE")
-    serial = (job.get("numero_serie") or "").strip()
-    if not serial:
-        raise BejermanBlockedError("Número de serie requerido para sincronizar Bejerman")
-
-    source_response = client.stock_by_deposit_partida(job.get("source_deposit") or "STR", serial)
-    target_response = client.stock_by_deposit_partida(job.get("target_deposit") or "STL", serial)
-    source_records = _records_for_partida(source_response, serial, job.get("source_deposit") or "STR")
-    target_records = _records_for_partida(target_response, serial, job.get("target_deposit") or "STL")
-
-    if target_records and not source_records:
-        article_code = _extract_article_code(target_records) or (job.get("article_code") or "")
+    next_request_payload = {
+        **request_payload,
+        "article_code": article_code,
+    }
+    next_response_payload = {
+        **response_payload,
+        "source": source_response,
+        "target": target_response,
+    }
+    if source_records and not sal_done:
+        validate_bejerman_config(comprobante="BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE")
+        sal_payload = build_stock_transfer_out_payload(job, article_code)
+        sal_request_payload = {
+            **next_request_payload,
+            "transfer_phase": "sal_pending",
+            "sal_comprobantes": sal_payload,
+        }
+        _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
+        sal_response = client.ingresar_lista_comprobantes_json(sal_payload)
+        next_request_payload = {
+            **sal_request_payload,
+            "sal_done": True,
+            "transfer_phase": TRANSFER_PHASE_SAL_DONE,
+        }
+        next_response_payload = {**next_response_payload, "sal": sal_response}
         _finish_job(
             job["id"],
-            JOB_STATUS_SUCCEEDED,
-            request_payload={"idempotent": True, "numero_serie": serial},
-            response_payload={"target": target_response},
+            JOB_STATUS_RUNNING,
+            request_payload=next_request_payload,
+            response_payload=next_response_payload,
             article_code=article_code,
         )
-        return JOB_STATUS_SUCCEEDED
-    if target_records and source_records:
-        raise BejermanBlockedError(f"Partida {serial} encontrada en ambos depósitos")
-    if not source_records:
-        raise BejermanBlockedError(f"Partida {serial} no encontrada en depósito {job.get('source_deposit')}")
 
-    article_code = (job.get("article_code") or "").strip() or _extract_article_code(source_records)
-    if not article_code:
-        article_code = _resolve_article_for_job(job, client)
-
-    comprobantes = build_stock_transfer_payload(job, article_code)
-    _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload={"comprobantes": comprobantes}, article_code=article_code)
-    response = client.ingresar_lista_comprobantes_json(comprobantes)
+    ent_payload = build_stock_transfer_in_payload(job, article_code)
+    ent_request_payload = {
+        **next_request_payload,
+        "transfer_phase": TRANSFER_PHASE_ENT_PENDING,
+        "ent_comprobantes": ent_payload,
+        "target_stock_entry_deposit": target,
+    }
+    _finish_job(
+        job["id"],
+        JOB_STATUS_RUNNING,
+        request_payload=ent_request_payload,
+        response_payload=next_response_payload,
+        article_code=article_code,
+    )
+    ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
     _finish_job(
         job["id"],
         JOB_STATUS_SUCCEEDED,
-        request_payload={"comprobantes": comprobantes},
-        response_payload=response,
+        request_payload={
+            **ent_request_payload,
+            "target_stock_entry_done": True,
+            "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+        },
+        response_payload={**next_response_payload, "target_stock_entry": ent_response},
         article_code=article_code,
     )
     return JOB_STATUS_SUCCEEDED
@@ -1152,6 +1733,330 @@ def process_bejerman_jobs(limit: int = 10, job_id: int | None = None, client: Be
         stats[status] = stats.get(status, 0) + 1
         if job_id is not None:
             break
+    return stats
+
+
+def _job_deposits_for_article_reconcile(job: dict[str, Any]) -> list[str]:
+    deposits: list[str] = []
+    for key in ("source_deposit", "target_deposit"):
+        deposit = str(job.get(key) or "").strip()
+        if not deposit or _norm(deposit) in {"NEXORA", "SALIDA"}:
+            continue
+        if deposit not in deposits:
+            deposits.append(deposit)
+    return deposits
+
+
+def _update_job_article_code_if_empty(job_id: int, article_code: str) -> None:
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET article_code = COALESCE(NULLIF(article_code, ''), %s),
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+        """,
+        [article_code, job_id],
+    )
+
+
+def reconcile_article_mapping_for_job(job: dict[str, Any], client: BejermanSDKClient) -> dict[str, Any]:
+    serial = (job.get("numero_serie") or "").strip()
+    if not serial:
+        return {"status": "skipped", "reason": "sin_serie", "job_id": job.get("id")}
+
+    records: list[dict[str, Any]] = []
+    checked_deposits = _job_deposits_for_article_reconcile(job)
+    for deposit in checked_deposits:
+        response = client.stock_by_deposit_partida(deposit, serial)
+        records.extend(_records_for_partida_any_quantity(response, serial))
+
+    article_code = remember_article_mapping_from_stock_records(
+        job,
+        records,
+        source="stock_partida_reconcile",
+    )
+    if article_code:
+        _update_job_article_code_if_empty(int(job["id"]), article_code)
+        return {
+            "status": "mapped_from_stock",
+            "job_id": job.get("id"),
+            "article_code": article_code,
+            "deposits": checked_deposits,
+        }
+
+    try:
+        context = _ingreso_context(int(job["ingreso_id"]))
+        mapping = _mapping_for_context(context)
+    except Exception:
+        mapping = None
+    existing_code = (mapping or {}).get("article_code") or ""
+    if existing_code:
+        _update_job_article_code_if_empty(int(job["id"]), existing_code)
+        return {
+            "status": "mapped_from_local",
+            "job_id": job.get("id"),
+            "article_code": existing_code,
+            "deposits": checked_deposits,
+        }
+
+    return {"status": "not_found", "job_id": job.get("id"), "deposits": checked_deposits}
+
+
+def reconcile_article_mappings_from_stock(
+    *,
+    limit: int = 250,
+    job_id: int | None = None,
+    client: BejermanSDKClient | None = None,
+) -> dict[str, Any]:
+    validate_bejerman_config()
+    client = client or BejermanSDKClient()
+    params: list[Any] = list(ARTICLE_RECONCILE_SYNC_TYPES)
+    job_filter = ""
+    if job_id is not None:
+        job_filter = "AND id = %s"
+        params.append(job_id)
+    params.append(max(1, int(limit or 1)))
+    jobs = q(
+        f"""
+        SELECT *
+          FROM bejerman_sync_jobs
+         WHERE sync_type IN ({",".join(["%s"] * len(ARTICLE_RECONCILE_SYNC_TYPES))})
+           AND NULLIF(TRIM(numero_serie), '') IS NOT NULL
+           AND (
+             COALESCE(article_code, '') = ''
+             OR status IN ('blocked','failed','pending')
+           )
+           {job_filter}
+         ORDER BY updated_at DESC, id DESC
+         LIMIT %s
+        """,
+        params,
+    ) or []
+
+    stats: dict[str, Any] = {
+        "checked": 0,
+        "mapped_from_stock": 0,
+        "mapped_from_local": 0,
+        "not_found": 0,
+        "skipped": 0,
+        "errors": 0,
+        "items": [],
+    }
+    for job in jobs:
+        stats["checked"] += 1
+        try:
+            result = reconcile_article_mapping_for_job(job, client)
+        except Exception as exc:
+            logger.exception("No se pudo conciliar artículo Bejerman para job %s", job.get("id"))
+            result = {"status": "error", "job_id": job.get("id"), "error": str(exc)}
+        status = result.get("status") or "error"
+        if status in stats:
+            stats[status] += 1
+        else:
+            stats["errors"] += 1
+        stats["items"].append(result)
+    return stats
+
+
+def restore_target_stock_for_job(job: dict[str, Any], client: BejermanSDKClient) -> dict[str, Any]:
+    serial = (job.get("numero_serie") or "").strip()
+    if not serial:
+        return {"status": "skipped", "reason": "sin_serie", "job_id": job.get("id")}
+
+    target = str(job.get("target_deposit") or "").strip()
+    if not target or _norm(target) in {"NEXORA", "SALIDA"}:
+        return {"status": "skipped", "reason": "sin_deposito_destino", "job_id": job.get("id")}
+
+    request_payload = _dict_payload(job.get("request_payload"))
+    response_payload = _dict_payload(job.get("response_payload"))
+    target_response = client.stock_by_deposit_partida(target, serial)
+    target_records = _records_for_partida(target_response, serial, target)
+    target_all_records = _records_for_partida_any_quantity(target_response, serial)
+    stock_article_code = remember_article_mapping_from_stock_records(
+        job, target_all_records, source="target_stock_restore_target_partida"
+    )
+
+    if target_records:
+        article_code = _extract_article_code(target_records) or stock_article_code or (job.get("article_code") or "")
+        _finish_job(
+            job["id"],
+            JOB_STATUS_SUCCEEDED,
+            request_payload={
+                **request_payload,
+                "restore_target_stock": True,
+                "restore_idempotent": True,
+                "numero_serie": serial,
+                "target_deposit": target,
+                "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+            },
+            response_payload={**response_payload, "target": target_response},
+            article_code=article_code,
+        )
+        return {
+            "status": "already_present",
+            "job_id": job.get("id"),
+            "serial": serial,
+            "target_deposit": target,
+            "article_code": article_code,
+        }
+
+    source = str(job.get("source_deposit") or "STR").strip() or "STR"
+    source_response = client.stock_by_deposit_partida(source, serial)
+    source_all_records = _records_for_partida_any_quantity(source_response, serial)
+    stock_article_code = stock_article_code or remember_article_mapping_from_stock_records(
+        job,
+        [*source_all_records, *target_all_records],
+        source="target_stock_restore_partida",
+    )
+    article_code = (
+        (job.get("article_code") or "").strip()
+        or str(request_payload.get("article_code") or "").strip()
+        or _extract_article_code(source_all_records)
+        or stock_article_code
+    )
+    if not article_code:
+        try:
+            article_code = _resolve_article_for_job(job, client)
+        except BejermanBlockedError as exc:
+            error = str(exc)
+            diagnostic = _restore_stock_diagnostic_payload(
+                serial=serial,
+                source=source,
+                target=target,
+                source_records=source_all_records,
+                target_records=target_all_records,
+                error=error,
+            )
+            response_after_article_lookup = _job_response_payload(int(job["id"]))
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                error=_restore_stock_error_message(
+                    serial=serial,
+                    source=source,
+                    target=target,
+                    source_records=source_all_records,
+                    target_records=target_all_records,
+                    error=error,
+                ),
+                response_payload={
+                    **response_after_article_lookup,
+                    "stock_restore_diagnostic": diagnostic,
+                },
+            )
+            return {
+                "status": "not_found",
+                "job_id": job.get("id"),
+                "serial": serial,
+                "target_deposit": target,
+                "error": error,
+            }
+
+    ent_payload = build_stock_transfer_in_payload(job, article_code)
+    next_request_payload = {
+        **request_payload,
+        "restore_target_stock": True,
+        "article_code": article_code,
+        "ent_comprobantes": ent_payload,
+        "target_stock_entry_deposit": target,
+    }
+    next_response_payload = {
+        **response_payload,
+        "source": source_response,
+        "target": target_response,
+    }
+    _finish_job(
+        job["id"],
+        JOB_STATUS_RUNNING,
+        request_payload=next_request_payload,
+        response_payload=next_response_payload,
+        article_code=article_code,
+    )
+    try:
+        ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    except BejermanBlockedError as exc:
+        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=str(exc), article_code=article_code)
+        return {
+            "status": "blocked",
+            "job_id": job.get("id"),
+            "serial": serial,
+            "target_deposit": target,
+            "article_code": article_code,
+            "error": str(exc),
+        }
+
+    _finish_job(
+        job["id"],
+        JOB_STATUS_SUCCEEDED,
+        request_payload={
+            **next_request_payload,
+            "target_stock_entry_done": True,
+            "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+        },
+        response_payload={**next_response_payload, "target_stock_entry": ent_response},
+        article_code=article_code,
+    )
+    return {
+        "status": "restored",
+        "job_id": job.get("id"),
+        "serial": serial,
+        "target_deposit": target,
+        "article_code": article_code,
+    }
+
+
+def restore_target_stock_from_jobs(
+    *,
+    limit: int = 250,
+    job_id: int | None = None,
+    client: BejermanSDKClient | None = None,
+) -> dict[str, Any]:
+    validate_bejerman_config()
+    client = client or BejermanSDKClient()
+    params: list[Any] = list(TARGET_STOCK_RESTORE_SYNC_TYPES)
+    job_filter = ""
+    if job_id is not None:
+        job_filter = "AND id = %s"
+        params.append(job_id)
+    params.append(max(1, int(limit or 1)))
+    jobs = q(
+        f"""
+        SELECT DISTINCT ON (numero_serie, target_deposit) *
+          FROM bejerman_sync_jobs
+         WHERE sync_type IN ({",".join(["%s"] * len(TARGET_STOCK_RESTORE_SYNC_TYPES))})
+           AND NULLIF(TRIM(numero_serie), '') IS NOT NULL
+           AND NULLIF(TRIM(target_deposit), '') IS NOT NULL
+           AND target_deposit NOT IN ('NEXORA', 'SALIDA')
+           {job_filter}
+         ORDER BY numero_serie, target_deposit, updated_at DESC, id DESC
+         LIMIT %s
+        """,
+        params,
+    ) or []
+
+    stats: dict[str, Any] = {
+        "checked": 0,
+        "restored": 0,
+        "already_present": 0,
+        "not_found": 0,
+        "skipped": 0,
+        "blocked": 0,
+        "errors": 0,
+        "items": [],
+    }
+    for job in jobs:
+        stats["checked"] += 1
+        try:
+            result = restore_target_stock_for_job(job, client)
+        except Exception as exc:
+            logger.exception("No se pudo restaurar stock Bejerman para job %s", job.get("id"))
+            result = {"status": "error", "job_id": job.get("id"), "error": str(exc)}
+        status = result.get("status") or "error"
+        if status in stats:
+            stats[status] += 1
+        else:
+            stats["errors"] += 1
+        stats["items"].append(result)
     return stats
 
 

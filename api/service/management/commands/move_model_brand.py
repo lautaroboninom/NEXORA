@@ -1,6 +1,8 @@
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
+from service.views.tipo_equipo_utils import clean_tipo_equipo, preferred_row, tipo_equipo_key
+
 
 class Command(BaseCommand):
     help = (
@@ -30,6 +32,38 @@ class Command(BaseCommand):
     def _exec(self, sql, params=None):
         with connection.cursor() as cur:
             cur.execute(sql, params or [])
+
+    def _ensure_marca_tipo_id(self, marca_id: int, nombre: str):
+        clean = clean_tipo_equipo(nombre)
+        if not clean:
+            return None
+        rows = self._rows(
+            "SELECT id, nombre, activo FROM marca_tipos_equipo WHERE marca_id=%s ORDER BY id",
+            [marca_id],
+        )
+        row = preferred_row(
+            [dict(zip(["id", "nombre", "activo"], r)) for r in rows],
+            clean,
+        )
+        if row:
+            if clean_tipo_equipo(row.get("nombre")) != clean or not row.get("activo"):
+                self._exec("UPDATE marca_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s", [clean, row["id"]])
+            return int(row["id"])
+        self._exec(
+            "INSERT INTO marca_tipos_equipo(marca_id, nombre, activo) VALUES (%s,%s,TRUE)",
+            [marca_id, clean],
+        )
+        row = self._row(
+            """
+            SELECT id
+              FROM marca_tipos_equipo
+             WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [marca_id, clean],
+        )
+        return int(row[0]) if row else None
 
     def handle(self, *args, **opts):
         model_name = (opts.get("model") or "").strip()
@@ -95,20 +129,7 @@ class Command(BaseCommand):
         def ensure_catalog_for_series(marca_id: int, tipo_txt: str, serie_nombre: str):
             if not tipo_txt or not serie_nombre:
                 return None
-            # Asegurar tipo
-            self._exec(
-                """
-                INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                VALUES (%s,%s,TRUE)
-                ON CONFLICT (marca_id, nombre) DO UPDATE SET activo=EXCLUDED.activo
-                """,
-                [marca_id, tipo_txt],
-            )
-            tipo_row = self._row(
-                "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                [marca_id, tipo_txt],
-            )
-            tipo_id = int(tipo_row[0]) if tipo_row else None
+            tipo_id = self._ensure_marca_tipo_id(marca_id, tipo_txt)
             if not tipo_id:
                 return None
             # Asegurar serie
@@ -133,13 +154,9 @@ class Command(BaseCommand):
         def copy_catalog_variants(src_marca_id: int, src_tipo_txt: str, src_serie_nombre: str, dst_marca_id: int, dst_tipo_id: int, dst_serie_id: int):
             if not (src_tipo_txt and src_serie_nombre and dst_serie_id and dst_tipo_id):
                 return
-            src_tipo_row = self._row(
-                "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                [src_marca_id, src_tipo_txt],
-            )
-            if not src_tipo_row:
+            src_tipo_id = self._ensure_marca_tipo_id(src_marca_id, src_tipo_txt)
+            if not src_tipo_id:
                 return
-            src_tipo_id = int(src_tipo_row[0])
             src_serie_row = self._row(
                 """
                 SELECT id FROM marca_series
@@ -180,7 +197,7 @@ class Command(BaseCommand):
                 # Unificar con modelo existente en destino
                 to_id = int(dup[0])
                 dst_tipo = (dup[1] or "").strip()
-                if (tipo_nombre.lower() != dst_tipo.lower()) and not (tipo_nombre == "" or dst_tipo == "" or force_types):
+                if (tipo_equipo_key(tipo_nombre) != tipo_equipo_key(dst_tipo)) and not (tipo_nombre == "" or dst_tipo == "" or force_types):
                     raise SystemExit("Tipos de equipo distintos; use --force-merge-types para unificar igualmente")
 
                 # Devices -> modelo destino
@@ -239,4 +256,3 @@ class Command(BaseCommand):
                 self.stdout.write(f"OK: modelo movido a marca '{to_brand}' (id={target_id})")
 
         return 0
-

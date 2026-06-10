@@ -372,6 +372,18 @@ class DeviceIdentificadoresView(APIView):
         params.append(device_id)
         sql = "UPDATE devices SET " + ", ".join(updates) + " WHERE id=%s"
         exec_void(sql, params)
+        if "numero_serie" in data and _has_table_column("bejerman_sync_jobs", "device_id"):
+            exec_void(
+                """
+                UPDATE bejerman_sync_jobs
+                   SET numero_serie = NULLIF(%s, ''),
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE device_id = %s
+                   AND status IN ('pending', 'failed', 'blocked')
+                   AND sync_type NOT IN ('stock_entry_str', 'stock_exit_rts')
+                """,
+                [next_numero_serie, device_id],
+            )
         return Response({"ok": True})
 
 
@@ -494,22 +506,23 @@ class DevicesListView(APIView):
             wh, params = [], []
             if q_raw:
                 like = f"%{q_raw}%"
-                wh.append(
-                    "("
-                    "LOWER(COALESCE(d.numero_serie,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(d.numero_interno,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(c.razon_social,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(b.nombre,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(m.nombre,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), '')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(NULLIF(d.variante,''), NULLIF(m.variante,''), '')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(d.propietario_nombre,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(d.propietario_contacto,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(d.propietario_doc,'')) LIKE LOWER(%s) OR "
-                    "LOWER(COALESCE(loc.nombre,'')) LIKE LOWER(%s)"
-                    ")"
-                )
-                params.extend([like, like, like, like, like, like, like, like, like, like, like])
+                clauses = [
+                    "LOWER(COALESCE(d.numero_serie,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(d.numero_interno,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(c.razon_social,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(b.nombre,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(m.nombre,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), '')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(NULLIF(d.variante,''), NULLIF(m.variante,''), '')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(d.propietario_nombre,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(d.propietario_contacto,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(d.propietario_doc,'')) LIKE LOWER(%s)",
+                    "LOWER(COALESCE(loc.nombre,'')) LIKE LOWER(%s)",
+                ]
+                if has_mg_sale_extended:
+                    clauses.append("LOWER(COALESCE(d.mg_venta_numero_alternativo,'')) LIKE LOWER(%s)")
+                wh.append("(" + " OR ".join(clauses) + ")")
+                params.extend([like] * len(clauses))
 
             if propio_raw in ("1", "true", "yes", "y", "t"):
                 wh.append(
@@ -1100,8 +1113,12 @@ class DevicesMergeView(APIView):
                     )
             else:
                 exec_void("UPDATE devices SET numero_interno = NULL WHERE id=%s", [target_id])
-        # 4) Mover ingresos al target
+        # 4) Mover referencias operativas al target antes de borrar el source
         exec_void("UPDATE ingresos SET device_id=%s WHERE device_id=%s", [target_id, source_id])
+        if _has_table_column("bejerman_sync_jobs", "device_id"):
+            exec_void("UPDATE bejerman_sync_jobs SET device_id=%s WHERE device_id=%s", [target_id, source_id])
+        if _has_table_column("device_mg_events", "device_id"):
+            exec_void("UPDATE device_mg_events SET device_id=%s WHERE device_id=%s", [target_id, source_id])
         # 5) Eliminar el source
         exec_void("DELETE FROM devices WHERE id=%s", [source_id])
 

@@ -5,9 +5,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import _set_audit_user, exec_void, q, require_roles
+from ..rejected_budget import get_rejected_quote_summary, get_stored_rejected_budget_fields, has_rejected_budget_charge_schema
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
-    enqueue_stock_exit_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
     ingreso_is_internal_equipment,
 )
@@ -40,6 +40,25 @@ class RemitoSalidaPdfView(APIView):
             cur_row["resolucion"] = 'reparado'
         if not cur_row["resolucion"] and cur_row["estado"] != 'liberado' and not es_venta_pendiente:
             return Response({"detail": "No se puede liberar sin resolución"}, status=409)
+
+        if cur_row["resolucion"] == "presupuesto_rechazado" and has_rejected_budget_charge_schema():
+            stored_fields = get_stored_rejected_budget_fields(ingreso_id)
+            if stored_fields.get("presupuesto_rechazado_cobro_neto") is None:
+                return Response(
+                    {"detail": "No se puede imprimir la orden de salida sin definir el cobro neto del presupuesto rechazado."},
+                    status=409,
+                )
+            latest_rejected_quote = get_rejected_quote_summary(ingreso_id)
+            latest_rejected_quote_id = latest_rejected_quote.get("quote_id") if latest_rejected_quote else None
+            if latest_rejected_quote_id != stored_fields.get("presupuesto_rechazado_quote_id"):
+                exec_void(
+                    """
+                    UPDATE ingresos
+                       SET presupuesto_rechazado_quote_id=%s
+                     WHERE id=%s
+                    """,
+                    [latest_rejected_quote_id, ingreso_id],
+                )
 
         # Marcar 'liberado' y registrar evento para fecha_listo
         exec_void(
@@ -78,10 +97,8 @@ class RemitoSalidaPdfView(APIView):
                 with transaction.atomic():
                     if ingreso_is_internal_equipment(ingreso_id):
                         enqueue_stock_transfer_for_ingreso(ingreso_id)
-                        enqueue_stock_exit_for_ingreso(ingreso_id)
                     else:
                         enqueue_client_ready_transfer_for_ingreso(ingreso_id)
-                        enqueue_stock_exit_for_ingreso(ingreso_id)
             except Exception:
                 pass
 

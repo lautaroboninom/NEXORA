@@ -658,7 +658,7 @@ def _alert_rows_presupuesto(request, rule):
         JOIN quotes q ON q.id = (
           SELECT q2.id FROM quotes q2
            WHERE q2.ingreso_id = t.id
-           ORDER BY (q2.fecha_emitido IS NOT NULL) DESC, q2.fecha_emitido DESC, q2.id DESC
+           ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
            LIMIT 1
         )
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)

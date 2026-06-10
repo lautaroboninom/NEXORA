@@ -1,4 +1,5 @@
 import re
+from urllib.parse import quote
 
 from django.db import connection
 from rest_framework import permissions
@@ -7,6 +8,14 @@ from rest_framework.views import APIView
 
 from .helpers import q, require_roles, _set_audit_user
 from .mg_state import resolve_mg_flags
+from ..bejerman_bridge import (
+    BejermanBridgeClient,
+    BejermanBridgeConfigError,
+    BejermanBridgeResponseError,
+    BejermanBridgeUnavailable,
+)
+from ..bejerman_ris import equipment_suggestion_from_bejerman_article, find_customer_suggestion
+from ..warranty import compute_warranty_from_sale_date
 
 
 def _parse_ingreso_id(raw: str):
@@ -180,6 +189,80 @@ def _fetch_last_ingreso(device_id: int):
     )
 
 
+def _lookup_bejerman_sale_by_serial(serial: str):
+    try:
+        client = BejermanBridgeClient.from_settings()
+        return client.get_json(
+            f"/api/portal/service/serials/{quote(serial, safe='')}/sale",
+            not_found_as_none=True,
+        )
+    except BejermanBridgeConfigError as exc:
+        return {"found": False, "lookup_error": str(exc)}
+    except (BejermanBridgeResponseError, BejermanBridgeUnavailable) as exc:
+        return {"found": False, "lookup_error": str(exc)}
+    except Exception as exc:
+        return {"found": False, "lookup_error": f"No se pudo consultar Bejerman: {exc}"}
+
+
+def _bejerman_sale_response(code: str, ns_key: str | None, sale_payload: dict):
+    if not sale_payload or not sale_payload.get("found"):
+        return None
+    article_code = sale_payload.get("articleCode") or ""
+    article_description = sale_payload.get("articleDescription") or ""
+    equipment = equipment_suggestion_from_bejerman_article(article_code, article_description)
+    customer = find_customer_suggestion(
+        sale_payload.get("customerCode") or "",
+        sale_payload.get("customerName") or "",
+    )
+    warranty = compute_warranty_from_sale_date(
+        sale_payload.get("issueDate"),
+        numero_serie=sale_payload.get("serial") or code,
+        brand_id=equipment.get("marca_id"),
+        model_id=equipment.get("modelo_id"),
+        source="bejerman_sale",
+    )
+    return {
+        "kind": "bejerman_sale",
+        "source": "bejerman_sale",
+        "raw": code,
+        "normalized": code,
+        "normalized_key": ns_key,
+        "suggestion": {
+            "serial": sale_payload.get("serial") or code,
+            "normalizedSerial": sale_payload.get("normalizedSerial") or ns_key,
+            "article": {
+                "code": article_code,
+                "description": article_description,
+                "itemPartida": sale_payload.get("itemPartida") or "",
+                "itemQuantity": sale_payload.get("itemQuantity"),
+            },
+            "document": {
+                "type": sale_payload.get("documentType") or "",
+                "letter": sale_payload.get("documentLetter") or "",
+                "pointOfSale": sale_payload.get("documentPointOfSale") or "",
+                "number": sale_payload.get("documentNumber") or "",
+                "label": sale_payload.get("documentLabel") or "",
+                "documentId": sale_payload.get("documentId"),
+                "issueDate": sale_payload.get("issueDate"),
+            },
+            "customer": {
+                "code": sale_payload.get("customerCode") or "",
+                "name": sale_payload.get("customerName") or "",
+                "local_customer": customer,
+            },
+            "equipment": equipment,
+            "warranty": {
+                "garantia": warranty.get("garantia"),
+                "vence_el": warranty.get("vence_el").isoformat() if warranty.get("vence_el") else None,
+                "fecha_venta": warranty.get("fecha_venta").isoformat() if warranty.get("fecha_venta") else None,
+                "days": warranty.get("days"),
+                "meta": warranty.get("meta") or {},
+            },
+            "checkedComprobantes": sale_payload.get("checkedComprobantes"),
+        },
+    }
+
+
 class ScanLookupView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -232,12 +315,17 @@ class ScanLookupView(APIView):
 
         device, ns_key = _fetch_device_by_code(code, mg_select_sql)
         if not device:
+            sale_payload = _lookup_bejerman_sale_by_serial(code)
+            sale_response = _bejerman_sale_response(code, ns_key, sale_payload or {})
+            if sale_response:
+                return Response(sale_response)
             return Response({
                 "kind": "none",
                 "source": source or "serial",
                 "raw": code,
                 "normalized": code,
                 "normalized_key": ns_key,
+                "bejerman_lookup_error": (sale_payload or {}).get("lookup_error") if isinstance(sale_payload, dict) else None,
             })
 
         last_ingreso = _fetch_last_ingreso(device["id"])

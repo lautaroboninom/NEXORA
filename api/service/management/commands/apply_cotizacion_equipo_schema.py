@@ -1,6 +1,8 @@
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
+from .apply_quote_versions_schema import SYNC_QUOTE_WITH_INGRESO_SQL as QUOTE_VERSIONS_SYNC_SQL
+
 
 SYNC_QUOTE_WITH_INGRESO_SQL = """
 CREATE OR REPLACE FUNCTION sync_quote_with_ingreso()
@@ -95,7 +97,7 @@ class Command(BaseCommand):
                     """
                 )
 
-                cur.execute(SYNC_QUOTE_WITH_INGRESO_SQL)
+                cur.execute(QUOTE_VERSIONS_SYNC_SQL)
 
         self.stdout.write(
             "APLICADO OK: motivo_ingreso(cotización de equipo) + ingresos.permite_reparacion + sync_quote_with_ingreso."

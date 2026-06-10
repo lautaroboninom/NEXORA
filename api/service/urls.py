@@ -7,11 +7,12 @@ from .views import (
     # flujo ingresos / ténico
     MisPendientesView,
     EmitirPresupuestoView, AprobarPresupuestoView, QuotePdfView,
-    NoAplicaPresupuestoView, QuitarNoAplicaPresupuestoView,
+    NoAplicaPresupuestoView, QuitarNoAplicaPresupuestoView, RechazarPresupuestoView, QuoteVersionesView,
     PendientesPresupuestoView, PresupuestadosView, PresupuestadosExportView,
     MarcarReparadoView, MarcarParaRepararView, MarcarControladoSinDefectoView, EntregarIngresoView, GarantiaReparacionCheckView, GarantiaFabricaCheckView,
     HabilitarReparacionCotizacionView,
     DarBajaIngresoView, DarAltaIngresoView,
+    IngresoConvertirPropioMgView,
     IngresoCorreccionesHistoricasView,
     ListosParaRetiroView,
     ScanLookupView,
@@ -72,7 +73,8 @@ from .views import (
     CatalogoMotivosView,
     WarrantyRulesView, WarrantyRuleDetailView, DevicesMergeView,
     WorkResumenView, WorkObjectivesView, WorkAlertRulesView, GlobalSearchView,
-    BejermanJobsView, BejermanJobRetryView, BejermanArticleMappingsView,
+    BejermanJobsView, BejermanJobRetryView, BejermanArticleMappingsView, BejermanArticlesView,
+    IngresoRisStatusView, IngresoRisEmitirView, SerialBarcodePdfView, IngresoBarcodePdfView,
 )
 
 from .views.devices_views import (
@@ -98,11 +100,16 @@ from .views.preventivos_views import (
 )
 from .views.portal_integration_views import (
     PortalClienteGeneralView,
+    PortalClienteIngresoMediaFileView,
     PortalClienteIngresoSummaryView,
+    PortalClienteIngresoTestPdfView,
     PortalClientePresupuestoDecisionView,
     PortalClientePresupuestoPdfView,
     PortalClientePresupuestoSummaryView,
     PortalClientePresupuestosView,
+    PortalInternalIngresoMediaFileView,
+    PortalInternalIngresoSummaryView,
+    PortalInternalIngresoTestPdfView,
     PortalInternalPresupuestosView,
     PortalInternalWorkQueueView,
     PortalInternalWorkSummaryView,
@@ -126,6 +133,26 @@ urlpatterns = [
         PortalClienteIngresoSummaryView.as_view(),
     ),
     path(
+        "integrations/portal/clientes/<int:customer_id>/ingresos/<int:ingreso_id>/test/pdf/",
+        PortalClienteIngresoTestPdfView.as_view(),
+    ),
+    path(
+        "integrations/portal/clientes/<int:customer_id>/ingresos/<int:ingreso_id>/media/<int:media_id>/<str:kind>/",
+        PortalClienteIngresoMediaFileView.as_view(),
+    ),
+    path(
+        "integrations/portal/internal/ingresos/<int:ingreso_id>/summary/",
+        PortalInternalIngresoSummaryView.as_view(),
+    ),
+    path(
+        "integrations/portal/internal/ingresos/<int:ingreso_id>/test/pdf/",
+        PortalInternalIngresoTestPdfView.as_view(),
+    ),
+    path(
+        "integrations/portal/internal/ingresos/<int:ingreso_id>/media/<int:media_id>/<str:kind>/",
+        PortalInternalIngresoMediaFileView.as_view(),
+    ),
+    path(
         "integrations/portal/clientes/<int:customer_id>/presupuestos/",
         PortalClientePresupuestosView.as_view(),
     ),
@@ -146,7 +173,9 @@ urlpatterns = [
     path("integrations/portal/internal/work-queue/", PortalInternalWorkQueueView.as_view()),
     path("bejerman/jobs/", BejermanJobsView.as_view()),
     path("bejerman/jobs/<int:job_id>/retry/", BejermanJobRetryView.as_view()),
+    path("bejerman/articles/", BejermanArticlesView.as_view()),
     path("bejerman/article-mappings/", BejermanArticleMappingsView.as_view()),
+    path("barcodes/serial/", SerialBarcodePdfView.as_view()),
 
     # ténico / ingresos (acciones)
     path("tecnico/mis-pendientes/", MisPendientesView.as_view()),
@@ -157,11 +186,14 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/entregar/", EntregarIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/baja/", DarBajaIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/alta/", DarAltaIngresoView.as_view()),
+    path("ingresos/<int:ingreso_id>/convertir-propio-mg/", IngresoConvertirPropioMgView.as_view()),
     path("ingresos/<int:ingreso_id>/correcciones-historicas/", IngresoCorreccionesHistoricasView.as_view()),
 
     # presupuestos
     path("quotes/<int:ingreso_id>/emitir/", EmitirPresupuestoView.as_view()),
     path("quotes/<int:ingreso_id>/aprobar/", AprobarPresupuestoView.as_view()),
+    path("quotes/<int:ingreso_id>/rechazar/", RechazarPresupuestoView.as_view()),
+    path("quotes/<int:ingreso_id>/versiones/", QuoteVersionesView.as_view()),
     path("quotes/<int:ingreso_id>/no-aplica/", NoAplicaPresupuestoView.as_view()),
     path("quotes/<int:ingreso_id>/no-aplica/quitar/", QuitarNoAplicaPresupuestoView.as_view()),
     path("presupuestos/pendientes/", PendientesPresupuestoView.as_view()),
@@ -225,6 +257,9 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/derivar/", DerivarIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/derivaciones/", DerivacionesPorIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/derivaciones/<int:deriv_id>/devolver/", DevolverDerivacionView.as_view()),
+    path("ingresos/<int:ingreso_id>/ris/", IngresoRisStatusView.as_view()),
+    path("ingresos/<int:ingreso_id>/ris/emitir/", IngresoRisEmitirView.as_view()),
+    path("ingresos/<int:ingreso_id>/barcode/", IngresoBarcodePdfView.as_view()),
 
     # catálogos
     path("catalogos/marcas/", CatalogoMarcasView.as_view()),

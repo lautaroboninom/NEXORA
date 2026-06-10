@@ -1,28 +1,75 @@
-import Row from "../../../components/Row";
-import IngresoPhotos from "../../../components/IngresoPhotos";
-import { RESOLUCION_OPTIONS, RESOLUCION, ESTADO } from "../../../lib/constants";
-import { getBlob, postMarcarReparado, postCerrarReparacion, postAccesorioIngreso, deleteAccesorioIngreso, postMarcarControladoSinDefecto, postMarcarParaReparar, postHabilitarReparacionCotizacion } from "../../../lib/api";
 import { useCallback, useEffect, useState } from "react";
+
+import IngresoPhotos from "../../../components/IngresoPhotos";
+import RejectedBudgetChargeModal from "../../../components/RejectedBudgetChargeModal";
+import Row from "../../../components/Row";
+import { RESOLUCION, RESOLUCION_OPTIONS, ESTADO } from "../../../lib/constants";
+import {
+  deleteAccesorioIngreso,
+  getBlob,
+  getQuote,
+  postAccesorioIngreso,
+  postCerrarReparacion,
+  postHabilitarReparacionCotizacion,
+  postMarcarControladoSinDefecto,
+  postMarcarParaReparar,
+  postMarcarReparado,
+} from "../../../lib/api";
 import { isSaleTicketState } from "../../../lib/ui-helpers";
+
+function resolveRejectedQuoteReference(quotePayload, preferredQuoteId = null) {
+  if (!quotePayload) return null;
+
+  const versions = Array.isArray(quotePayload?.versions) ? quotePayload.versions : [];
+  const preferredIdNum = Number(preferredQuoteId || 0) || null;
+  const preferredRejected = preferredIdNum
+    ? versions.find(
+      (version) => (
+        Number(version?.quote_id || 0) === preferredIdNum
+        && String(version?.estado || "").trim() === "rechazado"
+      ),
+    )
+    : null;
+  const latestRejected = versions.find(
+    (version) => String(version?.estado || "").trim() === "rechazado",
+  );
+  const currentRejected = String(quotePayload?.estado || "").trim() === "rechazado"
+    ? {
+      quote_id: quotePayload.quote_id,
+      version_num: quotePayload.version_num,
+      subtotal: quotePayload.subtotal,
+      iva_21: quotePayload.iva_21,
+      total: quotePayload.total,
+    }
+    : null;
+
+  const resolved = preferredRejected || latestRejected || currentRejected;
+  if (!resolved) return null;
+
+  return {
+    quoteId: resolved.quote_id,
+    versionNum: resolved.version_num,
+    subtotal: resolved.subtotal,
+    iva_21: resolved.iva_21,
+    total: resolved.total,
+  };
+}
 
 export default function DiagnosticoTab({
   id,
   data,
-  // accesorios
+  money,
   canEditAcc,
   accesCatalogo,
   nuevoAcc,
   setNuevoAcc,
-  // diagnostico/trabajos
   descripcion,
   setDescripcion,
   trabajos,
   setTrabajos,
-  // fecha servicio
   fechaServStr,
   setFechaServStr,
   maxLocalNow,
-  // resolucion
   canResolve,
   resolucion,
   setResolucion,
@@ -30,18 +77,15 @@ export default function DiagnosticoTab({
   isCotizacion,
   permiteReparacion,
   canHabilitarReparacionCotizacion,
-  // permisos
   actAsTech,
   canEditDiag,
   canMarkReparado,
-  // helpers
   patch,
   setErr,
   refreshIngreso,
   setToastMsg,
   setShowReparadoToast,
   savingDiag,
-  // fotos
   canManagePhotos,
 }) {
   const [addingAcc, setAddingAcc] = useState(false);
@@ -52,6 +96,12 @@ export default function DiagnosticoTab({
   const [habilitandoReparacion, setHabilitandoReparacion] = useState(false);
   const [serialCambio, setSerialCambio] = useState("");
   const [fajaGarantiaInput, setFajaGarantiaInput] = useState(data?.faja_garantia || "");
+  const [rejectedChargeModalOpen, setRejectedChargeModalOpen] = useState(false);
+  const [rejectedChargeModalLoading, setRejectedChargeModalLoading] = useState(false);
+  const [rejectedChargeModalError, setRejectedChargeModalError] = useState("");
+  const [rejectedChargeReferenceWarning, setRejectedChargeReferenceWarning] = useState("");
+  const [rejectedQuoteReference, setRejectedQuoteReference] = useState(null);
+
   const estadoLower = (data?.estado || "").toLowerCase();
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
   const estadosBloqueadosDiag = new Set([
@@ -63,7 +113,7 @@ export default function DiagnosticoTab({
     ESTADO.CONTROLADO_SIN_DEFECTO,
     ESTADO.VENDIDO_PENDIENTE_ENTREGA,
     ESTADO.VENDIDO_ENTREGADO,
-  ].map((s) => String(s || "").toLowerCase()));
+  ].map((value) => String(value || "").toLowerCase()));
   const isEstadoBloqueadoDiag = estadosBloqueadosDiag.has(estadoLower);
   const estadosBloqueadosReparado = new Set([
     ESTADO.ENTREGADO,
@@ -72,16 +122,18 @@ export default function DiagnosticoTab({
     ESTADO.CONTROLADO_SIN_DEFECTO,
     ESTADO.VENDIDO_PENDIENTE_ENTREGA,
     ESTADO.VENDIDO_ENTREGADO,
-  ].map((s) => String(s || "").toLowerCase()));
+  ].map((value) => String(value || "").toLowerCase()));
   const isEstadoBloqueadoReparado = estadosBloqueadosReparado.has(estadoLower);
   const reparacionBloqueadaCotizacion = !!isCotizacion && !permiteReparacion;
-  const puedeReparar = !!canAutorizarReparar && estadoLower !== "reparar" && !isEstadoBloqueadoDiag && !reparacionBloqueadaCotizacion;
+  const puedeReparar = !!canAutorizarReparar
+    && estadoLower !== "reparar"
+    && !isEstadoBloqueadoDiag
+    && !reparacionBloqueadaCotizacion;
   const sinTecnicoAsignado = !data?.asignado_a;
 
   useEffect(() => {
     try {
-      const v = (data?.serial_cambio || "").toString();
-      setSerialCambio(v);
+      setSerialCambio((data?.serial_cambio || "").toString());
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.id]);
@@ -104,17 +156,9 @@ export default function DiagnosticoTab({
     event.currentTarget.blur();
   }, []);
 
-  async function saveResolucionCambioAware() {
+  async function submitResolucion(payload) {
     try {
-      if (!resolucion) { setErr("Seleccioná una resolución."); return; }
-      if (String(resolucion) === RESOLUCION.CAMBIO) {
-        const s = (serialCambio || "").trim();
-        if (!s) { setErr("Ingrese la Serie (Cambio)."); return; }
-      }
       setSavingResol(true);
-      const payload = String(resolucion) === RESOLUCION.CAMBIO
-        ? { resolucion, serial_cambio: (serialCambio || "").trim() }
-        : { resolucion };
       await postCerrarReparacion(id, payload);
       await refreshIngreso();
       try {
@@ -126,13 +170,79 @@ export default function DiagnosticoTab({
         }
       } catch {}
       setErr("");
+      return true;
     } catch (e) {
       setErr(e?.message || "No se pudo guardar la resolución");
+      return false;
     } finally {
       setSavingResol(false);
     }
   }
 
+  async function openRejectedChargeModal() {
+    setRejectedChargeModalError("");
+    setRejectedChargeReferenceWarning("");
+    setRejectedQuoteReference(null);
+    setRejectedChargeModalOpen(true);
+    setRejectedChargeModalLoading(true);
+
+    try {
+      const quotePayload = await getQuote(id);
+      const preferredQuoteId = data?.presupuesto_rechazado_quote_id;
+      const resolvedReference = resolveRejectedQuoteReference(quotePayload, preferredQuoteId);
+      setRejectedQuoteReference(resolvedReference);
+
+      if (!resolvedReference) {
+        setRejectedChargeReferenceWarning("No se encontró un presupuesto rechazado vinculado. El remito se imprimirá sin esa referencia.");
+      } else if (
+        preferredQuoteId
+        && Number(preferredQuoteId) !== Number(resolvedReference.quoteId || 0)
+      ) {
+        setRejectedChargeReferenceWarning("No se encontró la versión vinculada y se usará la última versión rechazada disponible.");
+      }
+    } catch {
+      setRejectedChargeReferenceWarning("No se pudo cargar la referencia del presupuesto rechazado.");
+    } finally {
+      setRejectedChargeModalLoading(false);
+    }
+  }
+
+  async function confirmRejectedCharge(payload) {
+    setRejectedChargeModalError("");
+    const ok = await submitResolucion({
+      resolucion: RESOLUCION.PRESUPUESTO_RECHAZADO,
+      presupuesto_rechazado_cobro_neto: payload.presupuesto_rechazado_cobro_neto,
+    });
+    if (ok) {
+      setRejectedChargeModalOpen(false);
+      setRejectedChargeReferenceWarning("");
+    } else {
+      setRejectedChargeModalError("No se pudo guardar el cobro del presupuesto rechazado.");
+    }
+  }
+
+  async function saveResolucionCambioAware() {
+    if (!resolucion) {
+      setErr("Seleccioná una resolución.");
+      return;
+    }
+    if (String(resolucion) === RESOLUCION.PRESUPUESTO_RECHAZADO) {
+      await openRejectedChargeModal();
+      return;
+    }
+    if (String(resolucion) === RESOLUCION.CAMBIO) {
+      const serial = (serialCambio || "").trim();
+      if (!serial) {
+        setErr("Ingrese la serie del cambio.");
+        return;
+      }
+    }
+
+    const payload = String(resolucion) === RESOLUCION.CAMBIO
+      ? { resolucion, serial_cambio: (serialCambio || "").trim() }
+      : { resolucion };
+    await submitResolucion(payload);
+  }
 
   async function marcarControladoSinDefecto() {
     try {
@@ -140,7 +250,7 @@ export default function DiagnosticoTab({
       const resp = await postMarcarControladoSinDefecto(id);
       await refreshIngreso();
       const movedMsg = resp && resp.auto_moved
-        ? `Marcado como controlado sin defecto. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || "Estanteria de Alquiler"}`
+        ? `Marcado como controlado sin defecto. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || "Estantería de Alquiler"}`
         : "Marcado como controlado sin defecto";
       setToastMsg(movedMsg);
       setTimeout(() => setToastMsg(""), 3000);
@@ -151,7 +261,6 @@ export default function DiagnosticoTab({
       setSavingAll(false);
     }
   }
-
 
   async function marcarParaReparar() {
     try {
@@ -188,16 +297,24 @@ export default function DiagnosticoTab({
 
   async function addAccesorio() {
     try {
-      const d = (nuevoAcc?.descripcion || "").trim().toLowerCase();
-      if (!d) { setErr("Escribí­ una descripción"); return; }
-      const acc = (accesCatalogo || []).find(a => (a?.nombre || "").trim().toLowerCase() === d);
-      if (!acc) { setErr("Elegí­ una descripción válida de la lista"); return; }
+      const descripcionAcc = (nuevoAcc?.descripcion || "").trim().toLowerCase();
+      if (!descripcionAcc) {
+        setErr("Escribí una descripción.");
+        return;
+      }
+      const acc = (accesCatalogo || []).find(
+        (item) => (item?.nombre || "").trim().toLowerCase() === descripcionAcc,
+      );
+      if (!acc) {
+        setErr("Elegí una descripción válida de la lista.");
+        return;
+      }
       setAddingAcc(true);
       await postAccesorioIngreso(id, {
         accesorio_id: Number(acc.id),
         referencia: (nuevoAcc?.referencia || "").trim() || null,
       });
-      setNuevoAcc && setNuevoAcc({ descripcion: "", referencia: "" });
+      setNuevoAcc?.({ descripcion: "", referencia: "" });
       await refreshIngreso();
       setErr("");
     } catch (e) {
@@ -220,50 +337,35 @@ export default function DiagnosticoTab({
     }
   }
 
-  // (El guardado de diagnóstico/trabajos es automático; no hay botón de guardar.)
-
-  async function saveResolucion() {
-    try {
-      if (!resolucion) { setErr("Seleccione una resolución."); return; }
-      setSavingResol(true);
-      await postCerrarReparacion(id, { resolucion });
-      await refreshIngreso();
-      setErr("");
-    } catch (e) {
-      setErr(e?.message || "No se pudo guardar la resolución");
-    } finally {
-      setSavingResol(false);
-    }
-  }
-
   return (
     <div className="border rounded p-4">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+      <div className="grid grid-cols-1 gap-3 mb-4 md:grid-cols-2">
         <div className="border rounded p-3 bg-gray-50">
           <div className="text-xs uppercase text-gray-500 mb-1">Informe preliminar</div>
           <div className="whitespace-pre-wrap">{data.informe_preliminar || "-"}</div>
         </div>
+
         <div className="border rounded p-3 bg-gray-50">
           <div className="text-xs uppercase text-gray-500 mb-1">Accesorios</div>
           <div>
             {Array.isArray(data.accesorios_items) && data.accesorios_items.length > 0 ? (
               <ul className="list-disc list-inside text-sm">
-                {data.accesorios_items.map((it) => (
-                  <li key={it.id} className="flex items-center justify-between gap-2">
+                {data.accesorios_items.map((item) => (
+                  <li key={item.id} className="flex items-center justify-between gap-2">
                     <span>
-                      {it.accesorio_nombre}
-                      {it.referencia ? ` (ref: ${it.referencia})` : ""}
+                      {item.accesorio_nombre}
+                      {item.referencia ? ` (ref: ${item.referencia})` : ""}
                     </span>
-                    {canEditAcc && (
+                    {canEditAcc ? (
                       <button
                         className="text-red-600 text-xs"
-                        onClick={() => removeAccesorio(it.id)}
-                        disabled={deletingAccId === it.id}
+                        onClick={() => removeAccesorio(item.id)}
+                        disabled={deletingAccId === item.id}
                         type="button"
                       >
-                        {deletingAccId === it.id ? "Quitando..." : "Quitar"}
+                        {deletingAccId === item.id ? "Quitando..." : "Quitar"}
                       </button>
-                    )}
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -272,27 +374,27 @@ export default function DiagnosticoTab({
             )}
           </div>
 
-          {canEditAcc && (
+          {canEditAcc ? (
             <div className="mt-3 border-t pt-3">
               <div className="text-xs uppercase text-gray-500 mb-2">Agregar accesorio</div>
               <div className="flex flex-wrap items-end gap-2">
                 <input
                   className="border rounded p-2 min-w-[240px]"
                   list="accesorios_catalogo"
-                  placeholder="Descripción (elegí­ de la lista)"
+                  placeholder="Descripción (elegí de la lista)"
                   value={nuevoAcc.descripcion}
-                  onChange={(e) => setNuevoAcc((s) => ({ ...s, descripcion: e.target.value }))}
+                  onChange={(e) => setNuevoAcc((state) => ({ ...state, descripcion: e.target.value }))}
                 />
                 <datalist id="accesorios_catalogo">
-                  {accesCatalogo.map((a) => (
-                    <option key={a.id} value={a.nombre} />
+                  {accesCatalogo.map((item) => (
+                    <option key={item.id} value={item.nombre} />
                   ))}
                 </datalist>
                 <input
                   className="border rounded p-2 w-40"
-                  placeholder="Nro de referencia (opcional)"
+                  placeholder="Nro. de referencia (opcional)"
                   value={nuevoAcc.referencia}
-                  onChange={(e) => setNuevoAcc((s) => ({ ...s, referencia: e.target.value }))}
+                  onChange={(e) => setNuevoAcc((state) => ({ ...state, referencia: e.target.value }))}
                 />
                 <button
                   className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
@@ -304,7 +406,7 @@ export default function DiagnosticoTab({
                 </button>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -318,23 +420,23 @@ export default function DiagnosticoTab({
             className="border rounded p-2"
             value={fechaServStr ? fechaServStr.slice(0, 10) : ""}
             onChange={(e) => {
-              const v = e.currentTarget.value;
-              setFechaServStr(v ? `${v}T00:00` : "");
+              const value = e.currentTarget.value;
+              setFechaServStr(value ? `${value}T00:00` : "");
             }}
             max={maxLocalNow ? maxLocalNow.slice(0, 10) : undefined}
             placeholder="YYYY-MM-DD"
-            disabled={typeof canEditDiag === 'boolean' ? !canEditDiag : false}
+            disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
           />
         </div>
 
         <div className="ml-auto flex items-end gap-2">
-          {reparacionBloqueadaCotizacion && (
+          {reparacionBloqueadaCotizacion ? (
             <div className="max-w-xs rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               Ingreso en cotización de equipo. La reparación está bloqueada hasta habilitarla.
             </div>
-          )}
+          ) : null}
 
-          {reparacionBloqueadaCotizacion && canHabilitarReparacionCotizacion && (
+          {reparacionBloqueadaCotizacion && canHabilitarReparacionCotizacion ? (
             <button
               className="bg-amber-700 text-white px-3 py-2 rounded disabled:opacity-60"
               disabled={habilitandoReparacion}
@@ -343,21 +445,21 @@ export default function DiagnosticoTab({
             >
               {habilitandoReparacion ? "Habilitando..." : "Habilitar reparación"}
             </button>
-          )}
+          ) : null}
 
-          {puedeReparar && (
+          {puedeReparar ? (
             <button
               className="bg-amber-600 text-white px-3 py-2 rounded disabled:opacity-60"
               disabled={marcandoReparar || sinTecnicoAsignado || !puedeReparar}
               onClick={marcarParaReparar}
-              title={sinTecnicoAsignado ? "Asigná un técnico para habilitar reparacion" : undefined}
+              title={sinTecnicoAsignado ? "Asigná un técnico para habilitar reparación" : undefined}
               type="button"
             >
               {marcandoReparar ? "Avisando..." : "Reparar"}
             </button>
-          )}
+          ) : null}
 
-          {canResolve && !reparacionBloqueadaCotizacion && (
+          {canResolve && !reparacionBloqueadaCotizacion ? (
             <>
               <div className="min-w-[260px]">
                 <label className="block text-sm text-gray-600 mb-1">Resolución de reparación</label>
@@ -376,9 +478,9 @@ export default function DiagnosticoTab({
                 </select>
               </div>
 
-              {String(resolucion) === RESOLUCION.CAMBIO && (
+              {String(resolucion) === RESOLUCION.CAMBIO ? (
                 <div>
-                  <label className="block text-sm text-gray-600 mb-1">Serie (Cambio)</label>
+                  <label className="block text-sm text-gray-600 mb-1">Serie (cambio)</label>
                   <input
                     className="border rounded p-2 w-64"
                     value={serialCambio}
@@ -386,7 +488,7 @@ export default function DiagnosticoTab({
                     placeholder="Ej.: MG 1234 o serie del equipo entregado"
                   />
                 </div>
-              )}
+              ) : null}
 
               <button
                 className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
@@ -397,11 +499,11 @@ export default function DiagnosticoTab({
                 {savingResol ? "Guardando..." : "Guardar resolución"}
               </button>
             </>
-          )}
+          ) : null}
 
-          {(typeof canMarkReparado === 'boolean' ? canMarkReparado : actAsTech) && !isEstadoBloqueadoReparado && (
+          {(typeof canMarkReparado === "boolean" ? canMarkReparado : actAsTech) && !isEstadoBloqueadoReparado ? (
             <>
-              {!isEstadoBloqueadoDiag && (
+              {!isEstadoBloqueadoDiag ? (
                 <button
                   className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
                   onClick={marcarControladoSinDefecto}
@@ -409,34 +511,35 @@ export default function DiagnosticoTab({
                 >
                   {savingAll ? "Guardando..." : "Controlado sin defecto"}
                 </button>
-              )}
-              {!reparacionBloqueadaCotizacion && (
+              ) : null}
+
+              {!reparacionBloqueadaCotizacion ? (
                 <button
                   className="bg-emerald-600 text-white px-3 py-2 rounded"
                   onClick={async () => {
                     try {
                       const resp = await postMarcarReparado(id);
                       await refreshIngreso();
-                      if (typeof setShowReparadoToast === 'function') {
+                      if (typeof setShowReparadoToast === "function") {
                         setShowReparadoToast(true);
                         setTimeout(() => setShowReparadoToast(false), 2000);
                       }
                       if (resp && resp.auto_moved) {
-                        const movedMsg = `Marcado como reparado. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || 'Estanteria de Alquiler'}`;
+                        const movedMsg = `Marcado como reparado. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || "Estantería de Alquiler"}`;
                         setToastMsg(movedMsg);
-                        setTimeout(() => setToastMsg('') , 3000);
+                        setTimeout(() => setToastMsg(""), 3000);
                       }
                     } catch (e) {
-                      setErr(e?.message || 'No se pudo marcar como reparado');
+                      setErr(e?.message || "No se pudo marcar como reparado");
                     }
                   }}
                   type="button"
                 >
                   Marcar reparado
                 </button>
-              )}
+              ) : null}
             </>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -444,7 +547,7 @@ export default function DiagnosticoTab({
         className="w-full border rounded p-2 min-h-[180px]"
         value={descripcion}
         onChange={(e) => setDescripcion(e.target.value)}
-        disabled={typeof canEditDiag === 'boolean' ? !canEditDiag : false}
+        disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
         placeholder="Ej.: Ingreso de agua; placa de control con óxido; válvula X no abre..."
       />
 
@@ -454,11 +557,11 @@ export default function DiagnosticoTab({
           className="w-full border rounded p-2 min-h-[200px]"
           value={trabajos}
           onChange={(e) => setTrabajos(e.target.value)}
-          disabled={typeof canEditDiag === 'boolean' ? !canEditDiag : false}
+          disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
           placeholder="Ej.: Cambio de turbina; limpieza y secado; resoldado de conector; calibración; pruebas OK."
         />
         <div className="mt-2 text-xs text-gray-500" aria-live="polite">
-          {(savingDiag || savingAll) ? "Guardando..." : "Los cambios se guardan automáticamente"}
+          {savingDiag || savingAll ? "Guardando..." : "Los cambios se guardan automáticamente"}
         </div>
       </div>
 
@@ -474,7 +577,27 @@ export default function DiagnosticoTab({
           disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
         />
       </Row>
+
+      <RejectedBudgetChargeModal
+        open={rejectedChargeModalOpen}
+        title="Cobro del presupuesto rechazado"
+        confirmLabel="Guardar e imprimir orden de salida"
+        saving={savingResol}
+        loading={rejectedChargeModalLoading}
+        error={rejectedChargeModalError}
+        money={money}
+        initialCharge={data?.presupuesto_rechazado_cobro_neto ?? ""}
+        showComment={false}
+        quoteSummary={rejectedQuoteReference}
+        referenceTitle="Presupuesto rechazado a informar en el remito"
+        referenceWarning={rejectedChargeReferenceWarning}
+        onClose={() => {
+          if (savingResol) return;
+          setRejectedChargeModalOpen(false);
+          setRejectedChargeModalError("");
+        }}
+        onConfirm={confirmRejectedCharge}
+      />
     </div>
   );
 }
-

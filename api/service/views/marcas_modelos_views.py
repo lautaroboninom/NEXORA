@@ -12,6 +12,62 @@ from .helpers import (
     _set_audit_user,
     require_roles,
 )
+from .tipo_equipo_utils import clean_tipo_equipo, preferred_row
+
+
+def _ensure_catalog_tipo(nombre: str) -> None:
+    clean = clean_tipo_equipo(nombre)
+    if not clean:
+        return
+    rows = q("SELECT id, nombre, activo FROM catalogo_tipos_equipo ORDER BY id") or []
+    row = preferred_row(rows, clean)
+    if row:
+        if clean_tipo_equipo(row.get("nombre")) != clean or not row.get("activo"):
+            exec_void(
+                "UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s",
+                [clean, row["id"]],
+            )
+        return
+    exec_void("INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)", [clean])
+
+
+def _ensure_marca_tipo_id(marca_id: int, nombre: str, activo: bool = True):
+    clean = clean_tipo_equipo(nombre)
+    if not clean:
+        return None
+    rows = q(
+        "SELECT id, nombre, activo FROM marca_tipos_equipo WHERE marca_id=%s ORDER BY id",
+        [marca_id],
+    ) or []
+    row = preferred_row(rows, clean)
+    if row:
+        if clean_tipo_equipo(row.get("nombre")) != clean or bool(row.get("activo")) != bool(activo):
+            exec_void(
+                "UPDATE marca_tipos_equipo SET nombre=%s, activo=%s WHERE id=%s",
+                [clean, bool(activo), row["id"]],
+            )
+        return row["id"]
+    if connection.vendor == "postgresql":
+        return exec_returning(
+            "INSERT INTO marca_tipos_equipo(marca_id, nombre, activo) VALUES (%s,%s,%s) RETURNING id",
+            [marca_id, clean, bool(activo)],
+        )
+    exec_void(
+        "INSERT INTO marca_tipos_equipo(marca_id, nombre, activo) VALUES (%s,%s,%s)",
+        [marca_id, clean, bool(activo)],
+    )
+    row = q(
+        """
+        SELECT id
+        FROM marca_tipos_equipo
+        WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        [marca_id, clean],
+        one=True,
+    )
+    return row["id"] if row else None
 
 
 class CatalogoMarcasView(APIView):
@@ -288,34 +344,8 @@ class ModelosPorMarcaView(APIView):
             )
 
         if tipo_equipo:
-            if connection.vendor == "postgresql":
-                q(
-                    """
-                    INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                    VALUES (%s,%s,TRUE)
-                    ON CONFLICT (marca_id, nombre) DO UPDATE SET activo=EXCLUDED.activo
-                    """,
-                    [bid, tipo_equipo],
-                )
-            else:
-                q(
-                    """
-                    INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                    VALUES (%s,%s,TRUE)
-                    ON DUPLICATE KEY UPDATE activo=VALUES(activo)
-                    """,
-                    [bid, tipo_equipo],
-                )
-
-            existing_tipo = q(
-                "SELECT id FROM catalogo_tipos_equipo WHERE UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                [tipo_equipo],
-                one=True,
-            )
-            if existing_tipo:
-                q("UPDATE catalogo_tipos_equipo SET nombre=%s, activo=TRUE WHERE id=%s", [tipo_equipo, existing_tipo["id"]])
-            else:
-                q("INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)", [tipo_equipo])
+            _ensure_marca_tipo_id(bid, tipo_equipo, activo=True)
+            _ensure_catalog_tipo(tipo_equipo)
 
         return Response({"ok": True})
 
@@ -431,30 +461,7 @@ class ModelMergeView(APIView):
             tipo_nombre = (tipo_b or tipo_a or "").strip()
             modelo_nombre = (dst.get("nombre") or "").strip() or (src.get("nombre") or "").strip()
             if tipo_nombre and modelo_nombre:
-                if connection.vendor == "postgresql":
-                    q(
-                        """
-                        INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                        VALUES (%s,%s,TRUE)
-                        ON CONFLICT (marca_id, nombre) DO UPDATE SET activo=EXCLUDED.activo
-                        """,
-                        [marca_id, tipo_nombre],
-                    )
-                else:
-                    q(
-                        """
-                        INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                        VALUES (%s,%s,TRUE)
-                        ON DUPLICATE KEY UPDATE activo=VALUES(activo)
-                        """,
-                        [marca_id, tipo_nombre],
-                    )
-                tipo_row = q(
-                    "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                    [marca_id, tipo_nombre],
-                    one=True,
-                ) or {}
-                tipo_id = tipo_row.get("id")
+                tipo_id = _ensure_marca_tipo_id(marca_id, tipo_nombre)
                 if tipo_id:
                     if connection.vendor == "postgresql":
                         q(
@@ -513,12 +520,7 @@ class ModelMergeView(APIView):
                         # 2) Copiar TODAS las variantes existentes en el catálogo para la serie del modelo source
                         src_tipo_nombre = (src.get("tipo") or "").strip()
                         if src_tipo_nombre:
-                            src_tipo_row = q(
-                                "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                                [marca_id, src_tipo_nombre],
-                                one=True,
-                            ) or {}
-                            src_tipo_id = src_tipo_row.get("id")
+                            src_tipo_id = _ensure_marca_tipo_id(marca_id, src_tipo_nombre)
                             if src_tipo_id:
                                 src_serie_row = q(
                                     """
@@ -649,30 +651,7 @@ class MarcaMergeView(APIView):
                     variante_nombre_m = (mv.get("variante") or "").strip()
                     if tipo_nombre_m and modelo_nombre_m:
                         # asegurar tipo en marca destino
-                        if connection.vendor == "postgresql":
-                            q(
-                                """
-                                INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                                VALUES (%s,%s,TRUE)
-                                ON CONFLICT (marca_id, nombre) DO UPDATE SET activo=EXCLUDED.activo
-                                """,
-                                [target_id, tipo_nombre_m],
-                            )
-                        else:
-                            q(
-                                """
-                                INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                                VALUES (%s,%s,TRUE)
-                                ON DUPLICATE KEY UPDATE activo=VALUES(activo)
-                                """,
-                                [target_id, tipo_nombre_m],
-                            )
-                        tipo_row_m = q(
-                            "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                            [target_id, tipo_nombre_m],
-                            one=True,
-                        ) or {}
-                        tipo_id_m = tipo_row_m.get("id")
+                        tipo_id_m = _ensure_marca_tipo_id(target_id, tipo_nombre_m)
                         if tipo_id_m:
                             # asegurar serie en marca destino
                             if connection.vendor == "postgresql":
@@ -726,12 +705,7 @@ class MarcaMergeView(APIView):
                                             [target_id, tipo_id_m, serie_id_m, variante_nombre_m],
                                         )
                                 # 2) Copiar TODAS las variantes del catálogo de la marca origen (si existían)
-                                src_tipo_row = q(
-                                    "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                                    [source_id, tipo_nombre_m],
-                                    one=True,
-                                ) or {}
-                                src_tipo_id = src_tipo_row.get("id")
+                                src_tipo_id = _ensure_marca_tipo_id(source_id, tipo_nombre_m)
                                 if src_tipo_id:
                                     src_serie_row = q(
                                         """
@@ -789,30 +763,7 @@ class MarcaMergeView(APIView):
                     tipo_nombre_2 = (dst_full.get("tipo") or src_full.get("tipo") or "").strip()
                     modelo_nombre_2 = (dst_full.get("nombre") or src_full.get("nombre") or "").strip()
                     if marca_id_2 and tipo_nombre_2 and modelo_nombre_2:
-                        if connection.vendor == "postgresql":
-                            q(
-                                """
-                                INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                                VALUES (%s,%s,TRUE)
-                                ON CONFLICT (marca_id, nombre) DO UPDATE SET activo=EXCLUDED.activo
-                                """,
-                                [marca_id_2, tipo_nombre_2],
-                            )
-                        else:
-                            q(
-                                """
-                                INSERT INTO marca_tipos_equipo(marca_id, nombre, activo)
-                                VALUES (%s,%s,TRUE)
-                                ON DUPLICATE KEY UPDATE activo=VALUES(activo)
-                                """,
-                                [marca_id_2, tipo_nombre_2],
-                            )
-                        tipo_row_2 = q(
-                            "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                            [marca_id_2, tipo_nombre_2],
-                            one=True,
-                        ) or {}
-                        t_id = tipo_row_2.get("id")
+                        t_id = _ensure_marca_tipo_id(marca_id_2, tipo_nombre_2)
                         if t_id:
                             if connection.vendor == "postgresql":
                                 q(
@@ -867,12 +818,7 @@ class MarcaMergeView(APIView):
                                                 [marca_id_2, t_id, s_id, v],
                                             )
                                 # 2) Copiar TODAS las variantes del catálogo de la marca origen para el modelo source
-                                src_tipo_row2 = q(
-                                    "SELECT id FROM marca_tipos_equipo WHERE marca_id=%s AND UPPER(TRIM(nombre))=UPPER(TRIM(%s))",
-                                    [source_id, (src_full.get("tipo") or "").strip()],
-                                    one=True,
-                                ) or {}
-                                src_tipo_id2 = src_tipo_row2.get("id")
+                                src_tipo_id2 = _ensure_marca_tipo_id(source_id, (src_full.get("tipo") or "").strip())
                                 if src_tipo_id2:
                                     src_serie_row2 = q(
                                         """

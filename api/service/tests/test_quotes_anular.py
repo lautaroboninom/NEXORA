@@ -1,4 +1,5 @@
-from decimal import Decimal
+﻿from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import connection
 from django.test import TestCase
@@ -32,7 +33,7 @@ class QuoteAnularAPITest(TestCase):
                 email VARCHAR(320) UNIQUE,
                 hash_pw TEXT,
                 rol TEXT,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT TRUE
             ){engine_suffix}
         """
 
@@ -42,7 +43,40 @@ class QuoteAnularAPITest(TestCase):
                 device_id INT NULL,
                 estado TEXT,
                 presupuesto_estado TEXT,
+                presupuesto_rechazado_cobro_neto NUMERIC(12,2) NULL,
+                presupuesto_rechazado_quote_id INT NULL,
+                motivo TEXT NULL,
+                permite_reparacion {bool_type} DEFAULT TRUE,
                 asignado_a INT NULL
+            ){engine_suffix}
+        """
+        customers_sql = f"""
+            CREATE TABLE IF NOT EXISTS customers (
+                id {auto_inc},
+                razon_social TEXT NULL
+            ){engine_suffix}
+        """
+        marcas_sql = f"""
+            CREATE TABLE IF NOT EXISTS marcas (
+                id {auto_inc},
+                nombre TEXT NULL
+            ){engine_suffix}
+        """
+        models_sql = f"""
+            CREATE TABLE IF NOT EXISTS models (
+                id {auto_inc},
+                nombre TEXT NULL,
+                tipo_equipo TEXT NULL
+            ){engine_suffix}
+        """
+        devices_sql = f"""
+            CREATE TABLE IF NOT EXISTS devices (
+                id {auto_inc},
+                customer_id INT NULL,
+                marca_id INT NULL,
+                model_id INT NULL,
+                numero_serie TEXT NULL,
+                numero_interno TEXT NULL
             ){engine_suffix}
         """
 
@@ -50,6 +84,8 @@ class QuoteAnularAPITest(TestCase):
             CREATE TABLE IF NOT EXISTS quotes (
                 id {auto_inc},
                 ingreso_id INT NOT NULL,
+                version_num INT NOT NULL DEFAULT 1,
+                origen_quote_id INT NULL,
                 estado TEXT NOT NULL DEFAULT 'pendiente',
                 moneda TEXT NOT NULL DEFAULT 'ARS',
                 subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -62,6 +98,8 @@ class QuoteAnularAPITest(TestCase):
                 mant_oferta_txt TEXT NULL,
                 fecha_emitido {datetime_type} NULL,
                 fecha_aprobado {datetime_type} NULL,
+                fecha_rechazado {datetime_type} NULL,
+                rechazo_comentario TEXT NULL,
                 pdf_url TEXT NULL
             ){engine_suffix}
         """
@@ -91,7 +129,7 @@ class QuoteAnularAPITest(TestCase):
                 stock_on_hand NUMERIC(12,2) NOT NULL DEFAULT 0,
                 stock_min NUMERIC(12,2) NOT NULL DEFAULT 0,
                 ubicacion_deposito TEXT NULL,
-                activo {bool_type} DEFAULT 1,
+                activo {bool_type} DEFAULT TRUE,
                 updated_at {datetime_type} DEFAULT CURRENT_TIMESTAMP
             ){engine_suffix}
         """
@@ -113,16 +151,41 @@ class QuoteAnularAPITest(TestCase):
             ){engine_suffix}
         """
 
+        audit_log_sql = f"""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id {auto_inc},
+                ts {datetime_type} DEFAULT CURRENT_TIMESTAMP,
+                user_id INT NULL,
+                role TEXT NULL,
+                method TEXT NULL,
+                path TEXT NULL,
+                ip TEXT NULL,
+                user_agent TEXT NULL,
+                status_code INT NULL,
+                body TEXT NULL
+            ){engine_suffix}
+        """
+
         with connection.cursor() as cur:
             cur.execute(users_sql)
             cur.execute(ingresos_sql)
+            cur.execute(customers_sql)
+            cur.execute(marcas_sql)
+            cur.execute(models_sql)
+            cur.execute(devices_sql)
             cur.execute(quotes_sql)
             cur.execute(quote_items_sql)
             cur.execute(catalogo_repuestos_sql)
             cur.execute(repuestos_movimientos_sql)
+            cur.execute(audit_log_sql)
             try:
-                cur.execute("ALTER TABLE ingresos ADD COLUMN presupuesto_estado TEXT")
+                cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_estado TEXT")
+                cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_cobro_neto NUMERIC(12,2) NULL")
+                cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_quote_id INT NULL")
+                cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS motivo TEXT NULL")
+                cur.execute(f"ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS permite_reparacion {bool_type} DEFAULT TRUE")
             except Exception:
+                connection.rollback()
                 pass
         super().setUpClass()
 
@@ -144,6 +207,10 @@ class QuoteAnularAPITest(TestCase):
             cur.execute("DELETE FROM ingresos")
             cur.execute("DELETE FROM repuestos_movimientos")
             cur.execute("DELETE FROM catalogo_repuestos")
+            cur.execute("DELETE FROM devices")
+            cur.execute("DELETE FROM models")
+            cur.execute("DELETE FROM marcas")
+            cur.execute("DELETE FROM customers")
         User.objects.filter(email="jefe-anular-quotes@example.com").delete()
         cls.jefe_user = User.objects.create(
             nombre="Jefe Presupuesto",
@@ -166,6 +233,20 @@ class QuoteAnularAPITest(TestCase):
 
     def _url_anular(self, ingreso_id: int) -> str:
         return f"/api/quotes/{ingreso_id}/anular/"
+
+    def _url_rechazar(self, ingreso_id: int) -> str:
+        return f"/api/quotes/{ingreso_id}/rechazar/"
+
+    def _url_aprobar(self, ingreso_id: int) -> str:
+        return f"/api/quotes/{ingreso_id}/aprobar/"
+
+    def _url_versiones(self, ingreso_id: int) -> str:
+        return f"/api/quotes/{ingreso_id}/versiones/"
+
+    def _url_detail(self, ingreso_id: int, quote_id: int | None = None) -> str:
+        if quote_id is None:
+            return f"/api/quotes/{ingreso_id}/"
+        return f"/api/quotes/{ingreso_id}/?quote_id={quote_id}"
 
     def _seed_case(self, ingreso_estado: str, presupuesto_estado: str, quote_estado: str, stock: int = 3, qty: int = 2):
         now = timezone.now()
@@ -206,7 +287,7 @@ class QuoteAnularAPITest(TestCase):
 
             cur.execute(
                 "INSERT INTO catalogo_repuestos (codigo, nombre, stock_on_hand, stock_min, activo, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
-                ["R-001", "Repuesto test", Decimal(str(stock)), Decimal("0"), 1, now],
+                ["R-001", "Repuesto test", Decimal(str(stock)), Decimal("0"), True, now],
             )
             repuesto_id = self._last_insert_id(cur)
 
@@ -338,3 +419,234 @@ class QuoteAnularAPITest(TestCase):
 
             cur.execute("SELECT COUNT(*) FROM repuestos_movimientos WHERE repuesto_id=%s", [repuesto_id])
             self.assertEqual(int(cur.fetchone()[0]), 0)
+
+    def test_detalle_emitido_legacy_muestra_acciones_de_emitido(self):
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="pendiente",
+            quote_estado="emitido",
+        )
+
+        resp = self.client.get(self._url_detail(ingreso_id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "presupuestado")
+        self.assertTrue(resp.data.get("is_editable"))
+        self.assertTrue(resp.data.get("can_reject"))
+        self.assertEqual(resp.data.get("versions")[0].get("estado"), "presupuestado")
+
+    def test_rechazar_emitido_legacy_guarda_fecha_y_comentario(self):
+        ingreso_id, quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="pendiente",
+            quote_estado="emitido",
+        )
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {
+                "rechazo_comentario": "Cliente pide descuento",
+                "presupuesto_rechazado_cobro_neto": "12800",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "rechazado")
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT estado, fecha_rechazado, rechazo_comentario FROM quotes WHERE id=%s",
+                [quote_id],
+            )
+            q_estado, q_fecha_rech, q_comentario = cur.fetchone()
+            cur.execute(
+                """
+                SELECT presupuesto_estado, presupuesto_rechazado_cobro_neto, presupuesto_rechazado_quote_id
+                FROM ingresos
+                WHERE id=%s
+                """,
+                [ingreso_id],
+            )
+            ingreso_presu, cobro_neto, linked_quote_id = cur.fetchone()
+
+        self.assertEqual(q_estado, "rechazado")
+        self.assertIsNotNone(q_fecha_rech)
+        self.assertEqual(q_comentario, "Cliente pide descuento")
+        self.assertEqual(ingreso_presu, "rechazado")
+        self.assertEqual(Decimal(str(cobro_neto)), Decimal("12800"))
+        self.assertEqual(int(linked_quote_id), quote_id)
+
+    def test_aprobar_emitido_legacy_descuenta_stock(self):
+        ingreso_id, quote_id, repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="pendiente",
+            quote_estado="emitido",
+            stock=10,
+            qty=2,
+        )
+
+        with patch("service.views.quotes_views.render_quote_pdf", return_value=("quote.pdf", b"%PDF-1.4")):
+            resp = self.client.post(self._url_aprobar(ingreso_id), {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "aprobado")
+
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado, presupuesto_estado FROM ingresos WHERE id=%s", [ingreso_id])
+            ingreso_estado, ingreso_presu = cur.fetchone()
+            cur.execute("SELECT estado, fecha_aprobado FROM quotes WHERE id=%s", [quote_id])
+            q_estado, q_fecha_aprob = cur.fetchone()
+            cur.execute("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s", [repuesto_id])
+            stock = Decimal(str(cur.fetchone()[0]))
+
+        self.assertEqual(ingreso_estado, "reparar")
+        self.assertEqual(ingreso_presu, "aprobado")
+        self.assertEqual(q_estado, "aprobado")
+        self.assertIsNotNone(q_fecha_aprob)
+        self.assertEqual(stock, Decimal("8"))
+
+    def test_rechazar_presupuestado_guarda_fecha_y_comentario(self):
+        ingreso_id, quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {
+                "rechazo_comentario": "Cliente pide descuento",
+                "presupuesto_rechazado_cobro_neto": "12800",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "rechazado")
+        self.assertTrue(resp.data.get("can_create_new_version"))
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT estado, fecha_rechazado, rechazo_comentario FROM quotes WHERE id=%s",
+                [quote_id],
+            )
+            q_estado, q_fecha_rech, q_comentario = cur.fetchone()
+            cur.execute(
+                """
+                SELECT presupuesto_estado, presupuesto_rechazado_cobro_neto, presupuesto_rechazado_quote_id
+                FROM ingresos
+                WHERE id=%s
+                """,
+                [ingreso_id],
+            )
+            ingreso_presu, cobro_neto, linked_quote_id = cur.fetchone()
+
+        self.assertEqual(q_estado, "rechazado")
+        self.assertIsNotNone(q_fecha_rech)
+        self.assertEqual(q_comentario, "Cliente pide descuento")
+        self.assertEqual(ingreso_presu, "rechazado")
+        self.assertEqual(Decimal(str(cobro_neto)), Decimal("12800"))
+        self.assertEqual(int(linked_quote_id), quote_id)
+
+    def test_rechazar_presupuesto_exige_cobro_neto(self):
+        ingreso_id, quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"rechazo_comentario": "Cliente no autoriza"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("presupuesto_rechazado_cobro_neto", str(resp.data).lower())
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT estado, fecha_rechazado, rechazo_comentario FROM quotes WHERE id=%s",
+                [quote_id],
+            )
+            q_estado, q_fecha_rech, q_comentario = cur.fetchone()
+            cur.execute(
+                """
+                SELECT presupuesto_estado, presupuesto_rechazado_cobro_neto, presupuesto_rechazado_quote_id
+                FROM ingresos
+                WHERE id=%s
+                """,
+                [ingreso_id],
+            )
+            ingreso_presu, cobro_neto, linked_quote_id = cur.fetchone()
+
+        self.assertEqual(q_estado, "presupuestado")
+        self.assertIsNone(q_fecha_rech)
+        self.assertIsNone(q_comentario)
+        self.assertEqual(ingreso_presu, "presupuestado")
+        self.assertIsNone(cobro_neto)
+        self.assertIsNone(linked_quote_id)
+
+    def test_crear_nueva_version_copia_items_y_historica_queda_solo_lectura(self):
+        ingreso_id, quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+        reject_resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {
+                "rechazo_comentario": "Falta autorización",
+                "presupuesto_rechazado_cobro_neto": "12800",
+            },
+            format="json",
+        )
+        self.assertEqual(reject_resp.status_code, 200)
+
+        with connection.cursor() as cur:
+            cur.execute("SELECT id FROM quote_items WHERE quote_id=%s ORDER BY id LIMIT 1", [quote_id])
+            old_item_id = int(cur.fetchone()[0])
+
+        resp = self.client.post(self._url_versiones(ingreso_id), {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "pendiente")
+        self.assertEqual(int(resp.data.get("version_num") or 0), 2)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, version_num, origen_quote_id, estado, fecha_emitido, fecha_aprobado, fecha_rechazado,
+                       rechazo_comentario, pdf_url
+                FROM quotes
+                WHERE ingreso_id=%s
+                ORDER BY version_num
+                """,
+                [ingreso_id],
+            )
+            rows = cur.fetchall()
+            self.assertEqual(len(rows), 2)
+            new_quote = rows[1]
+            self.assertEqual(int(new_quote[1]), 2)
+            self.assertEqual(int(new_quote[2]), quote_id)
+            self.assertEqual(new_quote[3], "pendiente")
+            self.assertIsNone(new_quote[4])
+            self.assertIsNone(new_quote[5])
+            self.assertIsNone(new_quote[6])
+            self.assertIsNone(new_quote[7])
+            self.assertIsNone(new_quote[8])
+
+            cur.execute("SELECT COUNT(*) FROM quote_items WHERE quote_id=%s", [quote_id])
+            old_items = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM quote_items WHERE quote_id=%s", [int(new_quote[0])])
+            new_items = int(cur.fetchone()[0])
+
+        self.assertEqual(old_items, new_items)
+
+        detail_resp = self.client.get(self._url_detail(ingreso_id, quote_id=quote_id))
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertFalse(detail_resp.data.get("is_current"))
+        self.assertFalse(detail_resp.data.get("is_editable"))
+
+        patch_resp = self.client.patch(
+            f"/api/quotes/{ingreso_id}/items/{old_item_id}/",
+            {"qty": 3},
+            format="json",
+        )
+        self.assertEqual(patch_resp.status_code, 400)
+

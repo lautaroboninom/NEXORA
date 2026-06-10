@@ -57,6 +57,7 @@ from .ingresos_views import (
     EntregarIngresoView,
     DarBajaIngresoView,
     DarAltaIngresoView,
+    IngresoConvertirPropioMgView,
     IngresoCorreccionesHistoricasView,
     GarantiaReparacionCheckView,
     GarantiaFabricaCheckView,
@@ -86,6 +87,8 @@ from .quotes_views import (
     QuoteItemsView,
     QuoteItemDetailView,
     QuoteResumenView,
+    RechazarPresupuestoView,
+    QuoteVersionesView,
     EmitirPresupuestoView,
     QuotePdfView,
     AprobarPresupuestoView,
@@ -238,6 +241,13 @@ from .bejerman_views import (
     BejermanJobsView,
     BejermanJobRetryView,
     BejermanArticleMappingsView,
+    BejermanArticlesView,
+)
+from .bejerman_ris_views import (
+    IngresoRisStatusView,
+    IngresoRisEmitirView,
+    SerialBarcodePdfView,
+    IngresoBarcodePdfView,
 )
 
 __all__ = [
@@ -279,6 +289,7 @@ __all__ = [
     "EntregarIngresoView",
     "DarBajaIngresoView",
     "DarAltaIngresoView",
+    "IngresoConvertirPropioMgView",
     "IngresoCorreccionesHistoricasView",
     "GarantiaReparacionCheckView",
     "GarantiaFabricaCheckView",
@@ -301,6 +312,8 @@ __all__ = [
     "QuoteItemsView",
     "QuoteItemDetailView",
     "QuoteResumenView",
+    "RechazarPresupuestoView",
+    "QuoteVersionesView",
     "EmitirPresupuestoView",
     "QuotePdfView",
     "AprobarPresupuestoView",
@@ -423,4 +436,9 @@ __all__ = [
     "BejermanJobsView",
     "BejermanJobRetryView",
     "BejermanArticleMappingsView",
+    "BejermanArticlesView",
+    "IngresoRisStatusView",
+    "IngresoRisEmitirView",
+    "SerialBarcodePdfView",
+    "IngresoBarcodePdfView",
 ]

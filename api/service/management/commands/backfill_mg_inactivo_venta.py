@@ -1,5 +1,5 @@
-from django.core.management.base import BaseCommand
-from django.db import connection, transaction
+from django.core.management.base import BaseCommand, CommandError
+from django.db import connection
 
 
 def _fetchall_dicts(cur):
@@ -9,12 +9,11 @@ def _fetchall_dicts(cur):
 
 class Command(BaseCommand):
     help = (
-        "Backfill mg_estado=inactivo_venta por heuristica legacy "
-        "(MG/BIO distinto y no alquilado). Default dry-run; usar --apply para persistir."
+        "Lista candidatos legacy para revisión manual. No marca ventas por heurística."
     )
 
     def add_arguments(self, parser):
-        parser.add_argument("--apply", action="store_true", help="Aplica cambios (sin este flag solo informa candidatos).")
+        parser.add_argument("--apply", action="store_true", help="Obsoleto: no aplica cambios; falla para evitar falsos positivos.")
         parser.add_argument("--limit", type=int, default=0, help="Limita cantidad de candidatos procesados/listados.")
 
     def handle(self, *args, **opts):
@@ -98,38 +97,10 @@ class Command(BaseCommand):
             self.stdout.write(f"... y {total - len(preview)} más.")
 
         if not apply_changes:
-            self.stdout.write("Dry-run finalizado. Ejecuta con --apply para persistir.")
+            self.stdout.write("Dry-run finalizado. Revisá cada caso y registrá la venta desde el flujo explícito si corresponde.")
             return
 
-        obs = (
-            "Backfill automático: marcado como MG histórico inactivo por venta "
-            "usando heurística (cliente distinto de MG/BIO y no alquilado)."
+        raise CommandError(
+            "No se puede marcar venta MG por heurística. "
+            "Registrá la venta desde el flujo explícito con comprobante o corregí el equipo manualmente."
         )
-        applied = 0
-        with transaction.atomic():
-            with connection.cursor() as cur:
-                for row in candidates:
-                    cur.execute(
-                        """
-                        UPDATE devices
-                           SET mg_estado = 'inactivo_venta',
-                               mg_inactivo_desde = COALESCE(mg_inactivo_desde, CURRENT_TIMESTAMP),
-                               mg_venta_fecha = COALESCE(mg_venta_fecha, CURRENT_TIMESTAMP),
-                               mg_venta_observaciones = COALESCE(NULLIF(mg_venta_observaciones,''), %s)
-                         WHERE id = %s
-                        """,
-                        [obs, row["id"]],
-                    )
-                    cur.execute(
-                        """
-                        INSERT INTO device_mg_events(
-                          device_id, accion, numero_interno_snapshot, fecha_evento,
-                          observaciones, usuario_id, ingreso_id, source
-                        )
-                        VALUES (%s, 'venta', NULLIF(%s,''), CURRENT_TIMESTAMP, %s, NULL, NULL, 'equipos')
-                        """,
-                        [row["id"], row["numero_interno"] or "", obs],
-                    )
-                    applied += 1
-
-        self.stdout.write(f"Backfill aplicado. Equipos actualizados: {applied}.")

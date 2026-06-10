@@ -23,26 +23,23 @@ def is_mg_owner_device(numero_interno: str, numero_serie: str = "") -> bool:
 def resolve_mg_flags(device: dict, mg_owner_id=None) -> dict:
     numero_interno = (device or {}).get("numero_interno") or ""
     numero_serie = (device or {}).get("numero_serie") or ""
-    es_propietario_mg = is_mg_owner_device(numero_interno, numero_serie)
+    tiene_codigo_mg = is_mg_owner_device(numero_interno, numero_serie)
+    customer_id = (device or {}).get("customer_id")
+    es_propietario_mg = False
+    try:
+        if customer_id is not None and mg_owner_id is not None:
+            es_propietario_mg = int(customer_id) == int(mg_owner_id)
+    except Exception:
+        es_propietario_mg = False
 
     explicit = str((device or {}).get("mg_estado") or "").strip().lower()
     if explicit not in ("activo", "inactivo_venta"):
         explicit = "activo"
-        if (
-            es_propietario_mg
-            and not bool((device or {}).get("alquilado"))
-            and (device or {}).get("customer_id")
-        ):
-            try:
-                customer_id = int((device or {}).get("customer_id"))
-                if mg_owner_id is None or customer_id != int(mg_owner_id):
-                    explicit = "inactivo_venta"
-            except Exception:
-                pass
 
     mg_inactivo_venta = explicit == "inactivo_venta"
     return {
         "es_propietario_mg": bool(es_propietario_mg),
+        "tiene_codigo_mg": bool(tiene_codigo_mg),
         "mg_estado": explicit,
         "mg_activo": not mg_inactivo_venta,
         "mg_inactivo_venta": mg_inactivo_venta,
