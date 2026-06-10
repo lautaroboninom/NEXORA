@@ -81,7 +81,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   ]);
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
 
-  const showRecepcion = canRecepcion || canCreateIngreso || canLiberados;
+  const showRecepcion = canRecepcion || canCreateIngreso;
   const showServicioTecnico = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
   const showAdministracion = canHistory || canDevices || canDeliveryOrders || canCreateIngreso || canHome;
   const showCobranzas = canBilling;
@@ -131,11 +131,6 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   Panel de recepción
                 </LinkItem>
               )}
-              {canLiberados && (
-                <LinkItem to="/listos" {...linkProps}>
-                  Equipos pendientes
-                </LinkItem>
-              )}
               {canDeliveryOrders && (
                 <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
                   Órdenes de entrega
@@ -180,6 +175,11 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                     Reparados
                   </LinkItem>
                 </>
+              )}
+              {canLiberados && (
+                <LinkItem to="/listos" {...linkProps}>
+                  Liberados
+                </LinkItem>
               )}
               {canLogistics && (
                 <>

@@ -85,7 +85,7 @@ DASHBOARD_ALERTS = {
         "preventivo_proximo",
     },
     "tecnico": {"wip_critico", "derivado_sin_devolucion"},
-    "recepcion": {"liberado_sin_entregar"},
+    "recepcion": set(),
     "cobranzas": set(),
     "admin": {
         "liberado_sin_entregar",
@@ -107,7 +107,6 @@ DASHBOARD_KPIS = {
     ),
     "tecnico": ("en_taller", "wip_critico", "derivados_en_espera"),
     "recepcion": (
-        "liberados_en_espera",
         "pedidos_pendientes_armado",
         "pedidos_listos_entrega",
         "remitos_pendientes_facturacion",

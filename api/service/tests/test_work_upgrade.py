@@ -596,7 +596,7 @@ class WorkUpgradeAPITest(TestCase):
         self.assertNotIn(self.otro_ingreso_id, prioridad_ids)
         self.assertNotIn(self.liberado_ingreso_id, prioridad_ids)
 
-    def test_dashboard_recepcion_muestra_liberados_y_pedidos_activos(self):
+    def test_dashboard_recepcion_muestra_pedidos_activos_sin_liberados(self):
         self.client.force_authenticate(user=self.recepcion)
         resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")
         self.assertEqual(resp.status_code, 200)
@@ -604,18 +604,15 @@ class WorkUpgradeAPITest(TestCase):
         self.assertEqual(
             {row["key"] for row in resp.data["kpis"]},
             {
-                "liberados_en_espera",
                 "pedidos_pendientes_armado",
                 "pedidos_listos_entrega",
                 "remitos_pendientes_facturacion",
             },
         )
-        self.assertEqual({row["key"] for row in resp.data["alerts"]}, {"liberado_sin_entregar"})
+        self.assertEqual(resp.data["alerts"], [])
         self.assertEqual(resp.data["objetivos"], [])
         self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
-        self.assertTrue(resp.data["prioridades"])
-        for row in resp.data["prioridades"]:
-            self.assertEqual(row.get("alert_key"), "liberado_sin_entregar")
+        self.assertEqual(resp.data["prioridades"], [])
 
     def test_dashboard_admin_muestra_logistica_y_preventivos(self):
         self.client.force_authenticate(user=self.admin)

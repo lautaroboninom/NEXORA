@@ -693,7 +693,7 @@ function TecnicoDashboard(props) {
   );
 }
 
-function RecepcionDashboard({ summary, loading, priorities, onOpen }) {
+function RecepcionDashboard({ summary, loading }) {
   return (
     <div className="space-y-5">
       <KpiGrid items={summary?.kpis} loading={loading && !summary} />
@@ -705,15 +705,6 @@ function RecepcionDashboard({ summary, loading, priorities, onOpen }) {
             title="Pedidos y remitos"
             subtitle="Pedidos activos, entregas y remitos para ubicar."
             emptyText="No hay pedidos activos."
-          />
-          <PrioritiesSection
-            title="Liberados en espera"
-            subtitle="Equipos listos para coordinar entrega."
-            rows={priorities}
-            loading={loading && !summary}
-            emptyText="No hay equipos liberados en espera."
-            onOpen={onOpen}
-            action={{ label: "Ver listos", href: "/listos" }}
           />
         </main>
         <aside className="space-y-5">
@@ -913,7 +904,7 @@ export default function WorkDashboard() {
     },
     recepcion: {
       title: "Recepción",
-      subtitle: "Ingresos, liberados, pedidos y remitos activos.",
+      subtitle: "Ingresos, pedidos y remitos activos.",
       showPeriod: false,
     },
     admin: {

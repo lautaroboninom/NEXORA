@@ -196,7 +196,6 @@ _grant(
 # recepcion
 _grant(
     "recepcion",
-    "page.liberados",
     "page.new_ingreso",
     "page.recepcion",
     "page.delivery_orders",

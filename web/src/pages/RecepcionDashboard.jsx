@@ -78,9 +78,6 @@ export default function RecepcionDashboard() {
           <Link to="/ingresos/nuevo" className="rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700">
             Nuevo ingreso
           </Link>
-          <Link to="/listos" className="rounded border px-3 py-2 text-sm hover:bg-gray-50">
-            Equipos pendientes
-          </Link>
           <Link to="/administracion/ordenes-entrega" className="rounded border px-3 py-2 text-sm hover:bg-gray-50">
             Órdenes de entrega
           </Link>

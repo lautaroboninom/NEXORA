@@ -17,6 +17,7 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         self.assertTrue(permissions["page.delivery_orders"])
         self.assertTrue(permissions["action.ingreso.create"])
         self.assertTrue(permissions["action.delivery_order.update_remito_location"])
+        self.assertFalse(permissions["page.liberados"])
         self.assertFalse(permissions["page.billing"])
         self.assertFalse(permissions["action.delivery_order.invoice"])
 

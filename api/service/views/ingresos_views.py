@@ -456,6 +456,10 @@ def _ingreso_event_date_hitos(ingreso_id: int) -> dict:
             one=True,
         ) or {}
     except Exception:
+        try:
+            transaction.set_rollback(False)
+        except Exception:
+            pass
         return {}
 
 
@@ -5077,7 +5081,11 @@ class IngresoDetalleView(APIView):
             "action.ingreso.baja_alta",
             "action.presupuesto.manage",
         ]
-        if user_has_permission(request, "page.liberados") and not user_has_any_permission(request, broad_detail_permissions):
+        has_broad_detail = user_has_any_permission(request, broad_detail_permissions)
+        has_liberados_detail = user_has_permission(request, "page.liberados")
+        if not has_broad_detail and not has_liberados_detail:
+            raise PermissionDenied("No autorizado")
+        if has_liberados_detail and not has_broad_detail:
             estado_row = q("SELECT estado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
             if not estado_row:
                 return Response({"detail": "Ingreso no encontrado"}, status=404)

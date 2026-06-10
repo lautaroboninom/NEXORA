@@ -4,6 +4,7 @@ from rest_framework.test import APIClient
 
 from service.auth import issue_token
 from service.models import User
+from service.permissions import resolve_effective_permissions
 
 
 class RecepcionPermissionsAPITest(TestCase):
@@ -19,16 +20,19 @@ class RecepcionPermissionsAPITest(TestCase):
             auto_inc = "INTEGER PRIMARY KEY AUTOINCREMENT"
             bool_type = "INTEGER"
             bool_default = "1"
+            bool_false = "0"
             datetime_type = "DATETIME"
         elif vendor == "postgresql":
             auto_inc = "BIGSERIAL PRIMARY KEY"
             bool_type = "BOOLEAN"
             bool_default = "TRUE"
+            bool_false = "FALSE"
             datetime_type = "TIMESTAMPTZ"
         else:
             auto_inc = "INT AUTO_INCREMENT PRIMARY KEY"
             bool_type = "BOOLEAN"
             bool_default = "1"
+            bool_false = "0"
             datetime_type = "DATETIME"
         engine_suffix = " ENGINE=InnoDB" if vendor == "mysql" else ""
 
@@ -124,16 +128,17 @@ class RecepcionPermissionsAPITest(TestCase):
                     presupuesto_estado TEXT,
                     resolucion TEXT,
                     fecha_ingreso {datetime_type} DEFAULT CURRENT_TIMESTAMP,
+                    fecha_creacion {datetime_type} DEFAULT CURRENT_TIMESTAMP,
                     fecha_servicio {datetime_type} NULL,
-                    garantia_reparacion {bool_type} DEFAULT 0,
-                    garantia_fabrica {bool_type} DEFAULT 0,
+                    garantia_reparacion {bool_type} DEFAULT {bool_false},
+                    garantia_fabrica {bool_type} DEFAULT {bool_false},
                     etiq_garantia_ok {bool_type} DEFAULT {bool_default},
                     faja_garantia TEXT,
                     remito_ingreso TEXT,
                     remito_salida TEXT,
                     factura_numero TEXT,
                     fecha_entrega {datetime_type} NULL,
-                    alquilado {bool_type} DEFAULT 0,
+                    alquilado {bool_type} DEFAULT {bool_false},
                     alquiler_a TEXT,
                     alquiler_remito TEXT,
                     alquiler_fecha DATE NULL,
@@ -163,6 +168,7 @@ class RecepcionPermissionsAPITest(TestCase):
                     "ADD COLUMN IF NOT EXISTS presupuesto_estado TEXT",
                     "ADD COLUMN IF NOT EXISTS resolucion TEXT",
                     "ADD COLUMN IF NOT EXISTS fecha_ingreso TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
+                    "ADD COLUMN IF NOT EXISTS fecha_creacion TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
                     "ADD COLUMN IF NOT EXISTS fecha_servicio TIMESTAMPTZ NULL",
                     "ADD COLUMN IF NOT EXISTS garantia_reparacion BOOLEAN DEFAULT FALSE",
                     "ADD COLUMN IF NOT EXISTS garantia_fabrica BOOLEAN DEFAULT FALSE",
@@ -318,11 +324,11 @@ class RecepcionPermissionsAPITest(TestCase):
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.recepcion_token}")
         return client
 
-    def test_recepcion_can_view_liberados_only_from_logistics(self):
+    def test_recepcion_does_not_view_legacy_liberados_page(self):
         client = self._client()
 
         listos_resp = client.get("/api/listos-para-retiro/")
-        self.assertEqual(listos_resp.status_code, 200)
+        self.assertEqual(listos_resp.status_code, 403)
 
         derivados_resp = client.get("/api/ingresos/derivados/")
         self.assertEqual(derivados_resp.status_code, 403)
@@ -344,7 +350,7 @@ class RecepcionPermissionsAPITest(TestCase):
         resp = self._client().get("/api/ingresos/2/")
         self.assertEqual(resp.status_code, 403)
 
-    def test_service_sheet_principal_allows_non_liberado_detail(self):
+    def test_service_sheet_principal_override_grants_detail_permission(self):
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -354,7 +360,7 @@ class RecepcionPermissionsAPITest(TestCase):
                 [self.recepcion_user.id],
             )
 
-        resp = self._client().get("/api/ingresos/2/")
+        permissions = resolve_effective_permissions(user_id=self.recepcion_user.id, role=self.recepcion_user.rol)
 
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["id"], 2)
+        self.assertTrue(permissions["page.service_sheet_principal"])
+        self.assertFalse(permissions["page.liberados"])
