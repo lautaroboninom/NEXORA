@@ -72,7 +72,7 @@ export default function RecepcionDashboard() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Recepción</h1>
-          <p className="text-sm text-gray-600">Ingresos, equipos pendientes y remitos.</p>
+          <p className="text-sm text-gray-600">Ingresos, órdenes de entrega y remitos.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link to="/ingresos/nuevo" className="rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700">
