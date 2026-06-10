@@ -249,6 +249,22 @@ from .bejerman_ris_views import (
     SerialBarcodePdfView,
     IngresoBarcodePdfView,
 )
+from .delivery_orders_views import (
+    DeliveryOrdersView,
+    DeliveryOrderDetailView,
+    DeliveryOrderPreparedView,
+    DeliveryOrderDeliveredView,
+    DeliveryOrderInvoicedView,
+    DeliveryOrderCancelView,
+    DeliveryOrderRemitoLocationView,
+    DeliveryOrderItemArticleView,
+    DeliveryOrderItemPartidasView,
+    DeliveryOrderBejermanRemitoView,
+    DeliveryOrderBejermanRemitoPdfView,
+    FacturacionCompanyOptionsView,
+    FacturacionClienteDocumentosView,
+    FacturacionDocumentoPdfView,
+)
 
 __all__ = [
     # auth
@@ -441,4 +457,19 @@ __all__ = [
     "IngresoRisEmitirView",
     "SerialBarcodePdfView",
     "IngresoBarcodePdfView",
+    # NEXORA delivery orders / billing
+    "DeliveryOrdersView",
+    "DeliveryOrderDetailView",
+    "DeliveryOrderPreparedView",
+    "DeliveryOrderDeliveredView",
+    "DeliveryOrderInvoicedView",
+    "DeliveryOrderCancelView",
+    "DeliveryOrderRemitoLocationView",
+    "DeliveryOrderItemArticleView",
+    "DeliveryOrderItemPartidasView",
+    "DeliveryOrderBejermanRemitoView",
+    "DeliveryOrderBejermanRemitoPdfView",
+    "FacturacionCompanyOptionsView",
+    "FacturacionClienteDocumentosView",
+    "FacturacionDocumentoPdfView",
 ]

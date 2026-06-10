@@ -7,7 +7,7 @@ ROLE_CHOICES = [
     ("jefe", "Jefe"),
     ("jefe_veedor", "Jefe veedor"),
     ("recepcion", "Recepción"),
+    ("cobranzas", "Cobranzas"),
 ]
 
 ROLE_KEYS = [r for r, _ in ROLE_CHOICES]
-

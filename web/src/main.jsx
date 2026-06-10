@@ -45,6 +45,9 @@ import Garantias from "./pages/Garantias.jsx";
 import Equipos from "./pages/Equipos.jsx";
 import ProtocolosTest from "./pages/ProtocolosTest.jsx";
 import BejermanSync from "./pages/BejermanSync.jsx";
+import RecepcionDashboard from "./pages/RecepcionDashboard.jsx";
+import DeliveryOrders from "./pages/DeliveryOrders.jsx";
+import Billing from "./pages/Billing.jsx";
 import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
 
 function NotFound() {
@@ -53,10 +56,21 @@ function NotFound() {
 
 function IndexRoute() {
   const { user } = useAuth();
+  const role = (user?.rol || "").toString().trim().toLowerCase();
+  if (role === "recepcion" && can(user, PERMISSION_CODES.PAGE_RECEPCION)) {
+    return <Navigate to="/recepcion" replace />;
+  }
+  if (role === "cobranzas" && can(user, PERMISSION_CODES.PAGE_BILLING)) {
+    return <Navigate to="/cobranzas/facturacion" replace />;
+  }
+  if (role === "admin" && can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS)) {
+    return <Navigate to="/administracion/ordenes-entrega" replace />;
+  }
   if (can(user, PERMISSION_CODES.PAGE_HOME_SEARCH)) return <WorkDashboard />;
   if (canAny(user, [PERMISSION_CODES.ACTION_INGRESO_CREATE, PERMISSION_CODES.PAGE_NEW_INGRESO])) {
     return <Navigate to="/ingresos/nuevo" replace />;
   }
+  if (can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS)) return <Navigate to="/administracion/ordenes-entrega" replace />;
   if (can(user, PERMISSION_CODES.PAGE_LIBERADOS)) return <Navigate to="/listos" replace />;
   return <Forbidden />;
 }
@@ -76,12 +90,47 @@ const router = createBrowserRouter([
           <ProtectedRoute
             permissions={[
               PERMISSION_CODES.PAGE_HOME_SEARCH,
+              PERMISSION_CODES.PAGE_RECEPCION,
+              PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
+              PERMISSION_CODES.PAGE_BILLING,
               PERMISSION_CODES.ACTION_INGRESO_CREATE,
               PERMISSION_CODES.PAGE_NEW_INGRESO,
               PERMISSION_CODES.PAGE_LIBERADOS,
             ]}
           >
             <IndexRoute />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "recepcion",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_RECEPCION}>
+            <RecepcionDashboard />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "administracion/ordenes-entrega",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_DELIVERY_ORDERS}>
+            <DeliveryOrders />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "ordenes-entrega",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_DELIVERY_ORDERS}>
+            <DeliveryOrders />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "cobranzas/facturacion",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_BILLING}>
+            <Billing />
           </ProtectedRoute>
         ),
       },

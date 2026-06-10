@@ -19,6 +19,9 @@ PERMISSION_CATALOG = [
     {"code": "page.warranty", "label": "Ver garantias", "type": "page", "group": "Paginas"},
     {"code": "page.users", "label": "Ver usuarios", "type": "page", "group": "Paginas"},
     {"code": "page.bejerman_sync", "label": "Ver sincronización Bejerman", "type": "page", "group": "Paginas"},
+    {"code": "page.recepcion", "label": "Ver espacio de Recepción", "type": "page", "group": "NEXORA"},
+    {"code": "page.delivery_orders", "label": "Ver órdenes de entrega", "type": "page", "group": "NEXORA"},
+    {"code": "page.billing", "label": "Ver facturación y remitos pendientes", "type": "page", "group": "NEXORA"},
     {"code": "action.ingreso.create", "label": "Ingresar equipo (crear ingreso)", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.edit_basics", "label": "Editar datos de ingreso", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.edit_diagnosis", "label": "Editar diagnostico/trabajos", "type": "action", "group": "Ingresos"},
@@ -43,6 +46,15 @@ PERMISSION_CATALOG = [
     {"code": "action.devices_preventivos.manage", "label": "Gestionar edicion de equipos/preventivos", "type": "action", "group": "Equipos"},
     {"code": "action.metrics.configure", "label": "Configurar metricas", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_sync.manage", "label": "Gestionar sincronización Bejerman", "type": "action", "group": "Sistema"},
+    {"code": "action.delivery_order.create", "label": "Crear órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.prepare", "label": "Preparar órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.deliver", "label": "Entregar órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.invoice", "label": "Registrar facturas de órdenes de entrega", "type": "action", "group": "Cobranzas"},
+    {"code": "action.delivery_order.cancel", "label": "Cancelar órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.update_remito_location", "label": "Actualizar ubicación de remitos", "type": "action", "group": "Cobranzas"},
+    {"code": "action.delivery_order.generate_bejerman_remito", "label": "Generar remitos Bejerman", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.assign_articles", "label": "Asignar artículos y partidas", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.billing.view", "label": "Consultar facturación Bejerman", "type": "action", "group": "Cobranzas"},
 ]
 
 
@@ -60,6 +72,7 @@ ROLE_DEFAULTS = {
     "jefe": {code: True for code in PERMISSION_CODES},
     "jefe_veedor": _empty_role_defaults(),
     "recepcion": _empty_role_defaults(),
+    "cobranzas": _empty_role_defaults(),
 }
 
 
@@ -80,6 +93,7 @@ _grant(
     "page.service_sheet_principal",
     "page.devices_preventivos",
     "page.spare_parts",
+    "page.delivery_orders",
     "action.ingreso.edit_diagnosis",
     "action.ingreso.edit_location",
     "action.ingreso.repair_transitions",
@@ -87,6 +101,7 @@ _grant(
     "action.ingreso.print_barcode",
     "action.spare_parts.manage",
     "action.devices_preventivos.manage",
+    "action.delivery_order.assign_articles",
 )
 
 # admin
@@ -102,6 +117,8 @@ _grant(
     "page.catalogs",
     "page.spare_parts",
     "page.warranty",
+    "page.recepcion",
+    "page.delivery_orders",
     "action.ingreso.create",
     "action.ingreso.edit_basics",
     "action.ingreso.edit_diagnosis",
@@ -119,6 +136,13 @@ _grant(
     "action.tests_protocol.manage",
     "action.devices_preventivos.manage",
     "action.bejerman_sync.manage",
+    "action.delivery_order.create",
+    "action.delivery_order.prepare",
+    "action.delivery_order.deliver",
+    "action.delivery_order.cancel",
+    "action.delivery_order.update_remito_location",
+    "action.delivery_order.generate_bejerman_remito",
+    "action.delivery_order.assign_articles",
 )
 
 # jefe_veedor
@@ -138,6 +162,9 @@ _grant(
     "page.metrics",
     "page.warranty",
     "page.users",
+    "page.recepcion",
+    "page.delivery_orders",
+    "page.billing",
     "action.ingreso.create",
     "action.ingreso.edit_basics",
     "action.ingreso.edit_diagnosis",
@@ -157,6 +184,15 @@ _grant(
     "action.spare_parts.manage_24h_permissions",
     "action.devices_preventivos.manage",
     "action.bejerman_sync.manage",
+    "action.delivery_order.create",
+    "action.delivery_order.prepare",
+    "action.delivery_order.deliver",
+    "action.delivery_order.invoice",
+    "action.delivery_order.cancel",
+    "action.delivery_order.update_remito_location",
+    "action.delivery_order.generate_bejerman_remito",
+    "action.delivery_order.assign_articles",
+    "action.billing.view",
 )
 
 # recepcion
@@ -164,9 +200,22 @@ _grant(
     "recepcion",
     "page.liberados",
     "page.new_ingreso",
+    "page.recepcion",
+    "page.delivery_orders",
     "action.ingreso.create",
     "action.ingreso.emit_ingress_order",
     "action.ingreso.print_barcode",
+    "action.delivery_order.update_remito_location",
+)
+
+# cobranzas
+_grant(
+    "cobranzas",
+    "page.delivery_orders",
+    "page.billing",
+    "action.delivery_order.invoice",
+    "action.delivery_order.update_remito_location",
+    "action.billing.view",
 )
 
 

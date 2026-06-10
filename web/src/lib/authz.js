@@ -6,6 +6,7 @@ export const ROLES = {
   JEFE_VEEDOR: "jefe_veedor",
   ADMIN: "admin",
   RECEPCION: "recepcion",
+  COBRANZAS: "cobranzas",
   TECNICO: "tecnico",
 };
 
@@ -25,4 +26,5 @@ export const isJefe = (u) => normalizeRole(u?.rol) === ROLES.JEFE;
 export const isJefeVeedor = (u) => normalizeRole(u?.rol) === ROLES.JEFE_VEEDOR;
 export const isAdmin = (u) => normalizeRole(u?.rol) === ROLES.ADMIN;
 export const isRecepcion = (u) => normalizeRole(u?.rol) === ROLES.RECEPCION;
+export const isCobranzas = (u) => normalizeRole(u?.rol) === ROLES.COBRANZAS;
 export const isTecnico = (u) => normalizeRole(u?.rol) === ROLES.TECNICO;

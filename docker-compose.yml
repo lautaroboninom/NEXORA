@@ -1,4 +1,4 @@
-﻿name: sistemadereparaciones-dev
+name: nexora-dev
 
 services:
   postgres:
@@ -33,7 +33,6 @@ services:
     ports:
       - "18100:8000"
     volumes:
-      # Montar sólo directorio de presupuestos; evitar bind del código en Windows (paths con acentos)
       - type: bind
         source: ${QUOTES_HOST_DIR:-./quotes}
         target: /quotes
@@ -47,6 +46,7 @@ services:
         echo 'Waiting for database... retrying in 2s';
         sleep 2;
       done &&
+      python manage.py apply_delivery_orders_schema &&
       python manage.py seed_dev_minimo &&
       gunicorn app.wsgi:application --bind 0.0.0.0:8000 --workers 2
       "
@@ -61,10 +61,6 @@ services:
     depends_on:
       api:
         condition: service_started
+
 volumes:
   pg_data:
-
-
-
-
-

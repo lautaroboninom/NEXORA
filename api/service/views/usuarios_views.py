@@ -49,6 +49,7 @@ class UsuariosView(APIView):
                   u.email,
                   u.rol,
                   u.activo,
+                  u.bejerman_seller_code,
                   COALESCE(up.cnt, 0) AS permisos_personalizados
                 FROM users u
                 LEFT JOIN (
@@ -79,6 +80,7 @@ class UsuariosView(APIView):
         email = (data.get("email") or "").strip().lower()
         rol_raw = (data.get("rol") or "tecnico")
         rol = rol_raw.strip().lower().replace(" ", "_").replace("-", "_")
+        bejerman_seller_code = (data.get("bejerman_seller_code") or data.get("bejermanSellerCode") or "").strip().upper()
 
         if not nombre or not email:
             raise ValidationError("Nombre y email son requeridos")
@@ -97,6 +99,13 @@ class UsuariosView(APIView):
             """,
             {"n": nombre, "e": email, "r": rol},
         )
+        try:
+            q(
+                "UPDATE users SET bejerman_seller_code = %s WHERE email = %s",
+                [bejerman_seller_code or None, email],
+            )
+        except Exception:
+            pass
 
         if not existed:
             try:
@@ -116,17 +125,17 @@ class UsuariosView(APIView):
                     )
                     base = getattr(settings, "PUBLIC_WEB_URL", None) or getattr(settings, "FRONTEND_ORIGIN", "http://localhost:5173")
                     url = f"{(base or '').rstrip('/')}/restablecer?t={token}"
-                    subj = "Bienvenido a SEPID - Configura tu contraseña"
+                    subj = "Bienvenido a NEXORA - Configurá tu contraseña"
                     txt = (
                         f"Hola {user['nombre']},\n\n"
-                        f"Te damos la bienvenida al sistema de reparaciones de SEPID. "
-                        f"Usa este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+                        f"Te damos la bienvenida a NEXORA. "
+                        f"Usá este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
                         f"Si no esperabas este correo, ignoralo."
                     )
                     html = f"""
                         <p>Hola {user['nombre']},</p>
-                        <p>Bienvenido al sistema de reparaciones de <strong>SEPID</strong>.</p>
-                        <p>Usa este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):</p>
+                        <p>Bienvenido a <strong>NEXORA</strong>.</p>
+                        <p>Usá este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):</p>
                         <p><a href="{url}">{url}</a></p>
                         <p>Si no esperabas este correo, ignoralo.</p>
                     """
@@ -177,17 +186,17 @@ class UsuarioResetPassView(APIView):
         )
         base = getattr(settings, "PUBLIC_WEB_URL", None) or getattr(settings, "FRONTEND_ORIGIN", "http://localhost:5173")
         url = f"{(base or '').rstrip('/')}/restablecer?t={token}"
-        subj = "SEPID - Enlace para establecer tu contraseña"
+        subj = "NEXORA - Enlace para establecer tu contraseña"
         txt = (
             f"Hola {user['nombre']},\n\n"
             f"Solicitaron un enlace para establecer o restablecer tu contraseña. "
-            f"Usa este enlace (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+            f"Usá este enlace (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
             f"Si no fuiste vos, ignora este correo."
         )
         html = f"""
             <p>Hola {user['nombre']},</p>
             <p>Solicitaron un enlace para establecer o restablecer tu contraseña.</p>
-            <p>Usa este enlace (válido {TOKEN_TTL_MIN} minutos):</p>
+            <p>Usá este enlace (válido {TOKEN_TTL_MIN} minutos):</p>
             <p><a href="{url}">{url}</a></p>
             <p>Si no fuiste vos, ignora este correo.</p>
         """

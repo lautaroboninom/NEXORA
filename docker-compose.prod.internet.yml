@@ -1,7 +1,7 @@
 ﻿version: "3.9"
 
 
-name: sistemadereparaciones
+name: nexora
 services:
   reverse-proxy:
     image: traefik:v3.0
@@ -37,7 +37,7 @@ services:
 
   postgres:
     image: postgres:16
-    container_name: sistemadereparaciones-postgres
+    container_name: nexora-postgres
     env_file: .env.prod.internet
     volumes:
       - pg_data:/var/lib/postgresql/data
@@ -55,7 +55,7 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile.prod
-    container_name: sistemadereparaciones-api
+    container_name: nexora-api
     env_file: .env.prod.internet
     environment:
       - DJANGO_SETTINGS_MODULE=app.settings_internet
@@ -65,6 +65,7 @@ services:
         condition: service_healthy
     command: >
       bash -lc "python manage.py migrate --noinput && \
+      python manage.py apply_delivery_orders_schema && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:
       - staticfiles:/app/staticfiles
@@ -95,7 +96,7 @@ services:
       dockerfile: Dockerfile.prod
       args:
         - VITE_API_URL=
-    container_name: sistemadereparaciones-web
+    container_name: nexora-web
     environment:
       - TZ=${TZ:-America/Argentina/Buenos_Aires}
     depends_on:
@@ -120,7 +121,7 @@ networks:
     name: traefik-proxy
     driver: bridge
   backend:
-    name: backend
+    name: nexora-backend
     driver: bridge
     internal: true
 

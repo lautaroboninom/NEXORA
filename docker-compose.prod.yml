@@ -1,9 +1,9 @@
-name: sistemadereparaciones
+name: nexora
 
 services:
   postgres:
     image: postgres:16
-    container_name: sistemadereparaciones-postgres
+    container_name: nexora-postgres
     env_file: .env.prod
     ports:
       - "5432:5432"
@@ -21,7 +21,7 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile.prod
-    container_name: sistemadereparaciones-api
+    container_name: nexora-api
     env_file: .env.prod
     environment:
       - DJANGO_SETTINGS_MODULE=app.settings_prod
@@ -31,6 +31,7 @@ services:
         condition: service_healthy
     command: >
       bash -lc "python manage.py migrate --noinput && \
+      python manage.py apply_delivery_orders_schema && \
       python manage.py collectstatic --noinput && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:
@@ -53,7 +54,7 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile.prod
-    container_name: sistemadereparaciones-bejerman-sync
+    container_name: nexora-bejerman-sync
     env_file: .env.prod
     environment:
       - DJANGO_SETTINGS_MODULE=app.settings_prod
@@ -78,7 +79,7 @@ services:
         - VITE_API_URL=
         - VITE_SOURCEMAP=${VITE_SOURCEMAP:-1}
         - VITE_SW=${VITE_SW:-0}
-    container_name: sistemadereparaciones-web
+    container_name: nexora-web
     command: ["/usr/local/bin/start-nginx.sh"]
     environment:
       - TZ=${TZ:-America/Argentina/Buenos_Aires}

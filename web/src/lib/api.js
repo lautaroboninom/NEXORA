@@ -648,6 +648,64 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postBejermanArticleMapping = (payload) =>
     api.post("/api/bejerman/article-mappings/", payload);
 
+  /* =============== NEXORA: ÓRDENES Y COBRANZAS =============== */
+  export const getDeliveryOrders = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/ordenes-entrega/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getDeliveryOrder = (orderId) =>
+    api.get(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/`);
+
+  export const postDeliveryOrder = (payload) =>
+    api.post("/api/ordenes-entrega/", payload);
+
+  export const postDeliveryOrderPrepared = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/preparar/`, payload);
+
+  export const postDeliveryOrderDelivered = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/entregar/`, payload);
+
+  export const postDeliveryOrderInvoiced = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/facturar/`, payload);
+
+  export const postDeliveryOrderCancel = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/cancelar/`, payload);
+
+  export const patchDeliveryOrderRemitoLocation = (orderId, payload = {}) =>
+    api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/remito-ubicacion/`, payload);
+
+  export const patchDeliveryOrderItemArticle = (orderId, itemId, payload = {}) =>
+    api.patch(
+      `/api/ordenes-entrega/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/articulo/`,
+      payload
+    );
+
+  export const patchDeliveryOrderItemPartidas = (orderId, itemId, partidas = []) =>
+    api.patch(
+      `/api/ordenes-entrega/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/partidas/`,
+      { partidas }
+    );
+
+  export const postDeliveryOrderBejermanRemito = (payload = {}) =>
+    api.post("/api/ordenes-entrega/remito-bejerman/", payload);
+
+  export const getDeliveryOrderRemitoPdfBlob = (groupId) =>
+    getBlob(`/api/ordenes-entrega/remito-bejerman/${encodeURIComponent(groupId)}/pdf/`);
+
+  export const getBillingCustomers = () =>
+    api.get("/api/cobranzas/facturacion/clientes/");
+
+  export const getBillingDocuments = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/cobranzas/facturacion/documentos/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getBillingDocumentPdfBlob = (documentId, customerCode) => {
+    const qs = buildQuery({ customerCode });
+    return getBlob(`/api/cobranzas/facturacion/documentos/${encodeURIComponent(documentId)}/pdf/${qs ? `?${qs}` : ""}`);
+  };
+
   export const getHistoricoIngresos = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/ingresos/${qs ? `?${qs}` : ""}`);

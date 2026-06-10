@@ -16,6 +16,9 @@ export default function App() {
 
   const canSeeHistorico = can(user, PERMISSION_CODES.PAGE_INGRESOS_HISTORY);
   const canSeeEquipos = can(user, PERMISSION_CODES.PAGE_DEVICES_PREVENTIVOS);
+  const canSeeRecepcion = can(user, PERMISSION_CODES.PAGE_RECEPCION);
+  const canSeeDeliveryOrders = can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS);
+  const canSeeBilling = can(user, PERMISSION_CODES.PAGE_BILLING);
   const canCreateIngreso = canAny(user, [
     PERMISSION_CODES.ACTION_INGRESO_CREATE,
     PERMISSION_CODES.PAGE_NEW_INGRESO,
@@ -68,10 +71,25 @@ export default function App() {
           </button>
 
           <Link to="/" className="font-semibold">
-            SEPID Reparaciones
+            NEXORA
           </Link>
 
           <nav className="hidden md:flex items-center gap-6 ml-6">
+            {canSeeRecepcion && (
+              <Link to="/recepcion" className="hover:underline">
+                Recepción
+              </Link>
+            )}
+            {canSeeDeliveryOrders && (
+              <Link to="/administracion/ordenes-entrega" className="hover:underline">
+                Órdenes
+              </Link>
+            )}
+            {canSeeBilling && (
+              <Link to="/cobranzas/facturacion" className="hover:underline">
+                Cobranzas
+              </Link>
+            )}
             {canSeeHistorico && (
               <Link to="/clientes" className="hover:underline">
                 General por cliente

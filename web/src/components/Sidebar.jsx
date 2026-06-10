@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { can, PERMISSION_CODES } from "../lib/permissions";
+import { can, canAny, PERMISSION_CODES } from "../lib/permissions";
 import { canActAsTech } from "../lib/authz";
 
 const VARIANT_BORDER = {
@@ -25,8 +25,9 @@ function variantOfPath(to) {
   if (p === "/reparados") return "lime";
   if (p === "/listos") return "green";
   if (p === "/alquiler/stock") return "indigo";
-  if (p === "/depositos") return null;
-  if (p === "/bejerman") return null;
+  if (p === "/recepcion") return "blue";
+  if (p === "/administracion/ordenes-entrega") return "indigo";
+  if (p === "/cobranzas/facturacion") return "green";
   return null;
 }
 
@@ -35,7 +36,7 @@ const LinkItem = ({ to, children, variant, onClick }) => (
     to={to}
     onClick={onClick}
     className={({ isActive }) => {
-      const base = "block px-3 py-2 rounded hover:bg-gray-50 border-l-4";
+      const base = "block rounded border-l-4 px-3 py-2 hover:bg-gray-50";
       const active = isActive ? " bg-gray-100 font-semibold" : "";
       const v = variant || variantOfPath(to);
       const border = v ? VARIANT_BORDER[v] || "border-gray-200" : "border-transparent";
@@ -44,6 +45,13 @@ const LinkItem = ({ to, children, variant, onClick }) => (
   >
     {children}
   </NavLink>
+);
+
+const Section = ({ title, children }) => (
+  <div>
+    <div className="mb-1 px-1 text-xs uppercase text-gray-400">{title}</div>
+    <div className="space-y-1">{children}</div>
+  </div>
 );
 
 export default function Sidebar({ mobileOpen = false, onClose }) {
@@ -64,9 +72,19 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canSpareParts = can(user, PERMISSION_CODES.PAGE_SPARE_PARTS);
   const canWarranty = can(user, PERMISSION_CODES.PAGE_WARRANTY);
   const canBejerman = can(user, PERMISSION_CODES.PAGE_BEJERMAN_SYNC);
+  const canRecepcion = can(user, PERMISSION_CODES.PAGE_RECEPCION);
+  const canDeliveryOrders = can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS);
+  const canBilling = can(user, PERMISSION_CODES.PAGE_BILLING);
+  const canCreateIngreso = canAny(user, [
+    PERMISSION_CODES.ACTION_INGRESO_CREATE,
+    PERMISSION_CODES.PAGE_NEW_INGRESO,
+  ]);
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
 
-  const showEquiposSection = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
+  const showRecepcion = canRecepcion || canCreateIngreso || canLiberados;
+  const showServicioTecnico = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
+  const showAdministracion = canHistory || canDevices || canDeliveryOrders || canCreateIngreso || canHome;
+  const showCobranzas = canBilling;
   const showSistema =
     canMetrics || canUsers || canCatalogs || canSpareParts || canWarranty || canBejerman || canManageTestProtocols;
 
@@ -81,10 +99,12 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
         className={`fixed inset-0 z-40 bg-black/40 md:hidden ${mobileOpen ? "block" : "hidden"}`}
         onClick={onClose}
         aria-hidden="true"
-      ></div>
+      />
       <aside
         id="app-sidebar"
-        className={`fixed inset-y-0 left-0 z-50 w-72 transform border-r bg-white text-sm overflow-y-auto shadow-lg transition-transform duration-200 ease-out md:static md:w-50 md:translate-x-0 md:shadow-none md:block ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}
+        className={`fixed inset-y-0 left-0 z-50 w-72 transform overflow-y-auto border-r bg-white text-sm shadow-lg transition-transform duration-200 ease-out md:static md:w-56 md:translate-x-0 md:shadow-none md:block ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
       >
         <div className="flex h-12 items-center justify-between border-b px-3 md:hidden">
           <span className="text-sm text-gray-600">Menú</span>
@@ -102,41 +122,40 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
           {user?.nombre} {user?.rol}
         </div>
 
-        <div className="p-3 text-xs text-gray-500 hidden md:block">Menú</div>
-        <div className="px-3 pb-3 space-y-2">
-          <div className="md:hidden">
-            <div className="text-xs uppercase text-gray-400 px-1 mb-1">General</div>
-            {canHistory && (
-              <LinkItem to="/clientes" {...linkProps}>
-                General por cliente
-              </LinkItem>
-            )}
-            {canHistory && (
-                <LinkItem to="/ingresos/historico" {...linkProps}>
-                Histórico ingresos
-              </LinkItem>
-            )}
-            {canDevices && (
-              <LinkItem to="/equipos" {...linkProps}>
-                Equipos
-              </LinkItem>
-            )}
-            {canHome && (
-              <>
-                <LinkItem to="/buscar-ns" {...linkProps}>
-                  Buscar NS
+        <div className="hidden p-3 text-xs text-gray-500 md:block">NEXORA</div>
+        <div className="space-y-3 px-3 pb-3">
+          {showRecepcion && (
+            <Section title="Recepción">
+              {canRecepcion && (
+                <LinkItem to="/recepcion" {...linkProps}>
+                  Panel de recepción
                 </LinkItem>
-                <LinkItem to="/buscar-accesorio" {...linkProps}>
-                  Buscar accesorio
+              )}
+              {canCreateIngreso && (
+                <LinkItem to="/ingresos/nuevo" {...linkProps}>
+                  Nuevo ingreso
                 </LinkItem>
-              </>
-            )}
-          </div>
+              )}
+              {canLiberados && (
+                <LinkItem to="/listos" {...linkProps}>
+                  Equipos pendientes
+                </LinkItem>
+              )}
+              {canDeliveryOrders && (
+                <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
+                  Órdenes de entrega
+                </LinkItem>
+              )}
+            </Section>
+          )}
 
-          {showEquiposSection && (
-            <div>
-              <div className="text-xs uppercase text-gray-400 px-1 mb-1">Equipos</div>
-
+          {showServicioTecnico && (
+            <Section title="Servicio técnico">
+              {canWorkQueues && techLike && (
+                <LinkItem to="/tecnico" {...linkProps}>
+                  Mis pendientes
+                </LinkItem>
+              )}
               {canWorkQueues && (
                 <LinkItem to="/pendientes" {...linkProps}>
                   Pendientes general
@@ -145,11 +164,6 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
               {canWorkQueues && (
                 <LinkItem to="/pendientes-por-tecnico" {...linkProps}>
                   Pendientes por técnico
-                </LinkItem>
-              )}
-              {canWorkQueues && techLike && (
-                <LinkItem to="/tecnico" {...linkProps}>
-                  Mis pendientes
                 </LinkItem>
               )}
               {canBudgetQueues && (
@@ -185,17 +199,59 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   </LinkItem>
                 </>
               )}
-              {canLiberados && (
-                <LinkItem to="/listos" {...linkProps}>
-                  Liberados
+            </Section>
+          )}
+
+          {showAdministracion && (
+            <Section title="Administración">
+              {canDeliveryOrders && (
+                <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
+                  Órdenes de entrega
                 </LinkItem>
               )}
-            </div>
+              {canHistory && (
+                <LinkItem to="/clientes" {...linkProps}>
+                  General por cliente
+                </LinkItem>
+              )}
+              {canHistory && (
+                <LinkItem to="/ingresos/historico" {...linkProps}>
+                  Histórico ingresos
+                </LinkItem>
+              )}
+              {canDevices && (
+                <LinkItem to="/equipos" {...linkProps}>
+                  Equipos
+                </LinkItem>
+              )}
+              {canHome && (
+                <>
+                  <LinkItem to="/buscar-ns" {...linkProps}>
+                    Buscar NS
+                  </LinkItem>
+                  <LinkItem to="/buscar-accesorio" {...linkProps}>
+                    Buscar accesorio
+                  </LinkItem>
+                </>
+              )}
+            </Section>
+          )}
+
+          {showCobranzas && (
+            <Section title="Cobranzas">
+              <LinkItem to="/cobranzas/facturacion" {...linkProps}>
+                Facturación
+              </LinkItem>
+              {canDeliveryOrders && (
+                <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
+                  Remitos pendientes
+                </LinkItem>
+              )}
+            </Section>
           )}
 
           {showSistema && (
-            <div className="pt-2">
-              <div className="text-xs uppercase text-gray-400 px-1 mb-1">Sistema</div>
+            <Section title="Sistema">
               {canMetrics && (
                 <LinkItem to="/metricas" {...linkProps}>
                   Métricas
@@ -245,7 +301,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   Protocolos de test
                 </LinkItem>
               )}
-            </div>
+            </Section>
           )}
         </div>
       </aside>

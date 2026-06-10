@@ -75,6 +75,11 @@ from .views import (
     WorkResumenView, WorkObjectivesView, WorkAlertRulesView, GlobalSearchView,
     BejermanJobsView, BejermanJobRetryView, BejermanArticleMappingsView, BejermanArticlesView,
     IngresoRisStatusView, IngresoRisEmitirView, SerialBarcodePdfView, IngresoBarcodePdfView,
+    DeliveryOrdersView, DeliveryOrderDetailView, DeliveryOrderPreparedView, DeliveryOrderDeliveredView,
+    DeliveryOrderInvoicedView, DeliveryOrderCancelView, DeliveryOrderRemitoLocationView,
+    DeliveryOrderItemArticleView, DeliveryOrderItemPartidasView,
+    DeliveryOrderBejermanRemitoView, DeliveryOrderBejermanRemitoPdfView,
+    FacturacionCompanyOptionsView, FacturacionClienteDocumentosView, FacturacionDocumentoPdfView,
 )
 
 from .views.devices_views import (
@@ -176,6 +181,22 @@ urlpatterns = [
     path("bejerman/articles/", BejermanArticlesView.as_view()),
     path("bejerman/article-mappings/", BejermanArticleMappingsView.as_view()),
     path("barcodes/serial/", SerialBarcodePdfView.as_view()),
+
+    # NEXORA: órdenes de entrega, remitos y cobranzas.
+    path("ordenes-entrega/", DeliveryOrdersView.as_view()),
+    path("ordenes-entrega/<str:order_id>/", DeliveryOrderDetailView.as_view()),
+    path("ordenes-entrega/<str:order_id>/preparar/", DeliveryOrderPreparedView.as_view()),
+    path("ordenes-entrega/<str:order_id>/entregar/", DeliveryOrderDeliveredView.as_view()),
+    path("ordenes-entrega/<str:order_id>/facturar/", DeliveryOrderInvoicedView.as_view()),
+    path("ordenes-entrega/<str:order_id>/cancelar/", DeliveryOrderCancelView.as_view()),
+    path("ordenes-entrega/<str:order_id>/remito-ubicacion/", DeliveryOrderRemitoLocationView.as_view()),
+    path("ordenes-entrega/<str:order_id>/items/<str:item_id>/articulo/", DeliveryOrderItemArticleView.as_view()),
+    path("ordenes-entrega/<str:order_id>/items/<str:item_id>/partidas/", DeliveryOrderItemPartidasView.as_view()),
+    path("ordenes-entrega/remito-bejerman/", DeliveryOrderBejermanRemitoView.as_view()),
+    path("ordenes-entrega/remito-bejerman/<str:group_id>/pdf/", DeliveryOrderBejermanRemitoPdfView.as_view()),
+    path("cobranzas/facturacion/clientes/", FacturacionCompanyOptionsView.as_view()),
+    path("cobranzas/facturacion/documentos/", FacturacionClienteDocumentosView.as_view()),
+    path("cobranzas/facturacion/documentos/<str:document_id>/pdf/", FacturacionDocumentoPdfView.as_view()),
 
     # ténico / ingresos (acciones)
     path("tecnico/mis-pendientes/", MisPendientesView.as_view()),

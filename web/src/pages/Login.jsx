@@ -1,6 +1,5 @@
-// web/src/pages/Login.jsx
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import Footer from "../components/Footer.jsx";
 
@@ -25,13 +24,11 @@ export default function Login() {
   const nextParam = params.get("next");
   const from = nextParam || loc.state?.from?.pathname || "/";
 
-  // Verificacion rapida del backend para diferenciar error de red vs. credenciales
   useEffect(() => {
     (async () => {
       try {
         const base = normalizeApiBase(import.meta.env.VITE_API_URL);
-        const pingUrl = `${base}/api/ping/`;
-        const res = await fetch(pingUrl, {
+        const res = await fetch(`${base}/api/ping/`, {
           method: "GET",
           credentials: "omit",
           cache: "no-store",
@@ -44,17 +41,17 @@ export default function Login() {
     })();
   }, []);
 
-  async function onSubmit(e) {
-    e.preventDefault();
+  async function onSubmit(event) {
+    event.preventDefault();
     setErr("");
     setLoading(true);
     try {
       await login(email.trim().toLowerCase(), password);
       nav(from, { replace: true });
-    } catch (e) {
-      const msg = e?.message || "Credenciales invalidas";
+    } catch (error) {
+      const msg = error?.message || "Credenciales inválidas";
       if (!backendOk) {
-        setErr("Backend no disponible en /api. Verifica que la API este levantada y accesible.");
+        setErr("Backend no disponible en /api. Verificá que la API esté levantada y accesible.");
       } else {
         setErr(msg);
       }
@@ -70,16 +67,16 @@ export default function Login() {
           <div className="flex justify-center mb-4">
             <img
               src="/branding/logo-app.png"
-              alt="SEPID Reparaciones"
+              alt="NEXORA"
               className="h-12 object-contain"
-              onError={(e) => {
-                e.currentTarget.onerror = null;
-                e.currentTarget.src = "/icons/logo-app-180.png";
+              onError={(event) => {
+                event.currentTarget.onerror = null;
+                event.currentTarget.src = "/icons/logo-app-180.png";
               }}
             />
           </div>
           {!backendOk && (
-            <div className="mb-3 text-sm bg-yellow-100 text-yellow-800 p-2 rounded">
+            <div className="mb-3 rounded bg-yellow-100 p-2 text-sm text-yellow-800">
               Backend no disponible.
             </div>
           )}
@@ -90,7 +87,7 @@ export default function Login() {
               type="email"
               placeholder="Mail"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(event) => setEmail(event.target.value)}
               autoComplete="email"
               required
             />
@@ -99,16 +96,16 @@ export default function Login() {
               type="password"
               placeholder="Contraseña"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(event) => setPassword(event.target.value)}
               autoComplete="current-password"
               required
             />
-            {err && <div className="text-red-600 text-sm">{err}</div>}
+            {err && <div className="text-sm text-red-600">{err}</div>}
             <button className="btn w-full" type="submit" disabled={loading}>
               {loading ? "Ingresando..." : "Entrar"}
             </button>
 
-            <Link to="/recuperar" className="text-sm text-blue-700 underline inline-block mt-1">
+            <Link to="/recuperar" className="mt-1 inline-block text-sm text-blue-700 underline">
               ¿Olvidaste tu contraseña?
             </Link>
           </form>
@@ -118,4 +115,3 @@ export default function Login() {
     </div>
   );
 }
-
