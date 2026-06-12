@@ -27,10 +27,14 @@ class PortalIntegrationAPITest(TestCase):
 
         with connection.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS customers (
-                    id INTEGER PRIMARY KEY,
-                    razon_social TEXT
+                    id {identity_type},
+                    cod_empresa TEXT,
+                    razon_social TEXT,
+                    cuit TEXT,
+                    telefono TEXT,
+                    email TEXT
                 )
                 """
             )
@@ -256,6 +260,10 @@ class PortalIntegrationAPITest(TestCase):
             )
             for ddl in (
                 "ALTER TABLE customers ADD COLUMN IF NOT EXISTS razon_social TEXT",
+                "ALTER TABLE customers ADD COLUMN IF NOT EXISTS cod_empresa TEXT",
+                "ALTER TABLE customers ADD COLUMN IF NOT EXISTS cuit TEXT",
+                "ALTER TABLE customers ADD COLUMN IF NOT EXISTS telefono TEXT",
+                "ALTER TABLE customers ADD COLUMN IF NOT EXISTS email TEXT",
                 "ALTER TABLE marcas ADD COLUMN IF NOT EXISTS nombre TEXT",
                 "ALTER TABLE models ADD COLUMN IF NOT EXISTS marca_id INTEGER",
                 "ALTER TABLE models ADD COLUMN IF NOT EXISTS nombre TEXT",
@@ -337,6 +345,10 @@ class PortalIntegrationAPITest(TestCase):
                 cur.execute(f"DELETE FROM {table}")
 
             cur.execute("INSERT INTO customers (id, razon_social) VALUES (%s, %s), (%s, %s)", [1, "Cliente A", 2, "Cliente B"])
+            if connection.vendor == "postgresql":
+                cur.execute(
+                    "SELECT setval(pg_get_serial_sequence('customers', 'id'), COALESCE((SELECT MAX(id) FROM customers), 1))"
+                )
             cur.execute("INSERT INTO marcas (id, nombre) VALUES (%s, %s)", [1, "Marca"])
             cur.execute(
                 "INSERT INTO models (id, marca_id, nombre, tipo_equipo, variante) VALUES (%s, %s, %s, %s, %s)",
@@ -519,6 +531,78 @@ class PortalIntegrationAPITest(TestCase):
         )
 
         self.assertEqual(response.status_code, 401)
+
+    def test_bejerman_client_upsert_fills_missing_code_by_exact_name(self):
+        self._auth()
+        with connection.cursor() as cur:
+            cur.execute(
+                "INSERT INTO customers (id, razon_social) VALUES (%s, %s)",
+                [30, "CENTRO MEDICO AMENABAR"],
+            )
+
+        response = self.client.post(
+            "/api/integrations/portal/internal/clientes/bejerman-upsert/",
+            {
+                "bejermanCustomerCode": "CMA",
+                "name": "CENTRO MEDICO AMENABAR SRL",
+                "taxId": "30707612971",
+                "phone": "1111",
+                "email": "amenabar@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["outcome"], "matched")
+        self.assertEqual(response.data["nexoraCustomerId"], 30)
+        with connection.cursor() as cur:
+            cur.execute("SELECT cod_empresa, cuit, telefono, email FROM customers WHERE id=%s", [30])
+            row = cur.fetchone()
+        self.assertEqual(row, ("CMA", "30707612971", "1111", "amenabar@example.com"))
+
+    def test_bejerman_client_upsert_creates_when_no_match_exists(self):
+        self._auth()
+        response = self.client.post(
+            "/api/integrations/portal/internal/clientes/bejerman-upsert/",
+            {
+                "bejermanCustomerCode": "NVO",
+                "name": "CLIENTE NUEVO SRL",
+                "taxId": "30700000001",
+                "phone": "",
+                "email": "nuevo@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["outcome"], "created")
+        self.assertIsNotNone(response.data["nexoraCustomerId"])
+        with connection.cursor() as cur:
+            cur.execute("SELECT cod_empresa, razon_social, cuit, email FROM customers WHERE id=%s", [response.data["nexoraCustomerId"]])
+            row = cur.fetchone()
+        self.assertEqual(row, ("NVO", "CLIENTE NUEVO SRL", "30700000001", "nuevo@example.com"))
+
+    def test_bejerman_client_upsert_requires_review_for_code_name_conflict(self):
+        self._auth()
+        with connection.cursor() as cur:
+            cur.execute("UPDATE customers SET cod_empresa=%s, razon_social=%s WHERE id=%s", ["SIM", "PANAS", 1])
+
+        response = self.client.post(
+            "/api/integrations/portal/internal/clientes/bejerman-upsert/",
+            {
+                "bejermanCustomerCode": "SIM",
+                "name": "SIM ELECTRO MEDICINA",
+                "taxId": "30716787946",
+                "phone": "",
+                "email": "",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["outcome"], "needs_review")
+        self.assertIsNone(response.data["nexoraCustomerId"])
+        self.assertEqual(response.data["suggestions"][0]["id"], 1)
 
     def test_client_general_uses_nexora_general_rules(self):
         self._auth()

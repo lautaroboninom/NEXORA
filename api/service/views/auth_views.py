@@ -65,7 +65,7 @@ class LoginView(APIView):
 
         if not getattr(user, "hash_pw", ""):
             raise AuthenticationFailed(
-                "El usuario aún no tiene contraseña. Usá \"Olvidé mi contraseña\" para inicializarla."
+                "El usuario aún no tiene contraseña. Use \"Olvidé mi contraseña\" para inicializarla."
             )
 
         if not verify_hash(password, user.hash_pw):
@@ -162,14 +162,14 @@ class ForgotPasswordView(APIView):
         subj = "Recuperación de contraseña"
         txt = (
             f"Hola {user['nombre']},\n\n"
-            f"Usá este enlace para restablecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
-            "Si no fuiste vos, ignorá este correo."
+            f"Use este enlace para restablecer su contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+            "Si no fue usted, ignore este correo."
         )
         html = (
             f"<p>Hola {user['nombre']},</p>"
-            f"<p>Usá este enlace para restablecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):</p>"
+            f"<p>Use este enlace para restablecer su contraseña (válido {TOKEN_TTL_MIN} minutos):</p>"
             f"<p><a href=\"{url}\">{url}</a></p>"
-            "<p>Si no fuiste vos, ignorá este correo.</p>"
+            "<p>Si no fue usted, ignore este correo.</p>"
         )
         try:
             send_mail(

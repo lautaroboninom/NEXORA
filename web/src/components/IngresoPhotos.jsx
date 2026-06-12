@@ -194,7 +194,7 @@ export default function IngresoPhotos({ ingresoId, canManage, showFilters = fals
   };
 
   const confirmDelete = async (photoId) => {
-    if (!window.confirm("Eliminar el archivo seleccionado??")) return;
+    if (!window.confirm("¿Eliminar el archivo seleccionado?")) return;
     try {
       await deleteIngresoFoto(ingresoId, photoId);
       setPhotos((prev) => prev.filter((p) => p.id !== photoId));

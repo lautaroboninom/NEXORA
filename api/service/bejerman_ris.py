@@ -11,11 +11,18 @@ from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 
-from .bejerman_bridge import (
-    BejermanBridgeClient,
-    BejermanBridgeConfigError,
-    BejermanBridgeResponseError,
-    BejermanBridgeUnavailable,
+from .bejerman_companies import require_company
+from .bejerman_sdk import (
+    BejermanPdfReference,
+    BejermanPdfPendingError,
+    BejermanSDKClient,
+    BejermanSdkConfigError,
+    BejermanSdkResponseError,
+    BejermanSdkUnavailable,
+    build_service_ingress_comprobante,
+    fetch_comprobante_pdf,
+    parse_remito_response,
+    resolve_customer_document_fields,
 )
 from .bejerman_sync import normalize_article_variant
 
@@ -32,6 +39,12 @@ class BejermanRisBusyError(BejermanRisError):
 
 class BejermanRisPdfError(BejermanRisError):
     pass
+
+
+class BejermanRisPdfPendingError(BejermanRisPdfError):
+    def __init__(self, message: str = "El PDF del RIS todavía no está listo", *, retry_after_ms: int = 2500):
+        super().__init__(message)
+        self.retry_after_ms = retry_after_ms
 
 
 def _json_param(value: Any) -> str:
@@ -113,6 +126,25 @@ def _table_exists(table_name: str) -> bool:
         return False
 
 
+def _has_table_column(table_name: str, column_name: str) -> bool:
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_schema = ANY(current_schemas(true))
+                   AND table_name = %s
+                   AND column_name = %s
+                 LIMIT 1
+                """,
+                [table_name, column_name],
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
 def _has_ris_schema() -> bool:
     return _table_exists("bejerman_ingreso_remitos")
 
@@ -139,6 +171,9 @@ def serialize_ris_row(row: dict[str, Any] | None) -> dict[str, Any]:
             "status": "pending",
             "pdf_status": "pending",
             "remito_number": "",
+            "company_key": "",
+            "company_label": "",
+            "bejerman_company": "",
             "last_error": "",
         }
     return {
@@ -156,6 +191,9 @@ def serialize_ris_row(row: dict[str, Any] | None) -> dict[str, Any]:
         "comprobante_numero": row.get("comprobante_numero") or "",
         "customer_code": row.get("customer_code") or "",
         "customer_name": row.get("customer_name") or "",
+        "company_key": row.get("company_key") or "",
+        "company_label": row.get("company_label") or "",
+        "bejerman_company": row.get("bejerman_company") or "",
         "issue_date": _date_iso(row.get("issue_date")),
         "generated_at": row.get("generated_at"),
         "created_at": row.get("created_at"),
@@ -210,7 +248,14 @@ def _lock_for_emit(ingreso_id: int) -> dict[str, Any]:
         return dict(zip(cols, row))
 
 
-def _update_ris_failure(ingreso_id: int, error: str, *, pdf_error: bool = False) -> None:
+def _update_ris_failure(
+    ingreso_id: int,
+    error: str,
+    *,
+    pdf_error: bool = False,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+) -> None:
     status_sql = "status" if not pdf_error else "pdf_status"
     failed_value = "failed"
     with connection.cursor() as cur:
@@ -219,10 +264,18 @@ def _update_ris_failure(ingreso_id: int, error: str, *, pdf_error: bool = False)
             UPDATE bejerman_ingreso_remitos
                SET {status_sql} = %s,
                    last_error = %s,
+                   request_payload = COALESCE(%s::jsonb, request_payload),
+                   response_payload = COALESCE(%s::jsonb, response_payload),
                    updated_at = CURRENT_TIMESTAMP
              WHERE ingreso_id = %s
             """,
-            [failed_value, error[:2000], ingreso_id],
+            [
+                failed_value,
+                error[:2000],
+                _json_param(request_payload) if request_payload is not None else None,
+                _json_param(response_payload) if response_payload is not None else None,
+                ingreso_id,
+            ],
         )
 
 
@@ -237,6 +290,9 @@ def _update_ris_generated(ingreso_id: int, payload: dict[str, Any], response: di
     issue_date = _date_iso(response.get("issueDate") or payload.get("issueDate")) or timezone.localdate().isoformat()
     customer_code = _clean(payload.get("customerCode"))
     customer_name = _clean(payload.get("customerName"))
+    company_key = _clean(response.get("companyKey")) or _clean(payload.get("companyKey"))
+    company_label = _clean(response.get("companyLabel")) or _clean(payload.get("companyLabel"))
+    bejerman_company = _clean(response.get("bejermanCompany")) or _clean(payload.get("bejermanCompany"))
 
     with connection.cursor() as cur:
         cur.execute(
@@ -254,6 +310,9 @@ def _update_ris_generated(ingreso_id: int, payload: dict[str, Any], response: di
                    remito_number = NULLIF(%s, ''),
                    customer_code = NULLIF(%s, ''),
                    customer_name = NULLIF(%s, ''),
+                   company_key = NULLIF(%s, ''),
+                   company_label = NULLIF(%s, ''),
+                   bejerman_company = NULLIF(%s, ''),
                    issue_date = %s,
                    generated_at = COALESCE(generated_at, CURRENT_TIMESTAMP),
                    updated_at = CURRENT_TIMESTAMP
@@ -270,6 +329,9 @@ def _update_ris_generated(ingreso_id: int, payload: dict[str, Any], response: di
                 remito_number,
                 customer_code,
                 customer_name,
+                company_key,
+                company_label,
+                bejerman_company,
                 issue_date,
                 ingreso_id,
             ],
@@ -300,6 +362,24 @@ def _update_ris_pdf_ready(ingreso_id: int) -> dict[str, Any]:
     return dict(zip(cols, row)) if row else (_row_for_ingreso(ingreso_id) or {})
 
 
+def _update_ris_pdf_pending(ingreso_id: int) -> dict[str, Any]:
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bejerman_ingreso_remitos
+               SET pdf_status = 'pending',
+                   last_error = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE ingreso_id = %s
+            RETURNING *
+            """,
+            [ingreso_id],
+        )
+        row = cur.fetchone()
+        cols = [col[0] for col in cur.description]
+    return dict(zip(cols, row)) if row else (_row_for_ingreso(ingreso_id) or {})
+
+
 def _number_from_remito(remito_number: str) -> str:
     text = _clean(remito_number)
     if not text:
@@ -312,8 +392,18 @@ def _number_from_remito(remito_number: str) -> str:
 
 
 def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
+    empresa_bejerman_sql = (
+        "COALESCE(t.empresa_bejerman, 'SEPID') AS empresa_bejerman,"
+        if _has_table_column("ingresos", "empresa_bejerman")
+        else "'SEPID' AS empresa_bejerman,"
+    )
+    empresa_facturar_sql = (
+        "COALESCE(t.empresa_facturar, 'SEPID') AS empresa_facturar,"
+        if _has_table_column("ingresos", "empresa_facturar")
+        else "'SEPID' AS empresa_facturar,"
+    )
     row = q(
-        """
+        f"""
         SELECT
           t.id,
           t.motivo,
@@ -322,6 +412,8 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
           COALESCE(t.comentarios, '') AS comentarios,
           COALESCE(t.equipo_variante, '') AS equipo_variante,
           COALESCE(t.remito_ingreso, '') AS remito_ingreso,
+          {empresa_bejerman_sql}
+          {empresa_facturar_sql}
           c.id AS customer_id,
           COALESCE(c.cod_empresa, '') AS customer_code,
           COALESCE(c.razon_social, '') AS customer_name,
@@ -373,6 +465,10 @@ def _article_mapping_for_context(model_id: Any, variante: str) -> dict[str, Any]
 
 def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
     customer_code = _clean(context.get("customer_code"))
+    try:
+        company = require_company(context.get("empresa_bejerman") or context.get("empresa_facturar") or "SEPID")
+    except ValueError as exc:
+        raise BejermanRisError(str(exc)) from exc
     if not customer_code:
         raise BejermanRisError("El cliente seleccionado no tiene código Bejerman")
     variante = _clean(context.get("equipo_variante")) or _clean(context.get("device_variante")) or _clean(context.get("modelo_variante"))
@@ -391,6 +487,9 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "requestId": f"reparaciones-ingreso-{context['id']}",
         "ingresoId": context["id"],
+        "companyKey": company.key,
+        "companyLabel": company.label,
+        "bejermanCompany": company.bejerman_company,
         "issueDate": issue_date,
         "customerCode": customer_code,
         "customerName": _clean(context.get("customer_name")),
@@ -416,57 +515,122 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
 
 def _pdf_params(row: dict[str, Any]) -> dict[str, Any]:
     number = _clean(row.get("comprobante_numero")) or _number_from_remito(_clean(row.get("remito_number")))
+    request_payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+    company_key = _clean(row.get("company_key")) or _clean(request_payload.get("companyKey")) or "SEPID"
     return {
         "type": _clean(row.get("comprobante_tipo")) or "RIS",
         "letter": _clean(row.get("comprobante_letra")) or "R",
         "pointOfSale": _clean(row.get("comprobante_pto_venta")),
         "number": number,
+        "companyKey": company_key,
         "issueDate": _date_iso(row.get("issue_date")) or timezone.localdate().isoformat(),
         "customerCode": _clean(row.get("customer_code")),
     }
 
 
-def _fetch_pdf(client: BejermanBridgeClient, row: dict[str, Any]) -> tuple[bytes, str]:
+def _fetch_pdf(row: dict[str, Any]) -> tuple[bytes, str]:
     params = _pdf_params(row)
     if not params["number"] or not params["pointOfSale"]:
         raise BejermanRisPdfError("No hay referencia de comprobante suficiente para pedir el PDF")
-    return client.get_pdf("/api/portal/remitos/service-ingress/pdf", params)
+    try:
+        client = BejermanSDKClient(company_key=params["companyKey"])
+    except ValueError as exc:
+        raise BejermanRisPdfError(str(exc)) from exc
+    reference = BejermanPdfReference(
+        type=params["type"],
+        number=params["number"],
+        letter=params["letter"],
+        point_of_sale=params["pointOfSale"],
+        issue_date=params["issueDate"],
+        customer_code=params["customerCode"],
+    )
+    return fetch_comprobante_pdf(client, reference)
 
 
-def emit_or_fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, str, dict[str, Any]]:
+def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, Any]:
     _ensure_ris_row(ingreso_id, user_id)
-    client = BejermanBridgeClient.from_settings()
     current = _row_for_ingreso(ingreso_id) or {}
-
     if _clean(current.get("remito_number")) and current.get("status") == "generated":
-        try:
-            pdf_bytes, content_type = _fetch_pdf(client, current)
-            return pdf_bytes, content_type, _update_ris_pdf_ready(ingreso_id)
-        except (BejermanBridgeResponseError, BejermanBridgeUnavailable, BejermanRisPdfError) as exc:
-            _update_ris_failure(ingreso_id, str(exc), pdf_error=True)
-            raise BejermanRisPdfError(str(exc)) from exc
+        return current
 
     _lock_for_emit(ingreso_id)
+    payload: dict[str, Any] = {}
+    request_payload: dict[str, Any] | None = None
+    operation = _clean(getattr(settings, "BEJERMAN_RIS_OPERATION", "IngresarComprobanteJSON")) or "IngresarComprobanteJSON"
+    numera_flex = _clean(getattr(settings, "BEJERMAN_RIS_NUMERA_FLEX", "S")) or "S"
+    emite_reg = _clean(getattr(settings, "BEJERMAN_RIS_EMITE_REG", "E")) or "E"
     try:
         context = _ingreso_context(ingreso_id)
         payload = _build_payload(context)
     except BejermanRisError as exc:
-        _update_ris_failure(ingreso_id, str(exc), pdf_error=False)
+        _update_ris_failure(ingreso_id, str(exc), pdf_error=False, request_payload=payload or None)
         raise
     try:
-        response = client.post_json("/api/portal/remitos/service-ingress", payload)
-    except (BejermanBridgeConfigError, BejermanBridgeResponseError, BejermanBridgeUnavailable) as exc:
-        _update_ris_failure(ingreso_id, str(exc), pdf_error=False)
+        client = BejermanSDKClient(company_key=payload["companyKey"])
+        customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
+        built = build_service_ingress_comprobante(payload, customer_fields)
+        request_payload = {
+            **payload,
+            "comprobante": built["comprobante"],
+            "operation": operation,
+            "numeraFlex": numera_flex,
+            "emiteReg": emite_reg,
+        }
+        raw_response = client.ingresar_comprobante_ventas_json(
+            built["comprobante"],
+            circuito="VENTAS",
+            operacion=operation,
+            numera_flex=numera_flex,
+            emite_reg=emite_reg,
+        )
+        summary = parse_remito_response(raw_response)
+        remito_number = _clean(summary.get("remitoNumber"))
+        if not remito_number:
+            raise BejermanSdkResponseError("Bejerman no devolvió número de RIS")
+        payload = request_payload
+        response = {
+            "success": True,
+            "requestId": payload["requestId"],
+            "companyKey": payload["companyKey"],
+            "companyLabel": payload["companyLabel"],
+            "bejermanCompany": payload["bejermanCompany"],
+            "issueDate": payload["issueDate"],
+            "remitoNumber": remito_number,
+            "response": summary,
+            "profile": built["profile"],
+            "lineCount": built["lineCount"],
+            "raw": raw_response,
+        }
+    except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
+        _update_ris_failure(ingreso_id, str(exc), pdf_error=False, request_payload=request_payload or payload or None)
         raise BejermanRisError(str(exc)) from exc
 
-    row = _update_ris_generated(ingreso_id, payload, response)
+    return _update_ris_generated(ingreso_id, payload, response)
+
+
+def fetch_ris_pdf(ingreso_id: int) -> tuple[bytes, str, dict[str, Any]]:
+    row = _row_for_ingreso(ingreso_id) or {}
+    if not row:
+        raise BejermanRisError("RIS no inicializado")
+    if row.get("status") != "generated" or not _clean(row.get("remito_number")):
+        if row.get("status") == "failed":
+            raise BejermanRisError(_clean(row.get("last_error")) or "No se pudo emitir el RIS")
+        raise BejermanRisPdfPendingError("El RIS todavía no fue emitido")
     try:
-        pdf_bytes, content_type = _fetch_pdf(client, row)
-    except (BejermanBridgeResponseError, BejermanBridgeUnavailable, BejermanRisPdfError) as exc:
+        pdf_bytes, content_type = _fetch_pdf(row)
+    except BejermanPdfPendingError as exc:
+        row = _update_ris_pdf_pending(ingreso_id)
+        raise BejermanRisPdfPendingError(str(exc), retry_after_ms=getattr(exc, "retry_after_ms", 2500)) from exc
+    except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, BejermanRisPdfError) as exc:
         _update_ris_failure(ingreso_id, str(exc), pdf_error=True)
         raise BejermanRisPdfError(str(exc)) from exc
     row = _update_ris_pdf_ready(ingreso_id)
     return pdf_bytes, content_type, row
+
+
+def emit_or_fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, str, dict[str, Any]]:
+    emit_or_get_ris(ingreso_id, user_id)
+    return fetch_ris_pdf(ingreso_id)
 
 
 def find_customer_suggestion(customer_code: str, customer_name: str) -> dict[str, Any] | None:

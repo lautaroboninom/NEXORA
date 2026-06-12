@@ -355,6 +355,8 @@ CREATE TABLE IF NOT EXISTS ingresos (
   device_id            INTEGER NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
   estado               ticket_state NOT NULL DEFAULT 'ingresado',
   motivo               motivo_ingreso NOT NULL,
+  empresa_bejerman     TEXT NOT NULL DEFAULT 'SEPID',
+  empresa_facturar     TEXT NOT NULL DEFAULT 'SEPID',
   permite_reparacion   BOOLEAN NOT NULL DEFAULT TRUE,
   fecha_ingreso        TIMESTAMPTZ NULL,
   fecha_creacion       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -394,6 +396,8 @@ CREATE TABLE IF NOT EXISTS ingresos (
 
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_cobro_neto NUMERIC(12,2);
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_quote_id INTEGER;
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS empresa_bejerman TEXT NOT NULL DEFAULT 'SEPID';
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS empresa_facturar TEXT NOT NULL DEFAULT 'SEPID';
 
 -- Compat de schema para bases legacy (evita parches manuales fase 1/2)
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT;
@@ -893,6 +897,9 @@ CREATE TABLE IF NOT EXISTS bejerman_ingreso_remitos (
   comprobante_pto_venta  TEXT NULL,
   comprobante_numero     TEXT NULL,
   remito_number          TEXT NULL,
+  company_key            TEXT NULL,
+  company_label          TEXT NULL,
+  bejerman_company       TEXT NULL,
   customer_code          TEXT NULL,
   customer_name          TEXT NULL,
   issue_date             DATE NULL,
@@ -906,6 +913,10 @@ CREATE TABLE IF NOT EXISTS bejerman_ingreso_remitos (
     CHECK (pdf_status IN ('pending','ready','failed')),
   CONSTRAINT chk_bejerman_ingreso_remitos_attempts CHECK (attempts >= 0)
 );
+
+ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS company_key TEXT;
+ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS company_label TEXT;
+ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS bejerman_company TEXT;
 
 -- NEXORA: órdenes de entrega, remitos Bejerman y cobranzas.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT;
@@ -1172,6 +1183,9 @@ CREATE TABLE IF NOT EXISTS ingreso_assignment_requests (
   canceled_at TIMESTAMPTZ NULL
 );
 CREATE INDEX IF NOT EXISTS ix_iars_ingreso_created ON ingreso_assignment_requests(ingreso_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_iars_ingreso_usuario_pending
+  ON ingreso_assignment_requests(ingreso_id, usuario_id)
+  WHERE accepted_at IS NULL AND canceled_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS ingreso_baja_requests (
   id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bell } from "lucide-react";
+import { Bell, CheckCheck, RefreshCw } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { getNotificaciones, postNotificacionClick } from "@/lib/api";
+import { getNotificaciones, postNotificacionClick, postNotificacionesReadAll } from "@/lib/api";
 
 const REFRESH_MS = 60000;
 
@@ -33,6 +33,7 @@ export default function NotificationBell() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [clickingId, setClickingId] = useState(null);
+  const [markingAll, setMarkingAll] = useState(false);
 
   const badgeText = useMemo(() => {
     if (!unreadCount) return "";
@@ -91,8 +92,16 @@ export default function NotificationBell() {
     setError("");
     try {
       const data = await postNotificacionClick(item.id);
-      setItems((prev) => prev.filter((row) => Number(row.id) !== Number(item.id)));
-      setUnreadCount((prev) => Math.max(0, Number(prev || 0) - 1));
+      const wasUnread = !item.read_at;
+      const now = new Date().toISOString();
+      setItems((prev) =>
+        prev.map((row) =>
+          Number(row.id) === Number(item.id)
+            ? { ...row, read_at: row.read_at || now, clicked_at: row.clicked_at || now }
+            : row
+        )
+      );
+      if (wasUnread) setUnreadCount((prev) => Math.max(0, Number(prev || 0) - 1));
       setOpen(false);
       const href = data?.href || item.href;
       if (href) navigate(href);
@@ -100,6 +109,22 @@ export default function NotificationBell() {
       setError(err?.message || "No se pudo abrir la notificación.");
     } finally {
       setClickingId(null);
+    }
+  }
+
+  async function handleMarkAllRead() {
+    if (!unreadCount || markingAll) return;
+    setMarkingAll(true);
+    setError("");
+    try {
+      await postNotificacionesReadAll();
+      const now = new Date().toISOString();
+      setItems((prev) => prev.map((row) => ({ ...row, read_at: row.read_at || now })));
+      setUnreadCount(0);
+    } catch (err) {
+      setError(err?.message || "No se pudieron marcar las notificaciones.");
+    } finally {
+      setMarkingAll(false);
     }
   }
 
@@ -138,14 +163,28 @@ export default function NotificationBell() {
                 {unreadCount === 1 ? "1 pendiente" : `${unreadCount} pendientes`}
               </div>
             </div>
-            <button
-              type="button"
-              className="rounded px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
-              onClick={() => refresh()}
-              disabled={loading}
-            >
-              {loading ? "Actualizando..." : "Actualizar"}
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+                onClick={handleMarkAllRead}
+                disabled={!unreadCount || markingAll}
+                title="Marcar todas como leídas"
+                aria-label="Marcar todas como leídas"
+              >
+                <CheckCheck className="h-4 w-4" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+                onClick={() => refresh()}
+                disabled={loading}
+                title="Actualizar"
+                aria-label="Actualizar notificaciones"
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
+              </button>
+            </div>
           </div>
 
           {error && (
@@ -158,20 +197,26 @@ export default function NotificationBell() {
             {loading && !items.length ? (
               <div className="px-4 py-6 text-center text-sm text-gray-500">Cargando...</div>
             ) : items.length ? (
-              items.map((item) => (
+              items.map((item) => {
+                const unread = !item.read_at;
+                return (
                 <button
                   key={item.id}
                   type="button"
-                  className="flex w-full gap-3 px-3 py-3 text-left hover:bg-gray-50 disabled:opacity-60"
+                  className={`flex w-full gap-3 px-3 py-3 text-left hover:bg-gray-50 disabled:opacity-60 ${
+                    unread ? "" : "opacity-75"
+                  }`}
                   onClick={() => handleClickNotification(item)}
                   disabled={clickingId === item.id}
                 >
                   <span
-                    className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${severityClass(item.severity)}`}
+                    className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                      unread ? severityClass(item.severity) : "bg-gray-300"
+                    }`}
                     aria-hidden="true"
                   />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-gray-900">
+                    <span className={`block truncate text-sm ${unread ? "font-medium text-gray-900" : "text-gray-700"}`}>
                       {item.title || "Notificación"}
                     </span>
                     {item.body && (
@@ -184,10 +229,11 @@ export default function NotificationBell() {
                     </span>
                   </span>
                 </button>
-              ))
+                );
+              })
             ) : (
               <div className="px-4 py-8 text-center text-sm text-gray-500">
-                No hay notificaciones pendientes.
+                No hay notificaciones recientes.
               </div>
             )}
           </div>

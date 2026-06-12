@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from service.notifications import (
     get_user_notification_settings,
     list_notifications_for_user,
+    mark_all_notifications_read,
     mark_notification_clicked,
     save_user_notification_settings,
 )
@@ -44,6 +45,18 @@ class NotificacionClickView(APIView):
         return Response({"ok": True, "href": row.get("href") or ""})
 
 
+class NotificacionesReadAllView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        uid = _current_user_id(request)
+        if not uid:
+            return Response({"detail": "Usuario inválido"}, status=400)
+        _set_audit_user(request)
+        updated = mark_all_notifications_read(uid)
+        return Response({"ok": True, "updated": updated})
+
+
 class UsuarioNotificacionesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -76,5 +89,6 @@ class UsuarioNotificacionesView(APIView):
 __all__ = [
     "NotificacionesView",
     "NotificacionClickView",
+    "NotificacionesReadAllView",
     "UsuarioNotificacionesView",
 ]

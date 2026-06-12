@@ -173,7 +173,7 @@ export default function HistoricoIngresos() {
         "historico_ingresos.xlsx"
       );
     } catch (e) {
-      setErr(e?.message || "No se pudo exportar el Excel del historico");
+      setErr(e?.message || "No se pudo exportar el Excel del historial");
     } finally {
       setExporting(false);
     }

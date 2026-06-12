@@ -329,15 +329,15 @@ export default function JefePresupuestos() {
       const summary = [
         `Total: ${selectedSnapshot.length}.`,
         `Aprobados OK: ${result.approvedIds.length}.`,
-        `Fallos de aprobacion: ${totalApprovalFailures}.`,
-        `Fallos de impresion: ${result.printFailures.length}.`,
+        `Fallos de aprobación: ${totalApprovalFailures}.`,
+        `Fallos de impresión: ${result.printFailures.length}.`,
       ];
       if (reparadosCount > 0 && !result.shouldPrint) {
-        summary.push("Impresion cancelada por el usuario.");
+        summary.push("Impresión cancelada por el usuario.");
       }
       setBulkResultMsg(summary.join(" "));
     } catch (e) {
-      setErr(e?.message || "No se pudo aprobar la seleccion");
+      setErr(e?.message || "No se pudieron aprobar los elegidos");
     } finally {
       setBulkApproving(false);
     }
@@ -394,9 +394,9 @@ export default function JefePresupuestos() {
             onClick={() => exportByIds(Array.from(selectedIds), `presupuestados_seleccion_${selectedIds.size}`)}
             disabled={exporting || bulkApproving || selectedIds.size === 0}
             aria-busy={exporting ? "true" : "false"}
-            title="Exportar seleccion a Excel"
+            title="Exportar elegidos a Excel"
           >
-            Exportar seleccion
+            Exportar elegidos
           </button>
           {canApprove ? (
             <button
@@ -404,9 +404,9 @@ export default function JefePresupuestos() {
               onClick={aprobarSeleccion}
               disabled={approvingBusy || selectedIds.size === 0}
               aria-busy={bulkApproving ? "true" : "false"}
-              title="Aprobar seleccion"
+              title="Aprobar elegidos"
             >
-              {bulkApproving ? "Aprobando..." : "Aprobar seleccion"}
+              {bulkApproving ? "Aprobando..." : "Aprobar elegidos"}
             </button>
           ) : null}
         </div>

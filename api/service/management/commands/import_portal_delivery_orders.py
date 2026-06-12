@@ -19,6 +19,14 @@ VALID_STATUSES = {
     "cancelado",
 }
 VALID_TYPES = {"sale", "service_release", "rental"}
+REQUIRED_PORTAL_TABLES = {
+    "companies",
+    "sales_orders",
+    "sales_order_items",
+    "sales_order_item_partidas",
+    "sales_order_events",
+    "bejerman_remito_groups",
+}
 
 
 def _text(value: Any) -> str:
@@ -37,6 +45,21 @@ def _json(value: Any) -> str:
 def _rows(cur) -> list[dict[str, Any]]:
     cols = [col[0] for col in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _missing_portal_tables(portal) -> list[str]:
+    with portal.cursor() as cur:
+        cur.execute(
+            """
+            SELECT table_name
+              FROM information_schema.tables
+             WHERE table_schema = ANY(current_schemas(false))
+               AND table_name = ANY(%s)
+            """,
+            [list(REQUIRED_PORTAL_TABLES)],
+        )
+        found = {row["table_name"] for row in cur.fetchall()}
+    return sorted(REQUIRED_PORTAL_TABLES - found)
 
 
 def _portal_counts(portal):
@@ -137,6 +160,26 @@ def _fetch_portal_groups_and_events(portal):
 
 
 def build_reconciliation(portal, *, sample_limit=20) -> dict[str, Any]:
+    missing_tables = _missing_portal_tables(portal)
+    if missing_tables:
+        return {
+            "source_ready": False,
+            "missing_portal_tables": missing_tables,
+            "counts": {},
+            "by_status": {},
+            "by_type": {},
+            "missing_customer_mappings": {"count": 0, "sample": []},
+            "missing_article_mappings": {"count": 0, "sample": []},
+            "missing_partida_mappings": {"count": 0, "sample": []},
+            "unknown_statuses": {},
+            "unknown_types": {},
+            "remito_group_pdf_integrity": {
+                "orders_with_missing_group_count": 0,
+                "orders_with_missing_group_sample": [],
+                "generated_groups_missing_pdf_reference_count": 0,
+                "generated_groups_missing_pdf_reference_sample": [],
+            },
+        }
     counts = _portal_counts(portal)
     grouped = _portal_grouped_counts(portal)
     companies = _load_portal_companies(portal)
@@ -199,6 +242,7 @@ def build_reconciliation(portal, *, sample_limit=20) -> dict[str, Any]:
     }
 
     return {
+        "source_ready": True,
         "counts": counts,
         **grouped,
         "missing_customer_mappings": {
@@ -486,6 +530,11 @@ class Command(BaseCommand):
                 cur.execute("SET TRANSACTION READ ONLY")
             reconciliation = build_reconciliation(portal, sample_limit=int(opts.get("sample_limit") or 20))
             self.stdout.write(json.dumps({"dry_run": not opts["apply"], **reconciliation}, ensure_ascii=False, indent=2, default=str))
+
+            if not reconciliation.get("source_ready", True):
+                if opts["apply"]:
+                    raise CommandError("La base Portal no tiene las tablas requeridas; importación cancelada.")
+                return
 
             if not opts["apply"]:
                 return

@@ -6,7 +6,12 @@ from service.management.commands.import_portal_delivery_orders import _delivery_
 from service.permission_catalog import get_role_defaults
 from service.permission_policy import VIEW_PERMISSION_MATRIX
 from service.permissions import MappedPermissionGuard
-from service.views.delivery_orders_views import DeliveryOrderBejermanRemitoView, FacturacionCompanyOptionsView
+from service.views.delivery_orders_views import (
+    DeliveryOrderBejermanArticlesView,
+    DeliveryOrderBejermanRemitoPrintView,
+    DeliveryOrderBejermanRemitoView,
+    FacturacionCompanyOptionsView,
+)
 
 
 class NexoraRoleDefaultsTests(SimpleTestCase):
@@ -14,9 +19,20 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         permissions = get_role_defaults("recepcion")
 
         self.assertTrue(permissions["page.recepcion"])
+        self.assertTrue(permissions["page.home_search"])
+        self.assertTrue(permissions["page.general_cliente"])
+        self.assertTrue(permissions["page.logistics"])
+        self.assertTrue(permissions["page.service_sheet_principal"])
         self.assertTrue(permissions["page.delivery_orders"])
         self.assertTrue(permissions["action.ingreso.create"])
+        self.assertTrue(permissions["action.delivery_order.create"])
+        self.assertTrue(permissions["action.delivery_order.prepare"])
+        self.assertTrue(permissions["action.delivery_order.deliver"])
+        self.assertTrue(permissions["action.delivery_order.cancel"])
         self.assertTrue(permissions["action.delivery_order.update_remito_location"])
+        self.assertTrue(permissions["action.delivery_order.generate_bejerman_remito"])
+        self.assertTrue(permissions["action.delivery_order.assign_articles"])
+        self.assertFalse(permissions["page.ingresos_history"])
         self.assertFalse(permissions["page.liberados"])
         self.assertFalse(permissions["page.billing"])
         self.assertFalse(permissions["action.delivery_order.invoice"])
@@ -52,6 +68,12 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
 
         self.assertIn("action.delivery_order.create", required)
 
+    def test_general_por_cliente_accepts_dedicated_permission_and_history(self):
+        required = VIEW_PERMISSION_MATRIX["GeneralPorClienteView"]["GET"]
+
+        self.assertIn("page.general_cliente", required)
+        self.assertIn("page.ingresos_history", required)
+
 
 class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
     def test_bejerman_remito_route_resolves_before_dynamic_order_detail(self):
@@ -59,8 +81,17 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
 
         self.assertEqual(match.func.view_class.__name__, "DeliveryOrderBejermanRemitoView")
 
+    def test_bejerman_article_and_print_routes_resolve_before_dynamic_order_detail(self):
+        article_match = resolve("/api/ordenes-entrega/bejerman-articulos/")
+        print_match = resolve("/api/ordenes-entrega/remito-bejerman/brg-test/print/")
+
+        self.assertEqual(article_match.func.view_class.__name__, "DeliveryOrderBejermanArticlesView")
+        self.assertEqual(print_match.func.view_class.__name__, "DeliveryOrderBejermanRemitoPrintView")
+
     def test_migrated_bejerman_views_use_mapped_permissions(self):
         self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanRemitoView.permission_classes)
+        self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanArticlesView.permission_classes)
+        self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanRemitoPrintView.permission_classes)
         self.assertIn(MappedPermissionGuard, FacturacionCompanyOptionsView.permission_classes)
 
     def test_remito_status_moves_to_pending_billing_only_when_remito_exists(self):

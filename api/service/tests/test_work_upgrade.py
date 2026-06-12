@@ -652,8 +652,10 @@ class WorkUpgradeAPITest(TestCase):
         self.assertEqual(resp.data["scope"]["dashboard_variant"], "cobranzas")
         self.assertEqual(
             {row["key"] for row in resp.data["kpis"]},
-            {"remitos_pendientes_facturacion", "pedidos_facturados"},
+            {"remitos_pendientes_facturacion", "clientes_pendientes_facturacion"},
         )
+        kpis = {row["key"]: row["value"] for row in resp.data["kpis"]}
+        self.assertEqual(kpis["clientes_pendientes_facturacion"], 1)
         self.assertEqual(resp.data["alerts"], [])
         self.assertEqual(resp.data["objetivos"], [])
         self.assertEqual(

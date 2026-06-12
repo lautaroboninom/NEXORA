@@ -13,15 +13,19 @@ import {
   getAccesoriosCatalogo,
   getTiposEquipo,
   getMarcasPorTipo,
-  getCatalogTipos,
-  getCatalogModelos,
-  getCatalogVariantes,
+  getVariantesPorModelo,
   lookupScan,
-  postIngresoRisEmitirBlob,
+  getBejermanIngressCompanies,
+  postIngresoRisEmitir,
   getSerialBarcodeBlob,
 } from "@/lib/api";
+import { openPdfBlob, reservePdfWindow } from "@/lib/pdf";
 import { useAuth } from "@/context/AuthContext";
 import { canAny, PERMISSION_CODES } from "@/lib/permissions";
+import RisProgressModal, {
+  waitForRisProgressMinimum,
+  waitForRisProgressPaint,
+} from "@/components/RisProgressModal";
 
 const FIELD_BASE_CLASS =
   "border border-gray-300 bg-white rounded p-2 w-full text-[15px] font-semibold text-gray-900 placeholder:text-gray-400";
@@ -45,12 +49,11 @@ const TIPO_INGRESO = {
   PARTICULAR: "particular",
 };
 const PROPIETARIO_VACIO = { nombre: "", contacto: "", doc: "" };
-
-function openPdfBlob(blob) {
-  const url = URL.createObjectURL(blob);
-  window.open(url, "_blank", "noopener,noreferrer");
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
+const DEFAULT_BEJERMAN_COMPANIES = [
+  { key: "SEPID", label: "SEPID SA", brandingKey: "SEPID", isTest: false },
+  { key: "MGBIO", label: "MG BIO", brandingKey: "MGBIO", isTest: false },
+  { key: "TEST", label: "Empresa de prueba", brandingKey: "TEST", isTest: true },
+];
 
 function scrollPageTop() {
   try {
@@ -135,8 +138,6 @@ export default function NuevoIngreso() {
   // Variantes (opcional)
   const [varianteTxt, setVarianteTxt] = useState("");
   const [varianteSugeridas, setVarianteSugeridas] = useState([]);
-  const [catTipoId, setCatTipoId] = useState(null);
-  const [catModelos, setCatModelos] = useState([]);
 
   // Form principal
   const [form, setForm] = useState({
@@ -166,8 +167,13 @@ export default function NuevoIngreso() {
   const [propietario, setPropietario] = useState(PROPIETARIO_VACIO);
   const [tecnicos, setTecnicos] = useState([]);
   const [tecnicoId, setTecnicoId] = useState(null);
-  // Empresa a facturar (SEPID por defecto)
-  const [empresaFact, setEmpresaFact] = useState("SEPID");
+  // Empresa Bejerman (SEPID por defecto)
+  const [bejermanCompanies, setBejermanCompanies] = useState(DEFAULT_BEJERMAN_COMPANIES);
+  const [empresaBejerman, setEmpresaBejerman] = useState("SEPID");
+  const selectedBejermanCompany = useMemo(
+    () => bejermanCompanies.find((item) => item.key === empresaBejerman) || DEFAULT_BEJERMAN_COMPANIES[0],
+    [bejermanCompanies, empresaBejerman]
+  );
 
   const [loading, setLoading] = useState(false);
   const [submitStage, setSubmitStage] = useState("");
@@ -427,7 +433,7 @@ export default function NuevoIngreso() {
     setTipoIngreso(TIPO_INGRESO.CLIENTE);
     setPropietario(PROPIETARIO_VACIO);
     setTecnicoId(null);
-    setEmpresaFact("SEPID");
+    setEmpresaBejerman("SEPID");
     setVarianteTxt("");
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
@@ -443,7 +449,19 @@ export default function NuevoIngreso() {
     if (prefillAppliedRef.current) return;
     const payload = location?.state?.prefill || null;
     const serieParam = (searchParams.get("serie") || "").trim();
-    const prefill = payload || (serieParam ? { numero_serie: serieParam } : null);
+    const rawPrefill = payload || (serieParam ? { numero_serie: serieParam } : null);
+    const prefillMarcaId = rawPrefill?.marca_id || rawPrefill?.brand_id || rawPrefill?.marcaId || "";
+    const prefillModelId = rawPrefill?.modelo_id || rawPrefill?.model_id || rawPrefill?.modelId || "";
+    const prefill = rawPrefill
+      ? {
+          ...rawPrefill,
+          marca_id: prefillMarcaId,
+          model_id: prefillModelId,
+          modelo_id: prefillModelId,
+          marca: rawPrefill.marca || rawPrefill.marca_nombre || rawPrefill.brand || "",
+          modelo: rawPrefill.modelo || rawPrefill.modelo_nombre || rawPrefill.model || "",
+        }
+      : null;
     if (!prefill) return;
 
     prefillAppliedRef.current = true;
@@ -452,13 +470,15 @@ export default function NuevoIngreso() {
     prefillSkipTipoResetRef.current = true;
     prefillTipoAppliedRef.current = false;
     prefillRef.current = prefill;
+    nsAutoDesiredBrandRef.current = prefill.marca_id || null;
+    nsAutoDesiredModelRef.current = prefill.model_id || null;
 
     setForm((f0) => {
       const f = clone(f0);
       if (prefill.numero_serie) f.equipo.numero_serie = prefill.numero_serie;
       if (prefill.numero_interno && !prefill.mg_inactivo_venta) f.equipo.numero_interno = prefill.numero_interno;
-      if (prefill.marca_id) f.equipo.marca_id = prefill.marca_id;
-      if (prefill.model_id) f.equipo.modelo_id = prefill.model_id;
+      if (prefill.marca_id) f.equipo.marca_id = String(prefill.marca_id);
+      if (prefill.model_id) f.equipo.modelo_id = String(prefill.model_id);
       return f;
     });
     if (prefill.marca_id) setMarcaId(prefill.marca_id);
@@ -515,8 +535,9 @@ export default function NuevoIngreso() {
     if (!modelos || modelos.length === 0) return;
     const exists = modelos.some((m) => String(m.id) === String(prefill.model_id));
     if (!exists) return;
-    setForm((f0) => ({ ...f0, equipo: { ...f0.equipo, modelo_id: prefill.model_id } }));
+    setForm((f0) => ({ ...f0, equipo: { ...f0.equipo, modelo_id: String(prefill.model_id) } }));
     prefillModelAppliedRef.current = true;
+    nsAutoDesiredModelRef.current = null;
   }, [modelos]);
 
   useEffect(() => {
@@ -554,7 +575,7 @@ export default function NuevoIngreso() {
           setMgInactiveInfo(null);
           setBejermanSuggestion(res.suggestion);
           setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
-          setNsAutofillInfo("Venta encontrada en Bejerman. Podés aplicar la sugerencia de equipo y decidir el cliente.");
+          setNsAutofillInfo("Venta encontrada en Bejerman. Puede aplicar la sugerencia de equipo y decidir el cliente.");
           return;
         }
 
@@ -608,8 +629,8 @@ export default function NuevoIngreso() {
           : "";
         const clienteWarning = shouldAutofillCliente && !clienteMatch
           ? useAlquilerCliente
-            ? `El cliente alquilado "${clienteRawRs}" no existe en el catálogo. Seleccioná un cliente válido antes de guardar.`
-            : `El cliente dueño "${clienteRawRs || clienteRawCod}" no existe en el catálogo. Seleccioná un cliente válido antes de guardar.`
+            ? `El cliente alquilado "${clienteRawRs}" no existe en el catálogo. Seleccione un cliente válido antes de guardar.`
+            : `El cliente dueño "${clienteRawRs || clienteRawCod}" no existe en el catálogo. Seleccione un cliente válido antes de guardar.`
           : "";
 
         const propietarioNombre = String(device.propietario_nombre || "").trim();
@@ -717,7 +738,7 @@ export default function NuevoIngreso() {
           (autofillEsParticular && propietarioDoc) ||
           mgInactiveBySale
         );
-        setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Podés editarlos.` : "");
+        setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Puede editarlos.` : "");
         setNsAutofillClienteWarning(clienteWarning);
         setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
       } catch {
@@ -865,6 +886,26 @@ export default function NuevoIngreso() {
         errs.push("Error cargando tipos de equipo");
       }
       try {
+        const res = await getBejermanIngressCompanies();
+        const items = Array.isArray(res?.items) && res.items.length ? res.items : DEFAULT_BEJERMAN_COMPANIES;
+        const normalizedItems = items.map((item) => ({
+          key: String(item?.key || "").trim().toUpperCase(),
+          label: item?.label || item?.key || "",
+          brandingKey: item?.brandingKey || item?.key || "",
+          isTest: !!item?.isTest,
+        })).filter((item) => item.key);
+        if (normalizedItems.length) {
+          const defaultKey = String(res?.defaultKey || normalizedItems[0].key || "SEPID").trim().toUpperCase();
+          setBejermanCompanies(normalizedItems);
+          setEmpresaBejerman((current) =>
+            normalizedItems.some((item) => item.key === current) ? current : defaultKey
+          );
+        }
+      } catch (_) {
+        setBejermanCompanies(DEFAULT_BEJERMAN_COMPANIES);
+        setEmpresaBejerman((current) => current || "SEPID");
+      }
+      try {
         const tecs = await getTecnicos();
         setTecnicos(tecs || []);
       } catch (_) {
@@ -887,72 +928,63 @@ export default function NuevoIngreso() {
     getModelosByBrand(marcaId)
       .then((rows) => {
         const list = rows || [];
+        const desiredModel = nsAutoDesiredModelRef.current;
         if (tipoSel) {
           const norm = (s) => (s || "").toString().trim().toUpperCase();
           const filtered = list.filter((m) => norm(m.tipo_equipo) === norm(tipoSel));
-          setModelos(filtered);
+          const desiredExistsInList = desiredModel
+            ? list.some((m) => String(m.id) === String(desiredModel))
+            : false;
+          const desiredExistsInFiltered = desiredModel
+            ? filtered.some((m) => String(m.id) === String(desiredModel))
+            : false;
+          const nextModelos = desiredExistsInList && !desiredExistsInFiltered ? list : filtered;
+          setModelos(nextModelos);
           const currentId = (form?.equipo?.modelo_id ?? "").toString();
-          const exists = filtered.some((x) => String(x.id) === currentId);
+          const exists = nextModelos.some((x) => String(x.id) === currentId);
           if (!exists) setForm((f) => ({ ...f, equipo: { ...f.equipo, modelo_id: "" } }));
         } else {
           setModelos(list);
         }
-        (async () => {
-          setCatTipoId(null);
-          setCatModelos([]);
-          setVarianteSugeridas([]);
-          if (!tipoSel) return;
-          try {
-            const tiposBrand = await getCatalogTipos(marcaId);
-            const match = (tiposBrand || []).find(
-              (t) => (t.name || "").trim().toUpperCase() === (tipoSel || "").trim().toUpperCase()
-            );
-            const tId = match?.id ?? null;
-            setCatTipoId(tId);
-            if (tId) {
-              const mods = await getCatalogModelos(marcaId, tId);
-              setCatModelos(mods || []);
-            }
-          } catch {
-            setCatTipoId(null);
-            setCatModelos([]);
-          }
-        })();
+        setVarianteSugeridas([]);
       })
       .catch((e) => setErr(e?.message || "Error cargando modelos"));
   }, [marcaId, tipoSel]);
 
   // Variantes desde catálogo según modelo interno seleccionado
   useEffect(() => {
-    const m = (modelos || []).find((x) => x.id === Number(form.equipo.modelo_id));
-    if (!m || !marcaId || !catTipoId) {
+    const modeloId = form.equipo.modelo_id;
+    if (!modeloId) {
       setVarianteSugeridas([]);
       if (!varianteTxt) setVarianteTxt("");
       return;
     }
-    const needle = (m.nombre || "").trim().toUpperCase();
-    const cmatch = (catModelos || []).filter((cm) => {
-      const a = (cm.name || "").trim().toUpperCase();
-      const alias = (cm.alias || "").trim().toUpperCase();
-      return a === needle || a.includes(needle) || needle.includes(a) || (alias && (alias === needle || needle.includes(alias) || alias.includes(needle)));
-    });
-    if (cmatch.length !== 1) {
-      setVarianteSugeridas([]);
-      if (!varianteTxt) setVarianteTxt("");
-      return;
-    }
-    const cm = cmatch[0];
+    let active = true;
     (async () => {
       try {
-        const vars = await getCatalogVariantes(marcaId, catTipoId, cm.id);
-        const names = (vars || []).filter((v) => v && v.name).map((v) => v.name);
+        const vars = await getVariantesPorModelo(modeloId);
+        if (!active) return;
+        const seen = new Set();
+        const names = (Array.isArray(vars) ? vars : [])
+          .filter((v) => v?.active !== false)
+          .map((v) => v?.name || v?.nombre || v?.label || "")
+          .map((value) => String(value || "").trim())
+          .filter((value) => {
+            const key = value.toUpperCase();
+            if (!value || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
         setVarianteSugeridas(names);
         if (!varianteTxt && names.length === 1) setVarianteTxt(names[0]);
       } catch {
-        setVarianteSugeridas([]);
+        if (active) setVarianteSugeridas([]);
       }
     })();
-  }, [form.equipo.modelo_id, modelos, marcaId, catTipoId, catModelos, varianteTxt]);
+    return () => {
+      active = false;
+    };
+  }, [form.equipo.modelo_id, varianteTxt]);
 
   // Técnico por modelo
   useEffect(() => {
@@ -1096,7 +1128,7 @@ export default function NuevoIngreso() {
     setVarianteTxt(equipment.variante || "");
     nsAutoDesiredBrandRef.current = suggestedMarcaId;
     nsAutoDesiredModelRef.current = modelInCurrentList?.id ? null : suggestedModeloId;
-    setNsAutofillInfo("Sugerencia Bejerman aplicada. Verificá cliente, motivo y accesorios antes de guardar.");
+    setNsAutofillInfo("Sugerencia Bejerman aplicada. Verifique cliente, motivo y accesorios antes de guardar.");
   };
 
   const applyBejermanCustomerSuggestion = () => {
@@ -1110,7 +1142,7 @@ export default function NuevoIngreso() {
   const printSerialBarcode = async () => {
     const serial = (form.equipo.numero_serie || form.equipo.numero_interno || "").trim();
     if (!serial) {
-      setErr("Ingresá un número de serie o interno para imprimir la etiqueta.");
+      setErr("Ingrese un número de serie o interno para imprimir la etiqueta.");
       return;
     }
     try {
@@ -1151,24 +1183,24 @@ export default function NuevoIngreso() {
 
     if (!form.equipo.marca_id) {
       setLoading(false);
-      setErr("Seleccioná una marca válida de la lista.");
+      setErr("Seleccione una marca válida de la lista.");
       return;
     }
     if (!form.equipo.modelo_id) {
       setLoading(false);
-      setErr("Seleccioná un modelo.");
+      setErr("Seleccione un modelo.");
       return;
     }
     if (!form.motivo) {
       setLoading(false);
-      setErr("Seleccioná un motivo.");
+      setErr("Seleccione un motivo.");
       return;
     }
 
     const c = resolveCliente(clienteRsInput, clienteCodInput);
     if (!c?.id) {
       setLoading(false);
-      setErr("Debés seleccionar un cliente válido de la lista.");
+      setErr("Debe seleccionar un cliente válido de la lista.");
       return;
     }
     const clienteEsParticular = isParticularCustomer(c);
@@ -1179,7 +1211,7 @@ export default function NuevoIngreso() {
     }
     if (!isParticularIngreso && clienteEsParticular) {
       setLoading(false);
-      setErr("Para usar el cliente Particular, seleccioná el tipo Particular.");
+      setErr("Para usar el cliente Particular, seleccione el tipo Particular.");
       return;
     }
 
@@ -1196,6 +1228,13 @@ export default function NuevoIngreso() {
       return;
     }
 
+    let risPdfWindow = null;
+    let risPdfOpened = false;
+    risPdfWindow = reservePdfWindow({
+      title: "REMITO",
+      message: "Preparando RIS...",
+    });
+
     const mgInput = (form.equipo.numero_interno || "").trim();
     if (mgInput) {
       try {
@@ -1205,6 +1244,7 @@ export default function NuevoIngreso() {
             numero_interno: scanMg?.device?.numero_interno || mgInput,
             msg: "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
           });
+          risPdfWindow?.close();
           setLoading(false);
           setErr("MG histórico inactivo por venta; no operativo para nuevos ingresos.");
           return;
@@ -1238,7 +1278,8 @@ export default function NuevoIngreso() {
         tecnico_id: tecnicoId ? Number(tecnicoId) : null,
         garantia_reparacion: !!form.garantia_reparacion,
         propietario: propietarioPayload,
-        empresa_facturar: (empresaFact || "SEPID").toUpperCase(),
+        empresa_bejerman: (empresaBejerman || "SEPID").toUpperCase(),
+        empresa_facturar: (selectedBejermanCompany?.brandingKey || "SEPID").toUpperCase(),
         bejerman_sale: bejermanSalePayloadForSubmit(),
         // Checkbox representa "fajas abiertas" => etiq_garantia_ok debe ser la negación
         etiq_garantia_ok: !form.etiq_garantia_ok,
@@ -1256,13 +1297,24 @@ export default function NuevoIngreso() {
       }
       let risNotice = "Ingreso creado.";
       if (r?.ingreso_id) {
+        const risProgressStartedAt = Date.now();
         try {
-          setSubmitStage("Emitiendo RIS...");
-          const blob = await postIngresoRisEmitirBlob(r.ingreso_id);
-          openPdfBlob(blob);
-          risNotice = "Ingreso creado y RIS emitido. Se abrió el PDF imprimible.";
+          setSubmitStage("Emitiendo RIS en Bejerman...");
+          await waitForRisProgressPaint();
+          const risResult = await postIngresoRisEmitir(r.ingreso_id);
+          setSubmitStage("Preparando PDF...");
+          risPdfOpened = risPdfWindow.openUrl(risResult?.print_url);
+          const remito = risResult?.remito_number || risResult?.ris?.remito_number || "";
+          risNotice = remito
+            ? `Ingreso creado y RIS ${remito} emitido. Preparando PDF para imprimir.`
+            : "Ingreso creado y RIS emitido. Preparando PDF para imprimir.";
+          if (!risPdfOpened) {
+            risNotice += " El navegador bloqueó la ventana de impresión; reimprima desde la hoja de servicio.";
+          }
         } catch (risError) {
-          risNotice = `Ingreso creado. No se pudo emitir o abrir el RIS: ${risError?.message || "error desconocido"}. Reintentá desde la hoja de servicio.`;
+          risNotice = `Ingreso creado. No se pudo emitir o abrir el RIS: ${risError?.message || "error desconocido"}. Reintente desde la hoja de servicio.`;
+        } finally {
+          await waitForRisProgressMinimum(risProgressStartedAt);
         }
       }
       resetFormFields();
@@ -1280,6 +1332,7 @@ export default function NuevoIngreso() {
       }
       setErr(e2?.message || "Error creando ingreso");
     } finally {
+      if (!risPdfOpened) risPdfWindow?.close();
       setLoading(false);
       setSubmitStage("");
     }
@@ -1301,9 +1354,17 @@ export default function NuevoIngreso() {
     if (dupPrompt.ingresoId) navigate(`/ingresos/${dupPrompt.ingresoId}`);
     closeDupPrompt();
   };
+  const risProgressOpen = loading && !!submitStage;
+  const risProgressStatus = submitStage || "Emitiendo RIS en Bejerman";
+  const risProgressTitle = risProgressStatus.toLowerCase().includes("guardando") ? "Creando ingreso" : "Emitiendo RIS";
 
   return (
     <div className="max-w-5xl mx-auto lg:mx-0 p-4 space-y-4">
+      <RisProgressModal
+        open={risProgressOpen}
+        title={risProgressTitle}
+        status={risProgressStatus}
+      />
       <h1 className="text-2xl font-bold">Nuevo Ingreso (Orden de Servicio)</h1>
 
       {dupPrompt.open && (
@@ -1407,7 +1468,7 @@ export default function NuevoIngreso() {
                     Usar cliente sugerido
                   </button>
                 ) : (
-                  <div className="mt-1 text-xs text-amber-700">No se fuerza: elegí el cliente que dejó el equipo.</div>
+                  <div className="mt-1 text-xs text-amber-700">No se fuerza: elija el cliente que dejó el equipo.</div>
                 )}
               </div>
               <div>
@@ -1491,7 +1552,7 @@ export default function NuevoIngreso() {
               />
               {autofillBy === "interno" && (form.equipo.numero_interno || "").trim() && !isInternalLookupReady(form.equipo.numero_interno) && (
                 <div className="text-xs text-gray-500 mt-1">
-                  Para autocompletar, ingresá el código completo (ej. MG 7293).
+                  Para autocompletar, ingrese el código completo (ej. MG 7293).
                 </div>
               )}
               {mgInactiveInfo?.msg && (
@@ -1503,8 +1564,8 @@ export default function NuevoIngreso() {
             </div>
             <div className="md:col-span-12 md:order-3 text-[11px] text-gray-500 mt-1">
               {autofillBy === "serie"
-                ? "Para autocompletar por N/S, presioná Enter o Tab."
-                : "Para autocompletar por número interno, presioná Enter o Tab."}
+                ? "Para autocompletar por N/S, presione Enter o Tab."
+                : "Para autocompletar por número interno, presione Enter o Tab."}
             </div>
 
             <div className="flex items-center gap-2 md:col-span-4 md:order-4">
@@ -1520,10 +1581,10 @@ export default function NuevoIngreso() {
 
             <div className="md:col-span-4 md:order-6 flex items-center gap-2">
               <input id="etiqok" type="checkbox" checked={!!form.etiq_garantia_ok} onChange={(e) => setForm((f) => ({ ...f, etiq_garantia_ok: !!e.target.checked }))} />
-              <label htmlFor="etiqok" className="text-sm font-medium text-gray-800">Faja de garantia abiertas</label>
+              <label htmlFor="etiqok" className="text-sm font-medium text-gray-800">Faja abierta</label>
             </div>
             <div className="md:col-span-12 md:order-7 text-xs text-gray-500 mt-1">
-              Marca si al ingresar el equipo la faja/etiquetas estaban en mal estado.
+              Marque si al ingresar el equipo la faja o las etiquetas estaban en mal estado.
             </div>
           </div>
         </fieldset>
@@ -1532,7 +1593,7 @@ export default function NuevoIngreso() {
         <fieldset className="border rounded p-3">
           <legend className="px-2 font-semibold">Cliente</legend>
           {!clientesPerm && (
-            <div className="text-xs text-gray-600 mb-2">No tenés permisos para listar clientes</div>
+            <div className="text-xs text-gray-600 mb-2">No tiene permisos para listar clientes</div>
           )}
           <div className="mb-3">
             <label className={FIELD_LABEL_CLASS}>Tipo</label>
@@ -1571,7 +1632,7 @@ export default function NuevoIngreso() {
                 value={clienteRsInput}
                 onChange={(e) => onClienteRsChange(e.target.value)}
                 readOnly={isParticularIngreso}
-                placeholder={isParticularIngreso ? "Particular" : "Escribí y elegí de la lista"}
+                placeholder={isParticularIngreso ? "Particular" : "Escriba y elija de la lista"}
                 required
               />
               {clientesPerm && (
@@ -1582,7 +1643,7 @@ export default function NuevoIngreso() {
                 </datalist>
               )}
               {!isParticularIngreso && clienteRsInput && !rsMatch && (
-                <div className="text-xs text-red-600 mt-1">Debés seleccionar de la lista</div>
+                <div className="text-xs text-red-600 mt-1">Debe seleccionar de la lista</div>
               )}
               {isParticularIngreso && clienteRsInput && !rsMatch && (
                 <div className="text-xs text-red-600 mt-1">No se encontró el cliente Particular en el catálogo.</div>
@@ -1643,14 +1704,20 @@ export default function NuevoIngreso() {
           </div>
         )}
 
-        {/* Empresa a facturar */}
+        {/* Empresa Bejerman */}
         <div className="border rounded p-3">
-          <label className={FIELD_LABEL_CLASS}>Empresa a facturar</label>
-          <Select className="md:max-w-sm" value={empresaFact} onChange={(e) => setEmpresaFact((e.target.value || "SEPID").toUpperCase())}>
-            <option value="SEPID">SEPID SA</option>
-            <option value="MGBIO">MG BIO</option>
+          <label className={FIELD_LABEL_CLASS}>Empresa Bejerman</label>
+          <Select
+            className="md:max-w-sm"
+            value={empresaBejerman}
+            onChange={(e) => setEmpresaBejerman((e.target.value || "SEPID").toUpperCase())}
+          >
+            {bejermanCompanies.map((company) => (
+              <option key={company.key} value={company.key}>
+                {company.label}
+              </option>
+            ))}
           </Select>
-          <div className="text-xs text-gray-500 mt-1">Por defecto: SEPID SA</div>
         </div>
 
         {/* Equipo */}
@@ -1680,7 +1747,7 @@ export default function NuevoIngreso() {
                 ))}
               </datalist>
               {marcaTxt && !marcaId && (
-                <div className="text-xs text-red-600 mt-1">Elegí una marca de las sugeridas.</div>
+                <div className="text-xs text-red-600 mt-1">Elija una marca de las sugeridas.</div>
               )}
             </div>
 
@@ -1688,7 +1755,7 @@ export default function NuevoIngreso() {
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Modelo</label>
               <Select value={form.equipo.modelo_id} onChange={onChange("equipo.modelo_id")} disabled={!marcaId || !modelos.length}>
-                <option value="">{!marcaId ? "Elegí marca primero" : "Seleccioná modelo"}</option>
+                <option value="">{!marcaId ? "Elija una marca primero" : "Seleccione modelo"}</option>
                 {modelos.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.nombre}
@@ -1740,14 +1807,14 @@ export default function NuevoIngreso() {
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Motivo</label>
               <Select value={form.motivo} onChange={onChange("motivo")} required>
-                <option value="">Seleccioná motivo</option>
+                <option value="">Seleccione motivo</option>
                 {motivos.map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}
                   </option>
                 ))}
               </Select>
-              {!form.motivo && <div className="text-xs text-gray-600 mt-1">Seleccioná un motivo</div>}
+              {!form.motivo && <div className="text-xs text-gray-600 mt-1">Seleccione un motivo</div>}
             </div>
             <div className="md:col-span-3 text-sm text-gray-600 self-end">
               Ubicación inicial: <b>Taller</b> (se puede modificar desde la hoja de servicio)
@@ -1767,7 +1834,7 @@ export default function NuevoIngreso() {
               <div className="grid grid-cols-1 md:grid-cols-12 items-end gap-3 mb-2">
                 <div className="md:col-span-6">
                   <label className={FIELD_LABEL_CLASS}>Descripción</label>
-                  <Input list="accesorios_catalogo" value={nuevoAcc.descripcion} onChange={(e) => setNuevoAcc((s) => ({ ...s, descripcion: e.target.value }))} placeholder="Escribí y elegí de la lista" />
+                  <Input list="accesorios_catalogo" value={nuevoAcc.descripcion} onChange={(e) => setNuevoAcc((s) => ({ ...s, descripcion: e.target.value }))} placeholder="Escriba y elija de la lista" />
                   <datalist id="accesorios_catalogo">
                     {(Array.isArray(accesCatalogo) ? accesCatalogo : []).map((a) => (
                       <option key={a.id} value={a.nombre} />
@@ -1784,7 +1851,7 @@ export default function NuevoIngreso() {
                   if (!d) return;
                   const acc = (accesCatalogo || []).find((a) => (a.nombre || "").trim().toLowerCase() === d);
                   if (!acc) {
-                    setErr("Elegí una descripción válida de la lista");
+                    setErr("Elija una descripción válida de la lista");
                     return;
                   }
                   setAccItems((list) => [

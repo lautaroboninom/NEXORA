@@ -51,7 +51,7 @@ export default function Login() {
     } catch (error) {
       const msg = error?.message || "Credenciales inválidas";
       if (!backendOk) {
-        setErr("Backend no disponible en /api. Verificá que la API esté levantada y accesible.");
+        setErr("Backend no disponible en /api. Verifique que la API esté levantada y accesible.");
       } else {
         setErr(msg);
       }
@@ -64,14 +64,14 @@ export default function Login() {
     <div className="min-h-screen flex flex-col">
       <main className="flex-1">
         <div className="max-w-md mx-auto mt-16 card">
-          <div className="flex justify-center mb-4">
+          <div className="mb-4 flex justify-center">
             <img
-              src="/branding/logo-app.png"
+              src="/branding/logotipo-nexora.png"
               alt="NEXORA"
-              className="h-12 object-contain"
+              className="w-72 max-w-full object-contain"
               onError={(event) => {
                 event.currentTarget.onerror = null;
-                event.currentTarget.src = "/icons/logo-app-180.png";
+                event.currentTarget.src = "/branding/logo-nexora.png";
               }}
             />
           </div>

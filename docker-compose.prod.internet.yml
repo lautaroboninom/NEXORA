@@ -1,6 +1,3 @@
-﻿version: "3.9"
-
-
 name: nexora
 services:
   reverse-proxy:
@@ -67,6 +64,8 @@ services:
       bash -lc "python manage.py migrate --noinput && \
       python manage.py apply_ticket_sale_states_schema && \
       python manage.py apply_delivery_orders_schema && \
+      python manage.py apply_notifications_schema && \
+      python manage.py apply_assignment_requests_schema && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:
       - staticfiles:/app/staticfiles
@@ -80,7 +79,7 @@ services:
         read_only: true
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.api-secure.rule=Host(`reparaciones.sepid.com.ar`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.api-secure.rule=Host(`nexora.sepid.com.ar`) && PathPrefix(`/api`)"
       - "traefik.http.routers.api-secure.entrypoints=websecure"
       - "traefik.http.routers.api-secure.tls=true"
       - "traefik.http.routers.api-secure.tls.certresolver=le"
@@ -107,7 +106,7 @@ services:
       - staticfiles:/static:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.web-secure.rule=Host(`reparaciones.sepid.com.ar`) && PathPrefix(`/`)"
+      - "traefik.http.routers.web-secure.rule=Host(`nexora.sepid.com.ar`) && PathPrefix(`/`)"
       - "traefik.http.routers.web-secure.entrypoints=websecure"
       - "traefik.http.routers.web-secure.tls=true"
       - "traefik.http.routers.web-secure.tls.certresolver=le"

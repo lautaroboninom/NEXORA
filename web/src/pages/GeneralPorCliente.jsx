@@ -165,7 +165,7 @@ export default function GeneralPorCliente() {
           disabled={loadingClientes}
           aria-label="Elegir cliente"
         >
-          <option value="">{loadingClientes ? "Cargando clientes" : "-- Eleg cliente --"}</option>
+          <option value="">{loadingClientes ? "Cargando clientes" : "-- Elija cliente --"}</option>
           {clientes.map((c) => (
             <option key={c.id} value={c.id}>
               {c.razon_social ?? c.nombre ?? `Cliente ${c.id}`}
@@ -205,14 +205,14 @@ export default function GeneralPorCliente() {
             onClick={() => exportGeneral(Array.from(selectedIds))}
             disabled={!sel || exporting || selectedIds.size === 0}
             aria-busy={exporting ? "true" : "false"}
-            title="Exportar seleccin a Excel"
+            title="Exportar elegidos a Excel"
           >
-            Exportar seleccin
+            Exportar elegidos
           </button>
         </div>
       </div>
 
-      {/* Errores de la bsqueda */}
+      {/* Errores de la búsqueda */}
       {errRows && (
         <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">
           {errRows}
@@ -225,7 +225,7 @@ export default function GeneralPorCliente() {
         <div className="text-sm text-gray-500">No hay resultados para este cliente.</div>
       ) : rows.length === 0 ? (
         <div className="text-sm text-gray-500">
-          Eleg un cliente y presion <span className="font-medium">Buscar</span>.
+          Elija un cliente para ver resultados.
         </div>
       ) : (
         <div className="overflow-x-auto">

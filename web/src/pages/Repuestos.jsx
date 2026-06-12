@@ -23,9 +23,7 @@ import {
   patchRepuestosStockPermiso,
   getMarcas,
   getModelos,
-  getCatalogTipos,
-  getCatalogModelos,
-  getCatalogVariantes,
+  getVariantesPorModelo,
   getTecnicos,
   getProveedoresExternos,
   deleteRepuesto,
@@ -79,10 +77,6 @@ const todayLocalISO = () => {
 
 const normalizeEquipoToken = (value) =>
   norm(value).replace(/\s+/g, " ").trim();
-
-const canonEquipoName = (value) => norm(value).replace(/\s+/g, " ").trim();
-const typeKey = (value) =>
-  (value ?? "").toString().toLowerCase().replace(/\s+/g, " ").trim();
 
 const splitEquipoParts = (value) =>
   (value ?? "")
@@ -394,7 +388,7 @@ export default function Repuestos() {
             : "",
       });
     } catch (e) {
-      setErr(e?.message || "No se pudo cargar la configuracion");
+      setErr(e?.message || "No se pudieron cargar los ajustes");
     }
   }
 
@@ -498,63 +492,12 @@ export default function Repuestos() {
         const modelos = await getModelos(marca.id);
         const modelosArr = Array.isArray(modelos) ? modelos : [];
 
-        const tipos = await getCatalogTipos(marca.id);
-        const tiposArr = Array.isArray(tipos) ? tipos : [];
-        const tipoByKey = new Map();
-        tiposArr.forEach((tipo) => {
-          const keyName = typeKey(tipo?.name || "");
-          const keyLabel = typeKey(tipo?.label || tipo?.name || "");
-          if (keyName) tipoByKey.set(keyName, tipo);
-          if (keyLabel) tipoByKey.set(keyLabel, tipo);
-        });
-
-        const catalogModelIndexByTipo = new Map();
-        const getCatalogModelIndex = async (tipoId) => {
-          if (catalogModelIndexByTipo.has(tipoId)) {
-            return catalogModelIndexByTipo.get(tipoId);
-          }
-          const modelosCat = await getCatalogModelos(marca.id, tipoId);
-          const index = new Map();
-          (modelosCat || []).forEach((modelo) => {
-            if (modelo?.active === false) return;
-            const nameKey = canonEquipoName(modelo?.name || "");
-            const aliasKey = canonEquipoName(modelo?.alias || "");
-            if (nameKey) index.set(nameKey, modelo);
-            if (aliasKey) index.set(aliasKey, modelo);
-          });
-          catalogModelIndexByTipo.set(tipoId, index);
-          return index;
-        };
-
-        const variantesCache = new Map();
-        const getVariantesBySerie = async (serieId) => {
-          if (variantesCache.has(serieId)) return variantesCache.get(serieId);
-          const rows = await getCatalogVariantes(marca.id, null, serieId);
-          const variantes = (rows || []).filter((v) => v?.active !== false);
-          variantesCache.set(serieId, variantes);
-          return variantes;
-        };
-
         for (const modelo of modelosArr) {
           const modeloNombre = (modelo?.nombre || modelo?.name || "").trim();
           if (!modeloNombre) continue;
           addOption(`${marcaNombre} | ${modeloNombre}`);
 
-          const varianteSimple = (modelo?.variante || "").trim();
-          if (varianteSimple) {
-            addOption(`${marcaNombre} | ${modeloNombre} | ${varianteSimple}`);
-          }
-
-          const tipoName = (modelo?.tipo_equipo || "").trim();
-          if (!tipoName) continue;
-          const tipo = tipoByKey.get(typeKey(tipoName));
-          if (!tipo) continue;
-
-          const index = await getCatalogModelIndex(tipo.id);
-          const serie = index.get(canonEquipoName(modeloNombre));
-          if (!serie) continue;
-
-          const variantes = await getVariantesBySerie(serie.id);
+          const variantes = await getVariantesPorModelo(modelo.id);
           variantes.forEach((variante) => {
             const varNombre = (variante?.name || variante?.nombre || "").trim();
             if (!varNombre) return;
@@ -1156,9 +1099,9 @@ export default function Repuestos() {
       });
       await loadConfig();
       await loadRepuestos();
-      setMsg("Configuracion actualizada");
+      setMsg("Ajustes actualizados");
     } catch (e) {
-      setErr(e?.message || "No se pudo actualizar configuracion");
+      setErr(e?.message || "No se pudieron actualizar los ajustes");
     } finally {
       setCfgLoading(false);
     }
@@ -1331,7 +1274,7 @@ export default function Repuestos() {
       ? Number(repuestoMatch.id)
       : Number(compraForm.repuesto_id || 0);
     if (!repuestoId) {
-      setErr("Selecciona un repuesto valido");
+      setErr("Seleccione un repuesto válido");
       return;
     }
 
@@ -1539,7 +1482,7 @@ export default function Repuestos() {
                     loadSubrubros();
                   }}
                 >
-                  Gestionar subrubros
+                  Administrar subrubros
                 </button>
               )}
               {canViewCambios && (
@@ -1756,7 +1699,7 @@ export default function Repuestos() {
         {canManageSubrubros && subrubrosOpen && (
           <div className="border rounded p-3 bg-gray-50 mb-3">
             <div className="flex items-center justify-between mb-3">
-              <div className="font-medium text-sm">Gestionar subrubros</div>
+              <div className="font-medium text-sm">Administrar subrubros</div>
               <button
                 className="text-xs text-gray-500 underline"
                 type="button"
@@ -2064,7 +2007,7 @@ export default function Repuestos() {
                             e.preventDefault();
                             if (!addEquipoInput.trim()) return;
                             if (!addEquipoMatch) {
-                              setAddEquipoErr("Selecciona un equipo de la lista.");
+                              setAddEquipoErr("Seleccione un equipo de la lista.");
                               return;
                             }
                             addEquipoLineToAdd(addEquipoMatch);
@@ -2077,7 +2020,7 @@ export default function Repuestos() {
                           onClick={() => {
                             if (!addEquipoInput.trim()) return;
                             if (!addEquipoMatch) {
-                              setAddEquipoErr("Selecciona un equipo de la lista.");
+                              setAddEquipoErr("Seleccione un equipo de la lista.");
                               return;
                             }
                             addEquipoLineToAdd(addEquipoMatch);
@@ -2602,7 +2545,7 @@ export default function Repuestos() {
                                               if (!equipoInput.trim()) return;
                                               if (!equipoMatch) {
                                                 updateDetalleState(it.id, {
-                                                  equipoErr: "Selecciona un equipo de la lista.",
+                                                  equipoErr: "Seleccione un equipo de la lista.",
                                                 });
                                                 return;
                                               }
@@ -2618,7 +2561,7 @@ export default function Repuestos() {
                                               if (!equipoInput.trim()) return;
                                               if (!equipoMatch) {
                                                 updateDetalleState(it.id, {
-                                                  equipoErr: "Selecciona un equipo de la lista.",
+                                                  equipoErr: "Seleccione un equipo de la lista.",
                                                 });
                                                 return;
                                               }
@@ -3052,7 +2995,7 @@ export default function Repuestos() {
                     ? `Seleccionado: ${repuestoOptionLabel(compraSelectedRepuesto)} | Stock actual: ${
                         compraSelectedRepuesto.stock_on_hand ?? "-"
                       }`
-                    : "Selecciona un repuesto del listado"}
+                    : "Seleccione un repuesto del listado"}
                 </div>
               </div>
 

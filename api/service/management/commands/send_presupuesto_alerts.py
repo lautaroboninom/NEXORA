@@ -226,9 +226,9 @@ class Command(BaseCommand):
             dias = int(r.get("dias_desde_emitido") or 0)
 
             link = _frontend_link(f"/ingresos/{ingreso_id}")
-            subject = f"Presupuesto pendiente de aprobacion - {os_txt}"
+            subject = f"Presupuesto pendiente de aprobación - {os_txt}"
             lines = [
-                f"Aviso automatico: el presupuesto de {os_txt} lleva {dias} dias sin aprobacion.",
+                f"Aviso automático: el presupuesto de {os_txt} lleva {dias} días sin aprobación.",
                 "",
                 "Detalle del equipo:",
                 f"- Cliente: {cliente}",
@@ -238,7 +238,7 @@ class Command(BaseCommand):
             ]
             if link:
                 lines += ["", f"Abrir hoja de servicio: {link}"]
-            lines += ["", "Aviso automatico - no responder a este correo."]
+            lines += ["", "Aviso automático - no responder a este correo."]
             body = _email_append_footer_text("\n".join(lines))
 
             if dry_run:

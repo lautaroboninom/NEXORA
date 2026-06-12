@@ -7,6 +7,13 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from service.auth import issue_token
+from service.delivery_orders import (
+    DeliveryOrderError,
+    create_delivery_order,
+    list_delivery_orders,
+    mark_delivered,
+    mark_invoiced,
+)
 from service.models import User
 from service.notifications import (
     emit_notification,
@@ -106,6 +113,7 @@ class NotificationsAPITest(TestCase):
                 cur.execute(statement)
 
         call_command("apply_notifications_schema", verbosity=0)
+        call_command("apply_delivery_orders_schema", verbosity=0)
         super().setUpClass()
 
     @classmethod
@@ -141,6 +149,20 @@ class NotificationsAPITest(TestCase):
             rol="tecnico",
             activo=True,
         )
+        cls.recepcion = User.objects.create(
+            nombre="Recepcion Notificaciones",
+            email="recepcion@notif.test",
+            hash_pw="",
+            rol="recepcion",
+            activo=True,
+        )
+        cls.cobranzas = User.objects.create(
+            nombre="Cobranzas Notificaciones",
+            email="cobranzas@notif.test",
+            hash_pw="",
+            rol="cobranzas",
+            activo=True,
+        )
         cls.jefe_token = issue_token(cls.jefe)
         cls.tecnico_token = issue_token(cls.tecnico)
         cls.otro_token = issue_token(cls.otro)
@@ -151,6 +173,7 @@ class NotificationsAPITest(TestCase):
                 ["CLI-NOTIF", "Clínica Notificaciones", "123", "ops@notif.test"],
             )
             customer_id = int(cur.fetchone()[0])
+            cls.customer_id = customer_id
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s) RETURNING id", ["ResMed"])
             marca_id = int(cur.fetchone()[0])
             cur.execute(
@@ -188,6 +211,10 @@ class NotificationsAPITest(TestCase):
     def setUp(self):
         self.client = APIClient()
         with connection.cursor() as cur:
+            cur.execute("DELETE FROM delivery_order_events")
+            cur.execute("DELETE FROM delivery_order_item_partidas")
+            cur.execute("DELETE FROM delivery_order_items")
+            cur.execute("DELETE FROM delivery_orders")
             cur.execute("DELETE FROM notifications")
             cur.execute("DELETE FROM notification_user_preferences")
 
@@ -296,7 +323,7 @@ class NotificationsAPITest(TestCase):
 
         self.assertEqual(inserted, 0)
 
-    def test_panel_no_marca_leida_y_click_oculta_notificacion(self):
+    def test_panel_no_marca_leida_y_click_mantiene_historial_reciente(self):
         self._enable_liberado_for_tecnico()
         notify_ingreso_liberado(self.ingreso_id)
         self._auth_as_tecnico()
@@ -317,12 +344,35 @@ class NotificationsAPITest(TestCase):
         resp_after = self.client.get("/api/notificaciones/?limit=20")
         self.assertEqual(resp_after.status_code, 200)
         self.assertEqual(resp_after.data["unread_count"], 0)
-        self.assertEqual(resp_after.data["items"], [])
+        self.assertEqual(len(resp_after.data["items"]), 1)
+        self.assertEqual(resp_after.data["items"][0]["id"], notification_id)
+        self.assertIsNotNone(resp_after.data["items"][0]["read_at"])
         with connection.cursor() as cur:
             cur.execute("SELECT read_at, clicked_at FROM notifications WHERE id=%s", [notification_id])
             read_at, clicked_at = cur.fetchone()
         self.assertIsNotNone(read_at)
         self.assertIsNotNone(clicked_at)
+
+    def test_panel_marca_todas_como_leidas(self):
+        self._enable_notification(self.tecnico, "ingreso_asignado", True)
+        self._enable_liberado_for_tecnico()
+        notify_ingreso_liberado(self.ingreso_id)
+        notify_ingreso_asignado(self.ingreso_id, self.tecnico.id)
+        self._auth_as_tecnico()
+
+        resp = self.client.get("/api/notificaciones/?limit=20")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["unread_count"], 2)
+
+        read_all_resp = self.client.post("/api/notificaciones/read-all/")
+        self.assertEqual(read_all_resp.status_code, 200)
+        self.assertEqual(read_all_resp.data["updated"], 2)
+
+        resp_after = self.client.get("/api/notificaciones/?limit=20")
+        self.assertEqual(resp_after.status_code, 200)
+        self.assertEqual(resp_after.data["unread_count"], 0)
+        self.assertEqual(len(resp_after.data["items"]), 2)
+        self.assertTrue(all(item["read_at"] for item in resp_after.data["items"]))
 
     def test_panel_filtra_por_usuario_y_no_permite_click_ajeno(self):
         emit_notification(
@@ -408,3 +458,175 @@ class NotificationsAPITest(TestCase):
         reset_items = {item["key"]: item for item in reset_resp.data["items"]}
         self.assertIsNone(reset_items["ingreso_liberado"]["override_enabled"])
         self.assertFalse(reset_items["ingreso_liberado"]["effective_enabled"])
+
+    def test_orden_entrega_creada_notifica_recepcion(self):
+        order = create_delivery_order(
+            {
+                "id": "do-notif-created",
+                "orderNumber": "OE-NOTIF-001",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        self.assertEqual(order["id"], "do-notif-created")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id, title, href
+                  FROM notifications
+                 WHERE notification_key = 'sales_order_created'
+                 ORDER BY user_id
+                """
+            )
+            rows = cur.fetchall()
+        self.assertEqual(
+            rows,
+            [(self.recepcion.id, "Nueva orden de entrega OE-NOTIF-001", "/administracion/ordenes-entrega")],
+        )
+
+    def test_remito_cargado_notifica_cobranzas(self):
+        order = create_delivery_order(
+            {
+                "id": "do-notif-remito",
+                "orderNumber": "OE-NOTIF-002",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        mark_delivered(order["id"], self.jefe.id, "RT 0002-00012345")
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id, title, href
+                  FROM notifications
+                 WHERE notification_key = 'sales_order_remito_ready'
+                 ORDER BY user_id
+                """
+            )
+            rows = cur.fetchall()
+        self.assertEqual(
+            rows,
+            [(self.cobranzas.id, "Entrega lista para facturar OE-NOTIF-002", "/cobranzas/facturacion")],
+        )
+
+    def test_facturacion_requiere_numero_de_factura(self):
+        order = create_delivery_order(
+            {
+                "id": "do-invoice-required",
+                "orderNumber": "OE-INV-001",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "remitoNumber": "RT 0002-00012346",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            mark_invoiced(order["id"], self.cobranzas.id, "")
+
+        self.assertEqual(ctx.exception.code, "INVOICE_REQUIRED")
+
+    def test_facturacion_solo_acepta_remitos_pendientes(self):
+        order = create_delivery_order(
+            {
+                "id": "do-invoice-state",
+                "orderNumber": "OE-INV-002",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            mark_invoiced(order["id"], self.cobranzas.id, "FC A 0001-00001234")
+
+        self.assertEqual(ctx.exception.code, "INVALID_INVOICE_STATE")
+
+    def test_facturacion_registra_numero_y_cierra_orden(self):
+        order = create_delivery_order(
+            {
+                "id": "do-invoice-ok",
+                "orderNumber": "OE-INV-003",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "remitoNumber": "RT 0002-00012347",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        updated = mark_invoiced(order["id"], self.cobranzas.id, "FC A 0001-00001234")
+
+        self.assertEqual(updated["status"], "facturado")
+        self.assertEqual(updated["invoiceNumber"], "FC A 0001-00001234")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, invoice_number, invoiced_by_user_id, invoiced_at
+                  FROM delivery_orders
+                 WHERE id = %s
+                """,
+                [order["id"]],
+            )
+            row = cur.fetchone()
+        self.assertEqual(row[0], "facturado")
+        self.assertEqual(row[1], "FC A 0001-00001234")
+        self.assertEqual(row[2], self.cobranzas.id)
+        self.assertIsNotNone(row[3])
+
+    def test_ordenes_entrega_buscan_por_articulos_y_exponen_origen(self):
+        order = create_delivery_order(
+            {
+                "id": "do-article-search",
+                "orderNumber": "OE-ART-001",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "SEPID",
+                "sourceSystem": "portal",
+                "sourceExternalId": "portal-order-001",
+                "sourceReference": "Pedido Drive 15",
+                "sourceSheet": "Ventas Junio",
+                "sourceRow": 15,
+                "sourceColor": "#fff2cc",
+                "rawPedido": "Pedido de artículos generales",
+                "commercialCondition": "Contado",
+                "items": [
+                    {
+                        "articleCode": "ART-1504005",
+                        "articleName": "Filtro bacteriológico",
+                        "description": "Set universal para alquiler",
+                        "quantity": 2,
+                        "partida": "L-2026",
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+
+        self.assertEqual(order["sourceSheet"], "Ventas Junio")
+        self.assertEqual(order["sourceRow"], 15)
+        self.assertEqual(order["sourceColor"], "#fff2cc")
+
+        for query in ("ART-1504005", "bacteriológico", "Set universal", "Ventas Junio", "Contado"):
+            result = list_delivery_orders({"q": query, "limit": 10})
+            self.assertEqual([item["id"] for item in result["items"]], ["do-article-search"])

@@ -33,6 +33,8 @@ services:
       bash -lc "python manage.py migrate --noinput && \
       python manage.py apply_ticket_sale_states_schema && \
       python manage.py apply_delivery_orders_schema && \
+      python manage.py apply_notifications_schema && \
+      python manage.py apply_assignment_requests_schema && \
       python manage.py collectstatic --noinput && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:

@@ -6,10 +6,10 @@ import os
 DEBUG = False
 
 # Hosts and origins
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "reparaciones.sepid.com.ar").split(",") if h.strip()]
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "nexora.sepid.com.ar").split(",") if h.strip()]
 
 # If provided, use explicit prod origins; else default to https on the host
-_default_origin = "https://reparaciones.sepid.com.ar"
+_default_origin = "https://nexora.sepid.com.ar"
 CORS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", _default_origin).split(",") if o.strip()]
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 
@@ -46,4 +46,3 @@ LOGGING = {
         "django": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }
-

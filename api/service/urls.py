@@ -38,7 +38,7 @@ from .views import (
     CatalogoMarcasView, CatalogoModelosView,
     ModeloVarianteView,
     # catálogos jerárquico marca/tipo/modelo/variante
-    CatalogoTiposView, CatalogoModelosDeTipoView, CatalogoVariantesView, CatalogoMarcasPorTipoView,
+    CatalogoTiposView, CatalogoModelosDeTipoView, CatalogoVariantesView, ModeloVariantesView, CatalogoMarcasPorTipoView,
     # Tipos equipo general (ABM)
     TiposEquipoView,  # tipos equipo (sugerencias + ABM)
     
@@ -49,7 +49,7 @@ from .views import (
     # administración de usuarios
     UsuariosView, UsuarioActivoView, UsuarioResetPassView, UsuarioRolePermView, UsuarioDeleteView,
     CatalogoRolesView, CatalogoPermisosView, UsuarioPermisosView, UsuarioPermisosResetView, CerrarReparacionView,
-    NotificacionesView, NotificacionClickView, UsuarioNotificacionesView,
+    NotificacionesView, NotificacionClickView, NotificacionesReadAllView, UsuarioNotificacionesView,
 
     # clientes / marcas-modelos / proveedores externos
     ClientesView, ClienteDeleteView, ClienteMergeView,
@@ -73,12 +73,13 @@ from .views import (
     CatalogoMotivosView,
     WarrantyRulesView, WarrantyRuleDetailView, DevicesMergeView,
     WorkResumenView, WorkObjectivesView, WorkAlertRulesView, GlobalSearchView,
-    BejermanJobsView, BejermanJobRetryView, BejermanArticleMappingsView, BejermanArticlesView,
-    IngresoRisStatusView, IngresoRisEmitirView, SerialBarcodePdfView, IngresoBarcodePdfView,
-    DeliveryOrdersView, DeliveryOrderDetailView, DeliveryOrderPreparedView, DeliveryOrderDeliveredView,
+    BejermanIngressCompaniesView, BejermanJobsView, BejermanJobRetryView, BejermanArticleMappingsView, BejermanArticlesView,
+    IngresoRisStatusView, IngresoRisEmitirView, IngresoRisPdfView, IngresoRisPrintView, SerialBarcodePdfView, IngresoBarcodePdfView,
+    DeliveryOrdersView, DeliveryOrderDetailView, DeliveryOrderExitRemitoPdfView, DeliveryOrderPreparedView, DeliveryOrderDeliveredView,
     DeliveryOrderInvoicedView, DeliveryOrderCancelView, DeliveryOrderRemitoLocationView,
     DeliveryOrderItemArticleView, DeliveryOrderItemPartidasView,
-    DeliveryOrderBejermanRemitoView, DeliveryOrderBejermanRemitoPdfView,
+    DeliveryOrderBejermanRemitoView, DeliveryOrderBejermanArticlesView,
+    DeliveryOrderBejermanRemitoHistoryView, DeliveryOrderBejermanRemitoPdfView, DeliveryOrderBejermanRemitoPrintView,
     FacturacionCompanyOptionsView, FacturacionClienteDocumentosView, FacturacionDocumentoPdfView,
 )
 
@@ -104,6 +105,7 @@ from .views.preventivos_views import (
     PreventivoRevisionCerrarView,
 )
 from .views.portal_integration_views import (
+    PortalInternalBejermanClientUpsertView,
     PortalClienteGeneralView,
     PortalClienteIngresoMediaFileView,
     PortalClienteIngresoSummaryView,
@@ -174,8 +176,10 @@ urlpatterns = [
         PortalClientePresupuestoDecisionView.as_view(),
     ),
     path("integrations/portal/internal/presupuestos/", PortalInternalPresupuestosView.as_view()),
+    path("integrations/portal/internal/clientes/bejerman-upsert/", PortalInternalBejermanClientUpsertView.as_view()),
     path("integrations/portal/internal/work-summary/", PortalInternalWorkSummaryView.as_view()),
     path("integrations/portal/internal/work-queue/", PortalInternalWorkQueueView.as_view()),
+    path("bejerman/ingress-companies/", BejermanIngressCompaniesView.as_view()),
     path("bejerman/jobs/", BejermanJobsView.as_view()),
     path("bejerman/jobs/<int:job_id>/retry/", BejermanJobRetryView.as_view()),
     path("bejerman/articles/", BejermanArticlesView.as_view()),
@@ -184,8 +188,12 @@ urlpatterns = [
 
     # NEXORA: órdenes de entrega, remitos y cobranzas.
     path("ordenes-entrega/", DeliveryOrdersView.as_view()),
+    path("ordenes-entrega/bejerman-articulos/", DeliveryOrderBejermanArticlesView.as_view()),
     path("ordenes-entrega/remito-bejerman/", DeliveryOrderBejermanRemitoView.as_view()),
+    path("ordenes-entrega/remito-bejerman/historial/", DeliveryOrderBejermanRemitoHistoryView.as_view()),
     path("ordenes-entrega/remito-bejerman/<str:group_id>/pdf/", DeliveryOrderBejermanRemitoPdfView.as_view()),
+    path("ordenes-entrega/remito-bejerman/<str:group_id>/print/", DeliveryOrderBejermanRemitoPrintView.as_view()),
+    path("ordenes-entrega/<str:order_id>/remito-salida/", DeliveryOrderExitRemitoPdfView.as_view()),
     path("ordenes-entrega/<str:order_id>/", DeliveryOrderDetailView.as_view()),
     path("ordenes-entrega/<str:order_id>/preparar/", DeliveryOrderPreparedView.as_view()),
     path("ordenes-entrega/<str:order_id>/entregar/", DeliveryOrderDeliveredView.as_view()),
@@ -227,6 +235,7 @@ urlpatterns = [
     path("trabajo/objetivos/", WorkObjectivesView.as_view()),
     path("trabajo/reglas-alerta/", WorkAlertRulesView.as_view()),
     path("notificaciones/", NotificacionesView.as_view()),
+    path("notificaciones/read-all/", NotificacionesReadAllView.as_view()),
     path("notificaciones/<int:notification_id>/click/", NotificacionClickView.as_view()),
     path("busqueda/global/", GlobalSearchView.as_view()),
     path("ingresos/pendientes/", PendientesGeneralView.as_view()),
@@ -269,7 +278,7 @@ urlpatterns = [
     # utilidades
     path("equipos/garantia-reparacion/", GarantiaReparacionCheckView.as_view()),
     path("equipos/garantia-fabrica/", GarantiaFabricaCheckView.as_view()),
-    # Garantias (excepciones administrables)
+    # Garantías (excepciones administrables)
     path("garantias/politicas/", WarrantyRulesView.as_view()),  # GET, POST
     path("garantias/politicas/<int:rule_id>/", WarrantyRuleDetailView.as_view()),  # PATCH, DELETE
 
@@ -280,11 +289,14 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/derivaciones/<int:deriv_id>/devolver/", DevolverDerivacionView.as_view()),
     path("ingresos/<int:ingreso_id>/ris/", IngresoRisStatusView.as_view()),
     path("ingresos/<int:ingreso_id>/ris/emitir/", IngresoRisEmitirView.as_view()),
+    path("ingresos/<int:ingreso_id>/ris/pdf/", IngresoRisPdfView.as_view()),
+    path("ingresos/<int:ingreso_id>/ris/print/", IngresoRisPrintView.as_view()),
     path("ingresos/<int:ingreso_id>/barcode/", IngresoBarcodePdfView.as_view()),
 
     # catálogos
     path("catalogos/marcas/", CatalogoMarcasView.as_view()),
     path("catalogos/modelos/", CatalogoModelosView.as_view()),                   # ?marca_id=#
+    path("catalogos/modelos/<int:modelo_id>/variantes/", ModeloVariantesView.as_view()),
     path("catalogos/ubicaciones/", CatalogoUbicacionesView.as_view()),
     path("catalogos/motivos/", CatalogoMotivosView.as_view()),
     path("catalogos/accesorios/", CatalogoAccesoriosView.as_view()),

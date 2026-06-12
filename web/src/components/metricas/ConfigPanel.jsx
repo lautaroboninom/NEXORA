@@ -108,7 +108,7 @@ export default function ConfigPanel({ open, onClose }) {
 
           <div>
             <h3 className="font-semibold mb-2">Feriados locales (extras)</h3>
-            <p className="text-sm text-gray-500 mb-2">Los feriados oficiales se toman automáticamente. Agregá excepciones locales que aplican a horas hábiles.</p>
+            <p className="text-sm text-gray-500 mb-2">Los feriados oficiales se toman automáticamente. Agregue excepciones locales que aplican a horas hábiles.</p>
             <form onSubmit={addFeriado} className="flex gap-2 items-end">
               <div>
                 <div className="text-sm text-gray-600">Fecha</div>

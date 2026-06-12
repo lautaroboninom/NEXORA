@@ -14,6 +14,10 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const rol = user?.rol;
 
+  const canSeeGeneralCliente = canAny(user, [
+    PERMISSION_CODES.PAGE_GENERAL_CLIENTE,
+    PERMISSION_CODES.PAGE_INGRESOS_HISTORY,
+  ]);
   const canSeeHistorico = can(user, PERMISSION_CODES.PAGE_INGRESOS_HISTORY);
   const canSeeEquipos = can(user, PERMISSION_CODES.PAGE_DEVICES_PREVENTIVOS);
   const canSeeRecepcion = can(user, PERMISSION_CODES.PAGE_RECEPCION);
@@ -70,8 +74,12 @@ export default function App() {
             </span>
           </button>
 
-          <Link to="/" className="font-semibold">
-            NEXORA
+          <Link to="/" className="flex h-8 items-center overflow-hidden" aria-label="NEXORA">
+            <img
+              src="/branding/logotipo-nexora.png"
+              alt="NEXORA"
+              className="h-12 w-auto object-contain"
+            />
           </Link>
 
           <nav className="hidden md:flex items-center gap-6 ml-6">
@@ -90,7 +98,7 @@ export default function App() {
                 Cobranzas
               </Link>
             )}
-            {canSeeHistorico && (
+            {canSeeGeneralCliente && (
               <Link to="/clientes" className="hover:underline">
                 General por cliente
               </Link>

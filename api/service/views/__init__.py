@@ -131,6 +131,7 @@ from .catalogo_hierarquia_views import (
     CatalogoTiposView,
     CatalogoModelosDeTipoView,
     CatalogoVariantesView,
+    ModeloVariantesView,
     CatalogoMarcasPorTipoView,
     CatalogoTiposCreateView,
     CatalogoTipoDetailView,
@@ -174,6 +175,7 @@ from .usuarios_views import (
 from .notifications_views import (
     NotificacionesView,
     NotificacionClickView,
+    NotificacionesReadAllView,
     UsuarioNotificacionesView,
 )
 
@@ -238,6 +240,7 @@ from .work_views import (
     GlobalSearchView,
 )
 from .bejerman_views import (
+    BejermanIngressCompaniesView,
     BejermanJobsView,
     BejermanJobRetryView,
     BejermanArticleMappingsView,
@@ -246,12 +249,15 @@ from .bejerman_views import (
 from .bejerman_ris_views import (
     IngresoRisStatusView,
     IngresoRisEmitirView,
+    IngresoRisPdfView,
+    IngresoRisPrintView,
     SerialBarcodePdfView,
     IngresoBarcodePdfView,
 )
 from .delivery_orders_views import (
     DeliveryOrdersView,
     DeliveryOrderDetailView,
+    DeliveryOrderExitRemitoPdfView,
     DeliveryOrderPreparedView,
     DeliveryOrderDeliveredView,
     DeliveryOrderInvoicedView,
@@ -260,7 +266,10 @@ from .delivery_orders_views import (
     DeliveryOrderItemArticleView,
     DeliveryOrderItemPartidasView,
     DeliveryOrderBejermanRemitoView,
+    DeliveryOrderBejermanRemitoHistoryView,
+    DeliveryOrderBejermanArticlesView,
     DeliveryOrderBejermanRemitoPdfView,
+    DeliveryOrderBejermanRemitoPrintView,
     FacturacionCompanyOptionsView,
     FacturacionClienteDocumentosView,
     FacturacionDocumentoPdfView,
@@ -363,6 +372,7 @@ __all__ = [
     "CatalogoTiposView",
     "CatalogoModelosDeTipoView",
     "CatalogoVariantesView",
+    "ModeloVariantesView",
     "CatalogoMarcasPorTipoView",
     "CatalogoTiposCreateView",
     "CatalogoTipoDetailView",
@@ -400,6 +410,7 @@ __all__ = [
     "CatalogoTecnicosView",
     "NotificacionesView",
     "NotificacionClickView",
+    "NotificacionesReadAllView",
     "UsuarioNotificacionesView",
     # derivaciones
     "DerivarIngresoView",
@@ -449,17 +460,21 @@ __all__ = [
     "WorkAlertRulesView",
     "GlobalSearchView",
     # Bejerman
+    "BejermanIngressCompaniesView",
     "BejermanJobsView",
     "BejermanJobRetryView",
     "BejermanArticleMappingsView",
     "BejermanArticlesView",
     "IngresoRisStatusView",
     "IngresoRisEmitirView",
+    "IngresoRisPdfView",
+    "IngresoRisPrintView",
     "SerialBarcodePdfView",
     "IngresoBarcodePdfView",
     # NEXORA delivery orders / billing
     "DeliveryOrdersView",
     "DeliveryOrderDetailView",
+    "DeliveryOrderExitRemitoPdfView",
     "DeliveryOrderPreparedView",
     "DeliveryOrderDeliveredView",
     "DeliveryOrderInvoicedView",
@@ -468,7 +483,10 @@ __all__ = [
     "DeliveryOrderItemArticleView",
     "DeliveryOrderItemPartidasView",
     "DeliveryOrderBejermanRemitoView",
+    "DeliveryOrderBejermanRemitoHistoryView",
+    "DeliveryOrderBejermanArticlesView",
     "DeliveryOrderBejermanRemitoPdfView",
+    "DeliveryOrderBejermanRemitoPrintView",
     "FacturacionCompanyOptionsView",
     "FacturacionClienteDocumentosView",
     "FacturacionDocumentoPdfView",

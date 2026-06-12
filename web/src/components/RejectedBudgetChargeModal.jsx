@@ -40,7 +40,7 @@ export default function RejectedBudgetChargeModal({
 
   async function handleConfirm() {
     if (!chargeIsValid) {
-      setLocalError("Ingresá un importe neto válido.");
+      setLocalError("Ingrese un importe neto válido.");
       return;
     }
 

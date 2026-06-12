@@ -97,10 +97,10 @@ class Command(BaseCommand):
             self.stdout.write(f"... y {total - len(preview)} más.")
 
         if not apply_changes:
-            self.stdout.write("Dry-run finalizado. Revisá cada caso y registrá la venta desde el flujo explícito si corresponde.")
+            self.stdout.write("Dry-run finalizado. Revise cada caso y registre la venta desde el flujo explícito si corresponde.")
             return
 
         raise CommandError(
             "No se puede marcar venta MG por heurística. "
-            "Registrá la venta desde el flujo explícito con comprobante o corregí el equipo manualmente."
+            "Registre la venta desde el flujo explícito con comprobante o corrija el equipo manualmente."
         )

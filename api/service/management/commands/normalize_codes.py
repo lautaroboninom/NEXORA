@@ -141,7 +141,7 @@ class Command(BaseCommand):
             self.stdout.write(f"Conflictos numero_serie: {len(ns_conflicts)}")
             for rid, oldv, want, other in ns_conflicts[:50]:
                 self.stdout.write(f"  device_id={rid} '{oldv}' -> '{want}' conflict_with_device_id={other}")
-        self.stdout.write(f"Numero interno normalizados (>=5 digitos -> ####): {len(fixed_numint)}" + (" (aplicados)" if apply else " (dry-run)"))
+        self.stdout.write(f"Números internos normalizados (>=5 dígitos -> ####): {len(fixed_numint)}" + (" (aplicados)" if apply else " (dry-run)"))
         self.stdout.write(f"Conflictos numero_interno: {len(conflicts_numint)}")
         if conflicts_numint:
             for rid, oldv, want, other in conflicts_numint[:50]:

@@ -778,7 +778,7 @@ def _parse_bool_or_default(raw, default=False):
 class DeviceDirectCreateView(APIView):
     """
     Alta directa de equipo en tabla devices sin generar un ingreso.
-    Pensado para equipos bajo tutela del servicio tecnico instalados en instituciones.
+    Pensado para equipos bajo tutela del servicio técnico instalados en instituciones.
     """
 
     permission_classes = [permissions.IsAuthenticated]

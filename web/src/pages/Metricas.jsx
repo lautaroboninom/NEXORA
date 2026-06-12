@@ -547,7 +547,7 @@ export default function Metricas() {
             />
           </div>
           <div>
-            <div className="text-sm text-gray-600">Tecnico</div>
+            <div className="text-sm text-gray-600">Técnico</div>
             <select className="mt-1 border rounded px-2 py-1 w-full" value={tecnicoId} onChange={(e) => setTecnicoId(e.target.value)}>
               <option value="">Todos</option>
               {tecnicos.map(t => (
@@ -676,17 +676,17 @@ export default function Metricas() {
               value={formatDays(data.mttr_dias)}
               status={statusFor(data.mttr_dias != null ? Number(data.mttr_dias) : null, targets?.mttr_days, false)}
               meta={targets?.mttr_days != null ? `Objetivo ${formatDays(targets.mttr_days)}` : null}
-              help="Desde iniciar reparacion hasta reparado"
+              help="Desde inicio de arreglo hasta reparado"
             />
             <StatCard
-              label="SLA diagnostico < 24h"
+              label="SLA diagnóstico < 24h"
               value={formatPct(data.sla_diag_24h?.cumplimiento || 0)}
               status={statusFor(((data.sla_diag_24h?.cumplimiento || 0) * 100), targets?.sla_diag_pct, true)}
               meta={targets?.sla_diag_pct != null ? `Objetivo ${formatNumber(targets.sla_diag_pct, 0)}%` : null}
               help={`${data.sla_diag_24h?.dentro || 0} de ${data.sla_diag_24h?.total || 0}`}
             />
             <StatCard
-              label="Aprobacion presupuestos"
+              label="Aprobación presupuestos"
               value={formatPct(data.aprob_presupuestos?.tasa || 0)}
               status={statusFor(((data.aprob_presupuestos?.tasa || 0) * 100), targets?.aprob_pres_pct, true)}
               meta={targets?.aprob_pres_pct != null ? `Objetivo ${formatNumber(targets.aprob_pres_pct, 0)}%` : null}
@@ -712,7 +712,7 @@ export default function Metricas() {
               value={formatHours(data.aprob_presupuestos?.t_aprobar_horas)}
               status={statusFor(data.aprob_presupuestos?.t_aprobar_horas, targets?.t_aprobar_h, false)}
               meta={targets?.t_aprobar_h != null ? `Objetivo ${formatHours(targets.t_aprobar_h)}` : null}
-              help={aprobadosCount ? `Promedio sobre ${formatNumber(aprobadosCount)} equipos con aprobacion` : "Sin datos de aprobacion"}
+              help={aprobadosCount ? `Promedio sobre ${formatNumber(aprobadosCount)} equipos con aprobación` : "Sin datos de aprobación"}
             />
             <StatCard
               label="WIP total"
@@ -990,7 +990,7 @@ export default function Metricas() {
                     />
                     <SimpleLine
                       title="Tiempos de presupuesto (h)"
-                      subtitle="Promedio por equipos con emision/aprobacion"
+                      subtitle="Promedio por equipos con emisión/aprobación"
                       categories={monthlySeries.map(m=>m.period)}
                       series={[
                         { name: 'Emitir (h)', values: monthlySeries.map(m=>m.aprob_presupuestos?.t_emitir_horas||0) },

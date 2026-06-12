@@ -223,7 +223,7 @@ export default function DiagnosticoTab({
 
   async function saveResolucionCambioAware() {
     if (!resolucion) {
-      setErr("Seleccioná una resolución.");
+      setErr("Seleccione una resolución.");
       return;
     }
     if (String(resolucion) === RESOLUCION.PRESUPUESTO_RECHAZADO) {
@@ -299,14 +299,14 @@ export default function DiagnosticoTab({
     try {
       const descripcionAcc = (nuevoAcc?.descripcion || "").trim().toLowerCase();
       if (!descripcionAcc) {
-        setErr("Escribí una descripción.");
+        setErr("Escriba una descripción.");
         return;
       }
       const acc = (accesCatalogo || []).find(
         (item) => (item?.nombre || "").trim().toLowerCase() === descripcionAcc,
       );
       if (!acc) {
-        setErr("Elegí una descripción válida de la lista.");
+        setErr("Elija una descripción válida de la lista.");
         return;
       }
       setAddingAcc(true);
@@ -381,7 +381,7 @@ export default function DiagnosticoTab({
                 <input
                   className="border rounded p-2 min-w-[240px]"
                   list="accesorios_catalogo"
-                  placeholder="Descripción (elegí de la lista)"
+                  placeholder="Descripción (elija de la lista)"
                   value={nuevoAcc.descripcion}
                   onChange={(e) => setNuevoAcc((state) => ({ ...state, descripcion: e.target.value }))}
                 />

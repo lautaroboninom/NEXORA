@@ -24,6 +24,20 @@ NOTIFICATION_CATALOG = [
         "default_roles": ["tecnico"],
     },
     {
+        "key": "sales_order_created",
+        "label": "Nueva orden de entrega",
+        "description": "Orden de entrega pendiente de preparación para Recepción.",
+        "group": "Órdenes de entrega",
+        "default_roles": ["recepcion"],
+    },
+    {
+        "key": "sales_order_remito_ready",
+        "label": "Entrega lista para facturar",
+        "description": "Orden de entrega con remito disponible para Cobranzas.",
+        "group": "Cobranzas",
+        "default_roles": ["cobranzas"],
+    },
+    {
         "key": "solicitud_asignacion",
         "label": "Solicitud de asignación",
         "description": "Un técnico solicita que se le asigne un ingreso.",
@@ -252,6 +266,10 @@ def _candidate_users(notification_key, user_ids=None, roles=None, emails=None):
         for row in _load_active_users(emails=emails):
             users[int(row["id"])] = row
     return list(users.values())
+
+
+def active_user_ids_for_roles(roles):
+    return [int(row["id"]) for row in _load_active_users(roles=roles)]
 
 
 def emit_notification(
@@ -534,7 +552,6 @@ def list_notifications_for_user(user_id, limit=DEFAULT_LIMIT):
                entity_id, payload, created_at, read_at, clicked_at
           FROM notifications
          WHERE user_id = %s
-           AND read_at IS NULL
          ORDER BY created_at DESC, id DESC
          LIMIT %s
         """,
@@ -560,6 +577,27 @@ def mark_notification_clicked(user_id, notification_id):
         one=True,
     )
     return row
+
+
+def mark_all_notifications_read(user_id):
+    if not _table_exists("notifications"):
+        return 0
+    row = q(
+        """
+        WITH updated AS (
+            UPDATE notifications
+               SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = %s
+               AND read_at IS NULL
+             RETURNING id
+        )
+        SELECT COUNT(*) AS total FROM updated
+        """,
+        [user_id],
+        one=True,
+    ) or {}
+    return int(row.get("total") or 0)
 
 
 def get_user_notification_settings(user_id):

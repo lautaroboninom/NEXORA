@@ -2,6 +2,9 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import re
+import unicodedata
+from difflib import SequenceMatcher
 from urllib.parse import quote
 
 from django.conf import settings
@@ -156,6 +159,37 @@ def _clean(value):
     return "" if value is None else str(value).strip()
 
 
+def _clean_upper(value):
+    return _clean(value).upper()
+
+
+def _digits_only(value):
+    return re.sub(r"\D+", "", _clean(value))
+
+
+def _normalize_customer_name(value):
+    text = unicodedata.normalize("NFD", _clean(value).upper())
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = re.sub(r"^\d+\s+", "", text)
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    text = re.sub(r"\b(SOCIEDAD ANONIMA|S A S|S R L|S A|SRL|SAS|SA)\b", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _customer_name_score(left, right):
+    left_norm = _normalize_customer_name(left)
+    right_norm = _normalize_customer_name(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    if left_norm == right_norm:
+        return 1.0
+    return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+def _customer_names_compatible(left, right):
+    return _customer_name_score(left, right) >= 0.72
+
+
 def _label(value):
     raw = _clean(value)
     if not raw:
@@ -163,18 +197,18 @@ def _label(value):
     key = raw.strip().lower().replace("_", " ")
     labels = {
         "ingresado": "Ingresado",
-        "en diagnostico": "En Diagnostico",
-        "diagnostico": "En Diagnostico",
-        "diagnóstico": "En Diagnostico",
+        "en diagnostico": "En Diagnóstico",
+        "diagnostico": "En Diagnóstico",
+        "diagnóstico": "En Diagnóstico",
         "esperando presupuesto": "Esperando Presupuesto",
         "pendiente presupuesto": "Esperando Presupuesto",
         "pendiente": "Pendiente",
         "presupuestado": "Presupuestado",
-        "en reparacion": "En Reparacion",
-        "en reparación": "En Reparacion",
-        "para reparar": "En Reparacion",
-        "reparacion": "En Reparacion",
-        "reparación": "En Reparacion",
+        "en reparacion": "En Reparación",
+        "en reparación": "En Reparación",
+        "para reparar": "En Reparación",
+        "reparacion": "En Reparación",
+        "reparación": "En Reparación",
         "detenido repuesto": "Detenido - Repuesto",
         "detenido - repuesto": "Detenido - Repuesto",
         "reparado": "Listo para Entrega",
@@ -1414,6 +1448,192 @@ class PortalInternalPresupuestosView(PortalIntegrationBaseView):
         }
         _audit_portal_call(request, "portal_internal_budgets", {"items": len(items), "total": total})
         return Response(payload)
+
+
+def _bejerman_client_payload(data):
+    payload = data or {}
+    code = _clean(payload.get("bejermanCustomerCode") or payload.get("customerCode") or payload.get("code"))
+    name = _clean(payload.get("name") or payload.get("razonSocial") or payload.get("razon_social"))
+    return {
+        "code": code,
+        "name": name,
+        "tax_id": _clean(payload.get("taxId") or payload.get("cuit")),
+        "email": _clean(payload.get("email")),
+        "phone": _clean(payload.get("phone") or payload.get("telefono")),
+    }
+
+
+def _load_customer_rows_for_bejerman():
+    return q(
+        """
+        SELECT id,
+               razon_social,
+               COALESCE(cod_empresa, '') AS cod_empresa,
+               COALESCE(cuit, '') AS cuit,
+               COALESCE(telefono, '') AS telefono,
+               COALESCE(email, '') AS email
+          FROM customers
+         ORDER BY id ASC
+        """
+    ) or []
+
+
+def _customer_suggestion(row, score=None):
+    return {
+        "id": row.get("id"),
+        "name": _clean(row.get("razon_social")),
+        "taxId": _clean(row.get("cuit")) or None,
+        "score": score,
+    }
+
+
+def _customer_upsert_response(outcome, customer_id=None, suggestions=None):
+    return {
+        "outcome": outcome,
+        "nexoraCustomerId": customer_id,
+        "customerId": customer_id,
+        "suggestions": suggestions or [],
+    }
+
+
+def _update_customer_from_bejerman(customer_id, payload, *, overwrite_code):
+    code = _clean_upper(payload["code"])
+    tax_id = _clean(payload["tax_id"])
+    phone = _clean(payload["phone"])
+    email = _clean(payload["email"])
+    if overwrite_code:
+        code_sql = "cod_empresa = %s"
+    else:
+        code_sql = "cod_empresa = COALESCE(NULLIF(TRIM(cod_empresa), ''), %s)"
+
+    exec_void(
+        f"""
+        UPDATE customers
+           SET {code_sql},
+               cuit = CASE
+                 WHEN NULLIF(TRIM(COALESCE(cuit, '')), '') IS NULL AND %s <> '' THEN %s
+                 ELSE cuit
+               END,
+               telefono = CASE
+                 WHEN NULLIF(TRIM(COALESCE(telefono, '')), '') IS NULL AND %s <> '' THEN %s
+                 ELSE telefono
+               END,
+               email = CASE
+                 WHEN NULLIF(TRIM(COALESCE(email, '')), '') IS NULL AND %s <> '' THEN %s
+                 ELSE email
+               END
+         WHERE id = %s
+        """,
+        [code, tax_id, tax_id, phone, phone, email, email, customer_id],
+    )
+
+
+def _create_customer_from_bejerman(payload):
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO customers(cod_empresa, razon_social, cuit, telefono, email)
+            VALUES (%s, %s, NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''))
+            RETURNING id
+            """,
+            [
+                _clean_upper(payload["code"]),
+                payload["name"],
+                _clean(payload["tax_id"]),
+                _clean(payload["phone"]),
+                _clean(payload["email"]),
+            ],
+        )
+        row = cur.fetchone()
+    return row[0]
+
+
+def _rows_by_bejerman_code(rows, code):
+    clean_code = _clean_upper(code)
+    return [row for row in rows if _clean_upper(row.get("cod_empresa")) == clean_code]
+
+
+def _rows_by_tax_id(rows, tax_id):
+    clean_tax_id = _digits_only(tax_id)
+    if not clean_tax_id:
+        return []
+    return [row for row in rows if _digits_only(row.get("cuit")) == clean_tax_id]
+
+
+def _rows_by_exact_name(rows, name):
+    normalized_name = _normalize_customer_name(name)
+    if not normalized_name:
+        return []
+    return [row for row in rows if _normalize_customer_name(row.get("razon_social")) == normalized_name]
+
+
+def _review_response(rows, input_name, *, event_name, request):
+    suggestions = [
+        _customer_suggestion(row, _customer_name_score(row.get("razon_social"), input_name))
+        for row in rows[:5]
+    ]
+    _audit_portal_call(request, event_name, {"outcome": "needs_review", "suggestions": len(suggestions)}, status_code=200)
+    return Response(_customer_upsert_response("needs_review", suggestions=suggestions))
+
+
+class PortalInternalBejermanClientUpsertView(PortalIntegrationBaseView):
+    def post(self, request):
+        unauthorized = self.authorize(request)
+        if unauthorized:
+            return unauthorized
+
+        payload = _bejerman_client_payload(request.data)
+        if not payload["code"] or not payload["name"]:
+            return Response({"detail": "bejermanCustomerCode y name son requeridos"}, status=400)
+
+        payload["code"] = _clean_upper(payload["code"])
+        rows = _load_customer_rows_for_bejerman()
+        event_name = "portal_internal_bejerman_client_upsert"
+
+        with transaction.atomic():
+            code_matches = _rows_by_bejerman_code(rows, payload["code"])
+            if len(code_matches) > 1:
+                return _review_response(code_matches, payload["name"], event_name=event_name, request=request)
+            if len(code_matches) == 1:
+                row = code_matches[0]
+                if not _customer_names_compatible(row.get("razon_social"), payload["name"]):
+                    return _review_response([row], payload["name"], event_name=event_name, request=request)
+                _update_customer_from_bejerman(row["id"], payload, overwrite_code=False)
+                _audit_portal_call(request, event_name, {"outcome": "matched", "customer_id": row["id"]})
+                return Response(_customer_upsert_response("matched", row["id"]))
+
+            tax_matches = _rows_by_tax_id(rows, payload["tax_id"])
+            if len(tax_matches) > 1:
+                return _review_response(tax_matches, payload["name"], event_name=event_name, request=request)
+            if len(tax_matches) == 1:
+                row = tax_matches[0]
+                _update_customer_from_bejerman(row["id"], payload, overwrite_code=True)
+                _audit_portal_call(request, event_name, {"outcome": "matched", "customer_id": row["id"], "match": "tax_id"})
+                return Response(_customer_upsert_response("matched", row["id"]))
+
+            name_matches = _rows_by_exact_name(rows, payload["name"])
+            if len(name_matches) > 1:
+                return _review_response(name_matches, payload["name"], event_name=event_name, request=request)
+            if len(name_matches) == 1:
+                row = name_matches[0]
+                _update_customer_from_bejerman(row["id"], payload, overwrite_code=True)
+                _audit_portal_call(request, event_name, {"outcome": "matched", "customer_id": row["id"], "match": "name"})
+                return Response(_customer_upsert_response("matched", row["id"]))
+
+            fuzzy_matches = [
+                (row, _customer_name_score(row.get("razon_social"), payload["name"]))
+                for row in rows
+            ]
+            fuzzy_matches = [(row, score) for row, score in fuzzy_matches if score >= 0.82]
+            fuzzy_matches.sort(key=lambda item: item[1], reverse=True)
+            if fuzzy_matches:
+                suggestions = [_customer_suggestion(row, score) for row, score in fuzzy_matches[:5]]
+                _audit_portal_call(request, event_name, {"outcome": "needs_review", "suggestions": len(suggestions)})
+                return Response(_customer_upsert_response("needs_review", suggestions=suggestions))
+
+            customer_id = _create_customer_from_bejerman(payload)
+            _audit_portal_call(request, event_name, {"outcome": "created", "customer_id": customer_id})
+            return Response(_customer_upsert_response("created", customer_id))
 
 
 def _work_where(request):

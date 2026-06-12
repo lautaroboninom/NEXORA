@@ -22,7 +22,20 @@ class CustomersListView(APIView):
                 "action.delivery_order.create",
             ],
         )
-        return Response(q("SELECT id, razon_social FROM customers ORDER BY razon_social;"))
+        return Response(
+            q(
+                """
+                SELECT id,
+                       razon_social,
+                       cod_empresa,
+                       cuit,
+                       telefono,
+                       email
+                  FROM customers
+                 ORDER BY razon_social
+                """
+            )
+        )
 
 
 class ClientesView(APIView):

@@ -17,6 +17,7 @@ from .helpers import (
     require_roles,
     os_label,
 )
+from ..delivery_orders import load_items_by_order
 
 
 VIEW_ROLES = ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
@@ -121,7 +122,7 @@ DASHBOARD_KPIS = {
     ),
     "cobranzas": (
         "remitos_pendientes_facturacion",
-        "pedidos_facturados",
+        "clientes_pendientes_facturacion",
     ),
 }
 
@@ -852,21 +853,65 @@ def _delivery_order_counts():
     return counts
 
 
+def _pending_billing_customer_count():
+    if not _table_exists("delivery_orders"):
+        return 0
+    row = _safe_one(
+        """
+        SELECT COUNT(*) AS total
+          FROM (
+                SELECT COALESCE(
+                         NULLIF(bejerman_customer_code, ''),
+                         CAST(customer_id AS TEXT),
+                         NULLIF(customer_name, ''),
+                         id
+                       ) AS customer_ref
+                  FROM delivery_orders
+                 WHERE status = 'entregado_pendiente_facturacion'
+                 GROUP BY COALESCE(
+                            NULLIF(bejerman_customer_code, ''),
+                            CAST(customer_id AS TEXT),
+                            NULLIF(customer_name, ''),
+                            id
+                          )
+               ) pending_customers
+        """
+    )
+    return int(row.get("total") or 0)
+
+
 def _format_delivery_order(row):
     return {
         "id": row.get("id"),
         "orderNumber": row.get("order_number") or "",
         "customerName": row.get("customer_name") or "",
+        "bejermanCustomerCode": row.get("bejerman_customer_code") or "",
         "deliveryType": row.get("delivery_type") or "",
         "status": row.get("status") or "",
         "priority": row.get("priority") or "",
         "orderDate": row.get("order_date"),
+        "sellerName": row.get("seller_name") or "",
+        "sellerCode": row.get("seller_code") or "",
+        "operationCompanyLabel": row.get("operation_company_label") or "",
+        "rawPedido": row.get("raw_pedido") or "",
+        "commercialTerms": row.get("commercial_terms") or "",
+        "commercialPrice": row.get("commercial_price") or "",
+        "commercialExchangeRate": row.get("commercial_exchange_rate") or "",
+        "commercialCondition": row.get("commercial_condition") or "",
+        "commercialDeadline": row.get("commercial_deadline") or "",
         "equipmentModel": row.get("equipment_model") or "",
         "equipmentSerial": row.get("equipment_serial") or "",
         "equipmentInternalNumber": row.get("equipment_internal_number") or "",
+        "sourceSystem": row.get("source_system") or "",
+        "sourceExternalId": row.get("source_external_id") or "",
+        "sourceReference": row.get("source_reference") or "",
+        "sourceSheet": row.get("source_sheet") or "",
+        "sourceRow": row.get("source_row"),
+        "sourceColor": row.get("source_color") or "",
         "remitoNumber": row.get("remito_number") or "",
         "remitoLocation": row.get("remito_location") or "",
         "invoiceNumber": row.get("invoice_number") or "",
+        "items": row.get("items") or [],
         "href": "/administracion/ordenes-entrega",
     }
 
@@ -888,10 +933,22 @@ def _delivery_order_items(variant, limit=8):
     if not statuses:
         return []
     placeholders = ",".join(["%s"] * len(statuses))
+
+    def order_column(name, default="''"):
+        return name if _has_table_column("delivery_orders", name) else f"{default} AS {name}"
+
     rows = _safe_rows(
         f"""
-        SELECT id, order_number, customer_name, delivery_type, status, priority,
-               order_date, equipment_model, equipment_serial, equipment_internal_number,
+        SELECT id, order_number, customer_name, bejerman_customer_code, delivery_type, status, priority,
+               order_date, {order_column("seller_name")}, {order_column("seller_code")},
+               {order_column("operation_company_label")}, {order_column("raw_pedido")},
+               {order_column("commercial_terms")}, {order_column("commercial_price")},
+               {order_column("commercial_exchange_rate")}, {order_column("commercial_condition")},
+               {order_column("commercial_deadline")},
+               equipment_model, equipment_serial, equipment_internal_number,
+               {order_column("source_system")}, {order_column("source_external_id")},
+               {order_column("source_reference")}, {order_column("source_sheet")},
+               {order_column("source_row", "NULL")}, {order_column("source_color")},
                remito_number, remito_location, invoice_number, created_at
           FROM delivery_orders
          WHERE status IN ({placeholders})
@@ -903,6 +960,9 @@ def _delivery_order_items(variant, limit=8):
         """,
         [*statuses, limit],
     )
+    items_by_order = load_items_by_order([row["id"] for row in rows]) if _table_exists("delivery_order_items") else {}
+    for row in rows:
+        row["items"] = items_by_order.get(row["id"], [])
     return [_format_delivery_order(row) for row in rows]
 
 
@@ -928,6 +988,7 @@ def _build_kpis(request, raw):
         "pedidos_pendientes_armado": {"key": "pedidos_pendientes_armado", "label": "Pedidos a armar", "value": int(delivery_counts.get("pendiente_armado") or 0), "severity": "warning"},
         "pedidos_listos_entrega": {"key": "pedidos_listos_entrega", "label": "Listos para entrega", "value": int(delivery_counts.get("armado_pendiente_entrega") or 0), "severity": "info"},
         "remitos_pendientes_facturacion": {"key": "remitos_pendientes_facturacion", "label": "Remitos a facturar", "value": int(delivery_counts.get("entregado_pendiente_facturacion") or 0), "severity": "warning"},
+        "clientes_pendientes_facturacion": {"key": "clientes_pendientes_facturacion", "label": "Clientes a facturar", "value": _pending_billing_customer_count(), "severity": "info"},
         "pedidos_facturados": {"key": "pedidos_facturados", "label": "Pedidos facturados", "value": int(delivery_counts.get("facturado") or 0), "severity": "info"},
     }
     variant = _dashboard_variant(request)

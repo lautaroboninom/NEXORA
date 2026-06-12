@@ -21,10 +21,17 @@ import {
   postDeviceMgVenta,
   postDeviceMgReactivar,
   postIngresoCorreccionHistorica,
-  postIngresoRisEmitirBlob,
+  postIngresoRisEmitir,
   getIngresoBarcodeBlob,
 } from "../lib/api";
-import { getMarcas, getModelosByBrand, getVariantesPorMarca, checkGarantiaFabrica, patchModeloTipoEquipo } from "../lib/api";
+import { openPdfBlob, reservePdfWindow } from "../lib/pdf";
+import {
+  getMarcas,
+  getModelosByBrand,
+  getVariantesPorModelo,
+  checkGarantiaFabrica,
+  patchModeloTipoEquipo,
+} from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import {
   formatOS as formatOSHelper,
@@ -49,15 +56,13 @@ import PrincipalTab from "./ServiceSheet/tabs/PrincipalTab";
 import DerivacionesTab from "./ServiceSheet/tabs/DerivacionesTab";
 import ServiceCriticalStrip from "../components/ServiceCriticalStrip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import RisProgressModal, {
+  waitForRisProgressMinimum,
+  waitForRisProgressPaint,
+} from "../components/RisProgressModal.jsx";
 
 const TAB_VALUES = ["principal", "diagnostico", "test", "presupuesto", "derivaciones", "historial", "archivos"];
 const isValidTab = (value) => TAB_VALUES.includes((value || "").toString().trim());
-
-function openPdfBlob(blob) {
-  const url = URL.createObjectURL(blob);
-  window.open(url, "_blank", "noopener,noreferrer");
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
 
 const Tabs = ({ value, onChange, items, extraRight }) => (
   <div className="border-b mb-4 flex items-center">
@@ -350,10 +355,11 @@ export default function ServiceSheet() {
   const canManageDevices = can(user, PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_MANAGE);
   const canEditLocation = can(user, PERMISSION_CODES.ACTION_INGRESO_EDIT_LOCATION);
   const canManageDerivations = can(user, PERMISSION_CODES.ACTION_INGRESO_MANAGE_DERIVATIONS);
+  const canViewLogistics = can(user, PERMISSION_CODES.PAGE_LOGISTICS);
   const canViewDiagnosticoTab = canEditDiagPermission || canRepairTransitions;
   const canViewTestTab = canEditDiagPermission;
   const canViewPresupuestoTab = canManagePresupuesto || canSeeCosts;
-  const canViewDerivacionesTab = canManageDerivations;
+  const canViewDerivacionesTab = canManageDerivations || canViewLogistics;
   const canViewArchivosTab = canEditDiagPermission;
   const canViewHistorialTab = canSeeHistory;
 
@@ -513,6 +519,7 @@ export default function ServiceSheet() {
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsMenuRef = useRef(null);
   const [risBusy, setRisBusy] = useState(false);
+  const [risProgressStatus, setRisProgressStatus] = useState("");
   const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [savingBaja, setSavingBaja] = useState(false);
   const [savingAlta, setSavingAlta] = useState(false);
@@ -799,18 +806,31 @@ export default function ServiceSheet() {
 
   async function emitirRisIngreso() {
     if (risBusy) return;
+    const progressStartedAt = Date.now();
+    const risPdfWindow = reservePdfWindow({
+      title: "REMITO",
+      message: "Preparando RIS...",
+    });
+    let risPdfOpened = false;
     try {
       setRisBusy(true);
+      setRisProgressStatus("Emitiendo RIS en Bejerman...");
       setActionsOpen(false);
-      const blob = await postIngresoRisEmitirBlob(id);
-      openPdfBlob(blob);
-      setToastMsg("RIS listo para imprimir");
+      await waitForRisProgressPaint();
+      const risResult = await postIngresoRisEmitir(id);
+      setRisProgressStatus("Preparando PDF...");
+      risPdfOpened = risPdfWindow.openUrl(risResult?.print_url);
+      const remito = risResult?.remito_number || risResult?.ris?.remito_number || data?.ris?.remito_number || "";
+      setToastMsg(remito ? `RIS ${remito} emitido. Preparando PDF.` : "RIS emitido. Preparando PDF.");
       setTimeout(() => setToastMsg(""), 2500);
       await refreshIngreso({ strong: 1 });
     } catch (e) {
       setErr(e?.message || "No se pudo emitir o reimprimir el RIS");
     } finally {
+      if (!risPdfOpened) risPdfWindow.close();
+      await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
+      setRisProgressStatus("");
     }
   }
 
@@ -989,6 +1009,7 @@ export default function ServiceSheet() {
       garantia: !!data?.garantia,
     });
     setEditBasics(true);
+    setVarSugeridas([]);
     setClienteRsInput(data?.razon_social || "");
     setClienteCodInput(data?.cod_empresa || "");
     (async () => {
@@ -1033,8 +1054,8 @@ export default function ServiceSheet() {
             const curModeloName = norm(data?.modelo);
             const modeloByName = curModeloName ? modelosList.find((x) => norm(x?.nombre) === curModeloName) : null;
             setModeloIdSel(modeloById?.id ?? modeloByName?.id ?? null);
-          } catch { setModelos([]); setModeloIdSel(null); }
-          try { setVarSugeridas(await getVariantesPorMarca(marcaId)); } catch { setVarSugeridas([]); }
+            setVarSugeridas([]);
+          } catch { setModelos([]); setModeloIdSel(null); setVarSugeridas([]); }
         } else {
           setModelos([]); setModeloIdSel(null); setVarSugeridas([]);
         }
@@ -1080,7 +1101,7 @@ export default function ServiceSheet() {
       };
     }
     if (!clienteSel) {
-      setErr("Debes seleccionar un cliente válido de la lista.");
+      setErr("Debe seleccionar un cliente válido de la lista.");
       return;
     }
     const diff = {};
@@ -1156,7 +1177,7 @@ export default function ServiceSheet() {
   async function ejecutarBaja({ askConfirm = true } = {}) {
     if (savingBaja || savingAlta) return;
     if (askConfirm) {
-      const ok = window.confirm("Dar BAJA al equipo? Esta accion marcara el ingreso como baja.");
+      const ok = window.confirm("¿Dar de baja el equipo? Esto deja el ingreso como baja.");
       if (!ok) return;
     }
     try {
@@ -1219,7 +1240,7 @@ export default function ServiceSheet() {
     if (savingSolicitarBaja) return;
     const motivo = (solicitarBajaMotivo || "").trim();
     if (!motivo) {
-      setErr("Debes indicar el motivo para solicitar la BAJA.");
+      setErr("Debe indicar el motivo para solicitar la BAJA.");
       return;
     }
     try {
@@ -1274,15 +1295,15 @@ export default function ServiceSheet() {
     const motivo = String(histForm.motivo || "").trim();
     const fechaEfectiva = String(histForm.fecha_efectiva || "").trim();
     if (!accion) {
-      setErr("Debes seleccionar una acción.");
+      setErr("Debe seleccionar una acción.");
       return;
     }
     if (!fechaEfectiva) {
-      setErr("Debes indicar la fecha efectiva.");
+      setErr("Debe indicar la fecha efectiva.");
       return;
     }
     if (!motivo) {
-      setErr("Debes indicar el motivo.");
+      setErr("Debe indicar el motivo.");
       return;
     }
 
@@ -1366,11 +1387,11 @@ export default function ServiceSheet() {
     const remito = (mgForm.remito_numero || "").trim();
     const ventaCustomerId = Number(mgForm.venta_customer_id || 0);
     if (!factura && !remito) {
-      setErr("Debes informar factura o remito para marcar venta.");
+      setErr("Debe informar factura o remito para marcar venta.");
       return;
     }
     if (!ventaCustomerId) {
-      setErr("Debes seleccionar a quién se vendió.");
+      setErr("Debe seleccionar a quién se vendió.");
       return;
     }
     try {
@@ -1427,7 +1448,7 @@ export default function ServiceSheet() {
     if (!id || propioMgSaving) return;
     const numeroInterno = String(propioMgForm.numero_interno || "").trim();
     if (!numeroInterno) {
-      setErr("Debes indicar el número MG para dar de alta el equipo como propio.");
+      setErr("Debe indicar el número MG para dar de alta el equipo como propio.");
       return;
     }
     try {
@@ -1471,11 +1492,42 @@ export default function ServiceSheet() {
   useEffect(() => {
     if (!editBasics) return;
     if (!marcaIdSel) { setModelos([]); setModeloIdSel(null); setVarSugeridas([]); return; }
+    let active = true;
     (async () => {
-      try { setModelos(await getModelosByBrand(marcaIdSel) || []); } catch { setModelos([]); }
-      try { setVarSugeridas(await getVariantesPorMarca(marcaIdSel)); } catch { setVarSugeridas([]); }
+      try {
+        const list = await getModelosByBrand(marcaIdSel);
+        if (active) setModelos(Array.isArray(list) ? list : []);
+      } catch {
+        if (active) setModelos([]);
+      }
     })();
+    return () => { active = false; };
   }, [editBasics, marcaIdSel]);
+  useEffect(() => {
+    if (!editBasics) return;
+    if (!marcaIdSel || !modeloIdSel) { setVarSugeridas([]); return; }
+    let active = true;
+    (async () => {
+      try {
+        const rows = await getVariantesPorModelo(modeloIdSel);
+        const seen = new Set();
+        const variantes = (Array.isArray(rows) ? rows : [])
+          .filter((item) => item?.active !== false)
+          .map((item) => item?.name || item?.nombre || item?.label || "")
+          .map((value) => String(value || "").trim())
+          .filter((value) => {
+            const key = value.toUpperCase();
+            if (!value || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        if (active) setVarSugeridas(variantes);
+      } catch {
+        if (active) setVarSugeridas([]);
+      }
+    })();
+    return () => { active = false; };
+  }, [editBasics, marcaIdSel, modeloIdSel]);
   useEffect(() => {
     if (!editBasics) return;
     const ns = (formBasics?.numero_serie || "").trim();
@@ -1643,6 +1695,11 @@ export default function ServiceSheet() {
 
   return (
     <div className="max-w-none p-4">
+      <RisProgressModal
+        open={risBusy}
+        title="Emitiendo RIS"
+        status={risProgressStatus || "Emitiendo RIS en Bejerman..."}
+      />
       <button type="button" onClick={() => navigate(-1)} className="mb-3 inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800">
         Volver
       </button>
@@ -1838,6 +1895,9 @@ export default function ServiceSheet() {
           setUbicacionId={setUbicacionId}
           canEditLocation={canEditLocation}
           canEditAlquiler={canEditAlquiler}
+          canShowRisAction={canShowRisAction}
+          risBusy={risBusy}
+          onEmitRis={emitirRisIngreso}
           tecnicos={tecnicos}
           tecnicoId={tecnicoId}
           setTecnicoId={setTecnicoId}
@@ -1921,7 +1981,7 @@ export default function ServiceSheet() {
 
       {/* DERIVACIONES */}
       {activeTab === "derivaciones" && canViewDerivacionesTab && (
-        <DerivacionesTab id={id} setErr={setErr} refreshIngreso={refreshIngreso} />
+        <DerivacionesTab id={id} canManage={canManageDerivations} setErr={setErr} refreshIngreso={refreshIngreso} />
       )}
 
       {relatedOpen && (

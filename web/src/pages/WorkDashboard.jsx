@@ -1,16 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import {
-  getClientesBasico,
-  getGlobalSearch,
-  getWorkResumen,
-  postDeliveryOrder,
-} from "../lib/api";
+import { getGlobalSearch, getWorkResumen } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import BusquedaNSCard from "../components/BusquedaNSCard.jsx";
 import BusquedaAccRefCard from "../components/BusquedaAccRefCard.jsx";
 import QrScanCard from "../components/QrScanCard.jsx";
+import DeliveryOrderCreateForm from "../components/DeliveryOrderCreateForm.jsx";
 import WorkQueueTable from "../components/WorkQueueTable.jsx";
 import {
   catalogEquipmentLabel,
@@ -19,6 +15,11 @@ import {
   formatOS,
   ingresoIdOf,
 } from "../lib/ui-helpers";
+import {
+  deliveryOrderCommercialLabel,
+  deliveryOrderItemsSummary,
+  deliveryOrderSourceLabel,
+} from "../lib/delivery-orders";
 
 const severityClasses = {
   critical: "border-red-200 bg-red-50 text-red-800",
@@ -38,21 +39,6 @@ const TYPE_LABELS = {
   sale: "Venta",
   service_release: "Servicio técnico",
   rental: "Alquiler",
-};
-
-const emptyOrderForm = {
-  customerId: "",
-  deliveryType: "sale",
-  priority: "normal",
-  sellerName: "",
-  operationCompanyLabel: "",
-  equipmentModel: "",
-  equipmentSerial: "",
-  equipmentInternalNumber: "",
-  rawPedido: "",
-  itemDescription: "",
-  articleCode: "",
-  quantity: "1",
 };
 
 function KpiCard({ item }) {
@@ -149,7 +135,7 @@ function DashboardHeader({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         {canCreateOrder && (
           <button type="button" className="btn sm:mr-2" onClick={onCreateOrder}>
-            Nuevo Pedido
+            Nueva entrega
           </button>
         )}
         {showPeriod && (
@@ -300,13 +286,13 @@ function ObjectivesSection({ items, title = "Objetivos" }) {
   );
 }
 
-function QuickAccessSection() {
+function QuickAccessSection({ showScanner = true }) {
   return (
     <section className="space-y-3">
       <h2 className="text-lg font-semibold text-gray-900">Accesos rápidos</h2>
       <BusquedaNSCard />
       <BusquedaAccRefCard />
-      <QrScanCard />
+      {showScanner && <QrScanCard />}
     </section>
   );
 }
@@ -314,6 +300,16 @@ function QuickAccessSection() {
 function UpdatedAt({ value }) {
   if (!value) return null;
   return <div className="text-xs text-gray-500">Actualizado: {formatDateOnly(value)}</div>;
+}
+
+function DeliveryOrderArticlesSummary({ order }) {
+  const summary = deliveryOrderItemsSummary(order, 1);
+  return (
+    <div>
+      <div className="font-medium text-gray-900">{summary.primary}</div>
+      {summary.secondary && <div className="text-xs text-gray-500">{summary.secondary}</div>}
+    </div>
+  );
 }
 
 function DeliveryOrdersSection({
@@ -349,7 +345,8 @@ function DeliveryOrdersSection({
                 <th className="px-2 py-2">Pedido</th>
                 <th className="px-2 py-2">Cliente</th>
                 <th className="px-2 py-2">Estado</th>
-                <th className="px-2 py-2">Equipo</th>
+                <th className="px-2 py-2">Artículos</th>
+                <th className="px-2 py-2">Comercial</th>
                 <th className="px-2 py-2">Remito</th>
               </tr>
             </thead>
@@ -359,11 +356,9 @@ function DeliveryOrdersSection({
                   <td className="px-2 py-2 font-medium">{order.orderNumber || "-"}</td>
                   <td className="px-2 py-2">{order.customerName || "-"}</td>
                   <td className="px-2 py-2">{STATUS_LABELS[order.status] || order.status || "-"}</td>
-                  <td className="px-2 py-2">
-                    <div>{order.equipmentModel || "-"}</div>
-                    <div className="text-xs text-gray-500">
-                      {[order.equipmentSerial, order.equipmentInternalNumber].filter(Boolean).join(" / ")}
-                    </div>
+                  <td className="px-2 py-2"><DeliveryOrderArticlesSummary order={order} /></td>
+                  <td className="px-2 py-2 text-xs text-gray-600">
+                    {deliveryOrderCommercialLabel(order) || deliveryOrderSourceLabel(order) || "-"}
                   </td>
                   <td className="px-2 py-2">
                     <div>{order.remitoNumber || "-"}</div>
@@ -382,36 +377,6 @@ function DeliveryOrdersSection({
 }
 
 function NewDeliveryOrderModal({ open, onClose, onCreated }) {
-  const [customers, setCustomers] = useState([]);
-  const [form, setForm] = useState(emptyOrderForm);
-  const [loadingCustomers, setLoadingCustomers] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!open) return undefined;
-    let active = true;
-    setForm(emptyOrderForm);
-    setError("");
-    setLoadingCustomers(true);
-    getClientesBasico()
-      .then((data) => {
-        if (!active) return;
-        setCustomers(Array.isArray(data) ? data : []);
-      })
-      .catch((err) => {
-        if (!active) return;
-        setCustomers([]);
-        setError(err?.message || "No se pudieron cargar los clientes.");
-      })
-      .finally(() => {
-        if (active) setLoadingCustomers(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [open]);
-
   useEffect(() => {
     if (!open) return undefined;
     const onKeyDown = (event) => {
@@ -421,51 +386,7 @@ function NewDeliveryOrderModal({ open, onClose, onCreated }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onClose]);
 
-  const customerById = useMemo(() => {
-    const out = new Map();
-    customers.forEach((customer) => out.set(String(customer.id), customer));
-    return out;
-  }, [customers]);
-
   if (!open) return null;
-
-  const update = (field) => (event) => {
-    setForm((current) => ({ ...current, [field]: event.target.value }));
-  };
-
-  const createOrder = async (event) => {
-    event.preventDefault();
-    const customer = customerById.get(String(form.customerId));
-    setSaving(true);
-    setError("");
-    try {
-      const created = await postDeliveryOrder({
-        customerId: form.customerId ? Number(form.customerId) : null,
-        customerName: customer?.razon_social || customer?.nombre || "",
-        bejermanCustomerCode: customer?.cod_empresa || "",
-        deliveryType: form.deliveryType,
-        priority: form.priority,
-        sellerName: form.sellerName,
-        operationCompanyLabel: form.operationCompanyLabel,
-        equipmentModel: form.equipmentModel,
-        equipmentSerial: form.equipmentSerial,
-        equipmentInternalNumber: form.equipmentInternalNumber,
-        rawPedido: form.rawPedido,
-        items: [
-          {
-            description: form.itemDescription || form.rawPedido || "Equipo",
-            articleCode: form.articleCode,
-            quantity: form.quantity || 1,
-          },
-        ],
-      });
-      onCreated(created);
-    } catch (err) {
-      setError(err?.message || "No se pudo crear el pedido.");
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <div
@@ -475,126 +396,34 @@ function NewDeliveryOrderModal({ open, onClose, onCreated }) {
       onClick={onClose}
     >
       <div
-        className="max-h-[90vh] w-full max-w-5xl overflow-hidden rounded bg-white shadow-xl"
+        className="max-h-[90vh] w-full max-w-6xl overflow-hidden rounded bg-white shadow-xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+        <div className="flex items-center justify-between gap-3 border-b px-5 py-4">
           <div>
-            <div className="text-lg font-semibold">Nuevo Pedido</div>
-            <div className="text-sm text-gray-600">Crear una nueva orden de entrega.</div>
+            <div className="text-lg font-semibold">Nueva orden de entrega</div>
+            <div className="text-sm text-gray-600">Clientes, artículos, partidas y detalle completo como en Portal.</div>
           </div>
           <button type="button" className="text-sm text-gray-500 hover:text-gray-900" onClick={onClose}>
             Cerrar
           </button>
         </div>
 
-        <form onSubmit={createOrder} className="max-h-[calc(90vh-65px)] overflow-auto p-4">
-          {error && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-
-          <div className="grid gap-3 md:grid-cols-6">
-            <label className="text-sm md:col-span-2">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Cliente</span>
-              <select
-                value={form.customerId}
-                onChange={update("customerId")}
-                className="h-9 w-full rounded border px-2"
-                required
-                disabled={loadingCustomers || saving}
-              >
-                <option value="">{loadingCustomers ? "Cargando clientes..." : "Seleccionar cliente"}</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.razon_social || customer.nombre}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Tipo</span>
-              <select value={form.deliveryType} onChange={update("deliveryType")} className="h-9 w-full rounded border px-2">
-                {Object.entries(TYPE_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Prioridad</span>
-              <select value={form.priority} onChange={update("priority")} className="h-9 w-full rounded border px-2">
-                <option value="normal">Normal</option>
-                <option value="urgente">Urgente</option>
-              </select>
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Vendedor</span>
-              <input value={form.sellerName} onChange={update("sellerName")} className="h-9 w-full rounded border px-2" />
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Empresa</span>
-              <input
-                value={form.operationCompanyLabel}
-                onChange={update("operationCompanyLabel")}
-                className="h-9 w-full rounded border px-2"
-              />
-            </label>
-
-            <label className="text-sm md:col-span-2">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Equipo/modelo</span>
-              <input value={form.equipmentModel} onChange={update("equipmentModel")} className="h-9 w-full rounded border px-2" />
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">N/S</span>
-              <input value={form.equipmentSerial} onChange={update("equipmentSerial")} className="h-9 w-full rounded border px-2" />
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Interno</span>
-              <input
-                value={form.equipmentInternalNumber}
-                onChange={update("equipmentInternalNumber")}
-                className="h-9 w-full rounded border px-2"
-              />
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Artículo</span>
-              <input value={form.articleCode} onChange={update("articleCode")} className="h-9 w-full rounded border px-2" />
-            </label>
-
-            <label className="text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Cantidad</span>
-              <input value={form.quantity} onChange={update("quantity")} className="h-9 w-full rounded border px-2" />
-            </label>
-
-            <label className="text-sm md:col-span-3">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Pedido</span>
-              <input value={form.rawPedido} onChange={update("rawPedido")} className="h-9 w-full rounded border px-2" required />
-            </label>
-
-            <label className="text-sm md:col-span-3">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Descripción del ítem</span>
-              <input value={form.itemDescription} onChange={update("itemDescription")} className="h-9 w-full rounded border px-2" />
-            </label>
-          </div>
-
-          <div className="mt-4 flex justify-end gap-2">
-            <button type="button" className="rounded border px-3 py-2 text-sm hover:bg-gray-50" onClick={onClose} disabled={saving}>
-              Cancelar
-            </button>
-            <button type="submit" className="btn" disabled={saving || loadingCustomers}>
-              {saving ? "Creando..." : "Crear pedido"}
-            </button>
-          </div>
-        </form>
+        <div className="max-h-[calc(90vh-73px)] overflow-auto p-5">
+          <DeliveryOrderCreateForm
+            compact
+            submitLabel="Crear entrega"
+            onCancel={onClose}
+            onCreated={(created) => {
+              onCreated(created);
+              onClose();
+            }}
+          />
+        </div>
       </div>
     </div>
   );
+
 }
 
 function JefeDashboard(props) {
@@ -676,7 +505,7 @@ function TecnicoDashboard(props) {
           subtitle="Trabajos asignados ordenados por urgencia y antigüedad."
           rows={priorities}
           loading={loading && !summary}
-          emptyText="No tenés prioridades críticas por ahora."
+          emptyText="No tiene prioridades críticas por ahora."
           onOpen={onOpen}
           action={{ label: "Ver mis pendientes", href: "/pendientes" }}
           showTechnician={false}
@@ -693,12 +522,18 @@ function TecnicoDashboard(props) {
   );
 }
 
-function RecepcionDashboard({ summary, loading }) {
+function RecepcionDashboard({ summary, loading, onReload }) {
   return (
     <div className="space-y-5">
       <KpiGrid items={summary?.kpis} loading={loading && !summary} />
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
         <main className="space-y-5">
+          <QrScanCard
+            receptionMode
+            title="Lector de recepción"
+            subtitle="Escanee equipo u OS para ingreso RIS, etiqueta o egreso RSS."
+            onDelivered={onReload}
+          />
           <DeliveryOrdersSection
             summary={summary}
             loading={loading}
@@ -708,7 +543,7 @@ function RecepcionDashboard({ summary, loading }) {
           />
         </main>
         <aside className="space-y-5">
-          <QuickAccessSection />
+          <QuickAccessSection showScanner={false} />
           <UpdatedAt value={summary?.generated_at} />
         </aside>
       </div>
@@ -883,6 +718,7 @@ export default function WorkDashboard() {
       searching,
       onOpen: openItem,
       onNavigate: navigate,
+      onReload: load,
     };
     if (variant === "tecnico") return <TecnicoDashboard {...props} />;
     if (variant === "recepcion") return <RecepcionDashboard {...props} />;
@@ -914,7 +750,7 @@ export default function WorkDashboard() {
     },
     cobranzas: {
       title: "Cobranzas",
-      subtitle: "Remitos pendientes, pedidos facturados y consulta de facturación.",
+      subtitle: "Remitos pendientes, clientes a facturar y consulta de facturación.",
       showPeriod: false,
     },
   };
@@ -935,7 +771,7 @@ export default function WorkDashboard() {
 
       {createdOrder && (
         <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-          Pedido {createdOrder.orderNumber || "creado"} creado.{" "}
+          Entrega {createdOrder.orderNumber || "creada"} creada.{" "}
           <Link to="/administracion/ordenes-entrega" className="font-medium underline">
             Ver órdenes de entrega
           </Link>

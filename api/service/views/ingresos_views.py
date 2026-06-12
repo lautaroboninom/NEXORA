@@ -57,6 +57,7 @@ from ..serializers import (
 )
 from ..permissions import require_any_permission, user_has_any_permission, user_has_permission
 from ..warranty import compute_warranty, compute_warranty_from_sale_date
+from ..bejerman_companies import require_company
 from ..bejerman_ris import get_ris_status_for_ingreso
 from ..notifications import (
     notify_estado_patrimonial,
@@ -593,21 +594,21 @@ def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_even
             f"- OS: {os_txt}",
             f"- Cliente: {cliente or '-'}",
             f"- Equipo: {equipo or '-'}",
-            f"- Numero de serie: {numero_serie or '-'}",
-            f"- Numero interno: {numero_interno or '-'}",
-            f"- Ubicacion actual: {ubicacion or '-'}",
+            f"- Número de serie: {numero_serie or '-'}",
+            f"- Número interno: {numero_interno or '-'}",
+            f"- Ubicación actual: {ubicacion or '-'}",
             f"- {fecha_label}: {fecha_evento_txt}",
             f"- Registrado por: {actor_line or '-'}",
         ]
         diag_lines = [
-            f"- Diagnostico / descripcion del problema: {descripcion_problema or '-'}",
+            f"- Diagnóstico / descripción del problema: {descripcion_problema or '-'}",
             f"- Trabajos realizados: {trabajos_realizados or '-'}",
             f"- Comentarios: {comentarios or '-'}",
         ]
         if informe_preliminar:
             diag_lines.append(f"- Informe preliminar: {informe_preliminar}")
         if resolucion_label:
-            diag_lines.append(f"- Resolucion: {resolucion_label}")
+            diag_lines.append(f"- Resolución: {resolucion_label}")
         if motivo:
             diag_lines.append(f"- Motivo de ingreso: {motivo}")
         lines.append("")
@@ -976,7 +977,7 @@ class MarcarReparadoView(APIView):
             if has_permite_reparacion
             else "TRUE AS permite_reparacion"
         )
-        # Solo el tecnico asignado puede marcar como reparado (salvo jefes)
+        # Solo el técnico asignado puede marcar como reparado (salvo jefes)
         try:
             if _rol(request) in ("tecnico", "jefe_veedor"):
                 row = q(
@@ -990,7 +991,7 @@ class MarcarReparadoView(APIView):
                 )
                 uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
                 if not row or int(row.get("asignado_a") or 0) != int(uid or 0):
-                    raise PermissionDenied("Solo el tecnico asignado puede marcar como reparado")
+                    raise PermissionDenied("Solo el técnico asignado puede marcar como reparado")
                 if _is_cotizacion_bloqueada_para_reparar(row.get("motivo"), row.get("permite_reparacion")):
                     raise ValidationError("Ingreso en cotización: primero habilite la reparación.")
         except PermissionDenied:
@@ -1000,7 +1001,7 @@ class MarcarReparadoView(APIView):
         except Exception:
             # En duda, permitir solo a roles superiores
             if _rol(request) in ("tecnico", "jefe_veedor"):
-                raise PermissionDenied("Solo el tecnico asignado puede marcar como reparado")
+                raise PermissionDenied("Solo el técnico asignado puede marcar como reparado")
         if _rol(request) not in ("tecnico", "jefe_veedor"):
             row = q(
                 f"""
@@ -1225,7 +1226,7 @@ class MarcarParaRepararView(APIView):
         if _rol(request) == "jefe_veedor":
             uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
             if int(asignado_a or 0) != int(uid or 0):
-                raise PermissionDenied("Solo el tecnico asignado puede editar diagnostico y reparacion")
+                raise PermissionDenied("Solo el técnico asignado puede editar diagnóstico y reparación")
         if not asignado_a:
             raise ValidationError("Antes de reparar, asigna un técnico al ingreso")
         if estado_cur in ("reparado", "liberado", "entregado", "baja", "alquilado", "controlado_sin_defecto", *SALE_TICKET_STATES):
@@ -1306,20 +1307,20 @@ class MarcarParaRepararView(APIView):
                 lines = [
                     f"Hola {info.get('tecnico_nombre') or ''},",
                     "",
-                    f"Podes reparar la {os_txt}.",
+                    f"Puede reparar la {os_txt}.",
                     "",
                     "Detalle del equipo:",
                     f"- Cliente: {info.get('cliente') or '-'}",
                     f"- Marca/Modelo: {info.get('marca') or '-'} / {info.get('modelo') or '-'}",
                     f"- Tipo: {info.get('tipo_equipo') or '-'}",
-                    f"- Numero de serie: {info.get('numero_interno') or info.get('numero_serie') or '-'}",
+                    f"- Número de serie: {info.get('numero_interno') or info.get('numero_serie') or '-'}",
                 ]
                 if link:
                     lines.append("")
                     lines.append(f"Abrir hoja de servicio: {link}")
                 try:
                     lines.append("")
-                    lines.append("Aviso automatico - no responder a este correo.")
+                    lines.append("Aviso automático - no responder a este correo.")
                 except Exception:
                     pass
                 body = "\n".join(lines)
@@ -1730,24 +1731,24 @@ class DarAltaIngresoView(APIView):
                     f"- OS: {os_txt}",
                     f"- Cliente: {cliente or '-'}",
                     f"- Equipo: {equipo or '-'}",
-                    f"- Numero de serie: {numero_serie or '-'}",
-                    f"- Numero interno: {numero_interno or '-'}",
-                    f"- Ubicacion actual: {ubicacion or '-'}",
+                    f"- Número de serie: {numero_serie or '-'}",
+                    f"- Número interno: {numero_interno or '-'}",
+                    f"- Ubicación actual: {ubicacion or '-'}",
                     f"- Fecha de alta: {fecha_alta}",
                     f"- Registrado por: {actor_line or '-'}",
                 ]
                 diag_lines = []
-                diag_lines.append(f"- Diagnostico / descripcion del problema: {descripcion_problema or '-'}")
+                diag_lines.append(f"- Diagnóstico / descripción del problema: {descripcion_problema or '-'}")
                 diag_lines.append(f"- Trabajos realizados: {trabajos_realizados or '-'}")
                 diag_lines.append(f"- Comentarios: {comentarios or '-'}")
                 if informe_preliminar:
                     diag_lines.append(f"- Informe preliminar: {informe_preliminar}")
                 if resolucion_label:
-                    diag_lines.append(f"- Resolucion: {resolucion_label}")
+                    diag_lines.append(f"- Resolución: {resolucion_label}")
                 if motivo:
                     diag_lines.append(f"- Motivo de ingreso: {motivo}")
                 lines.append("")
-                lines.append("Diagnostico / estado actual:")
+                lines.append("Diagnóstico / estado actual:")
                 lines.extend(diag_lines)
                 try:
                     url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
@@ -2852,7 +2853,7 @@ class GeneralEquiposView(APIView):
 
 class GeneralEquiposExportView(APIView):
     """
-    Exporta el historico de ingresos en Excel (.xlsx) respetando los mismos
+    Exporta el histórico de ingresos en Excel (.xlsx) respetando los mismos
     filtros de GeneralEquiposView.
     """
     permission_classes = [permissions.IsAuthenticated]
@@ -3155,22 +3156,23 @@ class IngresoAsignarTecnicoView(APIView):
         except Exception:
             logger.warning(f"[AsignarTecnico] ingreso={ingreso_id} could not read asignado_a after update")
         # Marcar solicitud aceptada si existe la tabla auxiliar (aislado en savepoint)
-        try:
-            with transaction.atomic():
-                exec_void(
-                    """
-                    UPDATE ingreso_assignment_requests
-                       SET accepted_at = now(), status = 'aceptado'
-                     WHERE ingreso_id = %s
-                       AND usuario_id = %s
-                       AND accepted_at IS NULL
-                       AND canceled_at IS NULL
-                    """,
-                    [ingreso_id, tecnico_id],
-                )
-        except Exception:
-            # si la tabla no existe o falla, no romper la transacción principal
-            pass
+        if _table_exists("ingreso_assignment_requests"):
+            try:
+                with transaction.atomic():
+                    exec_void(
+                        """
+                        UPDATE ingreso_assignment_requests
+                           SET accepted_at = now(), status = 'aceptado'
+                         WHERE ingreso_id = %s
+                           AND usuario_id = %s
+                           AND accepted_at IS NULL
+                           AND canceled_at IS NULL
+                        """,
+                        [ingreso_id, tecnico_id],
+                    )
+            except Exception:
+                # si falla, no romper la transacción principal
+                pass
         try:
             who = q("SELECT COALESCE(nombre,'') AS nombre, COALESCE(email,'') AS email FROM users WHERE id=%s", [tecnico_id], one=True)
             nombre = (who and who.get("nombre")) or ""
@@ -3310,18 +3312,80 @@ class IngresoSolicitarAsignacionView(APIView):
         except Exception:
             pass
 
-        # Intentar registrar solicitud en tabla auxiliar (si existe)
-        try:
-            with transaction.atomic():
-                exec_void(
-                """
-                INSERT INTO ingreso_assignment_requests(ingreso_id, usuario_id, status, created_at)
-                VALUES (%s, %s, 'solicitado', NOW())
-                """,
-                [ingreso_id, uid],
+        solicitud_row = None
+        if _table_exists("ingreso_assignment_requests"):
+            try:
+                solicitud_row = q(
+                    """
+                    SELECT id, created_at
+                      FROM ingreso_assignment_requests
+                     WHERE ingreso_id = %s
+                       AND usuario_id = %s
+                       AND accepted_at IS NULL
+                       AND canceled_at IS NULL
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1
+                    """,
+                    [ingreso_id, uid],
+                    one=True,
                 )
-        except Exception:
-            pass  # tabla puede no existir; continuar con notificación
+            except Exception:
+                solicitud_row = None
+
+            if solicitud_row:
+                return Response(
+                    {
+                        "ok": True,
+                        "already_pending": True,
+                        "solicitud_id": solicitud_row.get("id"),
+                        "solicitud_fecha": solicitud_row.get("created_at"),
+                        "email_sent": False,
+                    }
+                )
+
+            try:
+                with transaction.atomic():
+                    solicitud_row = q(
+                        """
+                        INSERT INTO ingreso_assignment_requests(ingreso_id, usuario_id, status, created_at)
+                        VALUES (%s, %s, 'solicitado', NOW())
+                        RETURNING id, created_at
+                        """,
+                        [ingreso_id, uid],
+                        one=True,
+                    )
+            except Exception:
+                try:
+                    solicitud_row = q(
+                        """
+                        SELECT id, created_at
+                          FROM ingreso_assignment_requests
+                         WHERE ingreso_id = %s
+                           AND usuario_id = %s
+                           AND accepted_at IS NULL
+                           AND canceled_at IS NULL
+                         ORDER BY created_at DESC, id DESC
+                         LIMIT 1
+                        """,
+                        [ingreso_id, uid],
+                        one=True,
+                    )
+                except Exception:
+                    solicitud_row = None
+                if solicitud_row:
+                    return Response(
+                        {
+                            "ok": True,
+                            "already_pending": True,
+                            "solicitud_id": solicitud_row.get("id"),
+                            "solicitud_fecha": solicitud_row.get("created_at"),
+                            "email_sent": False,
+                        }
+                    )
+                logger.exception(
+                    "No se pudo registrar la solicitud de asignación",
+                    extra={"ingreso_id": ingreso_id, "user_id": uid},
+                )
 
         # Enviar notificación por email (reportar éxito/fracaso)
         email_sent = False
@@ -3442,7 +3506,12 @@ class IngresoSolicitarAsignacionView(APIView):
             email_sent = False
 
         # Solo exponer debug a roles altos o en DEBUG
-        resp = {"ok": True, "email_sent": bool(email_sent)}
+        resp = {
+            "ok": True,
+            "email_sent": bool(email_sent),
+            "solicitud_id": solicitud_row.get("id") if solicitud_row else None,
+            "solicitud_fecha": solicitud_row.get("created_at") if solicitud_row else None,
+        }
         try:
             if getattr(settings, "DEBUG", False) or _rol(request) in ("jefe", "admin"):
                 resp["email_debug"] = email_debug
@@ -3586,8 +3655,8 @@ class IngresoSolicitarBajaView(APIView):
             f"- OS: {os_txt}",
             f"- Cliente: {cliente or '-'}",
             f"- Equipo: {equipo or '-'}",
-            f"- Numero de serie: {numero_serie or '-'}",
-            f"- Numero interno: {numero_interno or '-'}",
+            f"- Número de serie: {numero_serie or '-'}",
+            f"- Número interno: {numero_interno or '-'}",
             f"- Solicitado por: {actor_line or '-'}",
             "",
             "Motivo de la solicitud:",
@@ -4302,10 +4371,12 @@ class NuevoIngresoView(APIView):
         equipo = data.get("equipo") or {}
         bejerman_sale = data.get("bejerman_sale") or {}
 
-        # Empresa a facturar (branding de PDFs). Default SEPID; valida solo dos valores.
-        empresa_facturar = (data.get("empresa_facturar") or "SEPID").strip().upper()
-        if empresa_facturar not in ("SEPID", "MGBIO"):
-            empresa_facturar = "SEPID"
+        try:
+            selected_company = require_company(data.get("empresa_bejerman") or data.get("empresa_facturar") or "SEPID")
+        except ValueError:
+            return Response({"detail": "Empresa Bejerman no válida"}, status=400)
+        empresa_bejerman = selected_company.key
+        empresa_facturar = selected_company.branding_key
 
         motivo_raw = (data.get("motivo") or "").strip()
         if not motivo_raw:
@@ -4842,23 +4913,21 @@ class NuevoIngresoView(APIView):
              insert_params
         )
 
-        # Setear empresa_facturar si la columna existe en la base
+        # Setear empresa Bejerman/branding si las columnas existen en la base.
         try:
-            with connection.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT 1 FROM information_schema.columns
-                     WHERE table_name = 'ingresos'
-                       AND column_name = 'empresa_facturar'
-                       AND table_schema = ANY(current_schemas(true))
-                     LIMIT 1
-                    """
-                )
-                exists = cur.fetchone() is not None
-                if exists:
-                    exec_void("UPDATE ingresos SET empresa_facturar=%s WHERE id=%s", [empresa_facturar, ingreso_id])
+            company_sets = []
+            company_params = []
+            if _has_table_column("ingresos", "empresa_bejerman"):
+                company_sets.append("empresa_bejerman=%s")
+                company_params.append(empresa_bejerman)
+            if _has_table_column("ingresos", "empresa_facturar"):
+                company_sets.append("empresa_facturar=%s")
+                company_params.append(empresa_facturar)
+            if company_sets:
+                company_params.append(ingreso_id)
+                exec_void(f"UPDATE ingresos SET {', '.join(company_sets)} WHERE id=%s", company_params)
         except Exception:
-            # Mejor no romper si no existe la columna
+            # Mejor no romper si no existe la columna.
             pass
 
         sets, params = [], []
@@ -5136,11 +5205,23 @@ class IngresoDetalleView(APIView):
                 time.sleep(0.12)
             except Exception:
                 pass
+        empresa_bejerman_sql = (
+            "COALESCE(t.empresa_bejerman, 'SEPID') AS empresa_bejerman,"
+            if _has_table_column("ingresos", "empresa_bejerman")
+            else "'SEPID' AS empresa_bejerman,"
+        )
+        empresa_facturar_sql = (
+            "COALESCE(t.empresa_facturar, 'SEPID') AS empresa_facturar,"
+            if _has_table_column("ingresos", "empresa_facturar")
+            else "'SEPID' AS empresa_facturar,"
+        )
         row = q(
             f"""
             SELECT
               t.id,
               t.motivo,
+              {empresa_bejerman_sql}
+              {empresa_facturar_sql}
               {permite_reparacion_sql}
               t.estado,
               t.presupuesto_estado,
@@ -5483,7 +5564,7 @@ class IngresoDetalleView(APIView):
         if rol in ("tecnico", "jefe_veedor") and any(k in d for k in ("descripcion_problema", "trabajos_realizados", "fecha_servicio")):
             uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
             if int(asignado_a or 0) != int(uid or 0):
-                raise PermissionDenied("Solo el tecnico asignado puede editar diagnostico y reparacion")
+                raise PermissionDenied("Solo el técnico asignado puede editar diagnóstico y reparación")
         if any(k in d for k in ("remito_salida", "factura_numero", "fecha_entrega")):
             if "remito_salida" in d:
                 sets_no_estado.append("remito_salida = NULLIF(%s,'')")
@@ -5886,12 +5967,12 @@ class MarcarControladoSinDefectoView(APIView):
                 row = q("SELECT asignado_a FROM ingresos WHERE id=%s", [ingreso_id], one=True)
                 uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
                 if not row or int(row.get("asignado_a") or 0) != int(uid or 0):
-                    raise PermissionDenied("Solo el tecnico asignado puede marcar como controlado")
+                    raise PermissionDenied("Solo el técnico asignado puede marcar como controlado")
         except PermissionDenied:
             raise
         except Exception:
             if _rol(request) in ("tecnico", "jefe_veedor"):
-                raise PermissionDenied("Solo el tecnico asignado puede marcar como controlado")
+                raise PermissionDenied("Solo el técnico asignado puede marcar como controlado")
 
         _set_audit_user(request)
         # Forzar estado y presupuesto_estado

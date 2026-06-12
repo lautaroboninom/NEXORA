@@ -103,7 +103,7 @@ export default function PendientesPorTecnico() {
       </div>
 
       {!tecnicoId ? (
-        <div className="text-sm text-gray-500">Elegí un técnico o la opción sin asignar para ver los pendientes.</div>
+        <div className="text-sm text-gray-500">Elija un técnico o la opción sin asignar para ver los pendientes.</div>
       ) : (
         <WorkQueueTable
           rows={filtered}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { getDeliveryOrders } from "../lib/api";
+import { deliveryOrderItemsSummary, deliveryOrderSourceLabel } from "../lib/delivery-orders";
 
 const STATUS_LABELS = {
   pendiente_armado: "Pendiente de armado",
@@ -11,11 +12,15 @@ const STATUS_LABELS = {
 };
 
 function OrderRow({ order }) {
+  const articles = deliveryOrderItemsSummary(order, 1);
   return (
     <tr className="border-t">
       <td className="px-2 py-2 font-medium">{order.orderNumber}</td>
       <td className="px-2 py-2">{order.customerName || "-"}</td>
-      <td className="px-2 py-2">{order.equipmentSerial || order.equipmentInternalNumber || "-"}</td>
+      <td className="px-2 py-2">
+        <div className="font-medium text-gray-900">{articles.primary}</div>
+        <div className="text-xs text-gray-500">{articles.secondary || deliveryOrderSourceLabel(order) || "-"}</div>
+      </td>
       <td className="px-2 py-2">{STATUS_LABELS[order.status] || order.status}</td>
       <td className="px-2 py-2">{order.remitoNumber || "-"}</td>
       <td className="px-2 py-2 text-right">
@@ -115,7 +120,7 @@ export default function RecepcionDashboard() {
                 <tr>
                   <th className="px-2 py-2">Orden</th>
                   <th className="px-2 py-2">Cliente</th>
-                  <th className="px-2 py-2">Equipo</th>
+                  <th className="px-2 py-2">Artículos</th>
                   <th className="px-2 py-2">Estado</th>
                   <th className="px-2 py-2">Remito</th>
                   <th className="px-2 py-2"></th>

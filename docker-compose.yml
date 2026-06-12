@@ -20,8 +20,6 @@ services:
     build: ./api
     env_file:
       - ./.env
-      - path: "../../../PORTAL Sepid/PORTAL-Sepid/.env.local"
-        required: false
     environment:
       - DB_VENDOR=postgresql
       - POSTGRES_HOST=postgres
@@ -29,8 +27,6 @@ services:
       - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:5175}
       - PUBLIC_WEB_URL=${PUBLIC_WEB_URL:-http://localhost:5175}
       - LOGO_PATH=${LOGO_PATH:-/app/staticfiles/branding/logo-app.png}
-      - BEJERMAN_BRIDGE_BASE_URL=http://host.docker.internal:8787
-      - BEJERMAN_BRIDGE_TIMEOUT=30
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,6 +49,8 @@ services:
       done &&
       python manage.py apply_ticket_sale_states_schema &&
       python manage.py apply_delivery_orders_schema &&
+      python manage.py apply_notifications_schema &&
+      python manage.py apply_assignment_requests_schema &&
       python manage.py seed_dev_minimo &&
       gunicorn app.wsgi:application --bind 0.0.0.0:8000 --workers 2
       "

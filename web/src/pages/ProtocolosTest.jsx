@@ -860,7 +860,7 @@ export default function ProtocolosTest() {
       const errors = validatePayload(payload);
       if (errors.length) {
         setValidationErrors(errors);
-        setErr("Hay errores de validacion. Corregilos antes de guardar.");
+        setErr("Hay errores en los datos. Revise los campos antes de guardar.");
         return;
       }
       setValidationErrors([]);
@@ -920,7 +920,7 @@ export default function ProtocolosTest() {
 
       {validationErrors.length ? (
         <div className="rounded border border-amber-300 bg-amber-100 p-3 text-amber-800">
-          <div className="mb-1 text-sm font-semibold">Errores de validacion</div>
+          <div className="mb-1 text-sm font-semibold">Errores en los datos</div>
           <ul className="list-disc space-y-1 pl-5 text-sm">
             {validationErrors.map((validationError, index) => (
               <li key={`validation-${index}`}>{validationError}</li>

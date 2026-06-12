@@ -3,9 +3,7 @@ import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/Tabs";
 import {
-  getCatalogModelos,
-  getCatalogTipos,
-  getCatalogVariantes,
+  getVariantesPorModelo,
   getDevices,
   getMarcas,
   getMarcasPorTipo,
@@ -214,8 +212,6 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
   const [customerOptions, setCustomerOptions] = useState(() => normalizeCustomerRows(customers));
   const [marcaTxt, setMarcaTxt] = useState("");
   const [marcaId, setMarcaId] = useState(null);
-  const [catTipoId, setCatTipoId] = useState(null);
-  const [catModelos, setCatModelos] = useState([]);
 
   const tipoSel = (form.tipo_equipo || "").trim();
 
@@ -339,8 +335,6 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
   useEffect(() => {
     let active = true;
     setModelos([]);
-    setCatTipoId(null);
-    setCatModelos([]);
     setVarianteSugeridas([]);
     if (!marcaId) {
       return () => {
@@ -357,27 +351,10 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
         const norm = (s) => (s || "").toString().trim().toUpperCase();
         const filtered = tipoSel ? list.filter((m) => norm(m?.tipo_equipo) === norm(tipoSel)) : list;
         setModelos(filtered);
-
-        const tiposBrand = await getCatalogTipos(marcaId);
-        if (!active) return;
-        const match = (Array.isArray(tiposBrand) ? tiposBrand : []).find(
-          (t) => (t?.name || "").trim().toUpperCase() === (tipoSel || "").trim().toUpperCase()
-        );
-        const tId = match?.id ?? null;
-        setCatTipoId(tId);
-        if (tId) {
-          const mods = await getCatalogModelos(marcaId, tId);
-          if (!active) return;
-          setCatModelos(Array.isArray(mods) ? mods : []);
-        } else {
-          setCatModelos([]);
-        }
       } catch (e) {
         if (!active) return;
         setCatalogErr(e?.message || "No se pudieron cargar modelos.");
         setModelos([]);
-        setCatTipoId(null);
-        setCatModelos([]);
         setVarianteSugeridas([]);
       }
     })();
@@ -389,26 +366,8 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
 
   useEffect(() => {
     let active = true;
-    const selectedModel = (modelos || []).find((x) => String(x.id) === String(form.modelo_id));
-    if (!selectedModel || !marcaId || !catTipoId) {
-      setVarianteSugeridas([]);
-      return () => {
-        active = false;
-      };
-    }
-
-    const needle = (selectedModel?.nombre || "").trim().toUpperCase();
-    const cmatch = (catModelos || []).filter((cm) => {
-      const a = (cm?.name || "").trim().toUpperCase();
-      const alias = (cm?.alias || "").trim().toUpperCase();
-      return (
-        a === needle
-        || a.includes(needle)
-        || needle.includes(a)
-        || (alias && (alias === needle || needle.includes(alias) || alias.includes(needle)))
-      );
-    });
-    if (cmatch.length !== 1) {
+    const modeloId = form.modelo_id;
+    if (!modeloId) {
       setVarianteSugeridas([]);
       return () => {
         active = false;
@@ -417,9 +376,19 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
 
     (async () => {
       try {
-        const vars = await getCatalogVariantes(marcaId, catTipoId, cmatch[0].id);
+        const vars = await getVariantesPorModelo(modeloId);
         if (!active) return;
-        const names = (Array.isArray(vars) ? vars : []).filter((v) => v?.name).map((v) => v.name);
+        const seen = new Set();
+        const names = (Array.isArray(vars) ? vars : [])
+          .filter((v) => v?.active !== false)
+          .map((v) => v?.name || v?.nombre || v?.label || "")
+          .map((value) => String(value || "").trim())
+          .filter((value) => {
+            const key = value.toUpperCase();
+            if (!value || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
         setVarianteSugeridas(names);
       } catch {
         if (!active) return;
@@ -430,7 +399,7 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
     return () => {
       active = false;
     };
-  }, [form.modelo_id, modelos, marcaId, catTipoId, catModelos]);
+  }, [form.modelo_id]);
 
   const update = (key, value) =>
     setForm((prev) => {
@@ -630,7 +599,7 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                   onChange={(e) => update("alquiler_customer_id", e.target.value)}
                   disabled={!canEdit || saving}
                 >
-                  <option value="">Selecciona cliente</option>
+                  <option value="">Seleccione cliente</option>
                   {(customerOptions || []).map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
@@ -658,7 +627,7 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                   return;
                 }
                 if (marcaTxt && !marcaId) {
-                  setErr("Debes elegir una marca válida de las sugerencias.");
+                  setErr("Debe elegir una marca válida de las sugerencias.");
                   return;
                 }
                 let alquilerA = "";
@@ -667,7 +636,7 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                     (c) => String(c.id) === String(form.alquiler_customer_id)
                   );
                   if (!alquilerCustomer?.razon_social) {
-                    setErr("Debes seleccionar a qué cliente está alquilado el equipo.");
+                    setErr("Debe seleccionar a qué cliente está alquilado el equipo.");
                     return;
                   }
                   alquilerA = String(alquilerCustomer.razon_social || "").trim();
@@ -964,7 +933,7 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
                 disabled={saving}
               />
             </label>
-            <div className="text-xs text-gray-500">Debes informar al menos factura o remito.</div>
+            <div className="text-xs text-gray-500">Debe informar al menos factura o remito.</div>
           </div>
         ) : (
           <div className="space-y-3">
@@ -1498,8 +1467,8 @@ function DeviceRepuestosRevisionModal({
             </div>
             <div className="border rounded max-h-72 overflow-auto mb-3">
               <div className="bg-amber-50 border-b border-amber-200 text-amber-900 text-sm p-3">
-                Marcá "Reiniciar conteo" solo cuando también se reseteó el contador u horómetro del equipo.
-                Si solo registraste el cambio del repuesto, el trabajo queda en el historial pero no se mueve el próximo vencimiento.
+                Marque "Reiniciar conteo" solo cuando el contador u horómetro del equipo también se puso en cero.
+                Si solo se registró el cambio del repuesto, el trabajo queda en el historial pero no se mueve el próximo vencimiento.
               </div>
               {(repuestos || []).length === 0 ? (
                 <div className="text-sm text-gray-500 p-3">Este plan no tiene repuestos.</div>
@@ -1669,7 +1638,7 @@ function AddPreventivoEquipoModal({ onClose, onSelect, onCreateManaged }) {
       <div className="bg-white rounded shadow-lg w-full max-w-5xl p-4">
         <div className="text-lg font-semibold mb-2">Agregar equipo a preventivos</div>
         <div className="text-sm text-gray-600 mb-3">
-          Selecciona un equipo existente para configurarle plan preventivo.
+          Seleccione un equipo existente para configurarle plan preventivo.
         </div>
 
         {err && <div className="bg-red-100 border border-red-300 text-red-800 rounded p-2 mb-3">{err}</div>}
@@ -1771,8 +1740,6 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
   const [varianteSugeridas, setVarianteSugeridas] = useState([]);
   const [marcaTxt, setMarcaTxt] = useState("");
   const [marcaId, setMarcaId] = useState(null);
-  const [catTipoId, setCatTipoId] = useState(null);
-  const [catModelos, setCatModelos] = useState([]);
   const [catalogErr, setCatalogErr] = useState("");
 
   const update = (key, value) =>
@@ -1821,8 +1788,6 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
     setMarcaTxt("");
     setMarcaId(null);
     setModelos([]);
-    setCatTipoId(null);
-    setCatModelos([]);
     setVarianteSugeridas([]);
     setForm((prev) => ({
       ...prev,
@@ -1860,8 +1825,6 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
       variante: "",
     }));
     setModelos([]);
-    setCatTipoId(null);
-    setCatModelos([]);
     setVarianteSugeridas([]);
     if (!marcaId) {
       return () => {
@@ -1876,27 +1839,10 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
         const norm = (s) => (s || "").toString().trim().toUpperCase();
         const filtered = tipoSel ? list.filter((m) => norm(m?.tipo_equipo) === norm(tipoSel)) : list;
         setModelos(filtered);
-
-        const tiposBrand = await getCatalogTipos(marcaId);
-        if (!active) return;
-        const match = (Array.isArray(tiposBrand) ? tiposBrand : []).find(
-          (t) => (t?.name || "").trim().toUpperCase() === (tipoSel || "").trim().toUpperCase()
-        );
-        const tId = match?.id ?? null;
-        setCatTipoId(tId);
-        if (tId) {
-          const mods = await getCatalogModelos(marcaId, tId);
-          if (!active) return;
-          setCatModelos(Array.isArray(mods) ? mods : []);
-        } else {
-          setCatModelos([]);
-        }
       } catch (e) {
         if (!active) return;
         setCatalogErr(e?.message || "No se pudieron cargar modelos.");
         setModelos([]);
-        setCatTipoId(null);
-        setCatModelos([]);
         setVarianteSugeridas([]);
       }
     })();
@@ -1907,26 +1853,8 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
 
   useEffect(() => {
     let active = true;
-    const selectedModel = (modelos || []).find((x) => String(x.id) === String(form.modelo_id));
-    if (!selectedModel || !marcaId || !catTipoId) {
-      setVarianteSugeridas([]);
-      return () => {
-        active = false;
-      };
-    }
-
-    const needle = (selectedModel?.nombre || "").trim().toUpperCase();
-    const cmatch = (catModelos || []).filter((cm) => {
-      const a = (cm?.name || "").trim().toUpperCase();
-      const alias = (cm?.alias || "").trim().toUpperCase();
-      return (
-        a === needle ||
-        a.includes(needle) ||
-        needle.includes(a) ||
-        (alias && (alias === needle || needle.includes(alias) || alias.includes(needle)))
-      );
-    });
-    if (cmatch.length !== 1) {
+    const modeloId = form.modelo_id;
+    if (!modeloId) {
       setVarianteSugeridas([]);
       return () => {
         active = false;
@@ -1935,9 +1863,19 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
 
     (async () => {
       try {
-        const vars = await getCatalogVariantes(marcaId, catTipoId, cmatch[0].id);
+        const vars = await getVariantesPorModelo(modeloId);
         if (!active) return;
-        const names = (Array.isArray(vars) ? vars : []).filter((v) => v?.name).map((v) => v.name);
+        const seen = new Set();
+        const names = (Array.isArray(vars) ? vars : [])
+          .filter((v) => v?.active !== false)
+          .map((v) => v?.name || v?.nombre || v?.label || "")
+          .map((value) => String(value || "").trim())
+          .filter((value) => {
+            const key = value.toUpperCase();
+            if (!value || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
         setVarianteSugeridas(names);
         if (!String(form.variante || "").trim() && names.length === 1) {
           setForm((prev) => ({ ...prev, variante: names[0] }));
@@ -1950,7 +1888,7 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
     return () => {
       active = false;
     };
-  }, [form.modelo_id, form.variante, modelos, marcaId, catTipoId, catModelos]);
+  }, [form.modelo_id, form.variante]);
 
   const onMarcaInput = (value) => {
     setMarcaTxt(value);
@@ -2094,7 +2032,7 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
                 onChange={(e) => update("alquiler_customer_id", e.target.value)}
                 disabled={saving}
               >
-                <option value="">Selecciona cliente</option>
+                <option value="">Seleccione cliente</option>
                 {customers.map((c) => (
                   <option key={c.customer_id} value={c.customer_id}>
                     {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
@@ -2749,11 +2687,11 @@ export default function Equipos() {
       return;
     }
     if (!form?.marca_id) {
-      setAddManagedDeviceErr("Debes seleccionar una marca valida.");
+      setAddManagedDeviceErr("Debe seleccionar una marca válida.");
       return;
     }
     if (!form?.modelo_id) {
-      setAddManagedDeviceErr("Debes seleccionar un modelo.");
+      setAddManagedDeviceErr("Debe seleccionar un modelo.");
       return;
     }
     if (!(form?.numero_serie || "").trim() && !(form?.numero_interno || "").trim()) {
@@ -2763,7 +2701,7 @@ export default function Equipos() {
     let alquilerA = "";
     if (form?.alquilado) {
       if (!form?.alquiler_customer_id) {
-        setAddManagedDeviceErr("Debes seleccionar a que cliente esta alquilado el equipo.");
+        setAddManagedDeviceErr("Debe seleccionar a qué cliente está alquilado el equipo.");
         return;
       }
       const alquilerCustomer = sortedInstituciones.find(
@@ -3058,7 +2996,7 @@ export default function Equipos() {
                     <th className="p-2">Cliente</th>
                     <th className="p-2">Equipo</th>
                     <th className="p-2">Identificación</th>
-                    <th className="p-2">Ultima revision</th>
+                    <th className="p-2">Última revisión</th>
                     <th className="p-2">Próxima</th>
                     <th className="p-2">Estado</th>
                     <th className="p-2">Acción</th>
@@ -3765,7 +3703,7 @@ export default function Equipos() {
                     </div>
                   </>
                 ) : (
-                  <div>Selecciona equipo 2.</div>
+                  <div>Seleccione equipo 2.</div>
                 )}
               </div>
             )}

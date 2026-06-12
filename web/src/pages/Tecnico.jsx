@@ -101,7 +101,7 @@ export default function Tecnico() {
       <WorkQueueTable
         rows={displayRows}
         loading={loading}
-        emptyText={q ? "No se encontraron pendientes para el filtro aplicado." : "No tenés pendientes por ahora."}
+        emptyText={q ? "No se encontraron pendientes para el filtro aplicado." : "No tiene pendientes por ahora."}
         onOpen={go}
         showTechnician={false}
       />

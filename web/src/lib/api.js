@@ -144,6 +144,8 @@ import { MOTIVO_OPTIONS } from "./constants";
   };
   export const postNotificacionClick = (id) =>
     api.post(`/api/notificaciones/${id}/click/`, {});
+  export const postNotificacionesReadAll = () =>
+    api.post("/api/notificaciones/read-all/", {});
 
   /* =============== catalogos =============== */
 
@@ -204,7 +206,7 @@ export async function getCatalogModelos(marcaId, tipoId, force = false) {
 }
 
 export async function getCatalogVariantes(marcaId, tipoId, modeloId, force = false) {
-  const key = catalogCacheKey(marcaId, tipoId, modeloId);
+  const key = catalogCacheKey("catalog", marcaId, tipoId, modeloId);
   if (!force && catalogCache.variantes.has(key)) {
     return catalogCache.variantes.get(key);
   }
@@ -219,24 +221,18 @@ export async function getCatalogVariantes(marcaId, tipoId, modeloId, force = fal
   return data;
 }
 
-// Variantes por marca (sugerencias simples)
-export async function getVariantesPorMarca(marcaId) {
-  if (!marcaId) return [];
-  const rows = await api.get(`/api/catalogo/marcas/${encodeURIComponent(marcaId)}/variantes/`);
-  if (!Array.isArray(rows)) return [];
-  return rows
-    .map((item) => {
-      if (typeof item === "string") return item;
-      return (
-        item?.variante ??
-        item?.label ??
-        item?.name ??
-        item?.nombre ??
-        ""
-      );
-    })
-    .map((s) => String(s || "").trim())
-    .filter(Boolean);
+export async function getVariantesPorModelo(modeloId, force = false) {
+  const key = catalogCacheKey("model", modeloId);
+  if (!force && catalogCache.variantes.has(key)) {
+    return catalogCache.variantes.get(key);
+  }
+  if (!modeloId) {
+    catalogCache.variantes.set(key, []);
+    return [];
+  }
+  const data = await api.get(`/api/catalogos/modelos/${encodeURIComponent(modeloId)}/variantes/`);
+  catalogCache.variantes.set(key, data);
+  return data;
 }
 
 // Marcas que soportan un tipo dado (por nombre)
@@ -441,10 +437,14 @@ export const postModelo = (brandId, payloadOrNombre) => {
   /* =============== INGRESOS ================= */
   export const postNuevoIngreso = (payload) =>
     api.post("/api/ingresos/nuevo/", payload);
+  export const getBejermanIngressCompanies = () =>
+    api.get("/api/bejerman/ingress-companies/");
   export const getIngresoRisStatus = (ingresoId) =>
     api.get(`/api/ingresos/${ingresoId}/ris/`);
-  export const postIngresoRisEmitirBlob = (ingresoId) =>
-    getBlob(`/api/ingresos/${ingresoId}/ris/emitir/`, { method: "POST" });
+  export const postIngresoRisEmitir = (ingresoId) =>
+    api.post(`/api/ingresos/${ingresoId}/ris/emitir/`);
+  export const getIngresoRisPdfBlob = (ingresoId) =>
+    getBlob(`/api/ingresos/${ingresoId}/ris/pdf/`);
   export const getSerialBarcodeBlob = (value, params = {}) => {
     const qs = new URLSearchParams({ value: value || "", ...(params || {}) }).toString();
     return getBlob(`/api/barcodes/serial/?${qs}`);
@@ -689,6 +689,16 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export const postDeliveryOrderBejermanRemito = (payload = {}) =>
     api.post("/api/ordenes-entrega/remito-bejerman/", payload);
+
+  export const getDeliveryOrderRemitoHistory = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/ordenes-entrega/remito-bejerman/historial/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getDeliveryOrderBejermanArticles = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/ordenes-entrega/bejerman-articulos/${qs ? `?${qs}` : ""}`);
+  };
 
   export const getDeliveryOrderRemitoPdfBlob = (groupId) =>
     getBlob(`/api/ordenes-entrega/remito-bejerman/${encodeURIComponent(groupId)}/pdf/`);

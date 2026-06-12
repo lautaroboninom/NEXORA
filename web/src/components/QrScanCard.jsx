@@ -1,14 +1,41 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
-import { lookupScan, postEntregarIngreso } from "../lib/api";
+import {
+  getIngresoBarcodeBlob,
+  lookupScan,
+  postEntregarIngreso,
+  postIngresoRisEmitir,
+} from "../lib/api";
+import { openPdfBlob, reservePdfWindow } from "../lib/pdf";
+import { useAuth } from "../context/AuthContext";
+import { can, PERMISSION_CODES } from "../lib/permissions";
 import { formatOS } from "../lib/ui-helpers";
 import DeviceIdentifier from "./DeviceIdentifier.jsx";
+import RisProgressModal, {
+  waitForRisProgressMinimum,
+  waitForRisProgressPaint,
+} from "./RisProgressModal.jsx";
 
 const emptyEntrega = { remito_salida: "", retira_persona: "", serial_confirm: "" };
 const SCAN_RESET_MS = 120;
 const SCAN_MAX_MS = 1500;
 const SCAN_MIN_LEN = 3;
+
+const MODE_CONFIG = {
+  ingreso: {
+    label: "Ingreso / RIS",
+    title: "Ingreso con lector",
+    subtitle: "Escanee N/S, interno u OS para abrir el ingreso, emitir RIS o imprimir etiqueta.",
+    input: "Escanear serie, interno u OS",
+  },
+  egreso: {
+    label: "Egreso / RSS",
+    title: "Egreso con lector",
+    subtitle: "Escanee la OS o el equipo y cargue el RSS ya emitido para registrar la entrega.",
+    input: "Escanear OS, serie o interno",
+  },
+};
 
 const safeText = (value, fallback = "-") => (value == null || value === "" ? fallback : String(value));
 
@@ -16,6 +43,19 @@ const estadoLabel = (value) => {
   const raw = String(value || "").trim();
   if (!raw) return "-";
   return raw.replace(/_/g, " ");
+};
+
+const formatFecha = (value) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return safeText(value);
+  return date.toLocaleString("es-AR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 };
 
 function isEditableTarget(target) {
@@ -27,13 +67,22 @@ function isEditableTarget(target) {
   );
 }
 
-export default function QrScanCard() {
+export default function QrScanCard({
+  receptionMode = false,
+  title,
+  subtitle,
+  onDelivered,
+}) {
   const nav = useNavigate();
+  const { user } = useAuth();
   const inputRef = useRef(null);
   const scannerRef = useRef(null);
   const scanLockRef = useRef(false);
   const startLockRef = useRef(false);
   const fileInputRef = useRef(null);
+  const remitoInputRef = useRef(null);
+  const retiraInputRef = useRef(null);
+  const serialConfirmInputRef = useRef(null);
   const scanBufferRef = useRef("");
   const scanStartedAtRef = useRef(0);
   const scanLastKeyAtRef = useRef(0);
@@ -54,6 +103,23 @@ export default function QrScanCard() {
   const [saving, setSaving] = useState(false);
   const [deliverErr, setDeliverErr] = useState("");
   const [deliverOk, setDeliverOk] = useState("");
+  const [scanMode, setScanMode] = useState("ingreso");
+  const [risBusy, setRisBusy] = useState(false);
+  const [risProgressStatus, setRisProgressStatus] = useState("");
+  const [barcodeBusy, setBarcodeBusy] = useState(false);
+  const [actionOk, setActionOk] = useState("");
+
+  const config = MODE_CONFIG[scanMode] || MODE_CONFIG.ingreso;
+  const canCreateIngreso = can(user, PERMISSION_CODES.ACTION_INGRESO_CREATE) || can(user, PERMISSION_CODES.PAGE_NEW_INGRESO);
+  const canEditDelivery = receptionMode || can(user, PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY);
+  const canEmitRis = can(user, PERMISSION_CODES.ACTION_INGRESO_EMIT_INGRESS_ORDER);
+  const canPrintBarcode = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE);
+  const cardTitle = title || (receptionMode ? "Lector de recepción" : "Lectura de QR");
+  const cardSubtitle = subtitle || (
+    receptionMode
+      ? "Ingreso RIS y egreso RSS con lector de código de barras."
+      : "Escanear código QR o de barras."
+  );
 
   const resetState = () => {
     setCode("");
@@ -66,9 +132,13 @@ export default function QrScanCard() {
     setSaving(false);
     setDeliverErr("");
     setDeliverOk("");
+    setRisBusy(false);
+    setBarcodeBusy(false);
+    setActionOk("");
   };
 
-  const openModal = () => {
+  const openModal = (mode = scanMode) => {
+    setScanMode(mode);
     resetState();
     setOpen(true);
   };
@@ -136,7 +206,10 @@ export default function QrScanCard() {
     if (shouldAuto && canLive) {
       void startCamera();
     } else {
-      const id = setTimeout(() => inputRef.current?.focus(), 50);
+      const id = setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 50);
       return () => clearTimeout(id);
     }
   }, [open]);
@@ -155,6 +228,7 @@ export default function QrScanCard() {
     setResult(null);
     setDeliverErr("");
     setDeliverOk("");
+    setActionOk("");
     try {
       const res = await lookupScan(trimmed);
       setResult(res);
@@ -163,6 +237,7 @@ export default function QrScanCard() {
       setErr(e2?.message || "No se pudo leer el código.");
     } finally {
       setLoading(false);
+      setTimeout(() => inputRef.current?.select(), 50);
     }
   };
 
@@ -194,6 +269,7 @@ export default function QrScanCard() {
           event.preventDefault();
           if (!open) {
             resetState();
+            setScanMode(receptionMode ? "ingreso" : scanMode);
             setOpen(true);
           }
           setPendingScannedCode(scanned);
@@ -255,8 +331,8 @@ export default function QrScanCard() {
     if (!canLive) {
       setCameraError(
         secure
-          ? "La cámara no esta disponible en este dispositivo."
-          : "La lectura automatica requiere HTTPS."
+          ? "La cámara no está disponible en este dispositivo."
+          : "La lectura automática requiere HTTPS."
       );
       return;
     }
@@ -311,10 +387,25 @@ export default function QrScanCard() {
   const device = result?.device || null;
   const flags = result?.flags || {};
   const estado = String(ingreso?.estado || "").toLowerCase();
+  const ingresoEnCurso = Boolean(ingreso?.ingreso_en_curso);
   const isLiberado = estado === "liberado" || estado === "vendido_pendiente_entrega";
   const isEntregado = estado === "entregado" || estado === "vendido_entregado";
   const requiereSerial = String(ingreso?.resolucion || "").toLowerCase() === "cambio";
   const hoyLabel = new Date().toLocaleDateString("es-AR");
+  const canRegisterDelivery = !!ingreso?.id && isLiberado && !isEntregado && canEditDelivery;
+  const canPrintIngreso = !!ingreso?.id && canPrintBarcode;
+  const canCreateFromDevice = canCreateIngreso && !ingresoEnCurso;
+  const shouldShowIngresoCard = !!ingreso && (ingresoEnCurso || !device);
+  const canViewLastIngresoFromDevice = !!ingreso?.id && !!device && !ingresoEnCurso;
+
+  useEffect(() => {
+    if (!open || scanMode !== "egreso" || !canRegisterDelivery || deliverOk) return;
+    const id = setTimeout(() => {
+      remitoInputRef.current?.focus();
+      remitoInputRef.current?.select();
+    }, 80);
+    return () => clearTimeout(id);
+  }, [open, scanMode, canRegisterDelivery, deliverOk, ingreso?.id]);
 
   const propiedadLabel = () => {
     if (flags?.mg_inactivo_venta) return "MG histórico inactivo por venta";
@@ -360,13 +451,15 @@ export default function QrScanCard() {
     setSaving(true);
     setDeliverErr("");
     setDeliverOk("");
+    setActionOk("");
     try {
       await postEntregarIngreso(ingreso.id, {
         remito_salida: remito,
         retira_persona: retira,
         ...(requiereSerial ? { serial_confirm: serialConfirm } : {}),
       });
-      setDeliverOk("Entrega registrada.");
+      setDeliverOk("Entrega registrada con RSS.");
+      onDelivered?.();
       setResult((prev) => {
         if (!prev || !prev.ingreso) return prev;
         const nextEstado = String(prev.ingreso.estado || "").toLowerCase() === "vendido_pendiente_entrega"
@@ -388,30 +481,122 @@ export default function QrScanCard() {
     }
   };
 
+  const imprimirRis = async () => {
+    if (!ingreso?.id || risBusy || !canEmitRis) return;
+    const progressStartedAt = Date.now();
+    const risPdfWindow = reservePdfWindow({
+      title: "REMITO",
+      message: "Preparando RIS...",
+    });
+    let risPdfOpened = false;
+    setRisBusy(true);
+    setRisProgressStatus("Emitiendo RIS en Bejerman...");
+    setErr("");
+    setActionOk("");
+    try {
+      await waitForRisProgressPaint();
+      const risResult = await postIngresoRisEmitir(ingreso.id);
+      setRisProgressStatus("Preparando PDF...");
+      risPdfOpened = risPdfWindow.openUrl(risResult?.print_url);
+      const remito = risResult?.remito_number || risResult?.ris?.remito_number || "";
+      setActionOk(remito ? `RIS ${remito} emitido. Preparando PDF.` : "RIS emitido. Preparando PDF.");
+    } catch (e2) {
+      setErr(e2?.message || "No se pudo emitir o reimprimir el RIS.");
+    } finally {
+      if (!risPdfOpened) risPdfWindow.close();
+      await waitForRisProgressMinimum(progressStartedAt);
+      setRisBusy(false);
+      setRisProgressStatus("");
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  };
+
+  const imprimirEtiqueta = async () => {
+    if (!ingreso?.id || barcodeBusy || !canPrintBarcode) return;
+    setBarcodeBusy(true);
+    setErr("");
+    setActionOk("");
+    try {
+      const blob = await getIngresoBarcodeBlob(ingreso.id);
+      openPdfBlob(blob);
+      setActionOk("Etiqueta lista para imprimir.");
+    } catch (e2) {
+      setErr(e2?.message || "No se pudo imprimir el código de barras.");
+    } finally {
+      setBarcodeBusy(false);
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  };
+
   return (
-    <div className="border rounded p-4 mt-4">
-      <div className="flex items-center justify-between gap-3">
+    <div className="rounded border bg-white p-4">
+      <RisProgressModal
+        open={risBusy}
+        title="Emitiendo RIS"
+        status={risProgressStatus || "Emitiendo RIS en Bejerman..."}
+      />
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <div className="font-semibold">Lectura de QR</div>
-          <div className="text-xs text-gray-500">Escanear código QR o de barras.</div>
+          <div className="font-semibold">{cardTitle}</div>
+          <div className="text-xs text-gray-500">{cardSubtitle}</div>
         </div>
-        <button
-          className="px-3 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
-          onClick={openModal}
-        >
-          Abrir
-        </button>
+        {receptionMode ? (
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700"
+              onClick={() => openModal("ingreso")}
+            >
+              Ingreso / RIS
+            </button>
+            <button
+              type="button"
+              className="rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700"
+              onClick={() => openModal("egreso")}
+            >
+              Egreso / RSS
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700"
+            onClick={() => openModal(scanMode)}
+          >
+            Abrir
+          </button>
+        )}
       </div>
 
       {open && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded shadow-lg w-full max-w-2xl p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-lg font-semibold">Lectura de QR</div>
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-3 sm:p-4">
+          <div className="my-3 max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl overflow-y-auto overscroll-contain rounded bg-white p-4 shadow-lg sm:my-4 sm:max-h-[calc(100dvh-2rem)]">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">{config.title}</div>
+                <div className="text-xs text-gray-500">{config.subtitle}</div>
+              </div>
               <button className="px-2 py-1 rounded border" onClick={closeModal}>
                 Cerrar
               </button>
             </div>
+
+            {receptionMode && (
+              <div className="mb-3 inline-flex overflow-hidden rounded border bg-white text-sm">
+                {Object.entries(MODE_CONFIG).map(([key, item]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`px-3 py-2 ${
+                      scanMode === key ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-50"
+                    }`}
+                    onClick={() => setScanMode(key)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <input
               ref={fileInputRef}
@@ -443,7 +628,7 @@ export default function QrScanCard() {
 
             {!mediaSupported && (
               <div className="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
-                Tu navegador no permite acceso a cámara. Podés cargar una imagen con QR.
+                Tu navegador no permite acceso a cámara. Puede cargar una imagen con QR.
                 <div className="mt-2">
                   <button
                     type="button"
@@ -470,11 +655,12 @@ export default function QrScanCard() {
             <form onSubmit={onLookup} className="flex flex-col md:flex-row gap-2">
               <input
                 ref={inputRef}
-                className="border rounded p-2 w-full"
-                placeholder="Escanear o pegar código"
+                className="w-full rounded border p-3 text-base"
+                placeholder={config.input}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 aria-label="Lectura de código"
+                autoComplete="off"
               />
               <button className="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">
                 Buscar
@@ -490,21 +676,36 @@ export default function QrScanCard() {
 
             {loading && <div className="text-sm text-gray-500 mt-3">Buscando...</div>}
             {err && <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mt-3">{err}</div>}
+            {actionOk && (
+              <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-800">
+                {actionOk}
+              </div>
+            )}
 
             {!loading && result && (
               <div className="mt-4 space-y-4">
-                {ingreso && (
-                  <div className="border rounded p-3">
-                    <div className="font-semibold mb-2">Ingreso encontrado</div>
+                {shouldShowIngresoCard && (
+                  <div className={ingresoEnCurso ? "rounded border border-amber-300 bg-amber-50 p-3" : "rounded border p-3"}>
+                    <div className="mb-2">
+                      <div className={ingresoEnCurso ? "font-semibold text-amber-900" : "font-semibold"}>
+                        {ingresoEnCurso ? "Servicio en curso" : "Ingreso encontrado"}
+                      </div>
+                      {ingresoEnCurso && (
+                        <div className="mt-1 text-sm text-amber-800">
+                          Este equipo ya tiene un ingreso activo. No se sugiere crear otro ingreso porque el alta será bloqueada.
+                        </div>
+                      )}
+                    </div>
                     <div className="text-sm text-gray-700 grid grid-cols-1 md:grid-cols-2 gap-2">
                       <div>OS: {formatOS(ingreso)}</div>
                       <div>Estado: {estadoLabel(ingreso.estado)}</div>
+                      <div>Fecha de ingreso: {formatFecha(ingreso.fecha_ingreso)}</div>
                       <div>Cliente: {safeText(ingreso.razon_social)}</div>
                       <div>Equipo: {safeText(ingreso.marca)} {safeText(ingreso.modelo)}</div>
                       <div>Serie: <DeviceIdentifier row={ingreso} /></div>
                       <div>Tipo: {safeText(ingreso.tipo_equipo)}</div>
                     </div>
-                    <div className="mt-3 flex items-center gap-2">
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
                       <button
                         className="px-3 py-1.5 rounded border"
                         onClick={() => {
@@ -514,14 +715,42 @@ export default function QrScanCard() {
                       >
                         Ver hoja de servicio
                       </button>
+                      {canPrintIngreso && (
+                        <button
+                          type="button"
+                          className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50"
+                          onClick={imprimirEtiqueta}
+                          disabled={barcodeBusy}
+                        >
+                          {barcodeBusy ? "Preparando etiqueta..." : "Imprimir etiqueta"}
+                        </button>
+                      )}
+                      {canEmitRis && ingreso?.id && (
+                        <button
+                          type="button"
+                          className="rounded border px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                          onClick={imprimirRis}
+                          disabled={risBusy}
+                        >
+                          {risBusy ? "Preparando RIS..." : "Emitir/Reimprimir RIS"}
+                        </button>
+                      )}
                     </div>
 
-                    {isLiberado && !isEntregado && (
+                    {scanMode === "egreso" && !canRegisterDelivery && !isEntregado && (
+                      <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800">
+                        El equipo todavía no está liberado para registrar egreso.
+                      </div>
+                    )}
+
+                    {canRegisterDelivery && (
                       <div className="mt-4 border-t pt-4">
                         <div className="font-semibold text-emerald-700">
-                          {estado === "vendido_pendiente_entrega" ? "Venta pendiente de entrega" : "Equipo liberado"}
+                          {estado === "vendido_pendiente_entrega" ? "Venta pendiente de entrega" : "Egreso / RSS"}
                         </div>
-                        <div className="text-xs text-gray-500">Fecha de entrega: {hoyLabel} (auto)</div>
+                        <div className="text-xs text-gray-500">
+                          Fecha de entrega: {hoyLabel} (auto). El RSS se genera en Portal/Bejerman y acá se registra la entrega.
+                        </div>
                         {deliverOk && (
                           <div className="bg-emerald-100 text-emerald-800 border border-emerald-300 rounded p-2 mt-2">
                             {deliverOk}
@@ -534,28 +763,55 @@ export default function QrScanCard() {
                         )}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
                           <label className="block">
-                            <div className="text-sm text-gray-700 mb-1">Remito de entrega</div>
+                            <div className="text-sm text-gray-700 mb-1">Remito/RSS</div>
                             <input
+                              ref={remitoInputRef}
                               className="border rounded p-2 w-full"
                               value={entrega.remito_salida}
                               onChange={(e) => setEntrega((s) => ({ ...s, remito_salida: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  retiraInputRef.current?.focus();
+                                  retiraInputRef.current?.select();
+                                }
+                              }}
                             />
                           </label>
                           <label className="block">
                             <div className="text-sm text-gray-700 mb-1">Persona que retira</div>
                             <input
+                              ref={retiraInputRef}
                               className="border rounded p-2 w-full"
                               value={entrega.retira_persona}
                               onChange={(e) => setEntrega((s) => ({ ...s, retira_persona: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  if (requiereSerial) {
+                                    serialConfirmInputRef.current?.focus();
+                                    serialConfirmInputRef.current?.select();
+                                  } else {
+                                    void onEntregar();
+                                  }
+                                }
+                              }}
                             />
                           </label>
                           {requiereSerial && (
                             <label className="block md:col-span-2">
                               <div className="text-sm text-gray-700 mb-1">Serie confirmación (cambio)</div>
                               <input
+                                ref={serialConfirmInputRef}
                                 className="border rounded p-2 w-full"
                                 value={entrega.serial_confirm}
                                 onChange={(e) => setEntrega((s) => ({ ...s, serial_confirm: e.target.value }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void onEntregar();
+                                  }
+                                }}
                               />
                             </label>
                           )}
@@ -566,7 +822,7 @@ export default function QrScanCard() {
                             disabled={saving}
                             onClick={onEntregar}
                           >
-                            Marcar entrega
+                            {saving ? "Registrando..." : "Registrar egreso"}
                           </button>
                         </div>
                       </div>
@@ -590,17 +846,39 @@ export default function QrScanCard() {
                         </div>
                       )}
                     </div>
-                    <div className="mt-3 flex items-center gap-2">
-                      <button
-                        className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700"
-                        onClick={() =>
-                          goNuevoIngreso({
+                    {ingresoEnCurso && (
+                      <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800">
+                        Para continuar, abrí la hoja de servicio existente o reimprimí RIS/etiqueta desde este resultado.
+                      </div>
+                    )}
+                    {(canViewLastIngresoFromDevice || canCreateFromDevice) && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        {canViewLastIngresoFromDevice && (
+                          <button
+                            type="button"
+                            className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50"
+                            onClick={() => {
+                              nav(`/ingresos/${ingreso.id}`);
+                              closeModal();
+                            }}
+                          >
+                            Ver último ingreso
+                          </button>
+                        )}
+                        {canCreateFromDevice && (
+                          <button
+                            className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700"
+                            onClick={() =>
+                              goNuevoIngreso({
                             numero_serie: device.numero_serie || result?.normalized || code,
                             numero_interno: flags?.mg_inactivo_venta ? "" : (device.numero_interno || ""),
                             marca_id: device.marca_id,
                             marca: device.marca,
+                            marca_nombre: device.marca,
                             model_id: device.model_id,
+                            modelo_id: device.model_id,
                             modelo: device.modelo,
+                            modelo_nombre: device.modelo,
                             tipo_equipo: device.tipo_equipo || ingreso?.tipo_equipo || "",
                             variante: device.variante || ingreso?.equipo_variante || "",
                             ...(alquilerCliente
@@ -628,12 +906,14 @@ export default function QrScanCard() {
                             mg_context_msg: flags?.mg_inactivo_venta
                               ? "MG histórico inactivo por venta; no operativo para nuevos ingresos."
                               : "",
-                          })
-                        }
-                      >
-                        Nuevo ingreso con datos
-                      </button>
-                    </div>
+                              })
+                            }
+                          >
+                            Crear ingreso RIS con datos
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -641,15 +921,19 @@ export default function QrScanCard() {
                   <div className="border rounded p-3">
                     <div className="font-semibold mb-2">Sin coincidencias</div>
                     <div className="text-sm text-gray-600">
-                      No se encontró un equipo con ese código.
+                      {scanMode === "egreso"
+                        ? "No se encontró una hoja de servicio para registrar el egreso."
+                        : "No se encontró un equipo con ese código."}
                     </div>
                     <div className="mt-3">
-                      <button
-                        className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700"
-                        onClick={() => goNuevoIngreso(null)}
-                      >
-                        Crear nuevo ingreso
-                      </button>
+                      {scanMode === "ingreso" && canCreateIngreso && (
+                        <button
+                          className="px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700"
+                          onClick={() => goNuevoIngreso(null)}
+                        >
+                          Crear nuevo ingreso
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}

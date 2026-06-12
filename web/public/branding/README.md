@@ -1,7 +1,9 @@
-Colocá acá tus logos originales para referencia interna:
+Colocá acá los archivos originales de marca para referencia interna:
 
-- logo-empresa.png — Logo corporativo (se usa dentro de la UI si se necesita).
-- logo-app.png — Logo base para la app instalable y favicon.
+- logo-nexora.png — Logo principal para pantallas de acceso o espacios amplios.
+- logotipo-nexora.png — Logotipo horizontal para navegación y pantallas de acceso.
+- isotipo-nexora.png — Isotipo para favicon y PWA.
+- imagotipo-nexora.png — Imagotipo completo para usos alternativos.
 
 Luego corré desde la carpeta `web/`:
 

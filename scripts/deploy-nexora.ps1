@@ -3,7 +3,8 @@ param(
   [string]$Branch = "main",
   [string]$HealthUrl = "http://localhost/api/ping/",
   [int]$HealthRetries = 30,
-  [switch]$KeepLegacyContainers
+  [switch]$KeepLegacyContainers,
+  [switch]$SkipBejermanSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,8 +39,13 @@ docker compose -f $ComposeFile up -d --build
 
 docker compose -f $ComposeFile exec -T api python manage.py apply_ticket_sale_states_schema
 docker compose -f $ComposeFile exec -T api python manage.py apply_delivery_orders_schema
+docker compose -f $ComposeFile exec -T api python manage.py apply_notifications_schema
+docker compose -f $ComposeFile exec -T api python manage.py apply_assignment_requests_schema
 docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_sync_schema
 docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_ris_schema
+if (-not $SkipBejermanSmoke) {
+  docker compose -f $ComposeFile exec -T api python manage.py check_bejerman_sdk --skip-live
+}
 
 $ok = $false
 for ($i = 1; $i -le $HealthRetries; $i++) {

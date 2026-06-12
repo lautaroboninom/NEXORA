@@ -222,7 +222,7 @@ class Command(BaseCommand):
             lines.extend(fmt_row(r) for r in proximos)
         lines.extend(["", f"Total considerado: {len(rows)}", ""])
         lines.append(f"Abrir agenda: {_frontend_link('/equipos?tab=preventivos')}")
-        lines.append("Aviso automatico - no responder a este correo.")
+        lines.append("Aviso automático - no responder a este correo.")
         body = _email_append_footer_text("\n".join(lines))
         subject = f"Preventivos pendientes - Vencidos: {len(vencidos)} - Proximos: {len(proximos)}"
 

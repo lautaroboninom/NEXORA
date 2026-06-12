@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db import connection
 from .models import User
 
-# Usá la misma clave en todos los contenedores; para dev vale el default
+# Use la misma clave en todos los contenedores; para dev vale el default.
 JWT_SECRET = os.getenv("DJANGO_SECRET_KEY", "change-me")
 JWT_ALG = "HS256"
 JWT_TTL_MIN = 60 * 8  # 8 horas

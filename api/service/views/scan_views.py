@@ -1,5 +1,4 @@
 import re
-from urllib.parse import quote
 
 from django.db import connection
 from rest_framework import permissions
@@ -8,14 +7,39 @@ from rest_framework.views import APIView
 
 from .helpers import q, require_roles, _set_audit_user
 from .mg_state import resolve_mg_flags
-from ..bejerman_bridge import (
-    BejermanBridgeClient,
-    BejermanBridgeConfigError,
-    BejermanBridgeResponseError,
-    BejermanBridgeUnavailable,
-)
 from ..bejerman_ris import equipment_suggestion_from_bejerman_article, find_customer_suggestion
+from ..bejerman_sdk import (
+    BejermanSDKClient,
+    BejermanSdkConfigError,
+    BejermanSdkResponseError,
+    BejermanSdkUnavailable,
+    lookup_sale_by_serial,
+)
 from ..warranty import compute_warranty_from_sale_date
+
+
+INGRESO_ESTADOS_NO_BLOQUEAN_ALTA = {
+    "entregado",
+    "alquilado",
+    "baja",
+    "vendido_pendiente_entrega",
+    "vendido_entregado",
+}
+
+
+def _ingreso_en_curso(row: dict | None) -> bool:
+    estado = str((row or {}).get("estado") or "").strip().lower()
+    return bool(estado) and estado not in INGRESO_ESTADOS_NO_BLOQUEAN_ALTA
+
+
+def _normalize_ingreso_summary(row: dict | None, ingreso_en_curso: bool | None = None):
+    if not row:
+        return row
+    if row.get("fecha_ingreso") is None and row.get("fecha_creacion") is not None:
+        row["fecha_ingreso"] = row.get("fecha_creacion")
+    row["ingreso_en_curso"] = _ingreso_en_curso(row) if ingreso_en_curso is None else bool(ingreso_en_curso)
+    row.pop("fecha_creacion", None)
+    return row
 
 
 def _parse_ingreso_id(raw: str):
@@ -37,14 +61,15 @@ def _parse_ingreso_id(raw: str):
 
 
 def _fetch_ingreso_summary(ingreso_id: int):
-    return q(
+    return _normalize_ingreso_summary(q(
         """
         SELECT
           t.id,
           t.estado,
           t.presupuesto_estado,
           t.resolucion,
-          t.fecha_ingreso,
+          COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
+          t.fecha_creacion,
           t.fecha_entrega,
           COALESCE(t.equipo_variante,'') AS equipo_variante,
           t.device_id,
@@ -68,7 +93,7 @@ def _fetch_ingreso_summary(ingreso_id: int):
         """,
         [ingreso_id],
         one=True,
-    )
+    ))
 
 
 def _has_mg_schema() -> bool:
@@ -157,8 +182,8 @@ def _fetch_device_by_code(raw: str, mg_select_sql: str):
     return dev, ns_key
 
 
-def _fetch_last_ingreso(device_id: int):
-    return q(
+def _fetch_ingreso_en_curso(device_id: int):
+    return _normalize_ingreso_summary(q(
         """
         SELECT
           t.id,
@@ -166,7 +191,42 @@ def _fetch_last_ingreso(device_id: int):
           t.presupuesto_estado,
           COALESCE(t.alquilado, false) AS alquilado,
           COALESCE(t.alquiler_a, '') AS alquiler_a,
-          t.fecha_ingreso,
+          COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
+          t.fecha_creacion,
+          t.fecha_entrega,
+          COALESCE(t.equipo_variante,'') AS equipo_variante,
+          COALESCE(c.razon_social,'') AS razon_social,
+          COALESCE(d.numero_serie,'') AS numero_serie,
+          COALESCE(d.numero_interno,'') AS numero_interno,
+          COALESCE(b.nombre,'') AS marca,
+          COALESCE(m.nombre,'') AS modelo,
+          COALESCE(m.tipo_equipo,'') AS tipo_equipo
+        FROM ingresos t
+        JOIN devices d ON d.id = t.device_id
+        JOIN customers c ON c.id = d.customer_id
+        LEFT JOIN marcas b ON b.id = d.marca_id
+        LEFT JOIN models m ON m.id = d.model_id
+        WHERE t.device_id = %s
+          AND t.estado NOT IN ('entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
+        ORDER BY COALESCE(t.fecha_ingreso, t.fecha_creacion) DESC, t.id DESC
+        LIMIT 1
+        """,
+        [device_id],
+        one=True,
+    ), ingreso_en_curso=True)
+
+
+def _fetch_last_ingreso(device_id: int):
+    return _normalize_ingreso_summary(q(
+        """
+        SELECT
+          t.id,
+          t.estado,
+          t.presupuesto_estado,
+          COALESCE(t.alquilado, false) AS alquilado,
+          COALESCE(t.alquiler_a, '') AS alquiler_a,
+          COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
+          t.fecha_creacion,
           t.fecha_entrega,
           COALESCE(t.equipo_variante,'') AS equipo_variante,
           COALESCE(c.razon_social,'') AS razon_social,
@@ -186,19 +246,15 @@ def _fetch_last_ingreso(device_id: int):
         """,
         [device_id],
         one=True,
-    )
+    ))
 
 
 def _lookup_bejerman_sale_by_serial(serial: str):
     try:
-        client = BejermanBridgeClient.from_settings()
-        return client.get_json(
-            f"/api/portal/service/serials/{quote(serial, safe='')}/sale",
-            not_found_as_none=True,
-        )
-    except BejermanBridgeConfigError as exc:
+        return lookup_sale_by_serial(BejermanSDKClient(), serial)
+    except BejermanSdkConfigError as exc:
         return {"found": False, "lookup_error": str(exc)}
-    except (BejermanBridgeResponseError, BejermanBridgeUnavailable) as exc:
+    except (BejermanSdkResponseError, BejermanSdkUnavailable) as exc:
         return {"found": False, "lookup_error": str(exc)}
     except Exception as exc:
         return {"found": False, "lookup_error": f"No se pudo consultar Bejerman: {exc}"}
@@ -328,7 +384,8 @@ class ScanLookupView(APIView):
                 "bejerman_lookup_error": (sale_payload or {}).get("lookup_error") if isinstance(sale_payload, dict) else None,
             })
 
-        last_ingreso = _fetch_last_ingreso(device["id"])
+        ingreso_en_curso = _fetch_ingreso_en_curso(device["id"])
+        last_ingreso = ingreso_en_curso or _fetch_last_ingreso(device["id"])
 
         mg_owner = q(
             "SELECT id FROM customers WHERE LOWER(razon_social) LIKE %s ORDER BY id ASC LIMIT 1",

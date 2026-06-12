@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
 
-TABLES = ["bejerman_ingreso_remitos"]
+TABLES = ["ingresos", "bejerman_ingreso_remitos"]
 
 
 class Command(BaseCommand):
@@ -23,6 +23,37 @@ class Command(BaseCommand):
                         $$ LANGUAGE plpgsql;
                         """
                     )
+
+                cur.execute(
+                    """
+                    ALTER TABLE ingresos
+                      ADD COLUMN IF NOT EXISTS empresa_bejerman TEXT DEFAULT 'SEPID'
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE ingresos
+                      ADD COLUMN IF NOT EXISTS empresa_facturar TEXT DEFAULT 'SEPID'
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE ingresos
+                       SET empresa_bejerman = 'SEPID'
+                     WHERE empresa_bejerman IS NULL OR TRIM(empresa_bejerman) = ''
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE ingresos
+                       SET empresa_facturar = COALESCE(NULLIF(TRIM(empresa_facturar), ''), empresa_bejerman, 'SEPID')
+                     WHERE empresa_facturar IS NULL OR TRIM(empresa_facturar) = ''
+                    """
+                )
+                cur.execute("ALTER TABLE ingresos ALTER COLUMN empresa_bejerman SET DEFAULT 'SEPID'")
+                cur.execute("ALTER TABLE ingresos ALTER COLUMN empresa_facturar SET DEFAULT 'SEPID'")
+                cur.execute("ALTER TABLE ingresos ALTER COLUMN empresa_bejerman SET NOT NULL")
+                cur.execute("ALTER TABLE ingresos ALTER COLUMN empresa_facturar SET NOT NULL")
 
                 cur.execute(
                     """
@@ -53,6 +84,24 @@ class Command(BaseCommand):
                         CHECK (pdf_status IN ('pending','ready','failed')),
                       CONSTRAINT chk_bejerman_ingreso_remitos_attempts CHECK (attempts >= 0)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD COLUMN IF NOT EXISTS company_key TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD COLUMN IF NOT EXISTS company_label TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD COLUMN IF NOT EXISTS bejerman_company TEXT NULL
                     """
                 )
                 cur.execute(
@@ -103,6 +152,10 @@ class Command(BaseCommand):
                     raise RuntimeError(f"No se aplicaron tablas requeridas: {', '.join(missing)}")
 
                 required_columns = {
+                    "ingresos": {
+                        "empresa_bejerman",
+                        "empresa_facturar",
+                    },
                     "bejerman_ingreso_remitos": {
                         "ingreso_id",
                         "status",
@@ -115,6 +168,9 @@ class Command(BaseCommand):
                         "comprobante_pto_venta",
                         "comprobante_numero",
                         "remito_number",
+                        "company_key",
+                        "company_label",
+                        "bejerman_company",
                         "issue_date",
                     },
                 }

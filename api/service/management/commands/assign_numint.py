@@ -7,7 +7,7 @@ def _norm_code(code: str) -> str:
     s = (code or "").strip().upper()
     m = re.match(r"^(MG|NM|NV|CE)[^0-9]*(\d{1,6})$", s)
     if not m:
-        raise ValueError("code debe ser MG/NM/NV/CE + numero")
+        raise ValueError("code debe ser MG/NM/NV/CE + número")
     pref, num = m.group(1), m.group(2)
     return f"{pref} {num[-4:].zfill(4)}"
 
@@ -21,10 +21,10 @@ class Command(BaseCommand):
     help = "Asigna devices.numero_interno a un equipo por NS o device_id, opcionalmente liberando conflictos (steal)."
 
     def add_arguments(self, parser):
-        parser.add_argument("--ns", default=None, help="Numero de serie de fabrica del device (para buscar device_id)")
+        parser.add_argument("--ns", default=None, help="Número de serie de fábrica del device (para buscar device_id)")
         parser.add_argument("--device-id", type=int, default=None, help="device_id objetivo (alternativa a --ns)")
-        parser.add_argument("--code", required=True, help="Codigo interno a asignar (ej: 'MG 4722' o 'MG004722')")
-        parser.add_argument("--steal", action="store_true", help="Si otro device tiene el mismo codigo, limpiar su numero_interno")
+        parser.add_argument("--code", required=True, help="Código interno a asignar (ej: 'MG 4722' o 'MG004722')")
+        parser.add_argument("--steal", action="store_true", help="Si otro device tiene el mismo código, limpiar su numero_interno")
 
     def handle(self, *args, **opts):
         code = _norm_code(opts.get("code") or "")
@@ -70,4 +70,3 @@ class Command(BaseCommand):
                 cur.execute("UPDATE devices SET numero_interno=%s WHERE id=%s", [code, device_id])
 
         self.stdout.write(f"OK: code='{code}' asignado a device_id={device_id}" + (f"; liberado conflict_id={conflict_id}" if conflict_id else ""))
-

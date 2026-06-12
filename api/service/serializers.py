@@ -100,6 +100,8 @@ class IngresoDetailSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     os = serializers.CharField()
     motivo = serializers.CharField()
+    empresa_bejerman = serializers.CharField(allow_blank=True, required=False)
+    empresa_facturar = serializers.CharField(allow_blank=True, required=False)
     permite_reparacion = serializers.BooleanField(required=False)
     estado = serializers.CharField()
     presupuesto_estado = serializers.CharField(allow_null=True)

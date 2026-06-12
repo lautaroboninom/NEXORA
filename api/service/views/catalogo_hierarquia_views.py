@@ -53,6 +53,13 @@ def _ensure_catalog_tipo(nombre: str) -> None:
     exec_void("INSERT INTO catalogo_tipos_equipo(nombre, activo) VALUES (%s, TRUE)", [clean])
 
 
+def _table_exists(table_name: str) -> bool:
+    try:
+        return table_name in connection.introspection.table_names()
+    except Exception:
+        return False
+
+
 class CatalogoTiposView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -174,6 +181,119 @@ class CatalogoVariantesView(APIView):
             })
 
         return Response(data)
+
+
+class ModeloVariantesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @staticmethod
+    def _canon(value: str) -> str:
+        if not value:
+            return ""
+        return " ".join(str(value).strip().split()).upper()
+
+    def _rows_response(self, rows):
+        data = []
+        for row in rows or []:
+            data.append({
+                "id": row.get("id"),
+                "name": row.get("nombre"),
+                "label": self._canon(row.get("nombre")),
+                "active": bool(row.get("activo")),
+            })
+        return data
+
+    def _simple_response(self, value: str):
+        name = (value or "").strip()
+        if not name:
+            return []
+        return [{
+            "id": None,
+            "name": name,
+            "label": self._canon(name),
+            "active": True,
+        }]
+
+    def _variants_for_series(self, marca_id, tipo_id, serie_id):
+        if not _table_exists("marca_series_variantes"):
+            return []
+        rows = q(
+            """
+            SELECT id, nombre, activo
+            FROM marca_series_variantes
+            WHERE marca_id=%s AND tipo_id=%s AND serie_id=%s
+            ORDER BY nombre
+            """,
+            [marca_id, tipo_id, serie_id],
+        ) or []
+        return self._rows_response(rows)
+
+    def get(self, request, modelo_id: int):
+        try:
+            model_id = int(modelo_id)
+        except (TypeError, ValueError):
+            return Response({"detail": "parametros invalidos"}, status=400)
+
+        model = q(
+            """
+            SELECT id, marca_id, nombre,
+                   COALESCE(TRIM(tipo_equipo), '') AS tipo_equipo,
+                   COALESCE(TRIM(variante), '') AS variante
+            FROM models
+            WHERE id=%s
+            """,
+            [model_id],
+            one=True,
+        )
+        if not model:
+            return Response([])
+
+        if _table_exists("model_hierarchy"):
+            hierarchy = q(
+                """
+                SELECT marca_id, tipo_id, serie_id
+                FROM model_hierarchy
+                WHERE model_id=%s
+                LIMIT 1
+                """,
+                [model_id],
+                one=True,
+            )
+            if hierarchy:
+                return Response(self._variants_for_series(
+                    hierarchy.get("marca_id"),
+                    hierarchy.get("tipo_id"),
+                    hierarchy.get("serie_id"),
+                ))
+
+        if _table_exists("marca_tipos_equipo") and _table_exists("marca_series"):
+            tipo_nombre = (model.get("tipo_equipo") or "").strip()
+            modelo_nombre = (model.get("nombre") or "").strip()
+            marca_id = model.get("marca_id")
+            if marca_id and tipo_nombre and modelo_nombre:
+                serie = q(
+                    """
+                    SELECT mt.id AS tipo_id, ms.id AS serie_id
+                    FROM marca_tipos_equipo mt
+                    JOIN marca_series ms
+                      ON ms.marca_id = mt.marca_id
+                     AND ms.tipo_id = mt.id
+                    WHERE mt.marca_id=%s
+                      AND UPPER(TRIM(mt.nombre)) = UPPER(TRIM(%s))
+                      AND UPPER(TRIM(ms.nombre)) = UPPER(TRIM(%s))
+                    LIMIT 1
+                    """,
+                    [marca_id, tipo_nombre, modelo_nombre],
+                    one=True,
+                )
+                if serie:
+                    return Response(self._variants_for_series(
+                        marca_id,
+                        serie.get("tipo_id"),
+                        serie.get("serie_id"),
+                    ))
+
+        return Response(self._simple_response(model.get("variante") or ""))
 
 
 class CatalogoMarcasPorTipoView(APIView):
@@ -555,6 +675,7 @@ __all__ = [
     'CatalogoTiposView',
     'CatalogoModelosDeTipoView',
     'CatalogoVariantesView',
+    'ModeloVariantesView',
     'CatalogoMarcasPorTipoView',
     'CatalogoTiposCreateView',
     'CatalogoTipoDetailView',

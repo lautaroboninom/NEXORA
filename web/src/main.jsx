@@ -238,7 +238,12 @@ const router = createBrowserRouter([
       {
         path: "clientes",
         element: (
-          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_INGRESOS_HISTORY}>
+          <ProtectedRoute
+            permissions={[
+              PERMISSION_CODES.PAGE_GENERAL_CLIENTE,
+              PERMISSION_CODES.PAGE_INGRESOS_HISTORY,
+            ]}
+          >
             <GeneralPorCliente />
           </ProtectedRoute>
         ),

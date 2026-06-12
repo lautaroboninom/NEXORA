@@ -123,6 +123,7 @@ VIEW_PERMISSION_MATRIX = {
         "POST": "action.delivery_order.create",
     },
     "DeliveryOrderDetailView": {"GET": "page.delivery_orders"},
+    "DeliveryOrderExitRemitoPdfView": {"GET": "page.delivery_orders"},
     "DeliveryOrderPreparedView": {"POST": "action.delivery_order.prepare"},
     "DeliveryOrderDeliveredView": {"POST": "action.delivery_order.deliver"},
     "DeliveryOrderInvoicedView": {"POST": "action.delivery_order.invoice"},
@@ -131,7 +132,10 @@ VIEW_PERMISSION_MATRIX = {
     "DeliveryOrderItemArticleView": {"PATCH": "action.delivery_order.assign_articles"},
     "DeliveryOrderItemPartidasView": {"PATCH": "action.delivery_order.assign_articles"},
     "DeliveryOrderBejermanRemitoView": {"POST": "action.delivery_order.generate_bejerman_remito"},
+    "DeliveryOrderBejermanArticlesView": {"GET": "action.delivery_order.assign_articles"},
+    "DeliveryOrderBejermanRemitoHistoryView": {"GET": "page.delivery_orders"},
     "DeliveryOrderBejermanRemitoPdfView": {"GET": "page.delivery_orders"},
+    "DeliveryOrderBejermanRemitoPrintView": {"GET": "page.delivery_orders"},
     "FacturacionCompanyOptionsView": {"GET": "action.billing.view"},
     "FacturacionClienteDocumentosView": {"GET": "action.billing.view"},
     "FacturacionDocumentoPdfView": {"GET": "action.billing.view"},
@@ -184,6 +188,7 @@ VIEW_PERMISSION_MATRIX = {
     "CatalogoTiposView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoModelosDeTipoView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoVariantesView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
+    "ModeloVariantesView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoVariantesPorMarcaView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoMarcasPorTipoView": {"GET": ["page.catalogs", "action.ingreso.edit_basics", "action.ingreso.create", "page.new_ingreso"]},
     "CatalogoTiposCreateView": {"POST": "action.catalogs.manage"},
@@ -300,8 +305,8 @@ VIEW_PERMISSION_MATRIX = {
     },
     "IngresoAlquilerAccesorioDetailView": {"DELETE": "action.ingreso.edit_basics"},
     # General por cliente
-    "GeneralPorClienteView": {"GET": "page.ingresos_history"},
-    "GeneralPorClienteExportView": {"GET": "page.ingresos_history"},
+    "GeneralPorClienteView": {"GET": ["page.general_cliente", "page.ingresos_history"]},
+    "GeneralPorClienteExportView": {"GET": ["page.general_cliente", "page.ingresos_history"]},
 }
 
 

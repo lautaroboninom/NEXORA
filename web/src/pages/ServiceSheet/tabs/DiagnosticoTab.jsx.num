@@ -49,7 +49,7 @@
 0049:      const d = (nuevoAcc?.descripcion || "").trim().toLowerCase();
 0050:      if (!d) { setErr("Escribí una descripción"); return; }
 0051:      const acc = (accesCatalogo || []).find(a => (a?.nombre || "").trim().toLowerCase() === d);
-0052:      if (!acc) { setErr("Elegí una descripción válida de la lista"); return; }
+0052:      if (!acc) { setErr("Elija una descripción válida de la lista"); return; }
 0053:      setAddingAcc(true);
 0054:      await postAccesorioIngreso(id, {
 0055:        accesorio_id: Number(acc.id),

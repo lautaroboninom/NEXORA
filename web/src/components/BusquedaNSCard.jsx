@@ -21,7 +21,7 @@ export default function BusquedaNSCard() {
       <form onSubmit={onSubmit} className="flex gap-2">
         <input
           className="border rounded p-2 w-full max-w-md"
-          placeholder="Ingresá el N° de serie o MG"
+          placeholder="Ingrese el N° de serie o MG"
           value={ns}
           onChange={(e) => setNs(e.target.value)}
           aria-label="Búsqueda por número de serie o MG"
@@ -42,7 +42,7 @@ export default function BusquedaNSCard() {
         >
           <input
             className="border rounded p-2 w-full max-w-md"
-            placeholder="Ingresá el N° de Orden (OS)"
+            placeholder="Ingrese el N° de Orden (OS)"
             value={os}
             onChange={(e) => setOs(e.target.value)}
             aria-label="Búsqueda por número de orden"

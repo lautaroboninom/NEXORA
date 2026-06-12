@@ -125,19 +125,19 @@ class UsuariosView(APIView):
                     )
                     base = getattr(settings, "PUBLIC_WEB_URL", None) or getattr(settings, "FRONTEND_ORIGIN", "http://localhost:5173")
                     url = f"{(base or '').rstrip('/')}/restablecer?t={token}"
-                    subj = "Bienvenido a NEXORA - Configurá tu contraseña"
+                    subj = "Bienvenido a NEXORA - Configure su contraseña"
                     txt = (
                         f"Hola {user['nombre']},\n\n"
                         f"Te damos la bienvenida a NEXORA. "
-                        f"Usá este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
-                        f"Si no esperabas este correo, ignoralo."
+                        f"Use este enlace para establecer su contraseña (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+                        f"Si no esperaba este correo, ignórelo."
                     )
                     html = f"""
                         <p>Hola {user['nombre']},</p>
                         <p>Bienvenido a <strong>NEXORA</strong>.</p>
-                        <p>Usá este enlace para establecer tu contraseña (válido {TOKEN_TTL_MIN} minutos):</p>
+                        <p>Use este enlace para establecer su contraseña (válido {TOKEN_TTL_MIN} minutos):</p>
                         <p><a href="{url}">{url}</a></p>
-                        <p>Si no esperabas este correo, ignoralo.</p>
+                        <p>Si no esperaba este correo, ignórelo.</p>
                     """
                     try:
                         txt = _email_append_footer_text(txt)
@@ -186,19 +186,19 @@ class UsuarioResetPassView(APIView):
         )
         base = getattr(settings, "PUBLIC_WEB_URL", None) or getattr(settings, "FRONTEND_ORIGIN", "http://localhost:5173")
         url = f"{(base or '').rstrip('/')}/restablecer?t={token}"
-        subj = "NEXORA - Enlace para establecer tu contraseña"
+        subj = "NEXORA - Enlace para establecer su contraseña"
         txt = (
             f"Hola {user['nombre']},\n\n"
-            f"Solicitaron un enlace para establecer o restablecer tu contraseña. "
-            f"Usá este enlace (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
-            f"Si no fuiste vos, ignora este correo."
+            f"Solicitaron un enlace para establecer o restablecer su contraseña. "
+            f"Use este enlace (válido {TOKEN_TTL_MIN} minutos):\n{url}\n\n"
+            f"Si no fue usted, ignore este correo."
         )
         html = f"""
             <p>Hola {user['nombre']},</p>
-            <p>Solicitaron un enlace para establecer o restablecer tu contraseña.</p>
-            <p>Usá este enlace (válido {TOKEN_TTL_MIN} minutos):</p>
+            <p>Solicitaron un enlace para establecer o restablecer su contraseña.</p>
+            <p>Use este enlace (válido {TOKEN_TTL_MIN} minutos):</p>
             <p><a href="{url}">{url}</a></p>
-            <p>Si no fuiste vos, ignora este correo.</p>
+            <p>Si no fue usted, ignore este correo.</p>
         """
         try:
             txt = _email_append_footer_text(txt)

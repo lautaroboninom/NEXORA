@@ -106,13 +106,23 @@ class RecepcionPermissionsAPITest(TestCase):
                     propietario_nombre TEXT,
                     propietario_contacto TEXT,
                     propietario_doc TEXT,
-                    variante TEXT
+                    variante TEXT,
+                    alquilado {bool_type} DEFAULT {bool_false},
+                    alquiler_a TEXT
                 ){engine_suffix}
                 """
             )
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS locations (
+                    id {auto_inc},
+                    nombre TEXT
+                ){engine_suffix}
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS proveedores_externos (
                     id {auto_inc},
                     nombre TEXT
                 ){engine_suffix}
@@ -160,6 +170,8 @@ class RecepcionPermissionsAPITest(TestCase):
                     "ADD COLUMN IF NOT EXISTS propietario_nombre TEXT",
                     "ADD COLUMN IF NOT EXISTS propietario_contacto TEXT",
                     "ADD COLUMN IF NOT EXISTS propietario_doc TEXT",
+                    "ADD COLUMN IF NOT EXISTS alquilado BOOLEAN DEFAULT FALSE",
+                    "ADD COLUMN IF NOT EXISTS alquiler_a TEXT",
                 ):
                     cur.execute(f"ALTER TABLE devices {column_sql}")
                 for column_sql in (
@@ -200,6 +212,33 @@ class RecepcionPermissionsAPITest(TestCase):
                     ingreso_id INT,
                     a_estado TEXT,
                     ts {datetime_type} DEFAULT CURRENT_TIMESTAMP
+                ){engine_suffix}
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS ingreso_baja_requests (
+                    id {auto_inc},
+                    ingreso_id INT,
+                    usuario_id INT,
+                    motivo TEXT,
+                    created_at {datetime_type} DEFAULT CURRENT_TIMESTAMP,
+                    accepted_at {datetime_type} NULL,
+                    canceled_at {datetime_type} NULL
+                ){engine_suffix}
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS equipos_derivados (
+                    id {auto_inc},
+                    ingreso_id INT,
+                    proveedor_id INT NULL,
+                    remit_deriv TEXT,
+                    fecha_deriv {datetime_type} NULL,
+                    fecha_entrega {datetime_type} NULL,
+                    comentarios TEXT,
+                    estado TEXT
                 ){engine_suffix}
                 """
             )
@@ -258,12 +297,15 @@ class RecepcionPermissionsAPITest(TestCase):
     def setUpTestData(cls):
         with connection.cursor() as cur:
             for table in (
+                "equipos_derivados",
+                "ingreso_baja_requests",
                 "ingreso_events",
                 "ingresos",
                 "devices",
                 "models",
                 "marcas",
                 "locations",
+                "proveedores_externos",
                 "customers",
                 "catalogo_accesorios",
                 "ingreso_accesorios",
@@ -298,18 +340,41 @@ class RecepcionPermissionsAPITest(TestCase):
                 [cls.tecnico_user.id],
             )
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (1, 1, 1, 1, 'NS-1', 'MG 0001')")
+            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (2, 1, 1, 1, 'NS-HIST', 'MG 0002')")
+            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (3, 1, 1, 1, 'NS-ACT-OLDER', 'MG 0003')")
             cur.execute("INSERT INTO locations(id, nombre) VALUES (1, 'taller')")
             cur.execute(
                 """
-                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, ubicacion_id, asignado_a, recibido_por)
-                VALUES (1, 1, 'reparacion', 'liberado', 'no_aplica', 'reparado', 1, %s, %s)
+                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
+                VALUES (1, 1, 'reparacion', 'liberado', 'no_aplica', 'reparado', '2026-05-01 09:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
             cur.execute(
                 """
-                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, ubicacion_id, asignado_a, recibido_por)
-                VALUES (2, 1, 'reparacion', 'ingresado', 'pendiente', NULL, 1, %s, %s)
+                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
+                VALUES (2, 1, 'reparacion', 'ingresado', 'pendiente', NULL, '2026-06-02 10:30:00', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            cur.execute(
+                """
+                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
+                VALUES (3, 2, 'reparacion', 'entregado', 'no_aplica', 'reparado', '2026-04-01 08:00:00', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            cur.execute(
+                """
+                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
+                VALUES (4, 3, 'reparacion', 'ingresado', 'pendiente', NULL, '2026-03-01 11:00:00', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            cur.execute(
+                """
+                INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
+                VALUES (5, 3, 'reparacion', 'entregado', 'no_aplica', 'reparado', '2026-05-15 12:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
@@ -324,17 +389,17 @@ class RecepcionPermissionsAPITest(TestCase):
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.recepcion_token}")
         return client
 
-    def test_recepcion_does_not_view_legacy_liberados_page(self):
+    def test_recepcion_views_derivados_without_legacy_liberados_or_history(self):
         client = self._client()
 
         listos_resp = client.get("/api/listos-para-retiro/")
         self.assertEqual(listos_resp.status_code, 403)
 
         derivados_resp = client.get("/api/ingresos/derivados/")
-        self.assertEqual(derivados_resp.status_code, 403)
+        self.assertEqual(derivados_resp.status_code, 200)
 
-        historico_resp = client.get("/api/ingresos/")
-        self.assertEqual(historico_resp.status_code, 403)
+        permissions = resolve_effective_permissions(user_id=self.recepcion_user.id, role=self.recepcion_user.rol)
+        self.assertFalse(permissions["page.ingresos_history"])
 
     def test_recepcion_can_read_new_ingreso_dependencies(self):
         client = self._client()
@@ -346,21 +411,39 @@ class RecepcionPermissionsAPITest(TestCase):
         self.assertEqual(client.get("/api/equipos/garantia-reparacion/").status_code, 200)
         self.assertEqual(client.get("/api/equipos/garantia-fabrica/").status_code, 200)
 
-    def test_page_liberados_does_not_allow_non_liberado_detail(self):
+    def test_scan_lookup_returns_active_service_with_entry_date(self):
+        resp = self._client().get("/api/scan/lookup/?code=NS-ACT-OLDER")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["kind"], "device")
+        self.assertEqual(resp.data["ingreso"]["id"], 4)
+        self.assertTrue(resp.data["ingreso"]["ingreso_en_curso"])
+        self.assertIn("2026-03-01", str(resp.data["ingreso"]["fecha_ingreso"]))
+
+    def test_scan_lookup_marks_historical_service_as_not_active(self):
+        resp = self._client().get("/api/scan/lookup/?code=NS-HIST")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["kind"], "device")
+        self.assertEqual(resp.data["ingreso"]["id"], 3)
+        self.assertFalse(resp.data["ingreso"]["ingreso_en_curso"])
+        self.assertIn("2026-04-01", str(resp.data["ingreso"]["fecha_ingreso"]))
+
+    def test_service_sheet_principal_default_allows_non_liberado_detail(self):
         resp = self._client().get("/api/ingresos/2/")
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 200, resp.data)
 
-    def test_service_sheet_principal_override_grants_detail_permission(self):
-        with connection.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO user_permission_overrides (user_id, permission_code, effect)
-                VALUES (%s, 'page.service_sheet_principal', 'allow')
-                """,
-                [self.recepcion_user.id],
-            )
-
+    def test_service_sheet_principal_default_grants_detail_permission(self):
         permissions = resolve_effective_permissions(user_id=self.recepcion_user.id, role=self.recepcion_user.rol)
 
         self.assertTrue(permissions["page.service_sheet_principal"])
+        self.assertTrue(permissions["page.home_search"])
+        self.assertTrue(permissions["page.logistics"])
+        self.assertTrue(permissions["action.delivery_order.create"])
+        self.assertTrue(permissions["action.delivery_order.prepare"])
+        self.assertTrue(permissions["action.delivery_order.deliver"])
+        self.assertTrue(permissions["action.delivery_order.cancel"])
+        self.assertTrue(permissions["action.delivery_order.generate_bejerman_remito"])
+        self.assertTrue(permissions["action.delivery_order.assign_articles"])
         self.assertFalse(permissions["page.liberados"])
+        self.assertFalse(permissions["action.delivery_order.invoice"])

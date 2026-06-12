@@ -552,25 +552,32 @@ LOGO_PATH = _detect_logo_path()
 
 # --- Empresa/branding helpers ---
 def _get_empresa_facturar(ingreso_id: int) -> str:
-    """Returns 'SEPID' (default) or 'MGBIO' from ingresos. Safe if column is missing."""
+    """Returns 'SEPID' (default), 'MGBIO' or 'TEST' from ingresos."""
     try:
         with connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT 1 FROM information_schema.columns
+                SELECT column_name FROM information_schema.columns
                  WHERE table_name = 'ingresos'
-                   AND column_name = 'empresa_facturar'
+                   AND column_name IN ('empresa_facturar', 'empresa_bejerman')
                    AND table_schema = ANY(current_schemas(true))
-                 LIMIT 1
                 """
             )
-            exists = cur.fetchone() is not None
-            if not exists:
+            columns = {row[0] for row in cur.fetchall()}
+            if not columns:
                 return "SEPID"
-            cur.execute("SELECT empresa_facturar FROM ingresos WHERE id=%s", [ingreso_id])
+            if "empresa_facturar" in columns and "empresa_bejerman" in columns:
+                cur.execute(
+                    "SELECT COALESCE(NULLIF(empresa_facturar, ''), NULLIF(empresa_bejerman, ''), 'SEPID') FROM ingresos WHERE id=%s",
+                    [ingreso_id],
+                )
+            elif "empresa_facturar" in columns:
+                cur.execute("SELECT COALESCE(NULLIF(empresa_facturar, ''), 'SEPID') FROM ingresos WHERE id=%s", [ingreso_id])
+            else:
+                cur.execute("SELECT COALESCE(NULLIF(empresa_bejerman, ''), 'SEPID') FROM ingresos WHERE id=%s", [ingreso_id])
             row = cur.fetchone()
-            val = (row[0] if row else None) or "SEPID"
-            return "MGBIO" if str(val).strip().upper() == "MGBIO" else "SEPID"
+            code = str((row[0] if row else None) or "SEPID").strip().upper()
+            return code if code in {"SEPID", "MGBIO", "TEST"} else "SEPID"
     except Exception:
         return "SEPID"
 
@@ -592,6 +599,14 @@ def _logo_path_for_company(code: str) -> str | None:
             "/app/staticfiles/logo-empresa-2.png",
             os.path.join(settings.BASE_DIR, "web", "public", "branding", "logo-empresa-2.png"),
             os.path.join(settings.BASE_DIR, "..", "web", "public", "branding", "logo-empresa-2.png"),
+        ]
+    elif code == "TEST":
+        candidates.append(os.environ.get("LOGO_PATH_TEST"))
+        candidates += [
+            "/app/staticfiles/branding/logo-empresa-test.png",
+            "/app/staticfiles/logo-empresa-test.png",
+            os.path.join(settings.BASE_DIR, "web", "public", "branding", "logo-empresa-test.png"),
+            os.path.join(settings.BASE_DIR, "..", "web", "public", "branding", "logo-empresa-test.png"),
         ]
 
     # Comunes a cualquier marca
@@ -625,6 +640,11 @@ def _company_header_lines(code: str):
         name = os.environ.get("COMPANY_NAME_2", "MG BIO")
         addr = os.environ.get("COMPANY_HEADER_L1_2") or os.environ.get("COMPANY_HEADER_L1", "")
         cuit = os.environ.get("COMPANY_FOOTER_CUIT_2", "")
+        return addr, name, (f"CUIT {cuit}" if cuit else "")
+    if code == "TEST":
+        name = os.environ.get("COMPANY_NAME_TEST", "Empresa de prueba")
+        addr = os.environ.get("COMPANY_HEADER_L1_TEST") or os.environ.get("COMPANY_HEADER_L1", "")
+        cuit = os.environ.get("COMPANY_FOOTER_CUIT_TEST", "")
         return addr, name, (f"CUIT {cuit}" if cuit else "")
     name = os.environ.get("COMPANY_NAME", "SEPID SA")
     addr = os.environ.get("COMPANY_HEADER_L1", "")
@@ -758,7 +778,7 @@ def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_intern
     serial_txt = _compose_serial_internal(numero_serie, numero_interno)
     col(0, "Marca", (marca or "").upper())
     col(1, "Modelo", (modelo or "").upper())
-    col(2, "Numero Serie | Numero interno", (serial_txt or "").upper(), label_fsz=8)
+    col(2, "Número Serie | Número interno", (serial_txt or "").upper(), label_fsz=8)
     # Línea adicional solo si fajas abiertas
     if show_faja:
         c.setFont("Helvetica", 9)
@@ -941,7 +961,7 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
     diag = (head.get("descripcion_problema") or "").strip()
     trab = (head.get("trabajos_realizados") or "").strip()
     diag_trab = (diag + ("\n" if diag and trab else "") + trab) or "-"
-    y = _draw_block(c, ml, y, "Detalle Rep. (Diagnostico / Trabajos a realizar)", diag_trab, W-2*ml) - 2
+    y = _draw_block(c, ml, y, "Detalle Rep. (Diagnóstico / Trabajos a realizar)", diag_trab, W-2*ml) - 2
 
 
     # Imagenes adjuntas (2 por fila) con pie de foto usando el comentario u original_name
@@ -1345,23 +1365,23 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         label_value(r2_x3, y - ROW_H, r2_w3, ROW_H, "Modelo", modelo_comp or head.get("modelo"))
         y -= (ROW_H + ROW_GAP)
 
-        # r3: Numero Serie | Numero interno (a la izquierda de Motivo) | Motivo | Garantia | Resolucion
+        # r3: Número Serie | Número interno (a la izquierda de Motivo) | Motivo | Garantía | Resolución
         serial_comp = _compose_serial_internal(head.get("numero_serie"), head.get("numero_interno"))
         r3_gap = 2 * mm
         r3_w1 = 62 * mm  # mantener ancho (antes era ~62mm en r2)
-        r3_w3 = 18 * mm  # garantia (Si/No)
-        r3_w4 = 38 * mm  # resolucion
+        r3_w3 = 18 * mm  # garantía (Sí/No)
+        r3_w4 = 38 * mm  # resolución
         r3_w2 = inner_w - (r3_w1 + r3_w3 + r3_w4 + 3 * r3_gap)  # motivo (resto)
         r3_x1 = inner_x
         r3_x2 = r3_x1 + r3_w1 + r3_gap
         r3_x3 = r3_x2 + r3_w2 + r3_gap
         r3_x4 = r3_x3 + r3_w3 + r3_gap
 
-        label_value(r3_x1, y - ROW_H, r3_w1, ROW_H, "Numero Serie | Numero interno", serial_comp, fsz=6.8, label_fsz=6.2)
+        label_value(r3_x1, y - ROW_H, r3_w1, ROW_H, "Número Serie | Número interno", serial_comp, fsz=6.8, label_fsz=6.2)
         label_value(r3_x2, y - ROW_H, r3_w2, ROW_H, "Motivo", head.get("motivo"))
-        garantia_txt = "Si" if head.get("garantia") else "No"
-        label_value(r3_x3, y - ROW_H, r3_w3, ROW_H, "Garantia", garantia_txt)
-        label_value(r3_x4, y - ROW_H, r3_w4, ROW_H, "Resolucion", resolution_label(head.get("resolucion")))
+        garantia_txt = "Sí" if head.get("garantia") else "No"
+        label_value(r3_x3, y - ROW_H, r3_w3, ROW_H, "Garantía", garantia_txt)
+        label_value(r3_x4, y - ROW_H, r3_w4, ROW_H, "Resolución", resolution_label(head.get("resolucion")))
         y -= (ROW_H + ROW_GAP)
 
         # r4: Accesorios (ancho completo)
@@ -1447,7 +1467,7 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         c.setFont("Helvetica", 10.0)
         c.drawString(x, y, f"Cliente: {head.get('cliente') or '-'}"); y -= 6.5 * mm
         serial_comp = _compose_serial_internal(head.get("numero_serie"), head.get("numero_interno"))
-        c.drawString(x, y, f"Numero Serie | Numero interno: {serial_comp or '-'}"); y -= 6.5 * mm
+        c.drawString(x, y, f"Número Serie | Número interno: {serial_comp or '-'}"); y -= 6.5 * mm
         c.drawString(x, y, f"Equipo: {_compose_equipment_label(head) or (head.get('equipo') or '-')}"); y -= 10 * mm
 
         c.setFont("Helvetica", F_LABEL); c.setFillColor(colors.grey)

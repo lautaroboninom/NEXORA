@@ -130,11 +130,11 @@ class RoutedEdge:
 
 
 LANES = [
-    Lane("Cliente", "Aprobacion y decisiones", colors.HexColor("#F3FAF1"), colors.HexColor("#DBF0D7")),
-    Lane("Recepcion", "Ingreso y entrega", colors.HexColor("#F3F6FC"), colors.HexColor("#DFE8F7")),
-    Lane("Logistica", "Movimientos fisicos", colors.HexColor("#F6F8FB"), colors.HexColor("#E8EEF6")),
-    Lane("Administracion", "Alta y documentacion", colors.HexColor("#F3FBFB"), colors.HexColor("#DDF1F1")),
-    Lane("Taller/Jefatura", "Diagnostico y gestion", colors.HexColor("#FBFCFE"), colors.HexColor("#EBF0F7")),
+    Lane("Cliente", "Aprobación y decisiones", colors.HexColor("#F3FAF1"), colors.HexColor("#DBF0D7")),
+    Lane("Recepción", "Ingreso y entrega", colors.HexColor("#F3F6FC"), colors.HexColor("#DFE8F7")),
+    Lane("Logística", "Movimientos físicos", colors.HexColor("#F6F8FB"), colors.HexColor("#E8EEF6")),
+    Lane("Administración", "Alta y documentación", colors.HexColor("#F3FBFB"), colors.HexColor("#DDF1F1")),
+    Lane("Taller/Jefatura", "Diagnóstico y gestión", colors.HexColor("#FBFCFE"), colors.HexColor("#EBF0F7")),
     Lane("Proveedor", "Disponibilidad y entrega", colors.HexColor("#FFF9EE"), colors.HexColor("#F7E7BE")),
 ]
 
@@ -885,21 +885,21 @@ def page_one_nodes() -> list[NodeSpec]:
     out_col = 2260
 
     return [
-        NodeSpec("rec_in", place_in_lane(1, intake_col, 122, 46), "Ingreso por\nRecepcion", "external"),
+        NodeSpec("rec_in", place_in_lane(1, intake_col, 122, 46), "Ingreso por\nRecepción", "external"),
         NodeSpec("rec_rem", place_in_lane(1, receipt_col, 146, 48), "Remito de\ningreso", "doc"),
-        NodeSpec("log_in", place_in_lane(2, intake_col, 122, 46), "Ingreso por\nLogistica", "external"),
+        NodeSpec("log_in", place_in_lane(2, intake_col, 122, 46), "Ingreso por\nLogística", "external"),
         NodeSpec("log_rem", place_in_lane(2, receipt_col, 146, 48), "Remito de\ningreso", "doc"),
         NodeSpec("adm_os", place_in_lane(3, admin_col, 164, 64), "Alta OS /\ningreso en\nsistema", "doc", state="[ingresado]", title_size=15.4),
-        NodeSpec("diag", place_in_lane(4, diag_col, 188, 66), "Diagnostico y\ndefinicion\ntecnica", "process", state="[diagnosticado]", title_size=15.4),
+        NodeSpec("diag", place_in_lane(4, diag_col, 188, 66), "Diagnóstico y\ndefinición\ntécnica", "process", state="[diagnosticado]", title_size=15.4),
         NodeSpec("na", place_in_lane(4, na_col, 114, 114), "Presupuesto\nno aplica?", "decision"),
         NodeSpec("stock", place_in_lane(4, stock_col, 114, 114), "Hay repuesto\npropio?", "decision"),
         NodeSpec("emit", place_in_lane(4, emit_col, 184, 76), "Emitir\npresupuesto", "process", "Precio cliente", "[presupuestado]", 15.8),
         NodeSpec("approve", place_in_lane(0, approve_col, 124, 124), "Aprueba\npresupuesto?", "decision"),
-        NodeSpec("repair", place_in_lane(4, repair_col, 174, 66, y_offset=-10), "Reparacion y\ntest tecnico", "process", state="[reparar -> reparado]", title_size=15.4),
-        NodeSpec("charge", place_in_lane(3, charge_col, 150, 54), "Cobro de\ndiagnostico", "danger"),
-        NodeSpec("release", place_in_lane(3, release_col, 162, 64), "Liberacion /\nremito /\nfactura", "doc", state="[liberado]", title_size=14.8),
+        NodeSpec("repair", place_in_lane(4, repair_col, 174, 66, y_offset=-10), "Reparación y\ntest técnico", "process", state="[reparar -> reparado]", title_size=15.4),
+        NodeSpec("charge", place_in_lane(3, charge_col, 150, 54), "Cobro de\ndiagnóstico", "danger"),
+        NodeSpec("release", place_in_lane(3, release_col, 162, 64), "Liberación /\nremito /\nfactura", "doc", state="[liberado]", title_size=14.8),
         NodeSpec("out", place_in_lane(1, out_col, 154, 56), "Entrega al\ncliente", "external", "Retiro por mostrador", title_size=14.8),
-        NodeSpec("page2", place_in_lane(5, emit_col, 178, 50), "Ver pagina 2", "connector", "Subflujo repuesto / proveedor", title_size=14.0),
+        NodeSpec("page2", place_in_lane(5, emit_col, 178, 50), "Ver página 2", "connector", "Subflujo repuesto / proveedor", title_size=14.0),
     ]
 
 
@@ -940,19 +940,19 @@ def page_two_nodes() -> list[NodeSpec]:
     out_col = 2268
 
     return [
-        NodeSpec("from_p1", place_in_lane(4, intake_col, 164, 56, y_offset=14, lane_bottom=lane_bottom), "Desde pagina 1", "connector", "Sin stock propio", title_size=14.4),
+        NodeSpec("from_p1", place_in_lane(4, intake_col, 164, 56, y_offset=14, lane_bottom=lane_bottom), "Desde página 1", "connector", "Sin stock propio", title_size=14.4),
         NodeSpec("ask", place_in_lane(4, ask_col, 186, 62, y_offset=14, lane_bottom=lane_bottom), "Consultar\nproveedor", "process", "Disponibilidad y precio", title_size=15.0),
         NodeSpec("avail", place_in_lane(5, avail_col, 122, 122, y_offset=8, lane_bottom=lane_bottom), "Hay stock y\nprecio viable?", "decision"),
         NodeSpec("wait_or_retire", place_in_lane(0, wait_decision_col, 124, 124, y_offset=-8, lane_bottom=lane_bottom), "Esperar\nrepuesto\no retirar?", "decision"),
         NodeSpec("wait", place_in_lane(5, wait_note_col, 204, 56, y_offset=-16, lane_bottom=lane_bottom), "En espera de repuesto", "note", "Estado operativo manual", title_size=14.4),
         NodeSpec("emit", place_in_lane(4, emit_col, 204, 80, y_offset=14, lane_bottom=lane_bottom), "Trasladar costo /\nemitir presupuesto", "process", "Precio cliente", "[presupuestado]", 15.4),
         NodeSpec("client_ok", place_in_lane(0, client_col, 124, 124, y_offset=-8, lane_bottom=lane_bottom), "Aprueba\npresupuesto?", "decision"),
-        NodeSpec("charge", place_in_lane(3, charge_col, 156, 56, lane_bottom=lane_bottom), "Cobro de\ndiagnostico", "danger"),
+        NodeSpec("charge", place_in_lane(3, charge_col, 156, 56, lane_bottom=lane_bottom), "Cobro de\ndiagnóstico", "danger"),
         NodeSpec("no_repair", place_in_lane(4, no_repair_col, 166, 60, y_offset=-8, lane_bottom=lane_bottom), "No reparado", "danger", title_size=15.0),
         NodeSpec("dispatch", place_in_lane(5, supplier_col, 166, 56, y_offset=-18, lane_bottom=lane_bottom), "Proveedor\ndespacha\nrepuesto", "external", title_size=14.6),
-        NodeSpec("log_recv", place_in_lane(2, supplier_col, 184, 60, lane_bottom=lane_bottom), "Logistica recibe\ny entrega a\ntaller", "process", title_size=14.4),
-        NodeSpec("repair", place_in_lane(4, supplier_col, 166, 66, y_offset=-20, lane_bottom=lane_bottom), "Reparacion y\ntest tecnico", "process", state="[reparar -> reparado]", title_size=15.2),
-        NodeSpec("release", place_in_lane(3, release_col, 160, 64, lane_bottom=lane_bottom), "Liberacion /\nremito /\nfactura", "doc", state="[liberado]", title_size=14.8),
+        NodeSpec("log_recv", place_in_lane(2, supplier_col, 184, 60, lane_bottom=lane_bottom), "Logística recibe\ny entrega a\ntaller", "process", title_size=14.4),
+        NodeSpec("repair", place_in_lane(4, supplier_col, 166, 66, y_offset=-20, lane_bottom=lane_bottom), "Reparación y\ntest técnico", "process", state="[reparar -> reparado]", title_size=15.2),
+        NodeSpec("release", place_in_lane(3, release_col, 160, 64, lane_bottom=lane_bottom), "Liberación /\nremito /\nfactura", "doc", state="[liberado]", title_size=14.8),
         NodeSpec("out", place_in_lane(1, out_col, 142, 56, lane_bottom=lane_bottom), "Entrega al\ncliente", "external", "Retiro por mostrador", title_size=14.4),
     ]
 
@@ -983,7 +983,7 @@ def draw_page_one(c: canvas.Canvas) -> None:
     draw_header(
         c,
         "Flujo 1 - Circuito principal",
-        "Ingreso, alta administrativa, diagnostico, presupuesto directo, aprobacion, reparacion y entrega.",
+        "Ingreso, alta administrativa, diagnóstico, presupuesto directo, aprobación, reparación y entrega.",
         1,
         2,
     )
@@ -1002,15 +1002,15 @@ def draw_page_one(c: canvas.Canvas) -> None:
     draw_round_rect(c, panel, COLOR_PANEL, stroke=COLOR_BORDER, radius=14)
     c.setFillColor(COLOR_INK)
     c.setFont(FONT_SEMIBOLD, 10.2)
-    c.drawString(panel.x + 12, panel.top - 18, "Por que esta pagina se simplifico")
+    c.drawString(panel.x + 12, panel.top - 18, "Por qué esta página se simplificó")
     draw_note_card(
         c,
         Rect(panel.x + 10, panel.y + 12, panel.w - 20, 74),
         "",
         [
-            "El subflujo de proveedor y espera se mueve a la pagina 2 para evitar cruces y lineas sobre nodos.",
-            "La pagina 1 muestra solo el circuito principal y la aprobacion comercial directa.",
-            "La salida de rechazo mantiene cobro de diagnostico y entrega sin reparar.",
+            "El subflujo de proveedor y espera se mueve a la página 2 para evitar cruces y líneas sobre nodos.",
+            "La página 1 muestra solo el circuito principal y la aprobación comercial directa.",
+            "La salida de rechazo mantiene cobro de diagnóstico y entrega sin reparar.",
         ],
     )
     draw_footer(c)
@@ -1044,9 +1044,9 @@ def draw_page_two(c: canvas.Canvas) -> None:
         Rect(MARGIN + card_w + 12, card_y, card_w, card_h),
         Rect(MARGIN + (card_w + 12) * 2, card_y, card_w, card_h),
     ]
-    draw_note_card(c, cards[0], "Derivacion externa", ["Se deriva a tercero, se trabaja afuera y luego retorna a taller para continuar o cerrar."])
+    draw_note_card(c, cards[0], "Derivación externa", ["Se deriva a tercero, se trabaja afuera y luego retorna a taller para continuar o cerrar."])
     draw_note_card(c, cards[1], "Baja", ["Si se define baja, sale del circuito normal y queda cerrado como baja."])
-    draw_note_card(c, cards[2], "Alquilado / entrega especial", ["Compacta salidas por logistica o circuitos especiales que no pasan por retiro clasico."])
+    draw_note_card(c, cards[2], "Alquilado / entrega especial", ["Compacta salidas por logística o circuitos especiales que no pasan por retiro clásico."])
     draw_footer(c)
 
 
@@ -1055,9 +1055,9 @@ def build_pdf(out_path: Path, skip_render: bool = False) -> None:
     ensure_parent(out_path)
 
     c = canvas.Canvas(str(out_path), pagesize=PAGE_SIZE)
-    c.setTitle("Diagrama integral del servicio tecnico SEPID")
+    c.setTitle("Diagrama integral del servicio técnico SEPID")
     c.setAuthor("Codex")
-    c.setSubject("Flujo interno completo del servicio tecnico")
+    c.setSubject("Flujo interno completo del servicio técnico")
 
     draw_page_one(c)
     c.showPage()
@@ -1076,7 +1076,7 @@ def build_pdf(out_path: Path, skip_render: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Genera el PDF interno del flujo integral del servicio tecnico SEPID.")
+    parser = argparse.ArgumentParser(description="Genera el PDF interno del flujo integral del servicio técnico SEPID.")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--skip-render", action="store_true")
     args = parser.parse_args()
@@ -1084,7 +1084,7 @@ def main() -> None:
     build_pdf(Path(args.out), skip_render=args.skip_render)
     if not args.skip_render:
         reader = PdfReader(str(args.out))
-        print(f"[pdf] generado: {args.out} ({len(reader.pages)} paginas)")
+        print(f"[pdf] generado: {args.out} ({len(reader.pages)} páginas)")
         print(f"[pdf] renders: {DEFAULT_RENDER_DIR}")
     else:
         print(f"[pdf] generado: {args.out}")

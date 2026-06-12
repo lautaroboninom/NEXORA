@@ -328,7 +328,7 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
             result_key,
             _safe_text(report.get("resultado_global")) or "Pendiente",
         )
-        # Visual pensado para impresion en blanco y negro:
+        # Visual pensado para impresión en blanco y negro:
         # APTO queda con alto contraste (fondo negro + texto blanco).
         if result_key == "apto":
             text_color, fill_color, stroke_color = (colors.white, colors.black, colors.black)
@@ -389,7 +389,7 @@ def render_ingreso_test_pdf(report: dict, printed_by: str = "") -> tuple[bytes, 
         draw_labeled_text("Instrumentos", _safe_text(report.get("instrumentos")) or "-")
 
         # Campo intencionalmente en blanco para firma manual.
-        # Lo ubicamos mas abajo y a la derecha para aprovechar mejor el espacio de pagina.
+        # Lo ubicamos más abajo y a la derecha para aprovechar mejor el espacio de página.
         sig_w = 58 * mm
         sig_x = W - margin - sig_w
         sig_y = margin + footer_h + 16.0 * mm

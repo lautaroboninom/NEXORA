@@ -29,7 +29,7 @@ SCREENSHOTS = {
     "pendientes_por_tecnico": {
         "file": SCREENSHOT_DIR / "pendientes_por_tecnico.png",
         "route": "/pendientes-por-tecnico",
-        "wait_text": "Pendientes por tecnico",
+        "wait_text": "Pendientes por técnico",
         "delay": 1.0,
         "crop": (0.15, 0.04, 0.98, 0.82),
     },
@@ -50,7 +50,7 @@ SCREENSHOTS = {
     "service_test": {
         "file": SCREENSHOT_DIR / "service_test.png",
         "route": "/ingresos/6?tab=test",
-        "wait_text": "Test tecnico",
+        "wait_text": "Test técnico",
         "delay": 1.1,
         "crop": (0.02, 0.06, 0.98, 0.9),
     },
@@ -71,7 +71,7 @@ SCREENSHOTS = {
     "equipos": {
         "file": SCREENSHOT_DIR / "equipos.png",
         "route": "/equipos",
-        "wait_text": "Gestion de equipos",
+        "wait_text": "Gestión de equipos",
         "delay": 1.0,
         "crop": (0.02, 0.04, 0.98, 0.9),
     },
@@ -148,7 +148,7 @@ SCREENSHOTS = {
     "garantias": {
         "file": SCREENSHOT_DIR / "garantias.png",
         "route": "/garantias",
-        "wait_text": "Garantias",
+        "wait_text": "Garantías",
         "delay": 1.1,
         "crop": (0.15, 0.04, 0.98, 0.9),
     },

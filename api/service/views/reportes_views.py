@@ -11,6 +11,7 @@ from ..bejerman_sync import (
     enqueue_stock_transfer_for_ingreso,
     ingreso_is_internal_equipment,
 )
+from ..delivery_orders import ensure_service_release_order_for_ingreso
 from ..pdf import render_remito_salida_pdf, render_remito_derivacion_pdf
 from ..notifications import notify_ingreso_liberado
 
@@ -105,6 +106,13 @@ class RemitoSalidaPdfView(APIView):
         try:
             if not es_venta_pendiente:
                 notify_ingreso_liberado(ingreso_id)
+        except Exception:
+            pass
+
+        try:
+            if not es_venta_pendiente:
+                with transaction.atomic():
+                    ensure_service_release_order_for_ingreso(ingreso_id, getattr(getattr(request, "user", None), "id", None))
         except Exception:
             pass
 

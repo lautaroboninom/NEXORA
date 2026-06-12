@@ -60,6 +60,10 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
 
   const techLike = canActAsTech(user);
   const canHome = can(user, PERMISSION_CODES.PAGE_HOME_SEARCH);
+  const canGeneralCliente = canAny(user, [
+    PERMISSION_CODES.PAGE_GENERAL_CLIENTE,
+    PERMISSION_CODES.PAGE_INGRESOS_HISTORY,
+  ]);
   const canHistory = can(user, PERMISSION_CODES.PAGE_INGRESOS_HISTORY);
   const canWorkQueues = can(user, PERMISSION_CODES.PAGE_WORK_QUEUES);
   const canBudgetQueues = can(user, PERMISSION_CODES.PAGE_BUDGET_QUEUES);
@@ -82,8 +86,11 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
 
   const showRecepcion = canRecepcion || canCreateIngreso;
+  const showDeliveryOrdersInRecepcion = showRecepcion && canDeliveryOrders;
+  const showDeliveryOrdersInAdministracion = canDeliveryOrders && !showDeliveryOrdersInRecepcion;
   const showServicioTecnico = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
-  const showAdministracion = canHistory || canDevices || canDeliveryOrders || canCreateIngreso || canHome;
+  const showAdministracion =
+    canGeneralCliente || canHistory || canDevices || showDeliveryOrdersInAdministracion || canCreateIngreso || canHome;
   const showCobranzas = canBilling;
   const showSistema =
     canMetrics || canUsers || canCatalogs || canSpareParts || canWarranty || canBejerman || canManageTestProtocols;
@@ -107,7 +114,13 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
         }`}
       >
         <div className="flex h-12 items-center justify-between border-b px-3 md:hidden">
-          <span className="text-sm text-gray-600">Menú</span>
+          <span className="flex h-8 items-center overflow-hidden" aria-label="NEXORA">
+            <img
+              src="/branding/logotipo-nexora.png"
+              alt="NEXORA"
+              className="h-12 w-auto object-contain"
+            />
+          </span>
           <button
             type="button"
             onClick={onClose}
@@ -122,7 +135,13 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
           {user?.nombre} {user?.rol}
         </div>
 
-        <div className="hidden p-3 text-xs text-gray-500 md:block">NEXORA</div>
+        <div className="hidden h-12 items-center border-b px-3 md:flex">
+          <img
+            src="/branding/logotipo-nexora.png"
+            alt="NEXORA"
+            className="h-14 w-auto object-contain"
+          />
+        </div>
         <div className="space-y-3 px-3 pb-3">
           {showRecepcion && (
             <Section title="Recepción">
@@ -131,7 +150,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   Panel de recepción
                 </LinkItem>
               )}
-              {canDeliveryOrders && (
+              {showDeliveryOrdersInRecepcion && (
                 <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
                   Órdenes de entrega
                 </LinkItem>
@@ -199,12 +218,12 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
 
           {showAdministracion && (
             <Section title="Administración">
-              {canDeliveryOrders && (
+              {showDeliveryOrdersInAdministracion && (
                 <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
                   Órdenes de entrega
                 </LinkItem>
               )}
-              {canHistory && (
+              {canGeneralCliente && (
                 <LinkItem to="/clientes" {...linkProps}>
                   General por cliente
                 </LinkItem>
@@ -238,7 +257,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                 Facturación
               </LinkItem>
               {canDeliveryOrders && (
-                <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
+                <LinkItem to="/cobranzas/facturacion" {...linkProps}>
                   Remitos pendientes
                 </LinkItem>
               )}

@@ -4,6 +4,7 @@ import { useMemo, useState, useEffect, useCallback } from "react";
 import { formatDateOnly as formatDateOnlyHelper, formatDateTime as formatDateTimeHelper, isSaleTicketState, resolveFechaIngreso } from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
+import { Printer } from "lucide-react";
 import {
   getBlob,
   postEntregarIngreso,
@@ -50,6 +51,9 @@ export default function PrincipalTab(props) {
     setUbicacionId,
     canEditLocation,
     canEditAlquiler,
+    canShowRisAction,
+    risBusy,
+    onEmitRis,
     // savingUb,
     // saveUbicacion,
     // ubDirty,
@@ -80,6 +84,7 @@ export default function PrincipalTab(props) {
   } = props;
 
   const canUncheckAlquilado = isJefe(user);
+  const hasRisRemito = Boolean((data?.ris?.remito_number || data?.remito_ingreso || "").toString().trim());
 
   // Derivados del catlogo (para filtros de equipo)
   const tiposDisponibles = useMemo(() => {
@@ -126,6 +131,7 @@ export default function PrincipalTab(props) {
   const [mailFallo, setMailFallo] = useState(false);
   const [emailDebug, setEmailDebug] = useState(null);
   const [solicitando, setSolicitando] = useState(false);
+  const [solicitudAsignacionEnviada, setSolicitudAsignacionEnviada] = useState(false);
   const [assignedNameHint, setAssignedNameHint] = useState(null);
   const techDirty = Boolean(
     canAssignTecnico && Number(selTecnicoId ?? -1) !== Number(data?.asignado_a ?? -1)
@@ -133,6 +139,11 @@ export default function PrincipalTab(props) {
   useEffect(() => {
     console.log('[PrincipalTab] data asignado_a changed', { asignado_a: data?.asignado_a, asignado_a_nombre: data?.asignado_a_nombre });
   }, [data?.asignado_a, data?.asignado_a_nombre]);
+  useEffect(() => {
+    const requestedId = Number(data?.tecnico_solicitado_id || 0);
+    const currentUserId = Number(userId || 0);
+    setSolicitudAsignacionEnviada(Boolean(currentUserId > 0 && requestedId === currentUserId));
+  }, [data?.id, data?.tecnico_solicitado_id, userId]);
   useEffect(() => {
     // Si el backend ya refleja el nombre, descartamos el hint local
     if (data?.asignado_a_nombre) setAssignedNameHint(null);
@@ -254,6 +265,12 @@ export default function PrincipalTab(props) {
     const quien = name ? name : (id ? `ID ${id}` : "otro técnico");
     return `Ya hay una solicitud pendiente para ${quien}.`;
   })();
+  const requestedTecnicoId = Number(data?.tecnico_solicitado_id || 0);
+  const currentUserId = Number(userId || 0);
+  const hasOwnAssignmentRequest = Boolean(
+    currentUserId > 0 && (requestedTecnicoId === currentUserId || solicitudAsignacionEnviada)
+  );
+  const hasOtherAssignmentRequest = Boolean(requestedTecnicoId > 0 && requestedTecnicoId !== currentUserId);
 
   // Cliente: validación contra catálogo (igual que en NuevoIngreso)
   const normClient = useCallback(
@@ -307,9 +324,9 @@ export default function PrincipalTab(props) {
   async function addAccesorioAlquiler() {
     try {
       const d = (nuevoAccAlq?.descripcion || "").trim().toLowerCase();
-      if (!d) { setErr && setErr("Escribí una descripción"); return; }
+      if (!d) { setErr && setErr("Escriba una descripción"); return; }
       const acc = (accesCatalogo || []).find(a => (a?.nombre || "").trim().toLowerCase() === d);
-      if (!acc) { setErr && setErr("Elegí una descripción válida de la lista"); return; }
+      if (!acc) { setErr && setErr("Elija una descripción válida de la lista"); return; }
       setAddingAccAlq(true);
       await postAccesorioAlquilerIngreso(id, {
         accesorio_id: Number(acc.id),
@@ -430,7 +447,7 @@ export default function PrincipalTab(props) {
                       setClienteCodInput(nextCod);
                       syncClienteFromInputs(v, nextCod);
                     }}
-                    placeholder="Elegí de la lista"
+                    placeholder="Elija de la lista"
                   />
                   {clientesPerm && (
                     <datalist id="service_clientes_rs">
@@ -440,7 +457,7 @@ export default function PrincipalTab(props) {
                     </datalist>
                   )}
                   {clientesPerm && clienteRsInput && !rsMatch && (
-                    <div className="text-xs text-amber-700 mt-1">Selecciona una razón social válida de la lista.</div>
+                    <div className="text-xs text-amber-700 mt-1">Seleccione una razón social válida de la lista.</div>
                   )}
                 </>
               ) : (
@@ -660,12 +677,23 @@ export default function PrincipalTab(props) {
                   onChange={(e) => setFormBasics((s) => ({ ...s, remito_ingreso: e.target.value }))}
                 />
               ) : (
-                <span>
-                  {data.remito_ingreso || "-"}
+                <span className="inline-flex flex-col items-start gap-1">
+                  <span>{data.remito_ingreso || "-"}</span>
                   {data?.ris?.available && (
                     <span className="block text-xs text-gray-500">
                       RIS: {data?.ris?.remito_number || data?.ris?.status || "pendiente"}
                     </span>
+                  )}
+                  {canShowRisAction && typeof onEmitRis === "function" && (
+                    <button
+                      type="button"
+                      onClick={onEmitRis}
+                      disabled={risBusy}
+                      className="mt-1 inline-flex items-center gap-1 rounded border border-sky-200 px-2 py-1 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                      {risBusy ? "Preparando RIS..." : hasRisRemito ? "Reimprimir RIS" : "Emitir RIS"}
+                    </button>
                   )}
                 </span>
               )}
@@ -801,7 +829,7 @@ export default function PrincipalTab(props) {
                     {mailEnviado && (<div className="text-xs text-emerald-700">Se envió el mail</div>)}
                     {!mailEnviado && mailFallo && (
                       <div>
-                        <div className="text-xs text-amber-700">Solicitud registrada; no se pudo enviar el correo</div>
+                        <div className="text-xs text-amber-700">La solicitud quedó registrada. No se pudo enviar el aviso por email.</div>
                         {emailDebug && (
                           <div className="mt-1 text-[11px] text-gray-600">
                             <div>Destino: {(emailDebug.recipients || []).join(", ") || "-"}</div>
@@ -812,34 +840,37 @@ export default function PrincipalTab(props) {
                         )}
                       </div>
                     )}
-                    <div>No tenés permiso para reasignar técnicos.</div>
+                    <div>No tiene permiso para reasignar técnicos.</div>
                     {isTech && !isEntregadoOBaja && Number(userId || 0) > 0 && (
                       <div className="mt-2">
                         {data?.asignado_a === userId ? (
                           <div className="text-xs text-gray-600">Ya estás asignado a este ingreso.</div>
-                        ) : data?.tecnico_solicitado_id === userId ? (
+                        ) : hasOwnAssignmentRequest ? (
                           <div className="text-xs text-amber-700">Solicitud de asignación enviada</div>
-                        ) : data?.tecnico_solicitado_id ? (
+                        ) : hasOtherAssignmentRequest ? (
                           <div className="text-xs text-gray-600">{otherTechLabel}</div>
                         ) : (
-                          <button hidden={mailEnviado}
+                          <button hidden={mailEnviado || solicitudAsignacionEnviada}
                             className="bg-neutral-800 text-white px-3 py-2 rounded disabled:opacity-60"
-                            disabled={solicitando}
+                            disabled={solicitando || solicitudAsignacionEnviada}
                             onClick={async () => {
                               try {
                                 setSolicitando(true);
                                 setMailEnviado(false);
                                 setMailFallo(false);
                                 const r = await postSolicitarAsignacion(id);
-                                await refreshIngreso();
+                                if (r && r.ok) {
+                                  setSolicitudAsignacionEnviada(true);
+                                }
                                 setMailEnviado(!!(r && r.email_sent));
-                                if (r && r.ok && r.email_sent === false) {
+                                if (r && r.ok && !r.already_pending && r.email_sent === false) {
                                   setMailFallo(true);
                                 }
                                 setEmailDebug(r && r.email_debug ? r.email_debug : null);
                                 setErr("");
+                                await refreshIngreso();
                               } catch (e) {
-                                setErr(e?.message || "No se pudo solicitar la asignación");
+                                setErr(e?.message || "No se pudo registrar la solicitud de asignación");
                               } finally {
                                 setSolicitando(false);
                               }
@@ -1153,7 +1184,7 @@ export default function PrincipalTab(props) {
               onBlur={() => commitAlquilerText("alquiler_a", alquilerAInput)}
               onKeyDown={blurOnEnter}
               disabled={!alquilerEditable}
-              placeholder="Elegí de la lista"
+              placeholder="Elija de la lista"
             />
             {clientesPerm && (
               <datalist id="alquiler_clientes_rs">
@@ -1163,7 +1194,7 @@ export default function PrincipalTab(props) {
               </datalist>
             )}
             {alquilerEditable && clientesPerm && (alquilerAInput || "").trim() && !alquilerMatch && (
-              <div className="text-xs text-amber-700 mt-1">Seleccioná un cliente válido de la lista.</div>
+              <div className="text-xs text-amber-700 mt-1">Seleccione un cliente válido de la lista.</div>
             )}
           </div>
         </Row>
@@ -1218,7 +1249,7 @@ export default function PrincipalTab(props) {
                 <input
                   className="border rounded p-2 min-w-[240px]"
                   list="accesorios_catalogo"
-                  placeholder="Descripción (elegí de la lista)"
+                  placeholder="Descripción (elija de la lista)"
                   value={nuevoAccAlq.descripcion}
                   onChange={(e) => setNuevoAccAlq((s) => ({ ...s, descripcion: e.target.value }))}
                 />

@@ -21,7 +21,8 @@ from ..bejerman_sync import (
     upsert_article_mapping,
     validate_bejerman_article_choice,
 )
-from ..permissions import require_permission
+from ..bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, list_ingress_companies
+from ..permissions import require_any_permission, require_permission
 from .helpers import q
 
 
@@ -174,6 +175,19 @@ class BejermanJobsView(APIView):
         )
 
 
+class BejermanIngressCompaniesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        require_any_permission(request, ["action.ingreso.create", "page.new_ingreso"])
+        return Response(
+            {
+                "items": [company.as_public_dict() for company in list_ingress_companies()],
+                "defaultKey": DEFAULT_INGRESS_COMPANY_KEY,
+            }
+        )
+
+
 class BejermanJobRetryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -296,6 +310,7 @@ class BejermanArticlesView(APIView):
 
 
 __all__ = [
+    "BejermanIngressCompaniesView",
     "BejermanJobsView",
     "BejermanJobRetryView",
     "BejermanArticleMappingsView",

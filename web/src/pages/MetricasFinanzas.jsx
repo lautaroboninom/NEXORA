@@ -246,7 +246,7 @@ export default function MetricasFinanzas() {
           />
         </div>
         <div>
-          <div className="text-sm text-gray-600">Tecnico</div>
+          <div className="text-sm text-gray-600">Técnico</div>
           <select className="mt-1 border rounded px-2 py-1 w-full" value={tecnicoId} onChange={(e) => setTecnicoId(e.target.value)}>
             <option value="">Todos</option>
             {tecnicos.map((t) => (

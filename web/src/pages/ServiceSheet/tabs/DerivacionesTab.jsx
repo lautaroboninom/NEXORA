@@ -4,7 +4,7 @@ import { formatDateTime as formatDateTimeHelper } from "../../../lib/ui-helpers"
 import { getDerivacionesPorIngreso, postDerivacionDevuelto } from "../../../lib/api";
 import { estadoLabel } from "../../../lib/constants";
 
-export default function DerivacionesTab({ id, setErr, refreshIngreso }) {
+export default function DerivacionesTab({ id, canManage = false, setErr, refreshIngreso }) {
   const [derivs, setDerivs] = useState([]);
   const [fechaDevStr, setFechaDevStr] = useState(() => new Date().toISOString().slice(0,10));
   const [savingDev, setSavingDev] = useState(false);
@@ -26,9 +26,10 @@ export default function DerivacionesTab({ id, setErr, refreshIngreso }) {
     <div className="border rounded p-4"> 
       <div className="flex items-center gap-3 mb-3">
         <h2 className="font-semibold">Derivaciones</h2>
-        <div className="ml-auto flex items-center gap-2">
-          <Link to={`/ingresos/${id}/derivar`} className="bg-neutral-800 text-white px-3 py-2 rounded">Derivar a externo</Link>
-          {hayDerivAbierta && (
+        {canManage && (
+          <div className="ml-auto flex items-center gap-2">
+            <Link to={`/ingresos/${id}/derivar`} className="bg-neutral-800 text-white px-3 py-2 rounded">Derivar a externo</Link>
+            {hayDerivAbierta && (
             <>
               <input
                 type="date"
@@ -59,8 +60,9 @@ export default function DerivacionesTab({ id, setErr, refreshIngreso }) {
                 {savingDev ? "Guardando..." : "Devuelto"}
               </button>
             </>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
 
       {(!derivs || derivs.length === 0) ? (
@@ -71,7 +73,7 @@ export default function DerivacionesTab({ id, setErr, refreshIngreso }) {
             <tr className="text-left">
               <th className="p-2">Proveedor</th>
               <th className="p-2">Remito</th>
-              <th className="p-2">Fecha derivacin</th>
+              <th className="p-2">Fecha derivación</th>
               <th className="p-2">Fecha entrega</th>
               <th className="p-2">Estado</th>
               <th className="p-2">Comentarios</th>

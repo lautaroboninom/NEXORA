@@ -368,7 +368,7 @@ def _send_stock_min_alerts(items: list[dict]):
         lines.append(f"- {it.get('codigo') or '-'} | {it.get('nombre') or '-'}")
         lines.append(f"  Stock: {it.get('stock_on_hand')} | Min: {it.get('stock_min')}")
         if it.get("ubicacion_deposito"):
-            lines.append(f"  Ubicacion: {it.get('ubicacion_deposito')}")
+            lines.append(f"  Ubicación: {it.get('ubicacion_deposito')}")
         lines.append("")
     body = _email_append_footer_text("\n".join(lines).rstrip() + "\n")
     send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", None), recipients, fail_silently=True)
