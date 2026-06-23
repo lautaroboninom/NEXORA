@@ -4,6 +4,7 @@
 ROLE_CHOICES = [
     ("tecnico", "Técnico"),
     ("admin", "Administración"),
+    ("ventas", "Ventas"),
     ("jefe", "Jefe"),
     ("jefe_veedor", "Jefe veedor"),
     ("recepcion", "Recepción"),

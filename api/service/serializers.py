@@ -57,6 +57,7 @@ class IngresoListItemSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     estado = serializers.CharField()
     presupuesto_estado = serializers.CharField(allow_null=True, required=False)
+    resolucion = serializers.CharField(allow_null=True, allow_blank=True, required=False)
     motivo = serializers.CharField(required=False, allow_blank=True)
     fecha_ingreso = serializers.DateTimeField(required=False, allow_null=True)
     razon_social = serializers.CharField(allow_blank=True, required=False)

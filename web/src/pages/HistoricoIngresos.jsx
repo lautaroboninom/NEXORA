@@ -6,6 +6,7 @@ import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, resolveFechaIngres
 import useQueryState from "../hooks/useQueryState";
 import StatusChip from "../components/StatusChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 export default function HistoricoIngresos() {
   const [rows, setRows] = useState([]);
@@ -276,7 +277,43 @@ export default function HistoricoIngresos() {
       {loading ? (
         "Cargando..."
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.length === 0 ? (
+              <MobileDataCard className="text-gray-500">
+                No hay resultados que coincidan con el filtro.
+              </MobileDataCard>
+            ) : (
+              filtered.map((row) => (
+                <MobileDataCard
+                  key={ingresoIdOf(row)}
+                  as="button"
+                  type="button"
+                  onClick={() => go(row)}
+                  className="hover:bg-gray-50"
+                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                  data-testid={`row-mobile-${ingresoIdOf(row)}`}
+                >
+                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                    <MobileDataField label="Equipo" value={[tipoEquipoOf(row), row?.marca ?? row?.equipo?.marca, row?.modelo ?? row?.equipo?.modelo].filter(Boolean).join(" · ") || "-"} />
+                    <MobileDataField label="Variante" value={row?.equipo_variante ?? row?.variante ?? row?.modelo_variante ?? "-"} />
+                    <MobileDataField label="Estado">
+                      <StatusChip value={row?.estado} />
+                    </MobileDataField>
+                    <MobileDataField label="Identificación">
+                      <DeviceIdentifier row={row} />
+                    </MobileDataField>
+                    <MobileDataField label="Fecha ingreso" value={formatDateTime(resolveFechaIngreso(row))} />
+                    <MobileDataField label="Fecha liberación" value={formatDateTime(row?.fecha_liberacion)} />
+                    <MobileDataField label="Fecha entrega" value={formatDateTime(row?.fecha_entrega)} />
+                  </div>
+                </MobileDataCard>
+              ))
+            )}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -289,7 +326,7 @@ export default function HistoricoIngresos() {
                 <th scope="col" className="p-2">Estado</th>
                 <th scope="col" className="p-2" colSpan={2}>Identificación</th>
                 <th scope="col" className="p-2">Fecha ingreso</th>
-                <th scope="col" className="p-2">Fecha liberacion</th>
+                <th scope="col" className="p-2">Fecha liberación</th>
                 <th scope="col" className="p-2">Fecha entrega</th>
               </tr>
               <tr className="text-left">
@@ -506,6 +543,7 @@ export default function HistoricoIngresos() {
               )}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}. {hasNext ? "Desplazá para cargar más…" : ""}
           </div>

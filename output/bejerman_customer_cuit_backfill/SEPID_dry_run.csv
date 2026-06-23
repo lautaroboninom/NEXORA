@@ -1,0 +1,255 @@
+status,reason,customer_id,razon_social,cuit,cuit_bejerman,cod_empresa_actual,cod_empresa_bejerman,razon_social_bejerman,locales_con_mismo_cuit,bejerman_con_mismo_cuit
+skipped,Cliente sin CUIT local.,1,MIGRACION,,,,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,2,ACUDIR,,30708060980,ACU,ACU,ACUDIR S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,3,AC 24,,,ACV,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,4,RESPIROXS,,30711360804,REX,REX,RESPIROXS S.R.L.,0,0
+already_synced,El código Bejerman ya coincide.,5,PERELETEGUI ADRIAN MATIAS,23331795739,23331795739,CPAP,CPAP,PERELETEGUI ADRIAN MATIAS,1,1
+skipped,El cod_empresa local no existe en Bejerman.,6,AERORUTAS,,,AER,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,7,OUBIÑA ALBERTO,,33708607989,AGO,AGO,AGO S.R.L.,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,8,AIRMED S.R.L.,,30500852131,air,AIR,AIR LIQUIDE ARGENTINA S A,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,9,ALCLA,,30519511351,ALCLA,ALCLA,ALCLA S.A.C.I.F.I.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,10,CLINICA ALFA,,,ALF,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,11,AMBULANCIAS LA GUARDIA,,,ALG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,12,NOVAMED S.A.,,,ame,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,13,AMTA,,,AMT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,14,ANDREOLI EDUARDO GABRIEL,,,AND,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,15,ORTOPEDIA ANTUNEZ,,,ANT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,16,MARCELOS ARCOS,,,ARC,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,17,ARGENTINA DE GASES S.A.,,30645416933,ARG,ARG,ARGENLAB S R L,0,0
+skipped,El cod_empresa local no existe en Bejerman.,18,ARIEL YACOBONE,,,ARI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,19,Ata equipamientos medicos,,,ata,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,20,OXIGENOTERAPIA AVELLANEDA,,30711031061,AVE,AVE,OXIGENOTERAPIA AVELLANEDA S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,21,AVIL SALUD SRL,,,AVI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,22,AYRES SALUD S.R.L.,,,AYR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,23,BIOMEDICAL CARE SUR S.A.S.,,,BIM,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,24,BIOMEDICAL S.A.,,30689208459,bio,BIO,BIOMEDICAL S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,25,BIOTRUST SERVICES TECHNOLOGY S.A,,,bit,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,26,BM MEDICAL,,,BMM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,27,BRAHIM JUAN MANUEL,,,BRA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,28,CARE S.A.,,,CAR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,29,CENTRO GALLEGO,,,CEG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,30,CELSO,,,CEL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,31,MERNO S.A.,,,CEN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,32,CIRUGIA INSUMOS MEDICOS,,,CIM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,33,CI PAR,,,CIP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,34,CLINICA BASILEA SA,,,CLI,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,35,CENTRO MEDICO AMENABAR SRL,,30707612971,CMA,CMA,CENTRO MEDICO AMENABAR SRL,0,0
+skipped,El cod_empresa local no existe en Bejerman.,36,CLINICA MODELO DE MORON,,,CMM,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,37,COCUZZA,,30718242157,COC,COC,1170 COCUZZA S.R.L.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,38,INSTITUTO COGHLAN SRL,,,COG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,39,FERNANDO COLUCCI,,,COL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,40,CORREA GUILLERMO,,,COR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,41,CLINICA PRIVADA ALCORTA,,,CPA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,42,CLINICA PRIVADA M. TACHELLA,,,CPT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,43,CLINICA CRUZ CELESTE,,,CRU,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,44,CLINICA SANTA CATALINA,,,CSC,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,45,SANATORIO PRIVADO SAN MAURICIO,,,CSM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,46,CENTRO DE SALUD NORTE,,,CSN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,47,CUIDA AVEDIS,,,CUI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,48,MEDICUS SA.. DE ASISTENCIA MED. Y CIENT.,,,CUS,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,49,C Y G,,30709434930,CYG,CYG,C Y G MEDICINAL SRL,0,0
+skipped,El cod_empresa local no existe en Bejerman.,50,CLINICA ZAPALA,,,CZA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,51,DAVID CORTEZ,,,DAV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,52,DIEGO AYALA,,,DAY,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,53,DEALER MEDICA,,,DEM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,54,GRIFFO DAMIAN,,,DGR,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,55,DIAGNOSTIC MEDIC,,30708155795,DIA,DIA,DIAGNOSTIC MEDIC S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,56,DISTRIBUIDORA MEDICA,,,DIM,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,57,DRE LUIS,,20124330425,DRE,DRE,DRE LUIS EROS,0,0
+skipped,El cod_empresa local no existe en Bejerman.,58,DOMICILIO SALUD,,,DSL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,59,DUZZI EDUARDO,,,DUZ,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,60,EDUARDO THIERY,,20149334239,EDU,EDU,ANDREOLI EDUARDO GABRIEL,0,0
+skipped,El cod_empresa local no existe en Bejerman.,61,EGESAC SOCIEDAD ANONIMA,,,EGE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,62,ESTUDIO INGENIERIA BIOMEDICA,,,EIB,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,63,EJE MEDICA,,,EJE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,64,ELECTRO MEDICINA ARGENTINA,,,ELM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,65,EMERGENCIA 171,,,EME,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,66,EMERICH,,,EMM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,67,EMAR SALUD,,,EMS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,68,EQUIMED,,,EQM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,69,EQUICENTER,,,equ,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,70,ESPACIO MEDICO,,,ESM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,71,ESTEBAN BETES,,,EST,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,72,ETICA,,30690245392,ETI,ETI,ETICA S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,73,FUNDACION DANIEL GOMEZ,,,FDG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,74,FEDERACION DE CIRCULOS CATOLICOS DE OBREROS,,,FED,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,75,filium,,,fil,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,76,ELECTROTECNICA FIORINO,,,FIO,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,77,ALEXANDER FLEMING S A,,,fle,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,78,SANATORIO FRANCHIN,,,FRA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,79,FRANCISCO FARIAS,,,FRI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,80,FUNDACION HOSPITALARIA,,,FUN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,81,gases comprimidos s.a.,,,gas,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,82,GERONIAN AGOP,,,GER,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,83,GIORDA SERGIO,,,GIS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,84,GRUPO MEDICO SAN FERNANDO,,,GMS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,85,GUSTAVO GONZALEZ,,,GON,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,86,GERARDO PONZA,,,GPO,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,87,GRIGUELA,,,GRI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,88,GASES LOMAS,,,GSL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,89,GUARDIS RUBEN ALBERTO,,,GUA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,90,GUSTAVO SAFENREITER,,,GUS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,91,HOME CARE,,,HCA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,92,HELGUERA EDUARDO,,,HEL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,93,HOSP. ERILL DE ESCOBAR,,,HES,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,94,HOSPITAL ISRAELITA,,,HIS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,95,NAVAL,,,HNV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,96,HOSPITAL RICARDO GUTIERREZ,,,HRG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,97,HEALTHY SERV MEDICOS,,,HTY,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,98,ESCALANTE HUGO,,20085775805,HUG,HUG,TRABADELO HUGO,0,0
+skipped,El cod_empresa local no existe en Bejerman.,99,HOSPITAL ZONAL DE ESQUEL,,,HZE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,100,HOSPITAL ZONAL DE TRELEW,,,HZT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,101,instituto cardiovascular infantil,,,ici,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,102,INSTITUTO DEL DIAGNOSTICO,,,IDI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,103,imat,,,ima,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,104,INSTITUTO MEDICO CONSTITUYENTE,,,IMC,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,105,DROGUERIA IMEQ,,,IME,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,106,GRUPO INBA,,,INB,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,107,INTHERMED BOLIVAR S.R.L.,,,INH,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,108,INSTITUTOS MEDICOS S A,,,INM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,109,INNOVAR,,,INN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,110,IN SITU POMPIDOU BERSEL S.A.,,,INS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,111,INTERDOM SRL,,,INT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,112,INTRAMEDICA,,,ITR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,113,IVAN FIGUEROA,,,IVA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,114,J G ELECTROMEDICINA,,,JGE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,115,VILLALA JOSE,,,JOS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,116,KERK PABLO ANDRES,,,ker,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,117,KNORR LUIS ALBERTO,,,kno,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,118,LANCET CORP,,30709031194,LAN,LAN,LANCET CORP. ARGENTINA S.R.L.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,119,MD FLY,,,LAT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,120,LAVIE INSUMOS,,,LAV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,121,LINDE GAS ARGENTINA,,,LIN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,122,LIPORACE FABIAN,,,LIP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,123,LINDE SALUD (SANTA CATALINA),,,LIS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,124,LANDMARK,,,LND,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,125,LOGIN DOOR,,30711244383,LOG,LOG,LOGIN DOOR S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,126,LUMEDICAL,,,LUM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,127,MARIANO ACOSTA,,,MAC,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,128,MAJIRENA LUIS ALBERTO,,,MAJ,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,129,MARK,,,MAK,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,130,MALLINCRKODT,,,MAL,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,131,MEDICINA AUXILIAR,,20042837815,MAU,MAU,SUCESION DE SLOBINSKY EMILIO ENRIQUE,0,0
+skipped,El cod_empresa local no existe en Bejerman.,132,MEDICINA CATAN,,,MCA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,133,MEDIC SALUD,,,MDS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,134,MDV,,,MDV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,135,MEDINOR,,,MEN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,136,MED PLANE,,,MEP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,137,M,,,MER,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,138,MGBIO,,,MGB,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,139,BIOMEDIX SAS,,30715407260,MIX,MIX,MEDICAL MIX S.R.L.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,140,MECATRONIX,,,MKT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,141,MARTIN KLEIMAN,,,MRT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,142,MARTIN TOURNON,,,MTM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,143,NATIVA,,,NAT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,144,NORELCO,,,NOR,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,145,MGBALBIN,,30710659768,NOV,NOV,NOVAMED S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,146,ORTOPEDIA INTEGRAR,,,OIN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,147,OSCAR LUQUE,,,OLU,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,148,CLINICA OLIVOS,,,OLV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,149,oxirent argentina,,,ora,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,150,OSFFENTOS,,,OSF,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,151,OSTEON,,,OST,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,152,OSYS,,,OSY,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,153,SANATORIO OTAMENDI Y MIROLI S.A.,,30545852450,OTA,OTA,SANATORIO OTAMENDI Y MIROLI S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,155,OXIDOM,,,OXD,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,156,OXIHOME LIFE,,,OXH,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,157,OXICASTHOMECARE,,30714095753,OXI,OXI,OXIDOM S.R.L.,0,0
+already_synced,El código Bejerman ya coincide.,158,OXIGENOTERAPIA LOMAS S.R.L.,30709674761,30709674761,LOMAS,LOMAS,OXIGENOTERAPIA LOMAS S.R.L.,1,1
+skipped,El cod_empresa local no existe en Bejerman.,159,OXISALUD,,,OXS,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,160,OXY NET S.A.,,30694811767,OXY,OXY,OXY NET S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,161,PARQUE ELECTRONICA,,,PAE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,162,PALLERO VICTOR RAUL,,,PAL,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,163,PANAS,,30716787946,SIM,SIM,SIM ELECTRO MEDICINA,0,0
+skipped,El cod_empresa local no existe en Bejerman.,164,PENIPE SA,,,PEN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,165,POLICLINICO LOMAS,,,POL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,166,PRO DIMOS,,,PRO,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,167,premex,,,prx,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,168,PABLO TUREK,,,PTK,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,169,PRAXAIR ARG.,,,PXR,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,170,respirar,,30708349174,RES,RES,RESPIRAR S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,171,RESPIFLOW,,,REW,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,173,RG ELECTROMEDICINA,,,RGE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,174,RIGONI JORGE,,,RIG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,175,OXIGENOTERAPIA RIO DE LA PLATA,,,RIO,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,176,SEM,,,rod,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,177,RESPILIFE,,,RPL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,178,RICARDO JOSE,,,RRJ,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,179,RSC S.A.,,30712136754,rsc,RSC,RSC S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,180,ROSH,,,RSH,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,181,RUSSO PABLO MATIAS,,,RUS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,182,RUTEC,,,RUT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,183,ARANGUREN SAE,,,SAE,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,184,SAMTRONIC ARGENTINA S.A.,,30714137472,SAM,SAM,SAMTRONIC ARGENTINA S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,185,SANATORIO DE LA RIBERA,,,SAN,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,186,SASMA,,,SAS,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,187,SC PILAR,,,SCP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,188,SEBASTIAN SCHIN,,,SCH,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,189,SEDESA,,,SED,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,190,SEMED SERVICIOS S.A.,,,SEM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,191,sepid,,,sep,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,192,SERVIMED,,,SER,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,193,SICOMED,,30707584706,SIC,SIC,SICOMED S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,194,SIED,,,SIE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,195,SIEP,,,SIP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,196,CASA HOSPITAL SAN JUAN DE DIOS,,,SJD,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,197,FUN. PREVALENTE DEL CANCER TEMPRANO AP. DIGESTIVO,,,SLT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,198,SANATORIO MARIANO ACOSTA,,,SMA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,199,COLOMBO,,,SMC,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,200,SOMOS PEDIATRAS,,,SOM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,201,SERVICIOS Y PREST. MEDICAS,,,SPM,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,202,SOPORTE VITAL,,,SPV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,203,SR CERTIFICACIONES,,,SRC,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,204,ST BIOMEDICA,,,STB,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,205,SANITICARE,,,STY,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,206,SAINT GERMAIN S.R.L.,,,SUL,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,207,GRUPO SYEMED SRL,,30714060232,SYE,SYE,SYEMED S.R.L.,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,208,SYNCROTECH,,30694617782,SYN,SYN,SYNCROTECH SRL,0,0
+skipped,El cod_empresa local no existe en Bejerman.,209,TARGET S.R.L.,,,TAR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,210,TECNO AGRO VIAL S.A.,,,TAV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,211,SOENSA,,,TAY,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,212,TEAM PEDIATRICO S.R.L,,,TEA,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,213,TMD,,30678203757,tmd,TMD,TERAPIAS MEDICAS DOMICILIARIAS S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,214,TOTAL SLEEP S.R.L.,,,TOT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,215,URBANI GUILLERMO,,,urb,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,216,DANIEL VALDES,,,VAL,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,217,VIDAMED S.R.L.,,30711830509,VID,VID,VIDAMED S.R.L.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,218,VILLAGRA RAMIRO AGUSTIN,,,VIL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,219,"SANCHEZ, SILVIA VIVIANA",,,VIV,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,220,VITAL FLOW,,,VTF,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,221,WIOR INSUMOS,,,WIO,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,222,XIPAP,,30710526008,XIP,XIP,XIPAP S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,223,PARA RECARGAR,,,XXX,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,224,YORIO,,,YOR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,225,ZC SALUD SRL,,,ZCS,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,226,OXECOR SRL,,30714245399,OXE,OXE,OXECOR SRL,0,0
+already_synced,El código Bejerman ya coincide.,1590,CENTRO MEDICO AMENABAR,30707612971,30707612971,CMA,CMA,CENTRO MEDICO AMENABAR SRL,1,1
+skipped,Cliente sin CUIT local.,1592,Cliente Demo,,,,,,0,0
+skipped,Cliente sin CUIT local.,1593,Sin CodEmpresa,,,,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1594,MARCELO CORTIGIANI,,,CORTI,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1595,MARTIN ARRIOLA,,,ARR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1596,JORGE AGUSTIN,,,JOR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1597,NESTOR BUFFA,,,23133854959,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1598,SIMPLE SALUD,,,SIMP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1599,DOLORES VIDAAL BAZTERRICA,,,DOL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1600,WALTER ZAFE,,,ZAFE,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1601,CRITTO ADOLFO (AGRO CREATIVA),,,30-71144723-3,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,1602,SILMAG,,30708212659,SIL,SIL,SILMAG S.A.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1603,Particular,,,PTL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1604,PULMOTECH,,,PUL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1605,HOSPICE KAMALAYA,,,HOSP,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1606,JORGE TEMPORETTI,,,TEMPO,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1607,STELLA SEMPE,,,STELL,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1608,NOVOCARE S.R.L.,,,OVO,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1609,QUALIMED,,,QUA,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,1610,SIIB TECNOLOGIA MEDICA,,30711265089,SIIB,SIIB,GRUPO SIIB TECNOLOGIA MEDICA S.R.L.,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1611,SR OXIGENO,,,SRO,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,1612,ORTOPEDIA GEMINIS,,20310014118,OGEM,OGEM,ORTOPEDIA GEMINIS,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1613,PAULA DE GOUVEIA,,,GOU,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1614,MOVILMED,,,MOV,,,0,0
+cuit_would_fill,CUIT completado desde Bejerman por cod_empresa exacto.,1615,SIM,,30716787946,SIM,SIM,SIM ELECTRO MEDICINA,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1616,MARCO PAOLINI,,,MAR,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1618,GUSTAVO DAMIAN PUGLISI,,,PUG,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1619,INGRASSIA CRISTINA,,,INGRA,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1620,VITAL LIFE,,,VIT,,,0,0
+skipped,El cod_empresa local no existe en Bejerman.,1621,HOME AIR,,,HOM,,,0,0

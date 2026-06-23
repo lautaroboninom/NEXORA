@@ -16,9 +16,11 @@ import {
 } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import useQueryState from "../hooks/useQueryState";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { reservePdfWindow } from "../lib/pdf";
 
 // ENDPOINT para "presupuestados" (ya emitidos/enviados)
-const ENDPOINT = "/api/ingresos/presupuestados/"; // <-- AJUSTAR si tu API usa otra ruta
+const ENDPOINT = "/api/ingresos/presupuestados/"; // Ajustar si la API usa otra ruta.
 
 export default function JefePresupuestos() {
   const { user } = useAuth();
@@ -154,10 +156,31 @@ export default function JefePresupuestos() {
   function closeIfOpen(win) {
     if (!win) return;
     try {
-      if (!win.closed) win.close();
+      if (typeof win.close === "function") {
+        win.close();
+      } else if (!win.closed) {
+        win.close();
+      }
     } catch (_) {
       // noop
     }
+  }
+
+  function remitosSalidaPath(ingresoIds) {
+    const ids = (ingresoIds || []).filter(Boolean);
+    if (ids.length === 1) return `/api/ingresos/${encodeURIComponent(ids[0])}/remito/`;
+    const qs = new URLSearchParams({ ids: ids.join(",") }).toString();
+    return `/api/ingresos/remitos-salida/?${qs}`;
+  }
+
+  async function openRemitosSalida(ingresoIds, reservedWindow) {
+    const ids = (ingresoIds || []).filter(Boolean);
+    if (ids.length === 0) return [];
+    const blob = await getBlob(remitosSalidaPath(ids));
+    if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
+    const opened = reservedWindow?.open ? reservedWindow.open(blob) : false;
+    if (!opened) throw new Error("El navegador bloqueó la apertura del remito.");
+    return ids;
   }
 
   async function approveRows(rowsToApprove, { askPrint = true, confirmPrintMessage = "" } = {}) {
@@ -168,7 +191,7 @@ export default function JefePresupuestos() {
       if (!ingresoId) {
         approvalFailures.push({
           ingresoId,
-          error: new Error("No se encontro el ID de ingreso para aprobar."),
+          error: new Error("No se encontró el ID de ingreso para aprobar."),
         });
         continue;
       }
@@ -180,27 +203,26 @@ export default function JefePresupuestos() {
     let shouldPrint = false;
     if (askPrint && reparadoRows.length > 0) {
       shouldPrint = window.confirm(
-        confirmPrintMessage || "Este equipo ya esta reparado, imprimir remito de salida?"
+        confirmPrintMessage || "Este equipo ya está reparado. ¿Imprimir remito de salida?"
       );
     }
 
-    const preopenedWindows = new Map();
+    let reservedPrintWindow = null;
     if (shouldPrint) {
-      for (const row of reparadoRows) {
-        const ingresoId = ingresoIdOf(row);
-        let win = null;
-        try {
-          win = window.open("", "_blank");
-        } catch (_) {
-          win = null;
-        }
-        preopenedWindows.set(ingresoId, win);
-      }
+      reservedPrintWindow = reservePdfWindow({
+        title: reparadoRows.length > 1 ? "Remitos de salida" : "Remito de salida",
+        message:
+          reparadoRows.length > 1
+            ? "Preparando remitos de salida..."
+            : "Preparando remito de salida...",
+        fallbackMessage:
+          "NEXORA sigue preparando el PDF. Si ya terminó, puede cerrar esta pestaña y reintentar la impresión.",
+      });
     }
 
     const approvedIds = [];
+    const printedIds = [];
     const printFailures = [];
-    const preopenedUsed = new Set();
 
     for (const row of validRows) {
       const ingresoId = ingresoIdOf(row);
@@ -209,49 +231,27 @@ export default function JefePresupuestos() {
         approvedIds.push(ingresoId);
       } catch (e) {
         approvalFailures.push({ ingresoId, error: e });
-        closeIfOpen(preopenedWindows.get(ingresoId));
         continue;
-      }
-
-      if (!shouldPrint || !reparadoIds.has(ingresoId)) continue;
-
-      const win = preopenedWindows.get(ingresoId);
-      try {
-        const blob = await getBlob(`/api/ingresos/${ingresoId}/remito/`);
-        if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
-        const url = URL.createObjectURL(blob);
-
-        let opened = false;
-        if (win && !win.closed) {
-          try {
-            win.location = url;
-            opened = true;
-            preopenedUsed.add(ingresoId);
-          } catch (_) {
-            opened = false;
-          }
-        }
-
-        if (!opened) {
-          closeIfOpen(win);
-          const fallback = window.open(url, "_blank", "noopener");
-          if (!fallback) throw new Error("El navegador bloqueo la apertura del remito.");
-        }
-
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      } catch (e) {
-        printFailures.push({ ingresoId, error: e });
-        closeIfOpen(win);
       }
     }
 
-    for (const [ingresoId, win] of preopenedWindows.entries()) {
-      if (preopenedUsed.has(ingresoId)) continue;
-      closeIfOpen(win);
+    const idsToPrint = shouldPrint ? approvedIds.filter((ingresoId) => reparadoIds.has(ingresoId)) : [];
+    if (idsToPrint.length > 0) {
+      try {
+        printedIds.push(...(await openRemitosSalida(idsToPrint, reservedPrintWindow)));
+      } catch (e) {
+        for (const ingresoId of idsToPrint) {
+          printFailures.push({ ingresoId, error: e });
+        }
+        closeIfOpen(reservedPrintWindow);
+      }
+    } else {
+      closeIfOpen(reservedPrintWindow);
     }
 
     return {
       approvedIds,
+      printedIds,
       approvalFailures,
       printFailures,
       shouldPrint,
@@ -263,7 +263,7 @@ export default function JefePresupuestos() {
     if (!canApprove || bulkApproving || busyId !== null) return;
     const ingresoId = ingresoIdOf(row);
     if (!ingresoId) {
-      setErr("No se encontro el ID de ingreso para aprobar.");
+      setErr("No se encontró el ID de ingreso para aprobar.");
       return;
     }
     try {
@@ -272,7 +272,7 @@ export default function JefePresupuestos() {
       setBulkResultMsg("");
       const result = await approveRows([row], {
         askPrint: true,
-        confirmPrintMessage: "Este equipo ya esta reparado, imprimir remito de salida?",
+        confirmPrintMessage: "Este equipo ya está reparado. ¿Imprimir remito de salida?",
       });
       await load();
 
@@ -313,7 +313,7 @@ export default function JefePresupuestos() {
       const reparadosCount = selectedRows.filter(isReparado).length;
       const result = await approveRows(selectedRows, {
         askPrint: true,
-        confirmPrintMessage: `Hay ${reparadosCount} equipos reparados. Imprimir todas las ordenes de salida juntas?`,
+        confirmPrintMessage: `Hay ${reparadosCount} equipos reparados. ¿Imprimir todas las órdenes de salida juntas?`,
       });
       const totalApprovalFailures = missingIds.length + result.approvalFailures.length;
 
@@ -329,6 +329,7 @@ export default function JefePresupuestos() {
       const summary = [
         `Total: ${selectedSnapshot.length}.`,
         `Aprobados OK: ${result.approvedIds.length}.`,
+        `Remitos impresos: ${result.printedIds.length}.`,
         `Fallos de aprobación: ${totalApprovalFailures}.`,
         `Fallos de impresión: ${result.printFailures.length}.`,
       ];
@@ -361,7 +362,7 @@ export default function JefePresupuestos() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="mb-3 flex flex-col gap-2 lg:flex-row lg:items-center">
         <input
           type="text"
           value={q}
@@ -379,7 +380,7 @@ export default function JefePresupuestos() {
         >
           Recargar
         </button>
-        <div className="flex items-center gap-2 ml-auto">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:ml-auto">
           <button
             className="btn"
             onClick={() => exportByIds(filtered.map(ingresoIdOf), `presupuestados_filtrados_${filtered.length}`)}
@@ -417,7 +418,65 @@ export default function JefePresupuestos() {
       ) : filtered.length === 0 ? (
         <div className="text-sm text-gray-500">No hay presupuestos emitidos/enviados.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((row) => {
+              const moneda = row?.presupuesto_moneda ?? "ARS";
+              const monto = row?.presupuesto_monto ?? row?.presupuesto_total ?? null;
+              const ingresoId = ingresoIdOf(row);
+              return (
+                <MobileDataCard
+                  key={ingresoId}
+                  onClick={() => go(row)}
+                  onKeyDown={(e) => onRowKeyDown(e, row)}
+                  className="cursor-pointer hover:bg-gray-50"
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                  data-testid={`row-mobile-${ingresoId}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(ingresoId)}
+                        onChange={(e) => toggleRow(e, row)}
+                        disabled={bulkApproving}
+                        aria-label={`Seleccionar ${formatOS(row)}`}
+                        className="h-5 w-5"
+                      />
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                    <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
+                    <MobileDataField label="Serie">
+                      <DeviceIdentifier row={row} />
+                    </MobileDataField>
+                    <MobileDataField label="Estado" value={row?.estado ?? "-"} />
+                    <MobileDataField label="Monto" value={formatMoney(monto, moneda)} />
+                    <MobileDataField label="Fecha emisión" value={formatDateOnly(row?.presupuesto_fecha_emision ?? row?.fecha_emision)} />
+                  </div>
+                  {canApprove ? (
+                    <button
+                      className="btn mt-3 w-full justify-center"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        aprobar(row);
+                      }}
+                      disabled={approvingBusy}
+                      aria-busy={approvingBusy ? "true" : "false"}
+                      title="Aprobar presupuesto"
+                    >
+                      Aprobar
+                    </button>
+                  ) : null}
+                </MobileDataCard>
+              );
+            })}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -436,7 +495,7 @@ export default function JefePresupuestos() {
                 <th scope="col" className="p-2">Serie</th>
                 <th scope="col" className="p-2">Estado</th>
                 <th scope="col" className="p-2">Monto</th>
-                <th scope="col" className="p-2">Fecha emision</th>
+                <th scope="col" className="p-2">Fecha emisión</th>
                 <th scope="col" className="p-2 text-right">Acciones</th>
               </tr>
             </thead>
@@ -493,7 +552,7 @@ export default function JefePresupuestos() {
                             Aprobar
                           </button>
                         ) : null}
-                        {/* Si tu backend permite rechazar / anular, podes agregar aca otro boton */}
+                        {/* Si el backend permite rechazar o anular, se puede agregar otro botón acá. */}
                       </div>
                     </td>
                   </tr>
@@ -501,6 +560,7 @@ export default function JefePresupuestos() {
               })}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}.
           </div>

@@ -35,11 +35,13 @@ class Command(BaseCommand):
                       numero_serie      TEXT NOT NULL DEFAULT '',
                       source_deposit    TEXT NOT NULL DEFAULT 'STR',
                       target_deposit    TEXT NOT NULL DEFAULT 'STL',
+                      company_key       TEXT NOT NULL DEFAULT 'SEPID',
                       status            TEXT NOT NULL DEFAULT 'pending',
                       attempts          INTEGER NOT NULL DEFAULT 0,
                       next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       last_error        TEXT NULL,
                       article_code      TEXT NULL,
+                      actor_user_id     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                       request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
                       response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
                       created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -56,6 +58,35 @@ class Command(BaseCommand):
                     """
                 )
                 cur.execute("ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS article_code TEXT")
+                cur.execute("ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS company_key TEXT")
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM information_schema.columns
+                     WHERE table_schema = ANY(current_schemas(true))
+                       AND table_name = 'ingresos'
+                       AND column_name = 'empresa_bejerman'
+                     LIMIT 1
+                    """
+                )
+                if cur.fetchone():
+                    cur.execute(
+                        """
+                        UPDATE bejerman_sync_jobs j
+                           SET company_key = COALESCE(NULLIF(t.empresa_bejerman, ''), 'SEPID')
+                          FROM ingresos t
+                         WHERE t.id = j.ingreso_id
+                           AND NULLIF(TRIM(COALESCE(j.company_key, '')), '') IS NULL
+                        """
+                    )
+                cur.execute("ALTER TABLE bejerman_sync_jobs ALTER COLUMN company_key SET DEFAULT 'SEPID'")
+                cur.execute(
+                    "UPDATE bejerman_sync_jobs SET company_key = 'SEPID' WHERE NULLIF(TRIM(COALESCE(company_key, '')), '') IS NULL"
+                )
+                cur.execute("ALTER TABLE bejerman_sync_jobs ALTER COLUMN company_key SET NOT NULL")
+                cur.execute(
+                    "ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS actor_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL"
+                )
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS bejerman_article_mappings (
@@ -109,6 +140,18 @@ class Command(BaseCommand):
                 )
                 cur.execute(
                     """
+                    CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_actor_user
+                      ON bejerman_sync_jobs(actor_user_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_company_key
+                      ON bejerman_sync_jobs(company_key)
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
                       ON bejerman_article_mappings(model_id, variante_norm)
                     """
@@ -154,7 +197,13 @@ class Command(BaseCommand):
                     raise RuntimeError(f"No se aplicaron tablas requeridas: {', '.join(missing)}")
 
                 required_columns = {
-                    "bejerman_sync_jobs": {"article_code", "request_payload", "response_payload"},
+                    "bejerman_sync_jobs": {
+                        "article_code",
+                        "actor_user_id",
+                        "company_key",
+                        "request_payload",
+                        "response_payload",
+                    },
                     "bejerman_article_mappings": {
                         "model_id",
                         "variante_norm",

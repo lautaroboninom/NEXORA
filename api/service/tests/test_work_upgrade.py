@@ -198,6 +198,7 @@ class WorkUpgradeAPITest(TestCase):
                     remito_number TEXT NULL,
                     remito_location TEXT NULL,
                     invoice_number TEXT NULL,
+                    imported_delivered_flag {bool_type} NULL,
                     created_at {datetime_type} NULL,
                     updated_at {datetime_type} NULL
                 ){engine_suffix}
@@ -250,6 +251,7 @@ class WorkUpgradeAPITest(TestCase):
                 "ALTER TABLE delivery_orders ADD COLUMN remito_number TEXT NULL",
                 "ALTER TABLE delivery_orders ADD COLUMN remito_location TEXT NULL",
                 "ALTER TABLE delivery_orders ADD COLUMN invoice_number TEXT NULL",
+                f"ALTER TABLE delivery_orders ADD COLUMN imported_delivered_flag {bool_type} NULL",
                 f"ALTER TABLE delivery_orders ADD COLUMN created_at {datetime_type} NULL",
                 f"ALTER TABLE delivery_orders ADD COLUMN updated_at {datetime_type} NULL",
             ):
@@ -460,16 +462,16 @@ class WorkUpgradeAPITest(TestCase):
                 ["device", delivered_device, None, timezone.localdate() + dt.timedelta(days=10)],
             )
 
-            def delivery_order(order_id, number, status, priority="normal", remito_number=None, invoice_number=None):
+            def delivery_order(order_id, number, status, priority="normal", remito_number=None, invoice_number=None, imported_delivered_flag=None):
                 cur.execute(
                     """
                     INSERT INTO delivery_orders(
                       id, order_number, customer_id, bejerman_customer_code, customer_name,
                       delivery_type, status, priority, order_date, equipment_model,
                       equipment_serial, equipment_internal_number, remito_number,
-                      remito_location, invoice_number, created_at, updated_at
+                      remito_location, invoice_number, imported_delivered_flag, created_at, updated_at
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     [
                         order_id,
@@ -487,6 +489,7 @@ class WorkUpgradeAPITest(TestCase):
                         remito_number,
                         "recepcion" if remito_number else None,
                         invoice_number,
+                        imported_delivered_flag,
                         now,
                         now,
                     ],
@@ -496,6 +499,7 @@ class WorkUpgradeAPITest(TestCase):
             delivery_order("do-work-2", "OE-2", "armado_pendiente_entrega")
             delivery_order("do-work-3", "OE-3", "entregado_pendiente_facturacion", remito_number="R 0001-00000001")
             delivery_order("do-work-4", "OE-4", "facturado", remito_number="R 0001-00000002", invoice_number="F 0001-00000002")
+            delivery_order("do-work-5", "OE-5", "armado_pendiente_entrega", imported_delivered_flag=True)
 
             cur.execute(
                 """
@@ -548,8 +552,9 @@ class WorkUpgradeAPITest(TestCase):
                 "pedidos_abiertos",
             },
         )
-        self.assertEqual(resp.data["delivery_orders"]["counts"]["active"], 3)
-        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
+        self.assertEqual(resp.data["delivery_orders"]["counts"]["active"], 2)
+        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 2)
+        self.assertNotIn("OE-5", {row["orderNumber"] for row in resp.data["delivery_orders"]["items"]})
 
     def test_resumen_deduplica_ingresos_que_caen_en_multiples_alertas(self):
         now = timezone.now()
@@ -611,7 +616,8 @@ class WorkUpgradeAPITest(TestCase):
         )
         self.assertEqual(resp.data["alerts"], [])
         self.assertEqual(resp.data["objetivos"], [])
-        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
+        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 2)
+        self.assertNotIn("OE-5", {row["orderNumber"] for row in resp.data["delivery_orders"]["items"]})
         self.assertEqual(resp.data["prioridades"], [])
 
     def test_dashboard_admin_muestra_logistica_y_preventivos(self):

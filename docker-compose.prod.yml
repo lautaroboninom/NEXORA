@@ -33,6 +33,10 @@ services:
       bash -lc "python manage.py migrate --noinput && \
       python manage.py apply_ticket_sale_states_schema && \
       python manage.py apply_delivery_orders_schema && \
+      python manage.py apply_bejerman_purchase_entries_schema && \
+      python manage.py apply_bejerman_user_credentials_schema && \
+      python manage.py apply_customer_bejerman_schema && \
+      python manage.py apply_customer_alias_schema --seed-examples && \
       python manage.py apply_notifications_schema && \
       python manage.py apply_assignment_requests_schema && \
       python manage.py collectstatic --noinput && \
@@ -66,7 +70,10 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      bash -lc "python manage.py apply_bejerman_sync_schema && \
+      bash -lc "python manage.py apply_bejerman_user_credentials_schema && \
+      python manage.py apply_customer_bejerman_schema && \
+      python manage.py apply_customer_alias_schema --seed-examples && \
+      python manage.py apply_bejerman_sync_schema && \
       python manage.py run_bejerman_sync_loop --interval 30 --limit 10"
     restart: unless-stopped
 
@@ -81,7 +88,7 @@ services:
       args:
         - VITE_API_URL=
         - VITE_SOURCEMAP=${VITE_SOURCEMAP:-1}
-        - VITE_SW=${VITE_SW:-0}
+        - VITE_SW=${VITE_SW:-1}
     container_name: nexora-web
     command: ["/usr/local/bin/start-nginx.sh"]
     environment:

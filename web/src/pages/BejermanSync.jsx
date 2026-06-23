@@ -47,6 +47,12 @@ const TYPE_LABELS = {
   stock_str_to_stcl: "STR a STCL",
 };
 
+const COMPANY_FILTERS = [
+  { key: "SEPID", label: "SEPID" },
+  { key: "MGBIO", label: "MG BIO" },
+  { key: "TEST", label: "Prueba" },
+];
+
 function payloadText(value) {
   if (!value) return "{}";
   try {
@@ -503,6 +509,7 @@ export default function BejermanSync() {
   const [filters, setFilters] = useState({
     status: "",
     sync_type: "",
+    company_key: "",
     q: "",
     cliente: "",
     articulo: "",
@@ -873,7 +880,7 @@ export default function BejermanSync() {
         </div>
       </div>
 
-      <div className="mt-4 grid gap-2 md:grid-cols-[160px_180px_1fr_180px_180px_auto]">
+      <div className="mt-4 grid gap-2 md:grid-cols-[150px_170px_140px_1fr_170px_170px_auto]">
         <select
           className="h-10 rounded border border-gray-300 px-2 text-sm"
           value={filters.status}
@@ -892,6 +899,16 @@ export default function BejermanSync() {
           <option value="">Operaciones</option>
           {Object.entries(TYPE_LABELS).map(([value, label]) => (
             <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        <select
+          className="h-10 rounded border border-gray-300 px-2 text-sm"
+          value={filters.company_key}
+          onChange={(e) => updateFilter("company_key", e.target.value)}
+        >
+          <option value="">Empresas</option>
+          {COMPANY_FILTERS.map((company) => (
+            <option key={company.key} value={company.key}>{company.label}</option>
           ))}
         </select>
         <input
@@ -932,6 +949,7 @@ export default function BejermanSync() {
               <th className="w-8 p-2"></th>
               <th className="p-2">Estado</th>
               <th className="p-2">Operación</th>
+              <th className="p-2">Empresa</th>
               <th className="p-2">Depósitos</th>
               <th className="p-2">OS</th>
               <th className="p-2">Equipo</th>
@@ -946,12 +964,12 @@ export default function BejermanSync() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={12} className="p-4 text-center text-gray-500">Cargando...</td>
+                <td colSpan={13} className="p-4 text-center text-gray-500">Cargando...</td>
               </tr>
             )}
             {!loading && rows.length === 0 && (
               <tr>
-                <td colSpan={12} className="p-4 text-center text-gray-500">Sin operaciones.</td>
+                <td colSpan={13} className="p-4 text-center text-gray-500">Sin operaciones.</td>
               </tr>
             )}
             {!loading && rows.map((row) => {
@@ -979,6 +997,7 @@ export default function BejermanSync() {
                     </td>
                     <td className="p-2"><StatusBadge status={row.status} /></td>
                     <td className="p-2">{TYPE_LABELS[row.sync_type] || row.sync_type}</td>
+                    <td className="p-2 whitespace-nowrap">{row.company_label || row.company_key || "-"}</td>
                     <td className="p-2 whitespace-nowrap">{row.source_deposit} → {row.target_deposit}</td>
                     <td className="p-2">
                       <Link className="text-blue-700 hover:underline" to={`/ingresos/${row.ingreso_id}`}>
@@ -1037,7 +1056,7 @@ export default function BejermanSync() {
                   {isOpen && (
                     <tr className="border-t border-gray-100 bg-gray-50/60">
                       <td></td>
-                      <td colSpan={11} className="p-3">
+                      <td colSpan={12} className="p-3">
                         <ArticleResolutionPanel
                           row={row}
                           canManage={canManage}

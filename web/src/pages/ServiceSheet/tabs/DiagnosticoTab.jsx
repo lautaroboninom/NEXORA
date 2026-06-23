@@ -6,7 +6,6 @@ import Row from "../../../components/Row";
 import { RESOLUCION, RESOLUCION_OPTIONS, ESTADO } from "../../../lib/constants";
 import {
   deleteAccesorioIngreso,
-  getBlob,
   getQuote,
   postAccesorioIngreso,
   postCerrarReparacion,
@@ -87,6 +86,7 @@ export default function DiagnosticoTab({
   setShowReparadoToast,
   savingDiag,
   canManagePhotos,
+  onOpenReleaseModal,
 }) {
   const [addingAcc, setAddingAcc] = useState(false);
   const [deletingAccId, setDeletingAccId] = useState(null);
@@ -161,14 +161,13 @@ export default function DiagnosticoTab({
       setSavingResol(true);
       await postCerrarReparacion(id, payload);
       await refreshIngreso();
-      try {
-        const blob = await getBlob(`/api/ingresos/${id}/remito/`);
-        if (blob instanceof Blob) {
-          const url = URL.createObjectURL(blob);
-          window.open(url, "_blank", "noopener");
-          setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        }
-      } catch {}
+      onOpenReleaseModal?.({
+        ...data,
+        resolucion: payload.resolucion,
+        serial_cambio: payload.serial_cambio ?? data?.serial_cambio,
+        presupuesto_rechazado_cobro_neto:
+          payload.presupuesto_rechazado_cobro_neto ?? data?.presupuesto_rechazado_cobro_neto,
+      });
       setErr("");
       return true;
     } catch (e) {
@@ -581,7 +580,7 @@ export default function DiagnosticoTab({
       <RejectedBudgetChargeModal
         open={rejectedChargeModalOpen}
         title="Cobro del presupuesto rechazado"
-        confirmLabel="Guardar e imprimir orden de salida"
+        confirmLabel="Guardar y revisar salida"
         saving={savingResol}
         loading={rejectedChargeModalLoading}
         error={rejectedChargeModalError}

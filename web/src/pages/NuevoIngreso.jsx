@@ -7,6 +7,7 @@ import {
   getModelosByBrand,
   getTecnicos,
   postNuevoIngreso,
+  postNuevoIngresoLote,
   getMotivos,
   checkGarantiaReparacion,
   checkGarantiaFabrica,
@@ -16,16 +17,26 @@ import {
   getVariantesPorModelo,
   lookupScan,
   getBejermanIngressCompanies,
+  postRisPreflight,
+  postRisPreflightCustomerFix,
+  postRisPreflightArticleFix,
   postIngresoRisEmitir,
   getSerialBarcodeBlob,
 } from "@/lib/api";
-import { openPdfBlob, reservePdfWindow } from "@/lib/pdf";
+import { openPdfBlob } from "@/lib/pdf";
+import {
+  openRisPrintablePdf,
+  risRemitoFrom,
+  waitForRisPdfBlob,
+} from "@/lib/ris-print";
 import { useAuth } from "@/context/AuthContext";
-import { canAny, PERMISSION_CODES } from "@/lib/permissions";
+import { can, canAny, PERMISSION_CODES } from "@/lib/permissions";
 import RisProgressModal, {
   waitForRisProgressMinimum,
   waitForRisProgressPaint,
 } from "@/components/RisProgressModal";
+import RisPreflightPanel from "@/components/RisPreflightPanel";
+import BejermanPurchaseEntries from "./BejermanPurchaseEntries.jsx";
 
 const FIELD_BASE_CLASS =
   "border border-gray-300 bg-white rounded p-2 w-full text-[15px] font-semibold text-gray-900 placeholder:text-gray-400";
@@ -76,11 +87,60 @@ function clone(obj) {
   }
 }
 
+function cleanText(value) {
+  return String(value || "").trim();
+}
+
+function documentProfileFromResult(result) {
+  if (!result || typeof result !== "object") return null;
+  return (
+    result.document_profile ||
+    result.documentProfile ||
+    result.preview?.document_profile ||
+    result.preview?.documentProfile ||
+    null
+  );
+}
+
+function documentTypeFromResult(result, fallback = "RIS") {
+  return cleanText(documentProfileFromResult(result)?.type) || fallback;
+}
+
+function documentDisplayName(documentType, fallback = "remito") {
+  const type = cleanText(documentType);
+  if (!type || type.toLowerCase() === "remito") return fallback;
+  return `${fallback} ${type}`;
+}
+
+function hasDocumentProfileMismatch(result) {
+  return Array.isArray(result?.issues) && result.issues.some((issue) => issue?.code === "INGRESO_DOCUMENT_PROFILE_MISMATCH");
+}
+
 export default function NuevoIngreso() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useAuth();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const canCreateEquipmentIngreso = canAny(user, [
+    PERMISSION_CODES.ACTION_INGRESO_CREATE,
+    PERMISSION_CODES.PAGE_NEW_INGRESO,
+  ]);
+  const canMercaderiaIngreso = can(user, PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES);
+  const requestedIngresoTab = (searchParams.get("tab") || "").trim().toLowerCase();
+  const ingresoTab =
+    requestedIngresoTab === "mercaderia" && canMercaderiaIngreso
+      ? "mercaderia"
+      : requestedIngresoTab === "equipos" && canCreateEquipmentIngreso
+        ? "equipos"
+        : canCreateEquipmentIngreso
+          ? "equipos"
+          : "mercaderia";
+  const setIngresoTab = (tab) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", tab);
+    setSearchParams(next, { replace: true });
+    scrollPageTop();
+  };
   const canAutoOpenCreatedIngreso = canAny(user, [
     PERMISSION_CODES.PAGE_INGRESOS_HISTORY,
     PERMISSION_CODES.PAGE_WORK_QUEUES,
@@ -162,6 +222,7 @@ export default function NuevoIngreso() {
   const [accesCatalogo, setAccesCatalogo] = useState([]);
   const [nuevoAcc, setNuevoAcc] = useState({ descripcion: "", referencia: "" });
   const [accItems, setAccItems] = useState([]);
+  const [batchItems, setBatchItems] = useState([]);
 
   // Propietario y técnico
   const [propietario, setPropietario] = useState(PROPIETARIO_VACIO);
@@ -180,6 +241,12 @@ export default function NuevoIngreso() {
   const [out, setOut] = useState(null);
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
+  const [manualRisPrint, setManualRisPrint] = useState(null);
+  const [risMode, setRisMode] = useState("emit");
+  const [manualRemitoNumber, setManualRemitoNumber] = useState("");
+  const [risPreflight, setRisPreflight] = useState(null);
+  const [risPreflightLoading, setRisPreflightLoading] = useState(false);
+  const [risPreflightError, setRisPreflightError] = useState("");
   const [bejermanSuggestion, setBejermanSuggestion] = useState(null);
   const [barcodeLoading, setBarcodeLoading] = useState(false);
   const [dupPrompt, setDupPrompt] = useState({ open: false, ingresoId: null, fechaIngreso: null, os: "" });
@@ -200,10 +267,14 @@ export default function NuevoIngreso() {
   const nsAutoDesiredModelRef = useRef(null);
 
   // Helpers de clientes
-  const findClienteByRS = (v) =>
-    (clientes || []).find((c) => (c.razon_social || "").toLowerCase() === String(v || "").trim().toLowerCase());
+  const clienteKey = (v) => String(v || "").trim().toLowerCase();
+  const findClienteByRS = (v) => {
+    const needle = clienteKey(v);
+    if (!needle) return null;
+    return (clientes || []).find((c) => clienteKey(c.razon_social) === needle || clienteKey(c.alias_interno) === needle) || null;
+  };
   const findClienteByCod = (v) =>
-    (clientes || []).find((c) => String(c.cod_empresa || "").toLowerCase() === String(v || "").trim().toLowerCase());
+    (clientes || []).find((c) => clienteKey(c.cod_empresa) === clienteKey(v));
 
   function resolveCliente(rsVal, codVal) {
     const byRs = rsVal ? findClienteByRS(rsVal) : null;
@@ -430,6 +501,7 @@ export default function NuevoIngreso() {
       fecha_ingreso: "",
     });
     setAccItems([]);
+    setBatchItems([]);
     setTipoIngreso(TIPO_INGRESO.CLIENTE);
     setPropietario(PROPIETARIO_VACIO);
     setTecnicoId(null);
@@ -438,6 +510,10 @@ export default function NuevoIngreso() {
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
     setBejermanSuggestion(null);
+    setRisPreflight(null);
+    setRisPreflightError("");
+    setRisMode("emit");
+    setManualRemitoNumber("");
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
     nsAutofillSnapshotRef.current = null;
@@ -1083,8 +1159,9 @@ export default function NuevoIngreso() {
 
   // Handlers cliente
   function onClienteRsChange(v) {
-    setClienteRsInput(v);
     const c = findClienteByRS(v);
+    const nextRs = c?.razon_social || v;
+    setClienteRsInput(nextRs);
     if (isParticularCustomer(c)) {
       setTipoIngreso(TIPO_INGRESO.PARTICULAR);
     } else if (isParticularIngreso && c && !isParticularCustomer(c)) {
@@ -1093,7 +1170,7 @@ export default function NuevoIngreso() {
     }
     const nextCod = c?.cod_empresa || "";
     setClienteCodInput(nextCod);
-    syncClienteFromInputs(v, nextCod);
+    syncClienteFromInputs(nextRs, nextCod);
   }
 
   const applyBejermanSuggestion = () => {
@@ -1147,7 +1224,7 @@ export default function NuevoIngreso() {
     }
     try {
       setBarcodeLoading(true);
-      const blob = await getSerialBarcodeBlob(serial, { title: "Equipo" });
+      const blob = await getSerialBarcodeBlob(serial, { title: "" });
       openPdfBlob(blob);
     } catch (error) {
       setErr(error?.message || "No se pudo imprimir el código de barras");
@@ -1171,31 +1248,317 @@ export default function NuevoIngreso() {
     };
   };
 
+  const validateCurrentEquipmentForSubmit = () => {
+    if (!form.equipo.marca_id) return "Seleccione una marca válida de la lista.";
+    if (!form.equipo.modelo_id) return "Seleccione un modelo.";
+    if (!form.motivo) return "Seleccione un motivo.";
+    return "";
+  };
+
+  const validateSharedForSubmit = () => {
+    const c = resolveCliente(clienteRsInput, clienteCodInput);
+    if (!c?.id) {
+      return { ok: false, error: "Debe seleccionar un cliente válido de la lista." };
+    }
+    const clienteEsParticular = isParticularCustomer(c);
+    if (isParticularIngreso && !clienteEsParticular) {
+      return { ok: false, error: "Para un ingreso particular debe seleccionarse el cliente Particular." };
+    }
+    if (!isParticularIngreso && clienteEsParticular) {
+      return { ok: false, error: "Para usar el cliente Particular, seleccione el tipo Particular." };
+    }
+    const propietarioPayload = isParticularIngreso
+      ? {
+          nombre: (propietario.nombre || "").trim(),
+          contacto: (propietario.contacto || "").trim(),
+          doc: (propietario.doc || "").trim(),
+        }
+      : { ...PROPIETARIO_VACIO };
+    if (isParticularIngreso && (!propietarioPayload.nombre || !propietarioPayload.doc)) {
+      return {
+        ok: false,
+        error: "Para un ingreso particular es obligatorio completar nombre y CUIT del propietario.",
+      };
+    }
+    return { ok: true, c, propietarioPayload };
+  };
+
+  const buildIngresoPayload = (c, propietarioPayload, { includeShared = true } = {}) => {
+    const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
+    const payload = {
+      equipo: {
+        marca_id: Number(form.equipo.marca_id),
+        modelo_id: Number(form.equipo.modelo_id),
+        numero_serie: (form.equipo.numero_serie || "").trim(),
+        garantia: !!form.equipo.garantia,
+        numero_interno: (form.equipo.numero_interno || "").trim(),
+      },
+      equipo_variante: (varianteTxt || "").trim() || null,
+      motivo: form.motivo,
+      informe_preliminar: form.informe_preliminar,
+      comentarios: form.comentarios,
+      accesorios_items: accItems.map((it) => ({
+        accesorio_id: Number(it.accesorio_id),
+        referencia: (it.referencia || "").trim(),
+      })),
+      tecnico_id: tecnicoId ? Number(tecnicoId) : null,
+      garantia_reparacion: !!form.garantia_reparacion,
+      bejerman_sale: bejermanSalePayloadForSubmit(),
+      // Checkbox representa "fajas abiertas" => etiq_garantia_ok debe ser la negación
+      etiq_garantia_ok: !form.etiq_garantia_ok,
+    };
+    if (!includeShared) return payload;
+    return {
+      cliente: { id: c.id },
+      ...payload,
+      ...(fechaIngresoNorm ? { fecha_ingreso: fechaIngresoNorm } : {}),
+      propietario: propietarioPayload,
+      empresa_bejerman: (empresaBejerman || "SEPID").toUpperCase(),
+      empresa_facturar: (selectedBejermanCompany?.brandingKey || "SEPID").toUpperCase(),
+    };
+  };
+
+  const buildRisPreflightPayload = (items = batchItems) => {
+    const shared = validateSharedForSubmit();
+    if (!shared.ok) throw new Error(shared.error);
+    const sourceItems = Array.isArray(items) ? items : [];
+    if (sourceItems.length === 0) {
+      throw new Error("Agregue al menos un equipo a la lista para validar el remito.");
+    }
+    const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
+    return {
+      cliente: { id: shared.c.id },
+      propietario: shared.propietarioPayload,
+      empresa_bejerman: (empresaBejerman || "SEPID").toUpperCase(),
+      empresa_facturar: (selectedBejermanCompany?.brandingKey || "SEPID").toUpperCase(),
+      ris_mode: risMode,
+      manual_remito_number: risMode === "register" ? manualRemitoNumber.trim() : "",
+      ...(fechaIngresoNorm ? { fecha_ingreso: fechaIngresoNorm } : {}),
+      items: sourceItems.map((item) => item.payload),
+    };
+  };
+
+  const runRisPreflight = async ({ silent = false, items = batchItems } = {}) => {
+    setRisPreflightLoading(true);
+    setRisPreflightError("");
+    try {
+      const payload = buildRisPreflightPayload(items);
+      const result = await postRisPreflight(payload);
+      setRisPreflight(result);
+      if (result?.can_emit) {
+        setErr("");
+      } else if (silent) {
+        setErr(result?.detail || "La validación previa del remito encontró problemas.");
+      }
+      return result;
+    } catch (error) {
+      const detail = error?.data?.detail || error?.message || "No se pudo validar el remito.";
+      if (error?.data?.issues) {
+        setRisPreflight(error.data);
+      }
+      setRisPreflightError(detail);
+      if (silent) setErr(detail);
+      return null;
+    } finally {
+      setRisPreflightLoading(false);
+    }
+  };
+
+  const handleApplyRisCustomer = async (payload) => {
+    try {
+      setRisPreflightLoading(true);
+      setRisPreflightError("");
+      const result = await postRisPreflightCustomerFix(payload);
+      const rows = await getClientes();
+      setClientes(rows || []);
+      const updated = result?.customer || null;
+      if (updated && Number(updated.id) === Number(payload?.customer_id || payload?.customerId)) {
+        setClienteRsInput(updated.razon_social || "");
+        setClienteCodInput(updated.cod_empresa || "");
+        setForm((prev) => ({
+          ...prev,
+          cliente: {
+            id: updated.id || null,
+            razon_social: updated.razon_social || "",
+            cod_empresa: updated.cod_empresa || "",
+            telefono: updated.telefono || prev?.cliente?.telefono || "",
+          },
+        }));
+      }
+      await runRisPreflight();
+    } catch (error) {
+      setRisPreflightError(error?.data?.detail || error?.message || "No se pudo aplicar el cliente de Bejerman.");
+    } finally {
+      setRisPreflightLoading(false);
+    }
+  };
+
+  const handleApplyRisArticle = async (payload) => {
+    try {
+      setRisPreflightLoading(true);
+      setRisPreflightError("");
+      await postRisPreflightArticleFix(payload);
+      await runRisPreflight();
+    } catch (error) {
+      setRisPreflightError(error?.data?.detail || error?.message || "No se pudo aplicar el artículo.");
+    } finally {
+      setRisPreflightLoading(false);
+    }
+  };
+
+  const handleEditPreflightItem = (itemIndex) => {
+    const item = batchItems[itemIndex];
+    if (!item) return;
+    editBatchItem(item.id);
+    setRisPreflight(null);
+  };
+
+  const currentEquipmentDisplay = () => {
+    const modelo = (modelos || []).find((m) => String(m.id) === String(form.equipo.modelo_id));
+    const motivo = (motivos || []).find((m) => String(m.value) === String(form.motivo));
+    const serial = (form.equipo.numero_serie || "").trim();
+    const interno = (form.equipo.numero_interno || "").trim();
+    return {
+      serial: serial || interno || "Sin identificador",
+      equipo: [tipoSel, marcaTxt, modelo?.nombre, varianteTxt].filter(Boolean).join(" - ") || "Equipo",
+      motivo: motivo?.label || form.motivo || "-",
+      accesorios: accItems.map((it) => it.accesorio_nombre + (it.referencia ? ` (ref: ${it.referencia})` : "")),
+    };
+  };
+
+  const clearCurrentEquipmentFields = () => {
+    setMarcaTxt("");
+    setMarcaId(null);
+    setModelos([]);
+    setForm((prev) => ({
+      ...prev,
+      etiq_garantia_ok: false,
+      equipo: { marca_id: "", modelo_id: "", numero_serie: "", numero_interno: "", garantia: false },
+      motivo: "",
+      informe_preliminar: "",
+      comentarios: "",
+      garantia_reparacion: false,
+    }));
+    setAccItems([]);
+    setNuevoAcc({ descripcion: "", referencia: "" });
+    setTipoSel("");
+    setTecnicoId(null);
+    setVarianteTxt("");
+    setMgLookup({ loading: false, notFound: false, checkedNs: "" });
+    setMgInactiveInfo(null);
+    setBejermanSuggestion(null);
+    setNsAutofillInfo("");
+    setNsAutofillClienteWarning("");
+    nsAutofillSnapshotRef.current = null;
+    nsAutoDesiredBrandRef.current = null;
+    nsAutoDesiredModelRef.current = null;
+  };
+
+  const addCurrentEquipmentToBatch = async () => {
+    if (loading || risPreflightLoading) return;
+    scrollPageTop();
+    setErr("");
+    const equipmentError = validateCurrentEquipmentForSubmit();
+    if (equipmentError) {
+      setErr(equipmentError);
+      return;
+    }
+    const shared = validateSharedForSubmit();
+    if (!shared.ok) {
+      setErr(shared.error);
+      return;
+    }
+    const payload = buildIngresoPayload(shared.c, shared.propietarioPayload, { includeShared: false });
+    const display = currentEquipmentDisplay();
+    const nextItem = {
+      id: `${Date.now()}-${batchItems.length}`,
+      payload,
+      display,
+      editor: {
+        form: {
+          etiq_garantia_ok: form.etiq_garantia_ok,
+          equipo: { ...form.equipo },
+          motivo: form.motivo,
+          informe_preliminar: form.informe_preliminar,
+          comentarios: form.comentarios,
+          garantia_reparacion: form.garantia_reparacion,
+        },
+        marcaTxt,
+        marcaId,
+        tipoSel,
+        varianteTxt,
+        accItems: accItems.map((it) => ({ ...it })),
+        tecnicoId,
+        bejermanSuggestion,
+      },
+    };
+    const nextItems = [...batchItems, nextItem];
+    setRisPreflightError("");
+    const nextPreflight = await runRisPreflight({ silent: false, items: nextItems });
+    if (hasDocumentProfileMismatch(nextPreflight)) {
+      setErr(nextPreflight?.detail || "El lote mezcla comprobantes de ingreso incompatibles.");
+      return;
+    }
+    setBatchItems(nextItems);
+    clearCurrentEquipmentFields();
+    const nextDocumentType = documentTypeFromResult(nextPreflight, risMode === "register" ? "remito" : "RIS");
+    setNotice(risMode === "register" ? "Equipo agregado al remito." : `Equipo agregado al ${documentDisplayName(nextDocumentType)}.`);
+    if (risMode === "register" && !manualRemitoNumber.trim()) {
+      setRisPreflight(null);
+      return;
+    }
+    if (!nextPreflight) await runRisPreflight({ silent: true, items: nextItems });
+  };
+
+  const removeBatchItem = (itemId) => {
+    setRisPreflight(null);
+    setRisPreflightError("");
+    setBatchItems((items) => items.filter((item) => item.id !== itemId));
+  };
+
+  const editBatchItem = (itemId) => {
+    const item = batchItems.find((entry) => entry.id === itemId);
+    if (!item) return;
+    const editor = item.editor || {};
+    setForm((prev) => ({
+      ...prev,
+      ...(editor.form || {}),
+      cliente: prev.cliente,
+      remito_ingreso: prev.remito_ingreso,
+      fecha_ingreso: prev.fecha_ingreso,
+    }));
+    setMarcaTxt(editor.marcaTxt || "");
+    setMarcaId(editor.marcaId || null);
+    setTipoSel(editor.tipoSel || "");
+    setVarianteTxt(editor.varianteTxt || "");
+    setAccItems((editor.accItems || []).map((it) => ({ ...it })));
+    setTecnicoId(editor.tecnicoId || null);
+    setBejermanSuggestion(editor.bejermanSuggestion || null);
+    setRisPreflight(null);
+    setRisPreflightError("");
+    removeBatchItem(itemId);
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     scrollPageTop();
+    const hasBatchItems = batchItems.length > 0;
+    const isRegisterMode = risMode === "register";
+    if (!hasBatchItems) {
+      setErr(isRegisterMode ? "Agregue el equipo a la lista antes de registrar el remito." : "Agregue el equipo a la lista antes de emitir el remito.");
+      return;
+    }
+    if (isRegisterMode && !manualRemitoNumber.trim()) {
+      setErr("Cargue el número de remito manual.");
+      return;
+    }
     setLoading(true);
-    setSubmitStage("Guardando ingreso...");
+    setSubmitStage("Creando ingresos...");
     setErr("");
     setOut(null);
     setNotice("");
+    setManualRisPrint(null);
     setDupPrompt({ open: false, ingresoId: null, fechaIngreso: null, os: "" });
-
-    if (!form.equipo.marca_id) {
-      setLoading(false);
-      setErr("Seleccione una marca válida de la lista.");
-      return;
-    }
-    if (!form.equipo.modelo_id) {
-      setLoading(false);
-      setErr("Seleccione un modelo.");
-      return;
-    }
-    if (!form.motivo) {
-      setLoading(false);
-      setErr("Seleccione un motivo.");
-      return;
-    }
 
     const c = resolveCliente(clienteRsInput, clienteCodInput);
     if (!c?.id) {
@@ -1228,33 +1591,78 @@ export default function NuevoIngreso() {
       return;
     }
 
-    let risPdfWindow = null;
-    let risPdfOpened = false;
-    risPdfWindow = reservePdfWindow({
-      title: "REMITO",
-      message: "Preparando RIS...",
-    });
-
-    const mgInput = (form.equipo.numero_interno || "").trim();
-    if (mgInput) {
-      try {
-        const scanMg = await lookupScan(mgInput);
-        if (scanMg?.kind === "device" && scanMg?.flags?.mg_inactivo_venta) {
-          setMgInactiveInfo({
-            numero_interno: scanMg?.device?.numero_interno || mgInput,
-            msg: "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
-          });
-          risPdfWindow?.close();
-          setLoading(false);
-          setErr("MG histórico inactivo por venta; no operativo para nuevos ingresos.");
-          return;
-        }
-      } catch {
-        // Si falla la validación online, backend vuelve a validar en el submit.
-      }
+    setSubmitStage("Validando remito...");
+    const preflight = await runRisPreflight({ silent: true });
+    if (!preflight?.can_emit) {
+      setLoading(false);
+      setSubmitStage("");
+      return;
     }
 
     try {
+      if (hasBatchItems) {
+        const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
+        const lotePayload = {
+          cliente: { id: c.id },
+          propietario: propietarioPayload,
+          empresa_bejerman: (empresaBejerman || "SEPID").toUpperCase(),
+          empresa_facturar: (selectedBejermanCompany?.brandingKey || "SEPID").toUpperCase(),
+          ris_mode: risMode,
+          manual_remito_number: isRegisterMode ? manualRemitoNumber.trim() : "",
+          ...(fechaIngresoNorm ? { fecha_ingreso: fechaIngresoNorm } : {}),
+          items: batchItems.map((item) => item.payload),
+        };
+        const risProgressStartedAt = Date.now();
+        setSubmitStage(isRegisterMode ? "Creando ingresos y registrando remito..." : "Creando ingresos...");
+        await waitForRisProgressPaint();
+        const r = await postNuevoIngresoLote(lotePayload);
+        setSubmitStage(isRegisterMode ? "Registrando remito..." : "Preparando PDF...");
+        const remito = risRemitoFrom(r);
+        const responseMode = r?.document_mode || r?.ris?.document_mode || risMode;
+        const isRegisteredResponse = responseMode === "register";
+        const count = Array.isArray(r?.ingresos) ? r.ingresos.length : batchItems.length;
+        const firstIngresoId = r?.ingreso_ids?.[0] || r?.ingresos?.[0]?.ingreso_id || r?.ingresos?.[0]?.id;
+        let risNotice = isRegisteredResponse
+          ? (
+              remito
+                ? `Ingresos creados y remito ${remito} registrado en Bejerman para ${count} ${count === 1 ? "equipo" : "equipos"}.`
+                : r?.detail || `Ingresos creados y remito registrado en Bejerman para ${count} ${count === 1 ? "equipo" : "equipos"}.`
+            )
+          : (
+              remito
+                ? `Ingresos creados y remito ${remito} emitido para ${count} ${count === 1 ? "equipo" : "equipos"}.`
+                : r?.detail || `Ingresos creados para ${count} ${count === 1 ? "equipo" : "equipos"}. Remito pendiente de reintento.`
+            );
+        if (!isRegisteredResponse && remito && firstIngresoId) {
+          try {
+            const blob = await waitForRisPdfBlob(firstIngresoId, r, {
+              onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
+            });
+            setSubmitStage("Abriendo impresión...");
+            const opened = openRisPrintablePdf(blob, r).opened;
+            if (opened) {
+              risNotice += " PDF listo para imprimir.";
+            } else {
+              setManualRisPrint({ blob, source: r, remito });
+              risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
+            }
+          } catch (pdfError) {
+            risNotice += ` No se pudo abrir el PDF del remito: ${pdfError?.message || "error desconocido"}. Reintente desde una hoja de servicio.`;
+          }
+        }
+        await waitForRisProgressMinimum(risProgressStartedAt);
+        resetFormFields();
+        setOut({
+          lote: true,
+          ingresos: r?.ingresos || [],
+          ingreso_ids: r?.ingreso_ids || [],
+          remito_number: remito,
+          document_mode: responseMode,
+        });
+        setNotice(risNotice);
+        return;
+      }
+
       const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
       const payload = {
         cliente: { id: c.id },
@@ -1299,20 +1707,27 @@ export default function NuevoIngreso() {
       if (r?.ingreso_id) {
         const risProgressStartedAt = Date.now();
         try {
-          setSubmitStage("Emitiendo RIS en Bejerman...");
+          setSubmitStage("Emitiendo remito en Bejerman...");
           await waitForRisProgressPaint();
           const risResult = await postIngresoRisEmitir(r.ingreso_id);
           setSubmitStage("Preparando PDF...");
-          risPdfOpened = risPdfWindow.openUrl(risResult?.print_url);
-          const remito = risResult?.remito_number || risResult?.ris?.remito_number || "";
+          const remito = risRemitoFrom(risResult);
           risNotice = remito
-            ? `Ingreso creado y RIS ${remito} emitido. Preparando PDF para imprimir.`
-            : "Ingreso creado y RIS emitido. Preparando PDF para imprimir.";
-          if (!risPdfOpened) {
-            risNotice += " El navegador bloqueó la ventana de impresión; reimprima desde la hoja de servicio.";
+            ? `Ingreso creado y remito ${remito} emitido.`
+            : "Ingreso creado y remito emitido.";
+          const blob = await waitForRisPdfBlob(r.ingreso_id, risResult, {
+            onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
+          });
+          setSubmitStage("Abriendo impresión...");
+          const opened = openRisPrintablePdf(blob, risResult).opened;
+          if (opened) {
+            risNotice += " PDF listo para imprimir.";
+          } else {
+            setManualRisPrint({ blob, source: risResult, remito });
+            risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
           }
         } catch (risError) {
-          risNotice = `Ingreso creado. No se pudo emitir o abrir el RIS: ${risError?.message || "error desconocido"}. Reintente desde la hoja de servicio.`;
+          risNotice = `Ingreso creado. No se pudo emitir o abrir el remito: ${risError?.message || "error desconocido"}. Reintente desde la hoja de servicio.`;
         } finally {
           await waitForRisProgressMinimum(risProgressStartedAt);
         }
@@ -1330,11 +1745,32 @@ export default function NuevoIngreso() {
         setErr("MG histórico inactivo por venta; no operativo para nuevos ingresos.");
         return;
       }
+      if (Array.isArray(e2?.data?.issues)) {
+        setRisPreflight(e2.data);
+        setErr(e2?.data?.detail || "La validación previa del remito encontró problemas.");
+        return;
+      }
+      if (Number.isInteger(e2?.data?.item_index)) {
+        const itemNumber = e2.data.item_index + 1;
+        setErr(`Equipo #${itemNumber}: ${e2?.data?.detail || e2?.message || "Error creando ingreso"}`);
+        return;
+      }
       setErr(e2?.message || "Error creando ingreso");
     } finally {
-      if (!risPdfOpened) risPdfWindow?.close();
       setLoading(false);
       setSubmitStage("");
+    }
+  };
+
+  const abrirRisManualPendiente = () => {
+    if (!manualRisPrint?.blob) return;
+    const opened = openRisPrintablePdf(manualRisPrint.blob, manualRisPrint.source || {}).opened;
+    if (opened) {
+      setManualRisPrint(null);
+      setErr("");
+      setNotice(manualRisPrint.remito ? `Remito ${manualRisPrint.remito} listo para imprimir.` : "Remito listo para imprimir.");
+    } else {
+      setErr("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
     }
   };
 
@@ -1355,17 +1791,88 @@ export default function NuevoIngreso() {
     closeDupPrompt();
   };
   const risProgressOpen = loading && !!submitStage;
-  const risProgressStatus = submitStage || "Emitiendo RIS en Bejerman";
-  const risProgressTitle = risProgressStatus.toLowerCase().includes("guardando") ? "Creando ingreso" : "Emitiendo RIS";
+  const risProgressStatus = submitStage || "Emitiendo remito en Bejerman";
+  const risProgressTitle = risProgressStatus.toLowerCase().includes("validando")
+    ? "Validando remito"
+    : risProgressStatus.toLowerCase().includes("guardando") || risProgressStatus.toLowerCase().includes("creando")
+      ? "Creando ingreso"
+      : "Emitiendo remito";
+  const isRegisterMode = risMode === "register";
+  const resolvedDocumentType = documentTypeFromResult(risPreflight, isRegisterMode ? "remito" : "RIS");
+  const documentActionLabel = isRegisterMode ? "Registrar remito" : "Emitir remito";
+  const documentLabel = resolvedDocumentType;
+  const manualRemitoReady = !isRegisterMode || manualRemitoNumber.trim().length > 0;
+  const canEmitRisBatch = batchItems.length > 0 && risPreflight?.can_emit === true;
+  const submitDisabled =
+    loading ||
+    risPreflightLoading ||
+    !canSubmitCliente ||
+    !manualRemitoReady ||
+    !canEmitRisBatch;
+  const submitButtonText = loading
+    ? submitStage || "Guardando..."
+    : batchItems.length > 0
+      ? documentActionLabel
+      : `Agregue equipos para ${isRegisterMode ? "registrar remito" : "emitir remito"}`;
+  const outIngresoCount = out?.lote
+    ? (Array.isArray(out.ingresos) ? out.ingresos.length : out.ingreso_ids?.length || 0)
+    : 0;
+  const outFirstIngresoId = out?.lote
+    ? out?.ingreso_ids?.[0] || out?.ingresos?.[0]?.ingreso_id || out?.ingresos?.[0]?.id
+    : out?.ingreso_id;
+  const updateRisMode = (nextMode) => {
+    setRisMode(nextMode);
+    setRisPreflight(null);
+    setRisPreflightError("");
+  };
+  const updateManualRemitoNumber = (value) => {
+    setManualRemitoNumber(value);
+    setRisPreflight(null);
+    setRisPreflightError("");
+  };
 
   return (
-    <div className="max-w-5xl mx-auto lg:mx-0 p-4 space-y-4">
+    <div className="mx-auto max-w-[1600px] space-y-4 p-2 sm:p-3 md:p-4 lg:mx-0">
       <RisProgressModal
         open={risProgressOpen}
         title={risProgressTitle}
         status={risProgressStatus}
       />
-      <h1 className="text-2xl font-bold">Nuevo Ingreso (Orden de Servicio)</h1>
+      <h1 className="text-2xl font-bold">Nuevo ingreso</h1>
+
+      {(canCreateEquipmentIngreso || canMercaderiaIngreso) && (
+        <div className="flex flex-wrap gap-2 border-b border-gray-200">
+          {canCreateEquipmentIngreso && (
+            <button
+              type="button"
+              className={`border-b-2 px-4 py-2 text-sm font-semibold ${
+                ingresoTab === "equipos"
+                  ? "border-blue-600 text-blue-700"
+                  : "border-transparent text-gray-600 hover:text-gray-900"
+              }`}
+              onClick={() => setIngresoTab("equipos")}
+            >
+              Equipos
+            </button>
+          )}
+          {canMercaderiaIngreso && (
+            <button
+              type="button"
+              className={`border-b-2 px-4 py-2 text-sm font-semibold ${
+                ingresoTab === "mercaderia"
+                  ? "border-emerald-600 text-emerald-700"
+                  : "border-transparent text-gray-600 hover:text-gray-900"
+              }`}
+              onClick={() => setIngresoTab("mercaderia")}
+            >
+              Mercadería
+            </button>
+          )}
+        </div>
+      )}
+
+      {ingresoTab === "equipos" && canCreateEquipmentIngreso ? (
+        <>
 
       {dupPrompt.open && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -1403,23 +1910,43 @@ export default function NuevoIngreso() {
       {err && (
         <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded">{err}</div>
       )}
+      {manualRisPrint?.blob && (
+        <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900">
+          <div className="text-sm">El PDF del remito está listo. Si no se abrió automáticamente, imprímalo desde este botón.</div>
+          <button
+            type="button"
+            onClick={abrirRisManualPendiente}
+            className="mt-2 rounded bg-amber-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-800"
+          >
+            Abrir e imprimir remito
+          </button>
+        </div>
+      )}
       {out && (
         <div className="bg-green-100 border border-green-300 text-green-700 p-2 rounded flex flex-wrap items-center gap-2">
-          <span>
-            Ingreso creado: <b>{out.os}</b> (ID: {out.ingreso_id})
-          </span>
-          {out.ingreso_id && canViewCreatedIngreso && (
+          {out.lote ? (
+            <span>
+              {outIngresoCount} {outIngresoCount === 1 ? "ingreso creado" : "ingresos creados"}
+              {out.remito_number ? <> con remito <b>{out.remito_number}</b></> : null}
+            </span>
+          ) : (
+            <span>
+              Ingreso creado: <b>{out.os}</b> (ID: {out.ingreso_id})
+            </span>
+          )}
+          {outFirstIngresoId && canViewCreatedIngreso && (
             <Link
-              to={`/ingresos/${out.ingreso_id}`}
+              to={`/ingresos/${outFirstIngresoId}`}
               className="font-semibold underline underline-offset-2 hover:text-green-900"
             >
-              Ver ingreso
+              {out.lote ? "Ver primer ingreso" : "Ver ingreso"}
             </Link>
           )}
         </div>
       )}
 
-      <form onSubmit={submit} className="space-y-6">
+      <form onSubmit={submit} className="grid gap-4 2xl:grid-cols-[minmax(0,920px)_420px] 2xl:items-start">
+        <div className="min-w-0 space-y-6">
         {nsAutofillInfo && (
           <div className="bg-indigo-50 border border-indigo-200 text-indigo-800 p-2 rounded text-sm">
             {nsAutofillInfo}
@@ -1638,7 +2165,10 @@ export default function NuevoIngreso() {
               {clientesPerm && (
                 <datalist id="clientes_rs">
                   {clientesIngreso.map((c) => (
-                    <option key={c.id} value={c.razon_social} />
+                    <option key={`rs-${c.id}`} value={c.razon_social} label={[c.alias_interno, c.cod_empresa].filter(Boolean).join(" - ")} />
+                  ))}
+                  {clientesIngreso.filter((c) => c.alias_interno).map((c) => (
+                    <option key={`alias-${c.id}`} value={c.alias_interno} label={c.razon_social} />
                   ))}
                 </datalist>
               )}
@@ -1795,18 +2325,13 @@ export default function NuevoIngreso() {
           <legend className="px-2 font-semibold">Ingreso</legend>
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-3">
-              <label className={FIELD_LABEL_CLASS}>Número de remito</label>
-              <Input value={form.remito_ingreso} onChange={onChange("remito_ingreso")} placeholder="Se completa al emitir RIS" />
-              <div className="text-xs text-gray-500 mt-1">No es obligatorio para crear el ingreso.</div>
-            </div>
-            <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Fecha de ingreso</label>
               <Input type="date" value={form.fecha_ingreso} onChange={onChange("fecha_ingreso")} />
               <div className="text-xs text-gray-500 mt-1">Si se deja vacío, se usa la fecha de hoy.</div>
             </div>
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Motivo</label>
-              <Select value={form.motivo} onChange={onChange("motivo")} required>
+              <Select value={form.motivo} onChange={onChange("motivo")}>
                 <option value="">Seleccione motivo</option>
                 {motivos.map((m) => (
                   <option key={m.value} value={m.value}>
@@ -1873,19 +2398,158 @@ export default function NuevoIngreso() {
           </div>
         </fieldset>
 
-        <div className="flex justify-end gap-3">
+        <div className="flex flex-col gap-3 border-t pt-4 md:flex-row md:items-center md:justify-between">
+          <div className="text-sm text-gray-600">
+            {batchItems.length > 0
+              ? `${batchItems.length} ${batchItems.length === 1 ? "equipo cargado" : "equipos cargados"} para ${isRegisterMode ? "registrar en un solo remito" : `emitir en un solo ${documentLabel}`}.`
+              : `Puede cargar varios equipos antes de ${isRegisterMode ? "registrar el remito" : `emitir el ${documentLabel}`}.`}
+          </div>
           <button
-            disabled={loading || !canSubmitCliente || !marcaId || !form.equipo.modelo_id || !form.motivo}
-            className={`px-4 py-2 rounded text-white ${
-              loading || !canSubmitCliente || !marcaId || !form.equipo.modelo_id || !form.motivo
-                ? "bg-blue-400 cursor-not-allowed"
-                : "bg-blue-600"
+            type="button"
+            disabled={loading || risPreflightLoading || !canSubmitCliente}
+            className={`px-4 py-2 rounded border text-sm font-semibold ${
+              loading || risPreflightLoading || !canSubmitCliente
+                ? "border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed"
+                : "border-blue-600 text-blue-700 hover:bg-blue-50"
             }`}
+            onClick={addCurrentEquipmentToBatch}
           >
-            {loading ? submitStage || "Guardando..." : "Crear ingreso y emitir RIS"}
+            {risPreflightLoading ? `Validando ${documentLabel}...` : "Agregar equipo"}
           </button>
         </div>
+        </div>
+
+        <aside className="space-y-3 rounded border border-gray-200 bg-white p-3 shadow-sm 2xl:sticky 2xl:top-4">
+          <section className="rounded border border-gray-200 bg-white">
+            <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2">
+              <h2 className="text-sm font-semibold text-gray-800">
+                {isRegisterMode ? "Equipos en remito" : `Equipos en ${documentLabel}`}
+              </h2>
+              <span className="text-xs font-semibold text-gray-500">
+                {batchItems.length} {batchItems.length === 1 ? "equipo" : "equipos"}
+              </span>
+            </div>
+            {batchItems.length === 0 ? (
+              <div className="px-3 py-4 text-sm text-gray-500">
+                Agregue al menos un equipo a la lista para habilitar {isRegisterMode ? "la registración del remito" : "la emisión del remito"}.
+              </div>
+            ) : (
+              <div className="max-h-[420px] divide-y divide-gray-100 overflow-y-auto">
+                {batchItems.map((item, index) => (
+                  <div key={item.id} className="grid grid-cols-1 gap-3 px-3 py-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold text-gray-500">#{index + 1}</span>
+                        <span className="font-semibold text-gray-900">{item.display.serial}</span>
+                      </div>
+                      <div className="mt-1 text-sm text-gray-700">{item.display.equipo}</div>
+                      <div className="mt-1 text-sm text-gray-600">
+                        Motivo: {item.display.motivo}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        Accesorios: {item.display.accesorios.length > 0 ? item.display.accesorios.join(", ") : "sin accesorios"}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className="rounded border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                        onClick={() => editBatchItem(item.id)}
+                      >
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50"
+                        onClick={() => removeBatchItem(item.id)}
+                      >
+                        Quitar
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="rounded border border-gray-200 bg-white p-3">
+            <div className="flex flex-col gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-800">Remito de ingreso</h2>
+                <div className="mt-1 text-xs text-gray-600">
+                  {isRegisterMode
+                    ? "Use esta opción cuando el remito manual ya fue hecho y solo debe registrarse en Bejerman."
+                    : "NEXORA emitirá el remito correspondiente en Bejerman y abrirá el PDF para imprimir."}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 overflow-hidden rounded border border-gray-300">
+                <button
+                  type="button"
+                  className={`px-3 py-2 text-sm font-semibold ${
+                    !isRegisterMode ? "bg-blue-700 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                  onClick={() => updateRisMode("emit")}
+                  aria-pressed={!isRegisterMode}
+                >
+                  Emitir remito
+                </button>
+                <button
+                  type="button"
+                  className={`border-l border-gray-300 px-3 py-2 text-sm font-semibold ${
+                    isRegisterMode ? "bg-blue-700 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                  onClick={() => updateRisMode("register")}
+                  aria-pressed={isRegisterMode}
+                >
+                  Registrar remito
+                </button>
+              </div>
+              {isRegisterMode && (
+                <div>
+                  <label className={FIELD_LABEL_CLASS}>Número de remito manual</label>
+                  <Input
+                    value={manualRemitoNumber}
+                    onChange={(event) => updateManualRemitoNumber(event.target.value)}
+                    placeholder="Ej: 26249"
+                  />
+                  <div className="mt-1 text-xs text-gray-500">
+                    Se registrará como remito manual según la configuración de ingreso.
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <RisPreflightPanel
+            result={risPreflight}
+            loading={risPreflightLoading}
+            error={risPreflightError}
+            onValidate={() => runRisPreflight()}
+            onApplyCustomer={handleApplyRisCustomer}
+            onApplyArticle={handleApplyRisArticle}
+            onEditItem={handleEditPreflightItem}
+            disabled={loading || batchItems.length === 0}
+            documentLabel={documentLabel}
+            actionLabel={documentActionLabel}
+          />
+
+          <button
+            type="submit"
+            disabled={submitDisabled}
+            className={`w-full rounded px-4 py-2 text-white ${
+              submitDisabled
+                ? "bg-blue-400 cursor-not-allowed"
+                : "bg-blue-600 hover:bg-blue-700"
+            }`}
+          >
+            {submitButtonText}
+          </button>
+        </aside>
       </form>
+        </>
+      ) : (
+        <BejermanPurchaseEntries embedded />
+      )}
     </div>
   );
 }

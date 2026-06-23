@@ -65,6 +65,12 @@ Manual de NEXORA
 - Requiere tabla: `python manage.py apply_presupuesto_alerts_schema`.
 - Scheduling: ejecutar diario via cron/Task Scheduler (ej. 03:00).
 
+### Alertas de facturación pendiente (Cobranzas)
+- Aviso inmediato: cuando un remito queda pendiente de facturación se notifica a usuarios activos con rol `cobranzas` y preferencia habilitada.
+- Resumen diario: `python manage.py send_billing_pending_notifications [--dry-run] [--limit 50]`.
+- Destinatarios: usuarios activos con rol `cobranzas`, email cargado y notificación `billing_pending_summary` habilitada.
+- Scheduling: ejecutar diario via cron/Task Scheduler, mismo patrón que presupuestos.
+
 ### Mantenimientos preventivos (`/equipos`)
 - UX:
   - La pantalla `/equipos` tiene 3 pestañas: `Equipos`, `Mantenimientos preventivos`, `Instituciones`.

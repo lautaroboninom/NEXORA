@@ -126,6 +126,7 @@ class DevicesListViewAPITest(TestCase):
             cur.execute("DELETE FROM devices")
             cur.execute("DELETE FROM models")
             cur.execute("DELETE FROM marcas")
+            cur.execute("DELETE FROM locations")
             cur.execute("DELETE FROM customers")
             cur.execute("DELETE FROM user_permission_overrides")
         User.objects.all().delete()
@@ -157,8 +158,17 @@ class DevicesListViewAPITest(TestCase):
                 [cls.marca_id, "CPAP G3", "CPAP", "Elite"],
             )
             cls.model_id = cls._last_id(cur)
+            cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["Longfian"])
+            cls.marca_oxi_id = cls._last_id(cur)
+            cur.execute(
+                "INSERT INTO models(marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s)",
+                [cls.marca_oxi_id, "JAY-5", "Concentrador", "5L"],
+            )
+            cls.model_oxi_id = cls._last_id(cur)
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
             cls.location_id = cls._last_id(cur)
+            cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Depósito"])
+            cls.location_deposito_id = cls._last_id(cur)
             cur.execute(
                 """
                 INSERT INTO devices(
@@ -183,6 +193,45 @@ class DevicesListViewAPITest(TestCase):
             cls.device_id = cls._last_id(cur)
             cur.execute(
                 """
+                INSERT INTO devices(
+                    customer_id, marca_id, model_id, numero_serie, numero_interno,
+                    tipo_equipo, variante, ubicacion_id,
+                    propietario_nombre, propietario_contacto, propietario_doc,
+                    alquilado, alquiler_a
+                ) VALUES (%s,%s,%s,%s,%s,NULL,NULL,%s,'','','',false,'')
+                """,
+                [
+                    cls.customer_cli_id,
+                    cls.marca_id,
+                    cls.model_id,
+                    "SER-MG-003",
+                    "MG 0003",
+                    cls.location_id,
+                ],
+            )
+            cls.device_mg_id = cls._last_id(cur)
+            cur.execute(
+                """
+                INSERT INTO devices(
+                    customer_id, marca_id, model_id, numero_serie, numero_interno,
+                    tipo_equipo, variante, ubicacion_id,
+                    propietario_nombre, propietario_contacto, propietario_doc,
+                    alquilado, alquiler_a
+                ) VALUES (%s,%s,%s,%s,%s,NULL,NULL,%s,'','','',true,%s)
+                """,
+                [
+                    cls.customer_cli_id,
+                    cls.marca_oxi_id,
+                    cls.model_oxi_id,
+                    "SER-OXI-002",
+                    "",
+                    cls.location_deposito_id,
+                    "Clinica Demo",
+                ],
+            )
+            cls.device_oxi_id = cls._last_id(cur)
+            cur.execute(
+                """
                 INSERT INTO ingresos(device_id, estado, motivo, fecha_ingreso, ubicacion_id)
                 VALUES (%s,%s,%s, CURRENT_TIMESTAMP, %s)
                 """,
@@ -193,6 +242,12 @@ class DevicesListViewAPITest(TestCase):
         super().setUp()
         self.client = APIClient()
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+    def _list_ids(self, **params):
+        query = {"page_size": 20, **params}
+        resp = self.client.get("/api/equipos/", query)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return {int(item.get("id") or 0) for item in (resp.data.get("items") or [])}
 
     def test_devices_list_uses_model_type_and_variant_when_device_is_blank(self):
         resp = self.client.get("/api/equipos/?page_size=20")
@@ -210,6 +265,28 @@ class DevicesListViewAPITest(TestCase):
         self.assertEqual(device.get("tipo_equipo"), "CPAP")
         self.assertEqual(device.get("variante"), "Elite")
 
+    def test_admin_can_create_direct_device_with_default_permissions(self):
+        resp = self.client.post(
+            "/api/devices/alta-directa/",
+            {
+                "customer_id": self.customer_cli_id,
+                "marca_id": self.marca_id,
+                "model_id": self.model_id,
+                "numero_serie": "SER-CPAP-ADM-002",
+                "numero_interno": "",
+                "tipo_equipo": "CPAP",
+                "variante": "Elite",
+                "ubicacion_id": self.location_id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        device = resp.data.get("device") or {}
+        self.assertEqual(device.get("customer_id"), self.customer_cli_id)
+        self.assertEqual(device.get("numero_serie"), "SER-CPAP-ADM-002")
+        self.assertEqual(device.get("tipo_equipo"), "CPAP")
+
     def test_devices_list_search_matches_owner_name_and_variant(self):
         resp_owner = self.client.get("/api/equipos/?page_size=20&q=Juan Perez")
         self.assertEqual(resp_owner.status_code, 200)
@@ -220,3 +297,37 @@ class DevicesListViewAPITest(TestCase):
         self.assertEqual(resp_variant.status_code, 200)
         variant_ids = {int(item.get("id") or 0) for item in (resp_variant.data.get("items") or [])}
         self.assertIn(self.device_id, variant_ids)
+
+    def test_devices_list_filters_by_catalog_fields(self):
+        cpap_ids = self._list_ids(tipo_equipo="CPAP")
+        self.assertIn(self.device_id, cpap_ids)
+        self.assertIn(self.device_mg_id, cpap_ids)
+        self.assertNotIn(self.device_oxi_id, cpap_ids)
+
+        marca_ids = self._list_ids(marca_id=self.marca_oxi_id)
+        self.assertEqual(marca_ids, {self.device_oxi_id})
+
+        modelo_ids = self._list_ids(modelo="JAY")
+        self.assertEqual(modelo_ids, {self.device_oxi_id})
+
+        variante_ids = self._list_ids(modelo="Elite")
+        self.assertIn(self.device_id, variante_ids)
+        self.assertIn(self.device_mg_id, variante_ids)
+        self.assertNotIn(self.device_oxi_id, variante_ids)
+
+        ubicacion_ids = self._list_ids(ubicacion_id=self.location_deposito_id)
+        self.assertEqual(ubicacion_ids, {self.device_oxi_id})
+
+        alquilado_ids = self._list_ids(alquilado="1")
+        self.assertEqual(alquilado_ids, {self.device_oxi_id})
+
+    def test_devices_list_filters_by_property(self):
+        mg_ids = self._list_ids(propiedad="mg")
+        self.assertIn(self.device_mg_id, mg_ids)
+        self.assertNotIn(self.device_id, mg_ids)
+        self.assertNotIn(self.device_oxi_id, mg_ids)
+
+        cliente_ids = self._list_ids(propiedad="cliente")
+        self.assertIn(self.device_id, cliente_ids)
+        self.assertIn(self.device_oxi_id, cliente_ids)
+        self.assertNotIn(self.device_mg_id, cliente_ids)

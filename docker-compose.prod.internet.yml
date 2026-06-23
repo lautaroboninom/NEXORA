@@ -64,6 +64,7 @@ services:
       bash -lc "python manage.py migrate --noinput && \
       python manage.py apply_ticket_sale_states_schema && \
       python manage.py apply_delivery_orders_schema && \
+      python manage.py apply_customer_alias_schema --seed-examples && \
       python manage.py apply_notifications_schema && \
       python manage.py apply_assignment_requests_schema && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
@@ -96,6 +97,7 @@ services:
       dockerfile: Dockerfile.prod
       args:
         - VITE_API_URL=
+        - VITE_SW=${VITE_SW:-1}
     container_name: nexora-web
     environment:
       - TZ=${TZ:-America/Argentina/Buenos_Aires}

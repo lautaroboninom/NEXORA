@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { getGeneralEquipos } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 export default function BuscarNS() {
   const [sp] = useSearchParams();
@@ -67,7 +68,33 @@ export default function BuscarNS() {
       {err && <div className="bg-red-100 text-red-700 border border-red-300 p-2 rounded">{err}</div>}
       {loading ? "Cargando..." :
         rows.length === 0 ? <div className="text-sm text-gray-500">No se encontraron ingresos con ese N° de serie o MG.</div> :
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {rows.map((r) => {
+              const ingresoId = r?.id;
+              return (
+                <MobileDataCard
+                  key={ingresoId}
+                  as="button"
+                  type="button"
+                  className="hover:bg-gray-50"
+                  onClick={() => nav(`/ingresos/${ingresoId}`)}
+                >
+                  <div className="font-semibold text-gray-900 underline">{formatOSHelper(r, "")}</div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Marca" value={r?.marca || "-"} />
+                    <MobileDataField label="Modelo" value={r?.modelo || "-"} />
+                    <MobileDataField label="Identificación">
+                      <DeviceIdentifier row={r} />
+                    </MobileDataField>
+                    <MobileDataField label="Tipo" value={tipoEquipoOf(r)} />
+                    <MobileDataField label="Fecha de ingreso" value={formatDateOnlyHelper(resolveFechaIngreso(r))} />
+                  </div>
+                </MobileDataCard>
+              );
+            })}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -100,6 +127,7 @@ export default function BuscarNS() {
               })}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">Mostrando {rows.length} ingreso(s).</div>
         </div>}
     </div>

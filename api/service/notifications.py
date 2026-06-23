@@ -1,9 +1,17 @@
 import json
 import logging
 from collections import OrderedDict
+from email.utils import parseaddr
 
+from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
+
+try:
+    from pywebpush import WebPushException, webpush
+except Exception:  # pragma: no cover - dependencia opcional hasta instalar requirements
+    WebPushException = Exception
+    webpush = None
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,20 @@ NOTIFICATION_CATALOG = [
         "default_roles": ["cobranzas"],
     },
     {
+        "key": "billing_pending_summary",
+        "label": "Resumen de facturación pendiente",
+        "description": "Resumen de remitos pendientes para Cobranzas.",
+        "group": "Cobranzas",
+        "default_roles": ["cobranzas"],
+    },
+    {
+        "key": "service_order_ready_to_bill",
+        "label": "OS lista para facturar",
+        "description": "Orden de servicio liberada para facturar como concepto.",
+        "group": "Cobranzas",
+        "default_roles": ["cobranzas"],
+    },
+    {
         "key": "solicitud_asignacion",
         "label": "Solicitud de asignación",
         "description": "Un técnico solicita que se le asigne un ingreso.",
@@ -56,7 +78,7 @@ NOTIFICATION_CATALOG = [
         "label": "Reparación lista para remito",
         "description": "Equipo reparado que ya puede liberarse con orden de salida.",
         "group": "Ingresos",
-        "default_roles": ["jefe"],
+        "default_roles": ["jefe", "recepcion"],
     },
     {
         "key": "solicitud_baja",
@@ -184,6 +206,241 @@ def notifications_schema_ready():
     return _table_exists("notifications") and _table_exists("notification_user_preferences")
 
 
+def push_schema_ready():
+    return _table_exists("notification_push_subscriptions")
+
+
+def _web_push_settings():
+    public_key = str(getattr(settings, "WEB_PUSH_VAPID_PUBLIC_KEY", "") or "").strip()
+    private_key = str(getattr(settings, "WEB_PUSH_VAPID_PRIVATE_KEY", "") or "").strip().replace("\\n", "\n")
+    subject = str(getattr(settings, "WEB_PUSH_VAPID_SUBJECT", "") or "").strip()
+    if not subject:
+        from_email = parseaddr(str(getattr(settings, "DEFAULT_FROM_EMAIL", "") or ""))[1] or "no-reply@sepid.com.ar"
+        subject = f"mailto:{from_email}"
+    return public_key, private_key, subject
+
+
+def web_push_available():
+    public_key, private_key, _subject = _web_push_settings()
+    return bool(public_key and private_key and webpush)
+
+
+def active_push_subscription_count(user_id):
+    if not push_schema_ready():
+        return 0
+    row = q(
+        """
+        SELECT COUNT(*) AS total
+          FROM notification_push_subscriptions
+         WHERE user_id = %s
+           AND disabled_at IS NULL
+        """,
+        [user_id],
+        one=True,
+    ) or {}
+    return int(row.get("total") or 0)
+
+
+def get_push_config_for_user(user_id):
+    public_key, private_key, _subject = _web_push_settings()
+    return {
+        "available": bool(public_key and private_key and webpush),
+        "publicKey": public_key if public_key and private_key else "",
+        "active": active_push_subscription_count(user_id) > 0,
+    }
+
+
+def _subscription_fields(subscription):
+    data = subscription.get("subscription") if isinstance(subscription, dict) and isinstance(subscription.get("subscription"), dict) else subscription
+    if not isinstance(data, dict):
+        raise ValueError("Suscripción inválida.")
+    keys = data.get("keys") if isinstance(data.get("keys"), dict) else {}
+    endpoint = str(data.get("endpoint") or "").strip()
+    p256dh = str(keys.get("p256dh") or data.get("p256dh") or "").strip()
+    auth = str(keys.get("auth") or data.get("auth") or "").strip()
+    content_encoding = str(
+        data.get("contentEncoding")
+        or data.get("content_encoding")
+        or data.get("encoding")
+        or "aes128gcm"
+    ).strip() or "aes128gcm"
+    if not endpoint or not p256dh or not auth:
+        raise ValueError("La suscripción push está incompleta.")
+    return endpoint, p256dh, auth, content_encoding
+
+
+def save_push_subscription(user_id, subscription, user_agent=""):
+    if not push_schema_ready():
+        raise RuntimeError("El esquema de notificaciones push no está aplicado.")
+    endpoint, p256dh, auth, content_encoding = _subscription_fields(subscription)
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO notification_push_subscriptions(
+              user_id, endpoint, p256dh, auth, content_encoding, user_agent,
+              disabled_at, failure_count, last_error
+            ) VALUES (%s,%s,%s,%s,%s,%s,NULL,0,'')
+            ON CONFLICT (endpoint) DO UPDATE SET
+              user_id = EXCLUDED.user_id,
+              p256dh = EXCLUDED.p256dh,
+              auth = EXCLUDED.auth,
+              content_encoding = EXCLUDED.content_encoding,
+              user_agent = EXCLUDED.user_agent,
+              disabled_at = NULL,
+              failure_count = 0,
+              last_error = '',
+              updated_at = CURRENT_TIMESTAMP
+            RETURNING id, endpoint
+            """,
+            [
+                user_id,
+                endpoint,
+                p256dh,
+                auth,
+                content_encoding[:64],
+                str(user_agent or "")[:500],
+            ],
+        )
+        row = cur.fetchone()
+    return {"id": int(row[0]), "endpoint": row[1], "active": True}
+
+
+def delete_push_subscription(user_id, endpoint=None):
+    if not push_schema_ready():
+        return 0
+    endpoint_value = str(endpoint or "").strip()
+    with connection.cursor() as cur:
+        if endpoint_value:
+            cur.execute(
+                """
+                DELETE FROM notification_push_subscriptions
+                 WHERE user_id = %s
+                   AND endpoint = %s
+                """,
+                [user_id, endpoint_value],
+            )
+        else:
+            cur.execute(
+                "DELETE FROM notification_push_subscriptions WHERE user_id = %s",
+                [user_id],
+            )
+        return int(cur.rowcount or 0)
+
+
+def _load_push_subscriptions(user_id):
+    if not push_schema_ready():
+        return []
+    return q(
+        """
+        SELECT id, endpoint, p256dh, auth, content_encoding
+          FROM notification_push_subscriptions
+         WHERE user_id = %s
+           AND disabled_at IS NULL
+         ORDER BY updated_at DESC, id DESC
+        """,
+        [user_id],
+    ) or []
+
+
+def _mark_push_success(subscription_id):
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE notification_push_subscriptions
+               SET failure_count = 0,
+                   last_error = '',
+                   last_success_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+            """,
+            [subscription_id],
+        )
+
+
+def _mark_push_failure(subscription_id, error, disable=False):
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE notification_push_subscriptions
+               SET failure_count = failure_count + 1,
+                   last_error = %s,
+                   disabled_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE disabled_at END,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+            """,
+            [str(error or "")[:500], bool(disable), subscription_id],
+        )
+
+
+def _web_push_exception_status(exc):
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    try:
+        return int(status_code) if status_code is not None else None
+    except Exception:
+        return None
+
+
+def send_web_push_to_user(user_id, notification):
+    if not web_push_available():
+        return 0
+    _public_key, private_key, subject = _web_push_settings()
+    subscriptions = _load_push_subscriptions(user_id)
+    if not subscriptions:
+        return 0
+    data = json.dumps(notification or {}, ensure_ascii=False, default=str)
+    sent = 0
+    for sub in subscriptions:
+        subscription_info = {
+            "endpoint": sub.get("endpoint"),
+            "keys": {
+                "p256dh": sub.get("p256dh"),
+                "auth": sub.get("auth"),
+            },
+        }
+        try:
+            webpush(
+                subscription_info=subscription_info,
+                data=data,
+                vapid_private_key=private_key,
+                vapid_claims={"sub": subject},
+            )
+            _mark_push_success(sub["id"])
+            sent += 1
+        except WebPushException as exc:
+            status_code = _web_push_exception_status(exc)
+            _mark_push_failure(sub["id"], exc, disable=status_code in {404, 410})
+            logger.warning(
+                "No se pudo enviar la notificación push",
+                extra={"user_id": user_id, "subscription_id": sub["id"], "status_code": status_code},
+            )
+        except Exception as exc:
+            _mark_push_failure(sub["id"], exc)
+            logger.exception(
+                "Error inesperado enviando notificación push",
+                extra={"user_id": user_id, "subscription_id": sub["id"]},
+            )
+    return sent
+
+
+def _push_notification_payload(notification_key, notification_id, title, body, href, severity, entity_type, entity_id, dedupe_key, payload):
+    href_value = str(href or "/").strip() or "/"
+    return {
+        "title": str(title or "").strip() or "NEXORA",
+        "body": str(body or "").strip(),
+        "href": href_value,
+        "icon": "/icons/logo-app-192.png",
+        "badge": "/icons/logo-app-192.png",
+        "tag": f"nexora:{notification_key}:{dedupe_key or notification_id}",
+        "notificationId": notification_id,
+        "notificationKey": notification_key,
+        "severity": severity,
+        "entityType": entity_type,
+        "entityId": str(entity_id) if entity_id is not None else "",
+        "payload": payload or {},
+    }
+
+
 def _as_bool(value):
     if value is None:
         return None
@@ -272,6 +529,26 @@ def active_user_ids_for_roles(roles):
     return [int(row["id"]) for row in _load_active_users(roles=roles)]
 
 
+def active_users_for_notification(notification_key, *, user_ids=None, roles=None, emails=None, require_email=False):
+    candidates = OrderedDict()
+    if user_ids:
+        for row in _load_active_users(user_ids=user_ids):
+            candidates[int(row["id"])] = row
+    if roles:
+        for row in _load_active_users(roles=roles):
+            candidates[int(row["id"])] = row
+    if emails:
+        for row in _load_active_users(emails=emails):
+            candidates[int(row["id"])] = row
+    if not candidates:
+        return []
+    overrides = _load_overrides(notification_key, list(candidates))
+    recipients = [row for row in candidates.values() if _effective_enabled(row, notification_key, overrides)]
+    if require_email:
+        recipients = [row for row in recipients if str(row.get("email") or "").strip()]
+    return recipients
+
+
 def emit_notification(
     notification_key,
     *,
@@ -286,6 +563,7 @@ def emit_notification(
     user_ids=None,
     roles=None,
     emails=None,
+    push=False,
 ):
     if notification_key not in CATALOG_BY_KEY:
         return 0
@@ -305,6 +583,7 @@ def emit_notification(
     severity_value = severity if severity in {"info", "warning", "critical"} else "info"
     payload_text = json.dumps(payload or {}, ensure_ascii=False, default=str)
     inserted = 0
+    push_targets = []
     for user in recipients:
         try:
             with connection.cursor() as cur:
@@ -315,6 +594,7 @@ def emit_notification(
                       severity, entity_type, entity_id, payload
                     ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
                     ON CONFLICT (user_id, notification_key, dedupe_key) DO NOTHING
+                    RETURNING id
                     """,
                     [
                         user.get("id"),
@@ -329,11 +609,38 @@ def emit_notification(
                         payload_text,
                     ],
                 )
-                inserted += int(cur.rowcount or 0)
+                row = cur.fetchone()
+                if row:
+                    inserted += 1
+                    if push:
+                        push_targets.append((int(user.get("id")), int(row[0])))
         except Exception:
             logger.exception(
                 "No se pudo crear la notificación interna",
                 extra={"notification_key": notification_key, "user_id": user.get("id")},
+            )
+            _safe_set_rollback_false()
+    for user_id, notification_id in push_targets:
+        try:
+            send_web_push_to_user(
+                user_id,
+                _push_notification_payload(
+                    notification_key,
+                    notification_id,
+                    title,
+                    body,
+                    href,
+                    severity_value,
+                    entity_type,
+                    entity_id,
+                    key,
+                    payload,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "No se pudo disparar la notificación push",
+                extra={"notification_key": notification_key, "user_id": user_id},
             )
             _safe_set_rollback_false()
     return inserted

@@ -26,3 +26,48 @@ self.addEventListener('fetch', (event) => {
     fetch(request).catch(() => caches.match(request))
   );
 });
+
+self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (_) {
+    data = {};
+  }
+
+  const title = data.title || 'NEXORA';
+  const options = {
+    body: data.body || '',
+    icon: data.icon || '/icons/logo-app-192.png',
+    badge: data.badge || '/icons/logo-app-192.png',
+    tag: data.tag || 'nexora-notificacion',
+    data: {
+      href: data.href || '/',
+      notificationId: data.notificationId || null,
+      notificationKey: data.notificationKey || '',
+    },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const href = event.notification?.data?.href || '/';
+  const targetUrl = new URL(href, self.location.origin).href;
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client && new URL(client.url).origin === self.location.origin) {
+          if ('navigate' in client) {
+            return client.navigate(targetUrl).then(() => client.focus());
+          }
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+      return undefined;
+    })
+  );
+});

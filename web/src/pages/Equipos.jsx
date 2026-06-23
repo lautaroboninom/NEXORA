@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Search, SlidersHorizontal, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/Tabs";
 import {
@@ -36,11 +37,14 @@ import {
   postCliente,
   postDeviceMgVenta,
   postDeviceMgReactivar,
+  getSerialBarcodeBlob,
 } from "../lib/api";
+import { openPdfBlob } from "../lib/pdf";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import { tipoEquipoOf } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 const TAB_ITEMS = [
   { value: "equipos", label: "Equipos" },
@@ -59,6 +63,28 @@ const ITEM_STATES = [
   { value: "ok", label: "OK" },
   { value: "retirado", label: "Retirado" },
   { value: "no_controlado", label: "No controlado" },
+];
+
+const DEVICE_FILTER_KEYS = [
+  "propiedad",
+  "tipo_equipo",
+  "marca_id",
+  "modelo",
+  "ubicacion_id",
+  "alquilado",
+];
+
+const PROPERTY_FILTER_OPTIONS = [
+  { value: "", label: "Todas" },
+  { value: "mg", label: "Propio MG/BIO" },
+  { value: "cliente", label: "Cliente" },
+  { value: "mg_historico", label: "Cliente (MG histórico)" },
+];
+
+const RENTAL_FILTER_OPTIONS = [
+  { value: "", label: "Todos" },
+  { value: "1", label: "Alquilados" },
+  { value: "0", label: "No alquilados" },
 ];
 
 function todayISO() {
@@ -108,7 +134,7 @@ function PropiedadBadge({ row }) {
   const alquilado = !!row?.alquilado;
   const hasNumeroInterno = !!String(row?.numero_interno || "").trim();
   if (mgInactivoVenta) {
-    return <span className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700">Cliente (Ex MG)</span>;
+    return <span className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700">Cliente (MG histórico)</span>;
   }
   if (isMg) {
     if (hasNumeroInterno) return <span className="px-2 py-1 text-xs rounded bg-emerald-100 text-emerald-800">Propio (MG)</span>;
@@ -157,6 +183,14 @@ function deviceModelTitle(row) {
   return [modelo, variante].filter(Boolean).join(" ").trim() || "-";
 }
 
+function deviceBarcodeValue(row) {
+  return String(row?.numero_serie || row?.numero_interno || "").trim();
+}
+
+function deviceBarcodeSubtitle(row) {
+  return [row?.marca, deviceModelTitle(row)].map((value) => String(value || "").trim()).filter((value) => value && value !== "-").join(" ");
+}
+
 function normalizeCustomerRows(rows = []) {
   const map = new Map();
   (Array.isArray(rows) ? rows : []).forEach((row) => {
@@ -166,11 +200,65 @@ function normalizeCustomerRows(rows = []) {
       id,
       razon_social: String(row?.razon_social || "").trim(),
       cod_empresa: String(row?.cod_empresa || "").trim(),
+      alias_interno: String(row?.alias_interno || "").trim(),
     });
   });
   return Array.from(map.values()).sort((a, b) =>
     String(a?.razon_social || "").localeCompare(String(b?.razon_social || ""))
   );
+}
+
+function customerOptionLabel(c) {
+  return [
+    c?.razon_social,
+    c?.alias_interno ? `[${c.alias_interno}]` : "",
+    c?.cod_empresa ? `(${c.cod_empresa})` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function optionText(row) {
+  return String(row?.nombre || row?.label || row?.name || row?.value || row || "").trim();
+}
+
+function uniqueSortedTextOptions(rows = []) {
+  const seen = new Set();
+  return (Array.isArray(rows) ? rows : [])
+    .map(optionText)
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (!value || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function sortedCatalogOptions(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => ({
+      ...row,
+      id: row?.id,
+      nombre: optionText(row),
+    }))
+    .filter((row) => row.id != null && row.nombre)
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+}
+
+function initialDeviceFilters(searchParams) {
+  const legacyPropio = String(searchParams.get("propio") || "").trim().toLowerCase();
+  const propiedad = searchParams.get("propiedad") || (["1", "true", "yes", "y", "t"].includes(legacyPropio) ? "mg" : "");
+  return {
+    propiedad,
+    tipo_equipo: searchParams.get("tipo_equipo") || "",
+    marca_id: searchParams.get("marca_id") || "",
+    modelo: searchParams.get("modelo") || "",
+    ubicacion_id: searchParams.get("ubicacion_id") || "",
+    alquilado: searchParams.get("alquilado") || "",
+  };
+}
+
+function activeDeviceFilterCount(filters) {
+  return DEVICE_FILTER_KEYS.reduce((count, key) => count + (String(filters?.[key] || "").trim() ? 1 : 0), 0);
 }
 
 function mergeCustomerRows(...lists) {
@@ -460,7 +548,7 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                 <option value="">Seleccione una institución</option>
                 {(customerOptions || []).map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
+                    {customerOptionLabel(c)}
                   </option>
                 ))}
               </select>
@@ -602,7 +690,7 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                   <option value="">Seleccione cliente</option>
                   {(customerOptions || []).map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
+                      {customerOptionLabel(c)}
                     </option>
                   ))}
                 </select>
@@ -1921,7 +2009,7 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
               <option value="">Seleccione una institución</option>
               {customers.map((c) => (
                 <option key={c.customer_id} value={c.customer_id}>
-                  {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
+                  {customerOptionLabel(c)}
                 </option>
               ))}
             </select>
@@ -2035,7 +2123,7 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
                 <option value="">Seleccione cliente</option>
                 {customers.map((c) => (
                   <option key={c.customer_id} value={c.customer_id}>
-                    {c.razon_social} {c.cod_empresa ? `(${c.cod_empresa})` : ""}
+                    {customerOptionLabel(c)}
                   </option>
                 ))}
               </select>
@@ -2068,6 +2156,7 @@ function AddManagedDeviceModal({ onClose, onSubmit, customers = [], saving = fal
 export default function Equipos() {
   const { user } = useAuth();
   const canManageDevices = can(user, PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_MANAGE);
+  const canPrintEquipmentBarcode = canManageDevices || can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE);
   const canEdit = canManageDevices;
   const canPlanEdit = canManageDevices;
   const canRevisionMutate = canManageDevices;
@@ -2100,13 +2189,19 @@ export default function Equipos() {
   const [err, setErr] = useState("");
   const [page, setPage] = useState(1);
   const [hasNext, setHasNext] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
   const [q, setQ] = useState(searchParams.get("q") || "");
   const [qDebounced, setQDebounced] = useState(searchParams.get("q") || "");
+  const [deviceFilters, setDeviceFilters] = useState(() => initialDeviceFilters(searchParams));
+  const [deviceFilterCatalogs, setDeviceFilterCatalogs] = useState({ tipos: [], marcas: [], ubicaciones: [] });
+  const [deviceFiltersLoading, setDeviceFiltersLoading] = useState(false);
+  const [deviceFiltersErr, setDeviceFiltersErr] = useState("");
   const [editDeviceId, setEditDeviceId] = useState(null);
   const [mgModalRow, setMgModalRow] = useState(null);
   const [mgModalMode, setMgModalMode] = useState("venta");
   const [reloadDevicesKey, setReloadDevicesKey] = useState(0);
   const [sort, setSort] = useState("-id");
+  const [barcodeBusyId, setBarcodeBusyId] = useState(null);
 
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeEquipo1, setMergeEquipo1] = useState(null);
@@ -2202,6 +2297,42 @@ export default function Equipos() {
     return () => clearTimeout(timer);
   }, [q]);
 
+  useEffect(() => {
+    if (activeTab !== "equipos") return;
+    updateSearchParam("q", (qDebounced || "").trim());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, qDebounced]);
+
+  useEffect(() => {
+    if (activeTab !== "equipos") return;
+    let active = true;
+    (async () => {
+      try {
+        setDeviceFiltersLoading(true);
+        setDeviceFiltersErr("");
+        const [tiposRows, marcasRows, ubicacionesRows] = await Promise.all([
+          getTiposEquipo(),
+          getMarcas(),
+          getUbicaciones(),
+        ]);
+        if (!active) return;
+        setDeviceFilterCatalogs({
+          tipos: uniqueSortedTextOptions(tiposRows),
+          marcas: sortedCatalogOptions(marcasRows),
+          ubicaciones: sortedCatalogOptions(ubicacionesRows),
+        });
+      } catch (e) {
+        if (!active) return;
+        setDeviceFiltersErr(e?.message || "No se pudieron cargar los filtros de equipos.");
+      } finally {
+        if (active) setDeviceFiltersLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [activeTab]);
+
   const selectedInstitucion = useMemo(
     () => instituciones.find((it) => String(it.customer_id) === String(selectedInstitucionId)) || null,
     [instituciones, selectedInstitucionId]
@@ -2218,6 +2349,54 @@ export default function Equipos() {
     () => sortedInstituciones.filter((it) => Boolean(it?.preventivo_plan_id || it?.plan?.id)),
     [sortedInstituciones]
   );
+
+  const activeFiltersCount = useMemo(() => activeDeviceFilterCount(deviceFilters), [deviceFilters]);
+  const hasDeviceSearch = Boolean((qDebounced || "").trim());
+  const hasDeviceFilters = activeFiltersCount > 0 || hasDeviceSearch;
+  const activeFilterBadges = useMemo(() => {
+    const badges = [];
+    const propiedad = PROPERTY_FILTER_OPTIONS.find((it) => it.value === deviceFilters.propiedad)?.label;
+    const alquiler = RENTAL_FILTER_OPTIONS.find((it) => it.value === deviceFilters.alquilado)?.label;
+    const marca = deviceFilterCatalogs.marcas.find((it) => String(it.id) === String(deviceFilters.marca_id))?.nombre;
+    const ubicacion = deviceFilterCatalogs.ubicaciones.find((it) => String(it.id) === String(deviceFilters.ubicacion_id))?.nombre;
+    if (hasDeviceSearch) badges.push(`Búsqueda: ${(qDebounced || "").trim()}`);
+    if (propiedad && deviceFilters.propiedad) badges.push(`Propiedad: ${propiedad}`);
+    if (deviceFilters.tipo_equipo) badges.push(`Tipo: ${deviceFilters.tipo_equipo}`);
+    if (marca) badges.push(`Marca: ${marca}`);
+    if (deviceFilters.modelo) badges.push(`Modelo: ${deviceFilters.modelo}`);
+    if (ubicacion) badges.push(`Ubicación: ${ubicacion}`);
+    if (alquiler && deviceFilters.alquilado) badges.push(`Alquiler: ${alquiler}`);
+    return badges;
+  }, [deviceFilterCatalogs, deviceFilters, hasDeviceSearch, qDebounced]);
+
+  const updateDeviceFilter = (key, value) => {
+    setDeviceFilters((prev) => {
+      const next = { ...prev, [key]: value };
+      if (key === "tipo_equipo" || key === "marca_id") next.modelo = "";
+      return next;
+    });
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("propio");
+      if (key === "tipo_equipo" || key === "marca_id") next.delete("modelo");
+      if (value == null || value === "") next.delete(key);
+      else next.set(key, String(value));
+      return next;
+    }, { replace: true });
+  };
+
+  const resetDeviceFilters = () => {
+    setQ("");
+    setQDebounced("");
+    setDeviceFilters(initialDeviceFilters(new URLSearchParams()));
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("q");
+      next.delete("propio");
+      DEVICE_FILTER_KEYS.forEach((key) => next.delete(key));
+      return next;
+    }, { replace: true });
+  };
 
   const resetMergeState = () => {
     setMergeOpen(false);
@@ -2265,12 +2444,31 @@ export default function Equipos() {
   const mergeMgFinalValue = (mergeMgFinal || "").trim();
   const canSubmitMerge = !!mergeEquipo1 && !!mergeEquipo2 && !!(mergeNsFinalValue || mergeMgFinalValue) && !mergeSaving;
 
+  async function printDeviceBarcode(row) {
+    const value = deviceBarcodeValue(row);
+    if (!value || barcodeBusyId) return;
+    try {
+      setBarcodeBusyId(row?.id || value);
+      setErr("");
+      const blob = await getSerialBarcodeBlob(value, {
+        title: "",
+        subtitle: deviceBarcodeSubtitle(row),
+      });
+      openPdfBlob(blob);
+    } catch (e) {
+      setErr(e?.message || "No se pudo imprimir el QR.");
+    } finally {
+      setBarcodeBusyId(null);
+    }
+  }
+
   async function loadDevices(p = 1, { reset = false } = {}) {
     try {
       if (reset) {
         setRows([]);
         setPage(1);
         setHasNext(false);
+        setTotalCount(0);
       }
       const isFirst = reset || p === 1;
       isFirst ? setLoading(true) : setLoadingMore(true);
@@ -2280,20 +2478,29 @@ export default function Equipos() {
         page: p,
         page_size: pageSize,
         q: qEffective || undefined,
-        propio: searchParams.get("propio") || undefined,
-        alquilado: searchParams.get("alquilado") || undefined,
+        propiedad: deviceFilters.propiedad || undefined,
+        tipo_equipo: deviceFilters.tipo_equipo || undefined,
+        marca_id: deviceFilters.marca_id || undefined,
+        modelo: deviceFilters.modelo || undefined,
+        ubicacion_id: deviceFilters.ubicacion_id || undefined,
+        alquilado: deviceFilters.alquilado || undefined,
         sort: sort || undefined,
       };
       const res = await getDevices(query);
       const items = Array.isArray(res) ? res : (res.items || []);
       const next = Array.isArray(res) ? false : !!res.has_next;
+      const nextTotal = Array.isArray(res) ? items.length : Number(res.total_count ?? items.length);
 
       setRows((prev) => (isFirst ? items : [...prev, ...items]));
       setHasNext(next);
+      setTotalCount(Number.isFinite(nextTotal) ? nextTotal : items.length);
       setPage(p);
     } catch (e) {
       setErr(e?.message || "No se pudieron cargar los equipos");
-      if (reset) setRows([]);
+      if (reset) {
+        setRows([]);
+        setTotalCount(0);
+      }
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -2544,7 +2751,7 @@ export default function Equipos() {
   useEffect(() => {
     if (activeTab === "equipos") loadDevices(1, { reset: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, reloadDevicesKey, sort, qDebounced, searchParams.get("propio"), searchParams.get("alquilado")]);
+  }, [activeTab, reloadDevicesKey, sort, qDebounced, deviceFilters]);
 
   useEffect(() => {
     if (activeTab !== "preventivos") return;
@@ -2800,23 +3007,233 @@ export default function Equipos() {
       {activeTab === "equipos" && (
         <>
           {err && <div className="bg-red-100 border border-red-300 text-red-800 p-2 rounded mb-3">{err}</div>}
+          {deviceFiltersErr && <div className="bg-amber-50 border border-amber-200 text-amber-900 p-2 rounded mb-3">{deviceFiltersErr}</div>}
 
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            <input
-              type="text"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Buscar por N/S, MG, cliente, marca, modelo..."
-              className="border rounded p-2 w-full max-w-md"
-            />
-          </div>
+          <section className="mb-4 rounded border border-gray-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+              <div className="inline-flex items-center gap-2 text-sm font-semibold text-gray-900">
+                <SlidersHorizontal className="h-4 w-4 text-gray-500" aria-hidden="true" />
+                Filtros de equipos
+              </div>
+              <div className="text-xs text-gray-500">
+                {deviceFiltersLoading ? "Cargando filtros..." : `${totalCount || rows.length} resultados`}
+              </div>
+            </div>
+            <div className="grid gap-3 p-3 md:grid-cols-2 xl:grid-cols-6">
+              <label className="md:col-span-2 xl:col-span-2">
+                <div className="mb-1 text-xs font-medium text-gray-600">Búsqueda</div>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-gray-400" aria-hidden="true" />
+                  <input
+                    type="text"
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="N/S, MG, cliente, marca, modelo..."
+                    className="h-9 w-full rounded border border-gray-300 pl-8 pr-3 text-sm"
+                  />
+                </div>
+              </label>
+              <label>
+                <div className="mb-1 text-xs font-medium text-gray-600">Propiedad</div>
+                <select
+                  className="h-9 w-full rounded border border-gray-300 px-2 text-sm"
+                  value={deviceFilters.propiedad}
+                  onChange={(e) => updateDeviceFilter("propiedad", e.target.value)}
+                >
+                  {PROPERTY_FILTER_OPTIONS.map((opt) => (
+                    <option key={opt.value || "all"} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <div className="mb-1 text-xs font-medium text-gray-600">Tipo de equipo</div>
+                <select
+                  className="h-9 w-full rounded border border-gray-300 px-2 text-sm"
+                  value={deviceFilters.tipo_equipo}
+                  onChange={(e) => updateDeviceFilter("tipo_equipo", e.target.value)}
+                  disabled={deviceFiltersLoading}
+                >
+                  <option value="">Todos</option>
+                  {deviceFilterCatalogs.tipos.map((tipo) => (
+                    <option key={tipo} value={tipo}>{tipo}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <div className="mb-1 text-xs font-medium text-gray-600">Marca</div>
+                <select
+                  className="h-9 w-full rounded border border-gray-300 px-2 text-sm"
+                  value={deviceFilters.marca_id}
+                  onChange={(e) => updateDeviceFilter("marca_id", e.target.value)}
+                  disabled={deviceFiltersLoading}
+                >
+                  <option value="">Todas</option>
+                  {deviceFilterCatalogs.marcas.map((marca) => (
+                    <option key={marca.id} value={marca.id}>{marca.nombre}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <div className="mb-1 text-xs font-medium text-gray-600">Modelo / variante</div>
+                <input
+                  type="text"
+                  className="h-9 w-full rounded border border-gray-300 px-3 text-sm"
+                  value={deviceFilters.modelo}
+                  onChange={(e) => updateDeviceFilter("modelo", e.target.value)}
+                  placeholder="Modelo o variante"
+                />
+              </label>
+              <label>
+                <div className="mb-1 text-xs font-medium text-gray-600">Ubicación</div>
+                <select
+                  className="h-9 w-full rounded border border-gray-300 px-2 text-sm"
+                  value={deviceFilters.ubicacion_id}
+                  onChange={(e) => updateDeviceFilter("ubicacion_id", e.target.value)}
+                  disabled={deviceFiltersLoading}
+                >
+                  <option value="">Todas</option>
+                  {deviceFilterCatalogs.ubicaciones.map((ubicacion) => (
+                    <option key={ubicacion.id} value={ubicacion.id}>{ubicacion.nombre}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <div className="mb-1 text-xs font-medium text-gray-600">Alquiler</div>
+                <select
+                  className="h-9 w-full rounded border border-gray-300 px-2 text-sm"
+                  value={deviceFilters.alquilado}
+                  onChange={(e) => updateDeviceFilter("alquilado", e.target.value)}
+                >
+                  {RENTAL_FILTER_OPTIONS.map((opt) => (
+                    <option key={opt.value || "all"} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {hasDeviceFilters && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
+                <div className="flex flex-wrap gap-2">
+                  {activeFilterBadges.map((label) => (
+                    <span key={label} className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-700">
+                      {label}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center gap-1 rounded border border-gray-300 px-2 text-xs hover:bg-gray-50"
+                  onClick={resetDeviceFilters}
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  Limpiar
+                </button>
+              </div>
+            )}
+          </section>
 
           {loading ? (
             "Cargando..."
           ) : rows.length === 0 ? (
-            <div className="text-sm text-gray-500">No hay resultados.</div>
+            <div className="text-sm text-gray-500">{hasDeviceFilters ? "No hay equipos para esos filtros." : "No hay resultados."}</div>
           ) : (
-            <div className="overflow-x-auto overflow-y-visible">
+            <div>
+              <MobileDataList>
+                {rows.map((row) => {
+                  const isHighlight = highlightId && String(highlightId) === String(row.id);
+                  const barcodeValue = deviceBarcodeValue(row);
+                  const barcodeBusy = barcodeBusyId === (row?.id || barcodeValue);
+                  return (
+                    <MobileDataCard
+                      key={row.id}
+                      className={`space-y-3 ${isHighlight ? "bg-amber-50" : ""}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-mono text-xs text-gray-500">#{row.id}</div>
+                          <div className="font-semibold text-gray-900">{deviceCustomerTitle(row)}</div>
+                          {deviceCustomerSubtitle(row) ? (
+                            <div className="text-xs text-gray-500">{deviceCustomerSubtitle(row)}</div>
+                          ) : null}
+                        </div>
+                        <PropiedadBadge row={row} />
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                        <MobileDataField label="Identificación">
+                          <DeviceIdentifier row={row} />
+                        </MobileDataField>
+                        <MobileDataField label="Marca" value={row.marca || "-"} />
+                        <MobileDataField label="Modelo">
+                          <div className="font-medium">{deviceModelTitle(row)}</div>
+                          {tipoEquipoOf(row, "") ? (
+                            <div className="text-xs text-gray-500">{tipoEquipoOf(row, "")}</div>
+                          ) : null}
+                        </MobileDataField>
+                        <MobileDataField label="Ubicación" value={row.ubicacion_nombre || "-"} />
+                        <MobileDataField label="Alquiler">
+                          {row.alquilado ? (
+                            <div>
+                              <div>Alquilado</div>
+                              <div className="text-xs text-gray-500">{row.alquiler_a || ""}</div>
+                            </div>
+                          ) : (
+                            "No"
+                          )}
+                        </MobileDataField>
+                        {row.last_ingreso_id ? <MobileDataField label="Último ingreso" value={`#${row.last_ingreso_id}`} /> : null}
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                        <button
+                          className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                          onClick={() => {
+                            if (row.last_ingreso_id) nav(`/ingresos/${row.last_ingreso_id}`);
+                          }}
+                          disabled={!row.last_ingreso_id}
+                        >
+                          Ver ingreso
+                        </button>
+                        {canPrintEquipmentBarcode && (
+                          <button
+                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => printDeviceBarcode(row)}
+                            disabled={!barcodeValue || barcodeBusy}
+                            title={barcodeValue ? "Imprimir QR" : "El equipo no tiene N/S ni número interno"}
+                          >
+                            {barcodeBusy ? "Preparando QR..." : "Imprimir QR"}
+                          </button>
+                        )}
+                        {canEdit && (
+                          <button
+                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                            onClick={() => setEditDeviceId(Number(row?.id || 0) || null)}
+                          >
+                            Editar datos
+                          </button>
+                        )}
+                        {canEdit && row?.es_propietario_mg && row?.numero_interno && (
+                          <button
+                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                            onClick={() => {
+                              setMgModalMode(row?.mg_inactivo_venta ? "reactivar" : "venta");
+                              setMgModalRow(row);
+                            }}
+                          >
+                            {row?.mg_inactivo_venta ? "Reactivar MG" : "Marcar vendido"}
+                          </button>
+                        )}
+                        {canEdit && (
+                          <button
+                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                            onClick={() => openMergeFor(row)}
+                          >
+                            Unificar
+                          </button>
+                        )}
+                      </div>
+                    </MobileDataCard>
+                  );
+                })}
+              </MobileDataList>
+              <DesktopTableWrap className="overflow-y-visible">
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="text-left">
@@ -2834,6 +3251,8 @@ export default function Equipos() {
                 <tbody>
                   {rows.map((row) => {
                     const isHighlight = highlightId && String(highlightId) === String(row.id);
+                    const barcodeValue = deviceBarcodeValue(row);
+                    const barcodeBusy = barcodeBusyId === (row?.id || barcodeValue);
                     return (
                       <tr key={row.id} className={`hover:bg-gray-50 ${isHighlight ? "bg-amber-50" : ""}`}>
                         <td className="p-2 font-mono text-xs">{row.id}</td>
@@ -2845,7 +3264,7 @@ export default function Equipos() {
                           ) : null}
                           {deviceOwnerMeta(row) ? <div className="text-xs text-gray-500">{deviceOwnerMeta(row)}</div> : null}
                           {row.last_ingreso_id ? <div className="text-xs text-gray-500">Último ingreso #{row.last_ingreso_id}</div> : null}
-                          {row.es_propietario_mg && !row.mg_inactivo_venta && <div className="text-xs text-gray-500">Dueño base (propio MG/BIO)</div>}
+                          {row.es_propietario_mg && !row.mg_inactivo_venta && <div className="text-xs text-gray-500">Patrimonio MG/BIO</div>}
                         </td>
                         <td className="p-2"><DeviceIdentifier row={row} /></td>
                         <td className="p-2">{row.marca || "-"}</td>
@@ -2886,6 +3305,19 @@ export default function Equipos() {
                                   >
                                     Ver ingreso
                                   </button>
+                                  {canPrintEquipmentBarcode && (
+                                    <button
+                                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                      onClick={() => {
+                                        close();
+                                        printDeviceBarcode(row);
+                                      }}
+                                      disabled={!barcodeValue || barcodeBusy}
+                                      title={barcodeValue ? "Imprimir QR" : "El equipo no tiene N/S ni número interno"}
+                                    >
+                                      {barcodeBusy ? "Preparando..." : "Imprimir QR"}
+                                    </button>
+                                  )}
                                   {canEdit && (
                                     <button
                                       className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
@@ -2930,8 +3362,9 @@ export default function Equipos() {
                   })}
                 </tbody>
               </table>
+              </DesktopTableWrap>
               <div className="text-xs text-gray-500 mt-2">
-                Mostrando {rows.length} {hasNext ? "(hay más, desplaza para cargar...)" : ""}
+                Mostrando {rows.length} de {totalCount || rows.length} {hasNext ? "(hay más, desplaza para cargar...)" : ""}
               </div>
               <div ref={sentinelRef} style={{ height: 1 }} />
               {loadingMore && <div className="text-xs text-gray-500 mt-2">Cargando más...</div>}
@@ -2989,7 +3422,118 @@ export default function Equipos() {
           ) : agendaItems.length === 0 ? (
             <div className="text-sm text-gray-500">Sin resultados.</div>
           ) : (
-            <div className="overflow-x-auto">
+            <div>
+              <MobileDataList>
+                {agendaItems.map((item, idx) => {
+                  const did = String(item.device_id || "");
+                  const expanded = !!agendaExpanded[did];
+                  const repState = agendaRepuestosByDevice[did] || { loading: false, err: "", items: [] };
+                  return (
+                    <MobileDataCard
+                      key={`${item.plan_id || "sp"}-${item.device_id || idx}-${idx}`}
+                      className={item.plan_id ? "cursor-pointer hover:bg-gray-50" : ""}
+                      onClick={() => {
+                        if (!item.plan_id) return;
+                        toggleAgendaExpand(item);
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-semibold text-gray-900">{item.customer_nombre || "-"}</div>
+                          <div className="mt-1 text-sm text-gray-700">{item.equipo_label || `${item.marca || ""} ${item.modelo || ""}`.trim() || "-"}</div>
+                        </div>
+                        <PreventivoBadge estado={item.preventivo_estado} dias={item.preventivo_dias_restantes} />
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                        <MobileDataField label="Identificación">
+                          <DeviceIdentifier row={item} />
+                        </MobileDataField>
+                        <MobileDataField label="Última revisión" value={fmtDate(item.ultima_revision_fecha)} />
+                        <MobileDataField label="Próxima" value={fmtDate(item.proxima_revision_fecha)} />
+                        <MobileDataField label="Repuestos" value={`${Number(item.repuestos_total || 0)}${item.repuesto_proximo_nombre ? ` · Próximo: ${item.repuesto_proximo_nombre}` : ""}`} />
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                        {item.plan_id ? (
+                          <>
+                            <button
+                              className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startAgendaDeviceRevision(item);
+                              }}
+                            >
+                              Registrar revisión
+                            </button>
+                            {canEdit && !!item.device_id && (
+                              <button
+                                className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditDeviceId(Number(item.device_id));
+                                }}
+                              >
+                                Editar equipo
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {canPlanEdit && (
+                              <button
+                                className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openDevicePlanModal({
+                                    id: item.device_id,
+                                    marca: item.marca,
+                                    modelo: item.modelo,
+                                    preventivo_plan_id: null,
+                                  });
+                                }}
+                              >
+                                Configurar plan
+                              </button>
+                            )}
+                            <button
+                              className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveTab("equipos");
+                              }}
+                            >
+                              Ir a equipo
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      {item.plan_id && expanded && (
+                        <div className="mt-3 border-t border-gray-100 pt-3">
+                          {repState.loading ? (
+                            <div className="text-sm text-gray-500">Cargando repuestos...</div>
+                          ) : repState.err ? (
+                            <div className="text-sm text-red-700">{repState.err}</div>
+                          ) : !repState.items?.length ? (
+                            <div className="text-sm text-gray-500">Sin repuestos configurados.</div>
+                          ) : (
+                            <div className="space-y-2">
+                              {repState.items.map((rep) => (
+                                <div key={rep.id} className="rounded border border-gray-200 bg-white p-2 text-xs">
+                                  <div className="font-medium text-gray-900">{rep.nombre_repuesto || "-"}</div>
+                                  <div className="mt-1 text-gray-600">
+                                    Cada {rep.periodicidad_valor} {rep.periodicidad_unidad} · Próxima {fmtDate(rep.proxima_revision_fecha)}
+                                  </div>
+                                  <div className="mt-1"><PreventivoBadge estado={rep.preventivo_estado} dias={rep.preventivo_dias_restantes} /></div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </MobileDataCard>
+                  );
+                })}
+              </MobileDataList>
+              <DesktopTableWrap>
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="text-left">
@@ -3173,6 +3717,7 @@ export default function Equipos() {
                   })}
                 </tbody>
               </table>
+              </DesktopTableWrap>
             </div>
           )}
         </>
@@ -3187,7 +3732,7 @@ export default function Equipos() {
               <option value="">Seleccione una institución</option>
               {institucionesConPreventivo.map((inst) => (
                 <option key={inst.customer_id} value={inst.customer_id}>
-                  {inst.razon_social} {inst.cod_empresa ? `(${inst.cod_empresa})` : ""}
+                  {customerOptionLabel(inst)}
                 </option>
               ))}
             </select>

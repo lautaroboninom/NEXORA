@@ -249,9 +249,9 @@ def _fetch_last_ingreso(device_id: int):
     ))
 
 
-def _lookup_bejerman_sale_by_serial(serial: str):
+def _lookup_bejerman_sale_by_serial(serial: str, user_id: int | None = None):
     try:
-        return lookup_sale_by_serial(BejermanSDKClient(), serial)
+        return lookup_sale_by_serial(BejermanSDKClient(actor_user_id=user_id), serial)
     except BejermanSdkConfigError as exc:
         return {"found": False, "lookup_error": str(exc)}
     except (BejermanSdkResponseError, BejermanSdkUnavailable) as exc:
@@ -371,7 +371,8 @@ class ScanLookupView(APIView):
 
         device, ns_key = _fetch_device_by_code(code, mg_select_sql)
         if not device:
-            sale_payload = _lookup_bejerman_sale_by_serial(code)
+            user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+            sale_payload = _lookup_bejerman_sale_by_serial(code, user_id=user_id)
             sale_response = _bejerman_sale_response(code, ns_key, sale_payload or {})
             if sale_response:
                 return Response(sale_response)

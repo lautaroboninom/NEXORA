@@ -69,7 +69,7 @@ function quoteDateLabel(version) {
   return "Sin emitir";
 }
 
-export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeCosts, money, isCotizacion, refreshIngreso, setErr }) {
+export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeCosts, money, isCotizacion, refreshIngreso, setErr, onOpenReleaseModal }) {
   const tituloDoc = isCotizacion ? "cotización" : "presupuesto";
   const tituloDocCap = isCotizacion ? "Cotización" : "Presupuesto";
   const garantiaTrabajos = (data?.garantia_reparacion_trabajos || "").trim();
@@ -663,25 +663,13 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     try {
       setAprobando(true);
       setQErr("");
-      const shouldPrint = (data?.estado || "").toLowerCase() === "reparado" &&
-        window.confirm("Este equipo ya está reparado, imprimir remito de salida?");
-
       const r = await postQuoteAprobar(id);
       setSelectedQuoteId(null);
       setQuote(r);
-      if (shouldPrint && typeof refreshIngreso === "function") {
-        try {
-          const blob = await getBlob(`/api/ingresos/${id}/remito/`);
-          if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
-          const url = URL.createObjectURL(blob);
-          window.open(url, "_blank", "noopener");
-          setTimeout(() => URL.revokeObjectURL(url), 60_000);
-          await refreshIngreso();
-        } catch (e) {
-          setQErr(e?.message || "No se pudo imprimir el remito de salida");
-        }
-      }
       if (typeof refreshIngreso === "function") await refreshIngreso();
+      if ((data?.estado || "").toLowerCase() === "reparado") {
+        onOpenReleaseModal?.({ ...data, presupuesto_estado: "aprobado" });
+      }
     } catch (e) {
       setQErr(e?.message || `No se pudo aprobar la ${tituloDoc}`);
     } finally {

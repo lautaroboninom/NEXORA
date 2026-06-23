@@ -2,27 +2,35 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getGeneralEquipos } from "../lib/api";
+import { getDeliveryOrderRentalAvailableEquipment } from "../lib/api";
 import { ingresoIdOf, formatOS, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
 import { useAuth } from "../context/AuthContext";
 import useQueryState from "../hooks/useQueryState";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
-// Catlogo (DB):
-const TARGET_ID = 5;
-const TARGET_NAME = "Estantería de Alquiler";
-const EXCLUIR_ESTADOS_QUERY = "entregado,alquilado,baja,vendido_pendiente_entrega,vendido_entregado";
+// Catálogo (DB):
 const ESTADOS_EXCLUIR = new Set(["entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado"]);
-const isStockAlquiler = (r) => {
-  const id = Number(r?.ubicacion_id ?? NaN);
-  const name = r?.ubicacion_nombre;
-  return id === TARGET_ID || norm(name) === norm(TARGET_NAME);
-};
-
 const estadoValido = (r) => {
   const estado = (r?.estado || '').toString().trim().toLowerCase();
   return !ESTADOS_EXCLUIR.has(estado);
 };
+
+const rowFromRentalOption = (item) => ({
+  ...item,
+  id: item?.ingresoId,
+  ingreso_id: item?.ingresoId,
+  device_id: item?.deviceId,
+  ubicacion_id: item?.ubicacionId,
+  ubicacion_nombre: item?.ubicacionNombre,
+  numero_serie: item?.equipmentSerial,
+  numero_interno: item?.equipmentInternalNumber,
+  marca: item?.marca,
+  modelo: item?.modelo,
+  equipo_variante: item?.equipoVariante,
+  tipo_equipo: item?.tipoEquipo,
+  razon_social: item?.ownerCustomerName,
+});
 
 export default function StockAlquiler() {
   const [rows, setRows] = useState([]);
@@ -45,13 +53,11 @@ export default function StockAlquiler() {
       setErr("");
       setLoading(true);
       try {
-        let data = await getGeneralEquipos({ ubicacion_id: TARGET_ID, solo_taller: false, excluir_estados: EXCLUIR_ESTADOS_QUERY });
-        if (!Array.isArray(data) || data.length === 0) {
-          data = await getGeneralEquipos({ solo_taller: false, excluir_estados: EXCLUIR_ESTADOS_QUERY });
-        }
+        const data = await getDeliveryOrderRentalAvailableEquipment({ limit: 200 });
         if (!active) return;
-        const safe = Array.isArray(data) ? data : [];
-        setRows(safe.filter((row) => isStockAlquiler(row) && estadoValido(row)));
+        const safe = Array.isArray(data?.items) ? data.items : [];
+        setRows(safe.map(rowFromRentalOption).filter(estadoValido));
+        if (data?.warning) setErr(data.warning);
       } catch (e) {
         if (!active) return;
         setErr(e?.message || "Error cargando stock");
@@ -99,10 +105,10 @@ export default function StockAlquiler() {
 
   return (
     <div className="card">
-      <div className="h1 mb-3">Stock de Alquiler</div>
+      <div className="h1 mb-3">Stock de alquiler</div>
       {err && <div className="bg-red-100 text-red-700 p-2 rounded mb-3">{err}</div>}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           className="border rounded p-2 w-full max-w-md"
           value={q}
@@ -113,9 +119,32 @@ export default function StockAlquiler() {
 
       {loading ? "Cargando..." :
         filtered.length === 0 ? (
-          <div className="text-sm text-gray-500">No hay equipos en Estanteria de Alquiler.</div>
+          <div className="text-sm text-gray-500">No hay equipos disponibles en Estantería de Alquiler con stock STL.</div>
         ) : (
-          <div className="overflow-x-auto">
+          <div>
+            <MobileDataList>
+              {filtered.map((row) => (
+                <MobileDataCard
+                  key={ingresoIdOf(row)}
+                  as="button"
+                  type="button"
+                  className="hover:bg-gray-50"
+                  onClick={() => nav(`/ingresos/${ingresoIdOf(row)}`)}
+                >
+                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Tipo de equipo" value={tipoEquipoOf(row)} />
+                    <MobileDataField label="Marca" value={marcaOf(row)} />
+                    <MobileDataField label="Modelo" value={modeloOf(row)} />
+                    <MobileDataField label="Variante" value={varianteOf(row)} />
+                    <MobileDataField label="Serie">
+                      <DeviceIdentifier row={row} />
+                    </MobileDataField>
+                  </div>
+                </MobileDataCard>
+              ))}
+            </MobileDataList>
+            <DesktopTableWrap>
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left">
@@ -144,6 +173,7 @@ export default function StockAlquiler() {
                 ))}
               </tbody>
             </table>
+            </DesktopTableWrap>
             <div className="text-xs text-gray-500 mt-2">Mostrando {filtered.length} equipos.</div>
           </div>
         )}

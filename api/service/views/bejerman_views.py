@@ -16,14 +16,20 @@ from ..bejerman_sync import (
     apply_article_mapping_to_job,
     article_resolution_for_job_row,
     article_context_for_ingreso,
+    article_context_for_model,
     search_bejerman_articles_for_job,
+    search_bejerman_articles_for_context,
     reopen_jobs_for_article_mapping,
     upsert_article_mapping,
     validate_bejerman_article_choice,
 )
-from ..bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, list_ingress_companies
+from ..bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, company_for_key, list_ingress_companies
 from ..permissions import require_any_permission, require_permission
 from .helpers import q
+
+
+def _actor_id(request):
+    return getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
 
 
 def _as_int(value):
@@ -52,6 +58,12 @@ def _build_job_filters(params, *, include_status=True):
     if sync_type:
         where.append("j.sync_type = %s")
         sql_params.append(sync_type)
+
+    company_param = (params.get("company_key") or params.get("company") or "").strip()
+    company = company_for_key(company_param, default=None) if company_param else None
+    if company:
+        where.append("UPPER(COALESCE(NULLIF(j.company_key, ''), NULLIF(t.empresa_bejerman, ''), %s)) = %s")
+        sql_params.extend([DEFAULT_INGRESS_COMPANY_KEY, company.key])
 
     os_value = _as_int(params.get("os") or params.get("ingreso_id"))
     if os_value:
@@ -110,6 +122,7 @@ class BejermanJobsView(APIView):
                    j.numero_serie,
                    j.source_deposit,
                    j.target_deposit,
+                   COALESCE(NULLIF(j.company_key, ''), NULLIF(t.empresa_bejerman, ''), %s) AS company_key,
                    j.article_code,
                    j.status,
                    j.attempts,
@@ -144,9 +157,12 @@ class BejermanJobsView(APIView):
                j.id DESC
              LIMIT 250
             """,
-            sql_params,
+            [DEFAULT_INGRESS_COMPANY_KEY, *sql_params],
         ) or []
+        companies_by_key = {company.key: company for company in list_ingress_companies()}
         for row in rows:
+            company = companies_by_key.get(row.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY)
+            row["company_label"] = company.label if company else row.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY
             resolution = article_resolution_for_job_row(row)
             row["article_resolution"] = resolution
             row["article_mapping"] = resolution.get("mapping")
@@ -212,11 +228,12 @@ class BejermanJobRetryView(APIView):
                        attempts = 0,
                        last_error = NULL,
                        next_attempt_at = CURRENT_TIMESTAMP,
+                       actor_user_id = %s,
                        updated_at = CURRENT_TIMESTAMP
                  WHERE id = %s
                 RETURNING id, status, attempts
                 """,
-                [job_id],
+                [_actor_id(request), job_id],
             )
             cols = [col[0] for col in cur.description]
             updated = dict(zip(cols, cur.fetchone()))
@@ -226,8 +243,25 @@ class BejermanJobRetryView(APIView):
 class BejermanArticleMappingsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    def get(self, request):
+        require_any_permission(request, ["action.ingreso.fix_ris_preflight", "action.bejerman_sync.manage"])
+        model_id = _as_int(request.GET.get("model_id"))
+        if not model_id:
+            return Response({"detail": "Modelo requerido"}, status=400)
+        rows = q(
+            """
+            SELECT id, model_id, variante, variante_norm, article_code, article_description,
+                   match_source, confirmed_at, updated_at
+              FROM bejerman_article_mappings
+             WHERE model_id = %s
+             ORDER BY variante_norm, updated_at DESC
+            """,
+            [model_id],
+        ) or []
+        return Response({"items": rows})
+
     def post(self, request):
-        require_permission(request, "action.bejerman_sync.manage")
+        require_any_permission(request, ["action.ingreso.fix_ris_preflight", "action.bejerman_sync.manage"])
         data = request.data or {}
         article_code = (data.get("article_code") or data.get("codigo") or "").strip()
         article_description = (data.get("article_description") or data.get("descripcion") or "").strip()
@@ -238,21 +272,33 @@ class BejermanArticleMappingsView(APIView):
         variante = (data.get("variante") or "").strip()
         job_id = _as_int(data.get("job_id"))
         context = None
+        company_key = DEFAULT_INGRESS_COMPANY_KEY
         if job_id:
-            row = q("SELECT ingreso_id FROM bejerman_sync_jobs WHERE id=%s", [job_id], one=True)
+            row = q(
+                "SELECT ingreso_id, COALESCE(NULLIF(company_key, ''), %s) AS company_key FROM bejerman_sync_jobs WHERE id=%s",
+                [DEFAULT_INGRESS_COMPANY_KEY, job_id],
+                one=True,
+            )
             if not row:
                 return Response({"detail": "Operación Bejerman no encontrada"}, status=404)
+            company_key = row.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY
             context = article_context_for_ingreso(int(row["ingreso_id"]))
             model_id = int(context["model_id"])
             variante = context.get("variante") or ""
 
         if not model_id:
             return Response({"detail": "Modelo requerido para mapear el artículo"}, status=400)
+        if context is None:
+            try:
+                context = article_context_for_model(int(model_id), variante)
+            except BejermanBlockedError as exc:
+                return Response({"detail": str(exc)}, status=404)
 
+        user_id = _actor_id(request)
         try:
             candidate = validate_bejerman_article_choice(
                 article_code,
-                client=BejermanSDKClient(),
+                client=BejermanSDKClient(company_key=company_key if job_id else None, actor_user_id=user_id),
                 context=context or {},
             )
         except BejermanBlockedError as exc:
@@ -260,7 +306,6 @@ class BejermanArticleMappingsView(APIView):
         except (BejermanConfigError, BejermanTransientError) as exc:
             return Response({"detail": str(exc)}, status=503)
 
-        user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
         mapping = upsert_article_mapping(
             model_id=model_id,
             variante=variante,
@@ -289,19 +334,42 @@ class BejermanArticlesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        require_permission(request, "action.bejerman_sync.manage")
+        require_any_permission(request, ["action.ingreso.fix_ris_preflight", "action.bejerman_sync.manage"])
         job_id = _as_int(request.GET.get("job_id"))
-        if not job_id:
-            return Response({"detail": "Job Bejerman requerido"}, status=400)
+        model_id = _as_int(request.GET.get("model_id") or request.GET.get("modelId"))
+        variante = (request.GET.get("variante") or request.GET.get("variant") or "").strip()
+        if not job_id and not model_id:
+            return Response({"detail": "Job Bejerman o modelo requerido"}, status=400)
         query = (request.GET.get("q") or request.GET.get("query") or "").strip()
         limit = _as_int(request.GET.get("limit")) or 20
         try:
-            payload = search_bejerman_articles_for_job(
-                job_id=job_id,
-                query=query,
-                client=BejermanSDKClient(),
-                limit=min(max(limit, 1), 50),
-            )
+            if job_id:
+                job = q(
+                    "SELECT COALESCE(NULLIF(company_key, ''), %s) AS company_key FROM bejerman_sync_jobs WHERE id=%s",
+                    [DEFAULT_INGRESS_COMPANY_KEY, job_id],
+                    one=True,
+                )
+                if not job:
+                    raise BejermanBlockedError("OperaciÃ³n Bejerman no encontrada")
+                client = BejermanSDKClient(
+                    company_key=job.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY,
+                    actor_user_id=_actor_id(request),
+                )
+                payload = search_bejerman_articles_for_job(
+                    job_id=job_id,
+                    query=query,
+                    client=client,
+                    limit=min(max(limit, 1), 50),
+                )
+            else:
+                client = BejermanSDKClient(actor_user_id=_actor_id(request))
+                context = article_context_for_model(int(model_id), variante)
+                payload = search_bejerman_articles_for_context(
+                    context=context,
+                    query=query,
+                    client=client,
+                    limit=min(max(limit, 1), 50),
+                )
         except BejermanBlockedError as exc:
             return Response({"detail": str(exc)}, status=404)
         except (BejermanConfigError, BejermanTransientError) as exc:

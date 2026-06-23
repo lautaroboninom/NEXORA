@@ -28,6 +28,7 @@ import {
   getProveedoresExternos,
   deleteRepuesto,
 } from "../lib/api";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 const Input = (p) => <input {...p} className="border rounded p-2 w-full" />;
 
@@ -2151,7 +2152,106 @@ export default function Repuestos() {
           </div>
         )}
 
-        <div className="overflow-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((it) => {
+              const draft = drafts[it.id] || {};
+              const rowClass = it.stock_negativo
+                ? "bg-red-50"
+                : it.stock_alerta
+                ? "bg-yellow-50"
+                : "";
+              return (
+                <MobileDataCard key={it.id} className={`space-y-3 ${rowClass}`}>
+                  <div>
+                    <div className="font-mono text-xs text-gray-500">{it.codigo}</div>
+                    <div className="font-semibold text-gray-900">{it.nombre}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {it.stock_negativo && <Chip tone="red">Stock negativo</Chip>}
+                      {!it.stock_negativo && it.stock_alerta && <Chip tone="yellow">Stock bajo</Chip>}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-3">
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] font-semibold uppercase text-gray-500">Mul.</span>
+                      {canManage ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="h-10 w-full rounded border px-2 text-right"
+                          value={draft.multiplicador ?? (it.multiplicador ?? "")}
+                          onChange={(e) => updateDraft(it.id, "multiplicador", e.target.value)}
+                          placeholder={it.multiplicador_aplicado != null ? String(it.multiplicador_aplicado) : ""}
+                        />
+                      ) : (
+                        <div className="text-sm text-gray-900">{it.multiplicador_aplicado != null ? it.multiplicador_aplicado : "-"}</div>
+                      )}
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] font-semibold uppercase text-gray-500">Stock</span>
+                      {canEditStock ? (
+                        <input
+                          type="number"
+                          step="1"
+                          className="h-10 w-full rounded border px-2 text-right"
+                          value={draft.stock_on_hand ?? (it.stock_on_hand ?? "")}
+                          onChange={(e) => updateDraft(it.id, "stock_on_hand", normalizeIntInput(e.target.value))}
+                        />
+                      ) : (
+                        <div className="text-sm text-gray-900">{it.stock_on_hand ?? "-"}</div>
+                      )}
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] font-semibold uppercase text-gray-500">Stock min</span>
+                      {canManage ? (
+                        <input
+                          type="number"
+                          step="1"
+                          className="h-10 w-full rounded border px-2 text-right"
+                          value={draft.stock_min ?? (it.stock_min ?? "")}
+                          onChange={(e) => updateDraft(it.id, "stock_min", normalizeIntInput(e.target.value))}
+                        />
+                      ) : (
+                        <div className="text-sm text-gray-900">{it.stock_min ?? "-"}</div>
+                      )}
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <button
+                      className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                      type="button"
+                      onClick={() => toggleDetalle(it.id)}
+                    >
+                      {openId === it.id ? "Ocultar detalle" : "Ver detalle"}
+                    </button>
+                    {(canManage || canEditStock) && (
+                      <button
+                        className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                        onClick={() => saveRow(it)}
+                        disabled={!hasChanges(it)}
+                        type="button"
+                      >
+                        Guardar
+                      </button>
+                    )}
+                  </div>
+                  {openId === it.id && (
+                    <div className="border-t border-gray-100 pt-2">
+                      <MobileDataField label="Detalle">
+                        {detalles[it.id]?.loading
+                          ? "Cargando detalle..."
+                          : detalles[it.id]?.error
+                          ? detalles[it.id].error
+                          : detalles[it.id]?.data?.descripcion || detalles[it.id]?.data?.subrubro_nombre || "Detalle disponible en vista de escritorio."}
+                      </MobileDataField>
+                    </div>
+                  )}
+                </MobileDataCard>
+              );
+            })}
+            {!filtered.length && <MobileDataCard className="text-gray-500">Sin repuestos</MobileDataCard>}
+          </MobileDataList>
+          <DesktopTableWrap className="overflow-auto">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -2925,6 +3025,7 @@ export default function Repuestos() {
               )}
             </tbody>
           </table>
+          </DesktopTableWrap>
         </div>
       </div>
 

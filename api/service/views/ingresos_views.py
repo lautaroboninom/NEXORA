@@ -2,6 +2,7 @@
 import time
 import json
 import logging
+from types import SimpleNamespace
 from datetime import date, datetime, timedelta
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -45,7 +46,9 @@ from ..rejected_budget import (
 )
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
+    enqueue_demo_ready_transfer_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
+    ingreso_is_demo_return,
     ingreso_is_internal_equipment,
 )
 
@@ -58,14 +61,23 @@ from ..serializers import (
 from ..permissions import require_any_permission, user_has_any_permission, user_has_permission
 from ..warranty import compute_warranty, compute_warranty_from_sale_date
 from ..bejerman_companies import require_company
-from ..bejerman_ris import get_ris_status_for_ingreso
+from ..bejerman_ris import (
+    BejermanRisError,
+    BejermanRisPreflightError,
+    emit_or_get_ris_batch,
+    get_ris_status_for_ingreso,
+    parse_ris_document_mode,
+    preflight_ris_for_request_payload,
+    register_ris_batch,
+    RIS_DOCUMENT_MODE_REGISTER,
+)
 from ..notifications import (
     notify_estado_patrimonial,
     notify_ingreso_asignado,
-    notify_reparacion_lista_remito,
     notify_solicitud_asignacion,
     notify_solicitud_baja,
 )
+from ..repair_ready_notifications import notify_repair_ready_for_remito
 
 
 SALE_TICKET_STATES = ("vendido_pendiente_entrega", "vendido_entregado")
@@ -287,6 +299,39 @@ def _is_mg_owner_customer(customer_id, mg_owner_id=None) -> bool:
         return int(customer_id) == int(owner_id)
     except Exception:
         return False
+
+
+def _fetch_ingreso_device_mg_context(ingreso_id):
+    n_de_control_sql = (
+        "COALESCE(d.n_de_control,'') AS n_de_control,"
+        if _has_table_column("devices", "n_de_control")
+        else "'' AS n_de_control,"
+    )
+    mg_estado_sql = (
+        "COALESCE(d.mg_estado,'activo') AS mg_estado,"
+        if _has_mg_schema()
+        else "'activo' AS mg_estado,"
+    )
+    row = q(
+        f"""
+        SELECT
+          i.estado,
+          d.customer_id,
+          COALESCE(d.numero_interno,'') AS numero_interno,
+          COALESCE(d.numero_serie,'') AS numero_serie,
+          {n_de_control_sql}
+          {mg_estado_sql}
+          COALESCE(d.alquilado,false) AS alquilado
+          FROM ingresos i
+          LEFT JOIN devices d ON d.id = i.device_id
+         WHERE i.id=%s
+        """,
+        [ingreso_id],
+        one=True,
+    )
+    if row:
+        row.update(resolve_mg_flags(row, _mg_owner_customer_id()))
+    return row
 
 
 def _parse_rejected_budget_charge_or_raise(raw_value, *, required: bool) -> object:
@@ -845,7 +890,7 @@ class PresupuestadosExportView(APIView):
       - ids: lista separada por comas de IDs de ingresos. Ej: ?ids=10,11,15
 
     Columnas:
-      OS, Cliente, Equipo, N/S, Monto sin IVA, Fecha emision
+      OS, Cliente, Equipo, N/S, Monto sin IVA
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -879,7 +924,6 @@ class PresupuestadosExportView(APIView):
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
-                  q.fecha_emitido AS fecha_emision,
                   COALESCE((
                     SELECT ROUND(SUM(qi.qty * qi.precio_u), 2)
                       FROM quote_items qi
@@ -914,26 +958,17 @@ class PresupuestadosExportView(APIView):
             "Equipo",
             "N/S",
             "Monto sin IVA",
-            "Fecha emision",
         ]
         ws.append(headers)
 
         # formato de equipo y N/S via helpers _equipolabel_row y _ns_label
+        currency_format = '"$" #,##0.00'
 
         for r in rows:
             os_txt = os_label(r.get("id"))
             equipo = _equipolabel_row(r)
             ns_val = _ns_label(r)
             monto = r.get("subtotal_sin_iva")
-            fecha = r.get("fecha_emision")
-            # Serializar fecha a texto corto si existe
-            if fecha is not None:
-                try:
-                    fecha_txt = fecha.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    fecha_txt = str(fecha)
-            else:
-                fecha_txt = "-"
 
             ws.append([
                 os_txt,
@@ -941,12 +976,12 @@ class PresupuestadosExportView(APIView):
                 equipo,
                 ns_val,
                 float(monto) if (monto is not None) else None,
-                fecha_txt,
             ])
+            ws.cell(row=ws.max_row, column=5).number_format = currency_format
 
         # Ajuste simple de ancho de columnas (opcional)
         try:
-            widths = [10, 40, 40, 20, 18, 20]
+            widths = [10, 40, 40, 20, 18]
             for idx, w in enumerate(widths, start=1):
                 col = ws.column_dimensions[chr(64 + idx)]
                 col.width = w
@@ -1036,6 +1071,7 @@ class MarcarReparadoView(APIView):
         auto_moved_to = None
         new_ubic_id = None
         should_enqueue_stl = False
+        should_enqueue_demo_val = False
         try:
             # Leer números para detección de equipo MG y ubicación actual.
             info = q(
@@ -1073,110 +1109,32 @@ class MarcarReparadoView(APIView):
                         auto_moved = True
                         auto_moved_to = loc_row.get("nombre") or target_name
                         new_ubic_id = target_id
+            elif ingreso_is_demo_return(ingreso_id):
+                should_enqueue_demo_val = True
         except Exception:
             # No bloquear el flujo por errores en movimiento automático.
             pass
         if should_enqueue_stl:
             try:
-                enqueue_stock_transfer_for_ingreso(ingreso_id)
+                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+                enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
             except Exception:
                 logger.exception("No se pudo encolar transferencia Bejerman STR a STL", extra={"ingreso_id": ingreso_id})
-        # Disparar correo si paso a 'reparado' y presupuesto esta 'aprobado'
+        if should_enqueue_demo_val:
+            try:
+                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+                enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+            except Exception:
+                logger.exception("No se pudo encolar transferencia Bejerman STR a VAL", extra={"ingreso_id": ingreso_id})
+        # Disparar aviso si pasó a 'reparado' y el presupuesto ya estaba aprobado.
         _should_send_mail = (_prev_estado != "reparado" and _prev_presu == "aprobado")
         if _should_send_mail:
             try:
-                _info = q(
-                    """
-                    SELECT c.razon_social AS cliente,
-                           COALESCE(m.tipo_equipo,'') AS tipo_equipo,
-                           COALESCE(b.nombre,'') AS marca,
-                           COALESCE(m.nombre,'') AS modelo,
-                           COALESCE(d.numero_serie,'') AS numero_serie,
-                           COALESCE(d.numero_interno,'') AS numero_interno
-                      FROM ingresos t
-                      JOIN devices d   ON d.id = t.device_id
-                      JOIN customers c ON c.id = d.customer_id
-                      LEFT JOIN marcas b ON b.id = d.marca_id
-                      LEFT JOIN models m ON m.id = d.model_id
-                     WHERE t.id=%s
-                    """,
-                    [ingreso_id],
-                    one=True,
-                ) or {}
-            except Exception:
-                _info = {}
-
-            _os_txt = os_label(ingreso_id)
-            _tech_name = getattr(request.user, "nombre", "")
-            _cliente = _info.get("cliente") or ""
-            _equipo = " | ".join([p for p in [_info.get("tipo_equipo") or "", _info.get("marca") or "", _info.get("modelo") or ""] if p])
-            _ns = _info.get("numero_serie") or ""
-
-            _subject = f"Equipo reparado - falta imprimir remito - {_os_txt} - {_cliente}"
-            _lines = [
-                "El equipo fue marcado como reparado.",
-                "Solo falta imprimir la orden de salida (remito).",
-                f"Marcado por: {_tech_name or '-'}",
-                f"OS: {_os_txt}",
-                f"Cliente: {_cliente}",
-                f"Equipo: {_equipo or '-'}",
-                f"N/S: {_ns or '-'}",
-            ]
-            try:
-                _url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
-                _lines.append("")
-                _lines.append(f"Abrir hoja: {_url}")
-            except Exception:
-                pass
-            _body = "\n".join(_lines)
-            try:
-                _body = _email_append_footer_text(_body)
-            except Exception:
-                pass
-
-            _recips = getattr(settings, "ASSIGNMENT_REQUEST_RECIPIENTS", []) or []
-            if not isinstance(_recips, (list, tuple)):
-                _recips = [str(_recips)] if _recips else []
-            if not _recips:
-                _fb1 = getattr(settings, "COMPANY_FOOTER_EMAIL_2", None)
-                _fb2 = getattr(settings, "COMPANY_FOOTER_EMAIL", None)
-                _recips = [x for x in [_fb1, _fb2] if x]
-            try:
-                notify_reparacion_lista_remito(ingreso_id, emails=_recips)
-            except Exception:
-                pass
-
-            def _send_repair_email():
-                if not _recips:
-                    logger.warning(
-                        "repair_completed_email no recipients configured",
-                        extra={"ingreso_id": ingreso_id},
-                    )
-                    return
-                try:
-                    _ok, _dbg = _send_mail_with_fallback(_subject, _body, _recips)
-                    logger.info(
-                        "repair_completed_email sent=%s ingreso_id=%s recipients=%s backend=%s",
-                        bool(_ok),
-                        ingreso_id,
-                        _recips,
-                        getattr(settings, "EMAIL_BACKEND", ""),
-                    )
-                except Exception:
-                    logger.exception(
-                        "repair_completed_email failed",
-                        extra={"ingreso_id": ingreso_id, "recipients": _recips},
-                    )
-
-            try:
-                try:
-                    _conn = transaction.get_connection()
-                    if getattr(_conn, "in_atomic_block", False):
-                        transaction.on_commit(_send_repair_email)
-                    else:
-                        _send_repair_email()
-                except Exception:
-                    _send_repair_email()
+                notify_repair_ready_for_remito(
+                    ingreso_id,
+                    request=request,
+                    actor_name=getattr(request.user, "nombre", ""),
+                )
             except Exception:
                 pass
 
@@ -1552,10 +1510,13 @@ class EntregarIngresoView(APIView):
             pass
         try:
             with transaction.atomic():
+                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
                 if ingreso_is_internal_equipment(ingreso_id):
-                    enqueue_stock_transfer_for_ingreso(ingreso_id)
+                    enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+                elif ingreso_is_demo_return(ingreso_id):
+                    enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
                 else:
-                    enqueue_client_ready_transfer_for_ingreso(ingreso_id)
+                    enqueue_client_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
         except Exception:
             logger.exception("No se pudo encolar la transferencia Bejerman", extra={"ingreso_id": ingreso_id})
         return Response({"ok": True})
@@ -1570,22 +1531,13 @@ class DarBajaIngresoView(APIView):
         with transaction.atomic():
             with connection.cursor() as cur:
                 dash_id = _dash_location_id()
-                cur.execute(
-                    """
-                    SELECT i.estado, d.customer_id
-                      FROM ingresos i
-                      LEFT JOIN devices d ON d.id = i.device_id
-                     WHERE i.id=%s
-                    """,
-                    [ingreso_id],
-                )
-                row = cur.fetchone()
+                row = _fetch_ingreso_device_mg_context(ingreso_id)
                 if not row:
                     return Response({"detail": "Ingreso no encontrado"}, status=404)
-                estado_actual = (row[0] or "").lower()
+                estado_actual = (row.get("estado") or "").lower()
                 if estado_actual == "baja":
                     return Response({"ok": True, "estado": "baja"})
-                if not _is_mg_owner_customer(row[1]):
+                if not row.get("es_propietario_mg"):
                     return Response({"detail": "Solo se puede dar de baja un equipo propio MG."}, status=400)
                 cur.execute(
                     """
@@ -1952,7 +1904,7 @@ class IngresoConvertirPropioMgView(APIView):
             one=True,
         ) or {}
         row.update(resolve_mg_flags(row, mg_owner_id))
-        row["es_cliente_mg_owner"] = _is_mg_owner_customer(row.get("customer_id"), mg_owner_id)
+        row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
         transaction.on_commit(lambda: _notify_estado_patrimonial(request, ingreso_id, "alta_mg"))
 
         return Response({"ok": True, "ingreso_id": ingreso_id, "device": row})
@@ -2524,6 +2476,7 @@ class AprobadosView(APIView):
                 f"""
                 SELECT
                   t.id, t.estado, t.presupuesto_estado,
+                  COALESCE(t.resolucion, '') AS resolucion,
                   c.razon_social, d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -2720,12 +2673,14 @@ class GeneralEquiposView(APIView):
                     else:
                         like = f"%{needle}%"
                         like_ns = f"%{needle_ns}%"
+                        has_customer_alias = _has_table_column("customers", "alias_interno")
                         clauses = []
                         if m_os:
                             clauses.append("t.id = %s")
                         clauses.extend([
                             "t.id::text ILIKE %s",
                             "COALESCE(c.razon_social,'') ILIKE %s",
+                            *(["COALESCE(c.alias_interno,'') ILIKE %s"] if has_customer_alias else []),
                             "COALESCE(b.nombre,'') ILIKE %s",
                             "COALESCE(m.nombre,'') ILIKE %s",
                             "COALESCE(m.tipo_equipo,'') ILIKE %s",
@@ -2745,7 +2700,7 @@ class GeneralEquiposView(APIView):
                         wh.append("(" + " OR ".join(clauses) + ")")
                         if m_os:
                             params.append(int(m_os.group(1)))
-                        params.extend([like] * 10 + [like_ns, like_ns])
+                        params.extend([like] * (10 + (1 if has_customer_alias else 0)) + [like_ns, like_ns])
                         if has_mg_sale_extended:
                             params.extend([like, like_ns])
 
@@ -2761,7 +2716,11 @@ class GeneralEquiposView(APIView):
                 else:
                     wh.append("t.id::text ILIKE %s")
                     params.append(f"%{os_raw}%")
-            _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
+            if _has_table_column("customers", "alias_interno") and cliente_raw:
+                wh.append("(COALESCE(c.razon_social,'') ILIKE %s OR COALESCE(c.alias_interno,'') ILIKE %s)")
+                params.extend([f"%{cliente_raw}%", f"%{cliente_raw}%"])
+            else:
+                _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
             _apply_ilike("COALESCE(m.tipo_equipo,'')", tipo_equipo_raw)
             _apply_ilike("COALESCE(b.nombre,'')", marca_raw)
             _apply_ilike("COALESCE(m.nombre,'')", modelo_raw)
@@ -2835,7 +2794,7 @@ class GeneralEquiposView(APIView):
         mg_owner_id = _mg_owner_customer_id()
         for row in rows:
             row.update(resolve_mg_flags(row, mg_owner_id))
-            row["es_cliente_mg_owner"] = _is_mg_owner_customer(row.get("customer_id"), mg_owner_id)
+            row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
         # compat: si no hay paginación pedida, seguir devolviendo lista
         if page_size == 0:
             return Response(rows)
@@ -2967,12 +2926,14 @@ class GeneralEquiposExportView(APIView):
                     else:
                         like = f"%{needle}%"
                         like_ns = f"%{needle_ns}%"
+                        has_customer_alias = _has_table_column("customers", "alias_interno")
                         clauses = []
                         if m_os:
                             clauses.append("t.id = %s")
                         clauses.extend([
                             "t.id::text ILIKE %s",
                             "COALESCE(c.razon_social,'') ILIKE %s",
+                            *(["COALESCE(c.alias_interno,'') ILIKE %s"] if has_customer_alias else []),
                             "COALESCE(b.nombre,'') ILIKE %s",
                             "COALESCE(m.nombre,'') ILIKE %s",
                             "COALESCE(m.tipo_equipo,'') ILIKE %s",
@@ -2992,7 +2953,7 @@ class GeneralEquiposExportView(APIView):
                         wh.append("(" + " OR ".join(clauses) + ")")
                         if m_os:
                             params.append(int(m_os.group(1)))
-                        params.extend([like] * 10 + [like_ns, like_ns])
+                        params.extend([like] * (10 + (1 if has_customer_alias else 0)) + [like_ns, like_ns])
                         if has_mg_sale_extended:
                             params.extend([like, like_ns])
 
@@ -3009,7 +2970,11 @@ class GeneralEquiposExportView(APIView):
                     wh.append("t.id::text ILIKE %s")
                     params.append(f"%{os_raw}%")
 
-            _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
+            if _has_table_column("customers", "alias_interno") and cliente_raw:
+                wh.append("(COALESCE(c.razon_social,'') ILIKE %s OR COALESCE(c.alias_interno,'') ILIKE %s)")
+                params.extend([f"%{cliente_raw}%", f"%{cliente_raw}%"])
+            else:
+                _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
             _apply_ilike("COALESCE(m.tipo_equipo,'')", tipo_equipo_raw)
             _apply_ilike("COALESCE(b.nombre,'')", marca_raw)
             _apply_ilike("COALESCE(m.nombre,'')", modelo_raw)
@@ -3555,22 +3520,13 @@ class IngresoSolicitarBajaView(APIView):
         if not motivo:
             return Response({"detail": "El motivo es obligatorio"}, status=400)
 
-        row = q(
-            """
-            SELECT i.estado, d.customer_id
-              FROM ingresos i
-              LEFT JOIN devices d ON d.id = i.device_id
-             WHERE i.id=%s
-            """,
-            [ingreso_id],
-            one=True,
-        )
+        row = _fetch_ingreso_device_mg_context(ingreso_id)
         if not row:
             return Response({"detail": "Ingreso no encontrado"}, status=404)
         estado_actual = (row.get("estado") or "").lower()
         if estado_actual == "baja":
             return Response({"ok": True, "already_baja": True, "email_sent": False})
-        if not _is_mg_owner_customer(row.get("customer_id")):
+        if not row.get("es_propietario_mg"):
             return Response({"detail": "Solo se puede solicitar BAJA para equipos propios MG."}, status=400)
 
         pending = _pending_baja_request(ingreso_id)
@@ -4440,7 +4396,21 @@ class NuevoIngresoView(APIView):
         elif cliente.get("cod_empresa"):
             c = q("SELECT id, cod_empresa, razon_social FROM customers WHERE cod_empresa=%s", [cliente["cod_empresa"]], one=True)
         elif cliente.get("razon_social"):
-            c = q("SELECT id, cod_empresa, razon_social FROM customers WHERE LOWER(razon_social)=LOWER(%s)", [cliente["razon_social"]], one=True)
+            if _has_table_column("customers", "alias_interno"):
+                c = q(
+                    """
+                    SELECT id, cod_empresa, razon_social
+                      FROM customers
+                     WHERE LOWER(razon_social)=LOWER(%s)
+                        OR LOWER(COALESCE(alias_interno,''))=LOWER(%s)
+                     ORDER BY CASE WHEN LOWER(razon_social)=LOWER(%s) THEN 0 ELSE 1 END, id
+                     LIMIT 1
+                    """,
+                    [cliente["razon_social"], cliente["razon_social"], cliente["razon_social"]],
+                    one=True,
+                )
+            else:
+                c = q("SELECT id, cod_empresa, razon_social FROM customers WHERE LOWER(razon_social)=LOWER(%s)", [cliente["razon_social"]], one=True)
         else:
             return Response({"detail": "Debe seleccionar un cliente"}, status=400)
 
@@ -4449,7 +4419,15 @@ class NuevoIngresoView(APIView):
 
         if cliente.get("cod_empresa") and c["cod_empresa"] != cliente["cod_empresa"]:
             return Response({"detail": "El código no corresponde a la razón social seleccionada."}, status=400)
-        if cliente.get("razon_social") and c["razon_social"].lower() != (cliente["razon_social"] or "").lower():
+        cliente_alias_ok = False
+        if cliente.get("razon_social") and _has_table_column("customers", "alias_interno"):
+            alias_row = q(
+                "SELECT 1 FROM customers WHERE id=%s AND LOWER(COALESCE(alias_interno,''))=LOWER(%s)",
+                [c["id"], cliente["razon_social"]],
+                one=True,
+            )
+            cliente_alias_ok = bool(alias_row)
+        if cliente.get("razon_social") and c["razon_social"].lower() != (cliente["razon_social"] or "").lower() and not cliente_alias_ok:
             return Response({"detail": "La razón social no corresponde al código seleccionado."}, status=400)
 
         customer_id = c["id"]
@@ -4472,6 +4450,12 @@ class NuevoIngresoView(APIView):
         if rs_lower == "particular":
             if not prop_nombre or not prop_doc:
                 return Response({"detail": "Para cliente 'Particular' es obligatorio completar Nombre y CUIT del propietario"}, status=400)
+
+        if not getattr(request, "_skip_ris_preflight", False):
+            user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+            preflight = preflight_ris_for_request_payload(data, user_id=user_id)
+            if not preflight.get("can_emit"):
+                return Response(preflight, status=409)
 
         numero_serie = (equipo.get("numero_serie") or "").strip()
         ns_key = (numero_serie or "").replace(" ", "").replace("-", "").upper()
@@ -4962,6 +4946,163 @@ class NuevoIngresoView(APIView):
         return Response({"ok": True, "ingreso_id": ingreso_id, "os": os_label(ingreso_id)}, status=201)
 
 
+class NuevoIngresoLoteError(Exception):
+    def __init__(self, payload, status_code=400, item_index=None):
+        super().__init__((payload or {}).get("detail") if isinstance(payload, dict) else str(payload))
+        self.payload = payload if isinstance(payload, dict) else {"detail": str(payload)}
+        self.status_code = status_code
+        self.item_index = item_index
+
+
+def _child_ingreso_request(request, payload):
+    user = getattr(request, "user", None)
+    child = SimpleNamespace(
+        data=payload,
+        user=user,
+        user_id=getattr(request, "user_id", None) or getattr(user, "id", None),
+        user_obj=getattr(request, "user_obj", None) or user,
+        user_role=getattr(request, "user_role", None) or getattr(user, "rol", ""),
+        _skip_ris_preflight=True,
+    )
+    cached_permissions = getattr(request, "_effective_permissions_v2", None)
+    if isinstance(cached_permissions, dict):
+        setattr(child, "_effective_permissions_v2", cached_permissions)
+    return child
+
+
+def _ris_lote_urls(first_ingreso_id):
+    return {
+        "pdf_url": f"/api/ingresos/{first_ingreso_id}/ris/pdf/",
+        "print_url": f"/api/ingresos/{first_ingreso_id}/ris/print/",
+    }
+
+
+class NuevoIngresoLoteView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        require_any_permission(request, ["action.ingreso.create", "page.new_ingreso"])
+        data = request.data or {}
+        ris_mode = parse_ris_document_mode(data.get("ris_mode") or data.get("document_mode"))
+        manual_remito_number = (
+            data.get("manual_remito_number")
+            or data.get("manualRemitoNumber")
+            or data.get("remito_ingreso")
+            or ""
+        )
+        raw_items = data.get("items") or []
+        if not isinstance(raw_items, list) or not raw_items:
+            return Response({"detail": "Debe agregar al menos un equipo al lote."}, status=400)
+        user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        preflight = preflight_ris_for_request_payload(data, user_id=user_id)
+        if not preflight.get("can_emit"):
+            return Response(preflight, status=409)
+
+        shared_keys = (
+            "cliente",
+            "propietario",
+            "empresa_bejerman",
+            "empresa_facturar",
+            "fecha_ingreso",
+            "ubicacion_id",
+        )
+        ingreso_view = NuevoIngresoView()
+        ingresos = []
+        try:
+            with transaction.atomic():
+                for index, item in enumerate(raw_items):
+                    if not isinstance(item, dict):
+                        raise NuevoIngresoLoteError({"detail": "Cada equipo del lote debe ser un objeto."}, 400, index)
+                    payload = dict(item)
+                    for key in shared_keys:
+                        if key in data and key not in payload:
+                            payload[key] = data.get(key)
+                    child_response = ingreso_view.post(_child_ingreso_request(request, payload))
+                    body = getattr(child_response, "data", None) or {}
+                    status_code = getattr(child_response, "status_code", 500)
+                    if status_code >= 400:
+                        raise NuevoIngresoLoteError(body, status_code, index)
+                    if isinstance(body, dict) and body.get("existing") is True:
+                        duplicate_payload = {
+                            **body,
+                            "detail": "El equipo ya tiene un ingreso abierto.",
+                        }
+                        raise NuevoIngresoLoteError(duplicate_payload, 409, index)
+                    ingresos.append(dict(body))
+        except NuevoIngresoLoteError as exc:
+            payload = {**exc.payload, "item_index": exc.item_index}
+            return Response(payload, status=exc.status_code)
+
+        ingreso_ids = [item.get("ingreso_id") for item in ingresos if item.get("ingreso_id")]
+        first_ingreso_id = ingreso_ids[0] if ingreso_ids else None
+        if not first_ingreso_id:
+            return Response({"detail": "No se pudo identificar el primer ingreso creado."}, status=500)
+
+        urls = _ris_lote_urls(first_ingreso_id)
+        user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        is_register_mode = ris_mode == RIS_DOCUMENT_MODE_REGISTER
+        try:
+            row = (
+                register_ris_batch(ingreso_ids, manual_remito_number, user_id=user_id)
+                if is_register_mode
+                else emit_or_get_ris_batch(ingreso_ids, user_id=user_id)
+            )
+            ris = get_ris_status_for_ingreso(first_ingreso_id)
+            remito_number = ris.get("remito_number") or row.get("remito_number") or ""
+            response_payload = {
+                "ok": True,
+                "ingresos": ingresos,
+                "ingreso_ids": ingreso_ids,
+                "remito_number": remito_number,
+                "ris": ris,
+                "document_mode": ris.get("document_mode") or ris_mode,
+                "pdf_status": ris.get("pdf_status") or ("not_applicable" if is_register_mode else "pending"),
+            }
+            if is_register_mode:
+                response_payload["detail"] = (
+                    f"Ingresos creados y remito {remito_number} registrado en Bejerman."
+                    if remito_number
+                    else "Ingresos creados y remito registrado en Bejerman."
+                )
+            else:
+                response_payload.update({"retry_after_ms": 2500, **urls})
+            return Response(
+                response_payload,
+                status=201,
+            )
+        except BejermanRisPreflightError as exc:
+            ris = get_ris_status_for_ingreso(first_ingreso_id)
+            response_payload = {
+                "ok": True,
+                "ingresos": ingresos,
+                "ingreso_ids": ingreso_ids,
+                "remito_number": ris.get("remito_number") or "",
+                "ris": ris,
+                "document_mode": ris.get("document_mode") or ris_mode,
+                "pdf_status": ris.get("pdf_status") or ("not_applicable" if is_register_mode else "pending"),
+                **exc.payload,
+            }
+            if not is_register_mode:
+                response_payload.update({"retry_after_ms": 2500, **urls})
+            return Response(response_payload, status=409)
+        except BejermanRisError as exc:
+            ris = get_ris_status_for_ingreso(first_ingreso_id)
+            action = "registrar remito" if is_register_mode else "emitir RIS"
+            response_payload = {
+                "ok": True,
+                "ingresos": ingresos,
+                "ingreso_ids": ingreso_ids,
+                "remito_number": ris.get("remito_number") or "",
+                "ris": ris,
+                "document_mode": ris.get("document_mode") or ris_mode,
+                "pdf_status": ris.get("pdf_status") or ("not_applicable" if is_register_mode else "pending"),
+                "detail": f"Ingresos creados. No se pudo {action}: {exc}",
+            }
+            if not is_register_mode:
+                response_payload.update({"retry_after_ms": 2500, **urls})
+            return Response(response_payload, status=201)
+
+
 class GarantiaReparacionCheckView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
@@ -5301,7 +5442,7 @@ class IngresoDetalleView(APIView):
             pass
         mg_owner_id = _mg_owner_customer_id()
         row.update(resolve_mg_flags(row, mg_owner_id))
-        row["es_cliente_mg_owner"] = _is_mg_owner_customer(row.get("customer_id"), mg_owner_id)
+        row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
         row["ris"] = get_ris_status_for_ingreso(ingreso_id)
         # Agregar serial_cambio si existe la columna
         try:
@@ -5985,6 +6126,7 @@ class MarcarControladoSinDefectoView(APIView):
         auto_moved_to = None
         new_ubic_id = None
         should_enqueue_stl = False
+        should_enqueue_demo_val = False
         try:
             info = q(
                 """
@@ -6020,13 +6162,22 @@ class MarcarControladoSinDefectoView(APIView):
                         auto_moved = True
                         auto_moved_to = loc_row.get("nombre") or target_name
                         new_ubic_id = target_id
+            elif ingreso_is_demo_return(ingreso_id):
+                should_enqueue_demo_val = True
         except Exception:
             pass
         if should_enqueue_stl:
             try:
-                enqueue_stock_transfer_for_ingreso(ingreso_id)
+                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+                enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
             except Exception:
                 logger.exception("No se pudo encolar transferencia Bejerman STR a STL", extra={"ingreso_id": ingreso_id})
+        if should_enqueue_demo_val:
+            try:
+                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+                enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+            except Exception:
+                logger.exception("No se pudo encolar transferencia Bejerman STR a VAL", extra={"ingreso_id": ingreso_id})
 
         resp = {"ok": True, "estado": "controlado_sin_defecto", "presupuesto_estado": "no_aplica"}
         if auto_moved:

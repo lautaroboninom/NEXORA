@@ -7,6 +7,7 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from ..permissions import MappedPermissionGuard
 from .helpers import q, exec_void, exec_returning, require_roles, _fetchall_dicts, _set_audit_user
 from .mg_state import normalize_mg, resolve_mg_flags
 
@@ -393,11 +394,16 @@ class DevicesListView(APIView):
     y datos básicos de identificación. Solo visible para roles de sistema.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, MappedPermissionGuard]
 
     def get(self, request):
         require_roles(request, ["jefe", "jefe_veedor", "admin", "tecnico"])
         q_raw = (request.GET.get("q") or "").strip()
+        propiedad_raw = (request.GET.get("propiedad") or "").strip().lower()
+        tipo_equipo_raw = (request.GET.get("tipo_equipo") or "").strip()
+        marca_id_raw = (request.GET.get("marca_id") or "").strip()
+        modelo_raw = (request.GET.get("modelo") or "").strip()
+        ubicacion_id_raw = (request.GET.get("ubicacion_id") or "").strip()
         propio_raw = (request.GET.get("propio") or "").strip().lower()
         alquilado_raw = (request.GET.get("alquilado") or "").strip().lower()
         preventivo_estado_raw = (request.GET.get("preventivo_estado") or "").strip().lower()
@@ -437,6 +443,11 @@ class DevicesListView(APIView):
 
         if preventivo_estado_raw and preventivo_estado_raw not in ("sin_plan", "al_dia", "proximo", "vencido"):
             return Response({"detail": "preventivo_estado inválido"}, status=400)
+        if propiedad_raw and propiedad_raw not in ("mg", "cliente", "mg_historico"):
+            return Response({"detail": "propiedad inválida"}, status=400)
+
+        marca_id_val = _parse_int_or_none(marca_id_raw)
+        ubicacion_id_val = _parse_int_or_none(ubicacion_id_raw)
 
         con_plan_val = None
         if con_plan_raw in ("1", "true", "yes", "y", "t"):
@@ -506,10 +517,12 @@ class DevicesListView(APIView):
             wh, params = [], []
             if q_raw:
                 like = f"%{q_raw}%"
+                has_customer_alias = _has_table_column("customers", "alias_interno")
                 clauses = [
                     "LOWER(COALESCE(d.numero_serie,'')) LIKE LOWER(%s)",
                     "LOWER(COALESCE(d.numero_interno,'')) LIKE LOWER(%s)",
                     "LOWER(COALESCE(c.razon_social,'')) LIKE LOWER(%s)",
+                    *(["LOWER(COALESCE(c.alias_interno,'')) LIKE LOWER(%s)"] if has_customer_alias else []),
                     "LOWER(COALESCE(b.nombre,'')) LIKE LOWER(%s)",
                     "LOWER(COALESCE(m.nombre,'')) LIKE LOWER(%s)",
                     "LOWER(COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), '')) LIKE LOWER(%s)",
@@ -523,6 +536,49 @@ class DevicesListView(APIView):
                     clauses.append("LOWER(COALESCE(d.mg_venta_numero_alternativo,'')) LIKE LOWER(%s)")
                 wh.append("(" + " OR ".join(clauses) + ")")
                 params.extend([like] * len(clauses))
+
+            mg_code_sql = (
+                "("
+                "COALESCE(d.numero_interno,'') ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$' OR "
+                "COALESCE(d.numero_serie,'') ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'"
+                ")"
+            )
+            mg_estado_sql = "COALESCE(d.mg_estado, 'activo')" if has_mg_schema else "'activo'"
+            if mg_owner_id:
+                active_mg_sql = f"(d.customer_id = %s OR ({mg_code_sql} AND {mg_estado_sql} <> 'inactivo_venta'))"
+                active_mg_params = [mg_owner_id]
+            else:
+                active_mg_sql = f"({mg_code_sql} AND {mg_estado_sql} <> 'inactivo_venta')"
+                active_mg_params = []
+            historical_mg_sql = f"({mg_code_sql} AND {mg_estado_sql} = 'inactivo_venta')" if has_mg_schema else "(1=0)"
+
+            if propiedad_raw == "mg":
+                wh.append(active_mg_sql)
+                params.extend(active_mg_params)
+            elif propiedad_raw == "mg_historico":
+                wh.append(historical_mg_sql)
+            elif propiedad_raw == "cliente":
+                wh.append(f"(NOT {active_mg_sql} AND NOT {historical_mg_sql})")
+                params.extend(active_mg_params)
+
+            if tipo_equipo_raw:
+                wh.append("LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), NULLIF(m.tipo_equipo,''), ''))) = LOWER(TRIM(%s))")
+                params.append(tipo_equipo_raw)
+            if marca_id_val:
+                wh.append("d.marca_id = %s")
+                params.append(marca_id_val)
+            if modelo_raw:
+                like_modelo = f"%{modelo_raw}%"
+                wh.append(
+                    "("
+                    "LOWER(COALESCE(m.nombre,'')) LIKE LOWER(%s) OR "
+                    "LOWER(COALESCE(NULLIF(d.variante,''), NULLIF(m.variante,''), '')) LIKE LOWER(%s)"
+                    ")"
+                )
+                params.extend([like_modelo, like_modelo])
+            if ubicacion_id_val:
+                wh.append("d.ubicacion_id = %s")
+                params.append(ubicacion_id_val)
 
             if propio_raw in ("1", "true", "yes", "y", "t"):
                 wh.append(
@@ -781,7 +837,7 @@ class DeviceDirectCreateView(APIView):
     Pensado para equipos bajo tutela del servicio técnico instalados en instituciones.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, MappedPermissionGuard]
 
     @transaction.atomic
     def post(self, request):

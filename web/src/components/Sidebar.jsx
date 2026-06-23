@@ -13,6 +13,8 @@ const VARIANT_BORDER = {
   gray: "border-gray-400",
 };
 
+const CUSTOMER_CATALOG_ROLES = new Set(["jefe", "admin", "ventas", "jefe_veedor"]);
+
 function variantOfPath(to) {
   const p = String(to || "");
   if (p === "/tecnico") return "amber";
@@ -26,6 +28,7 @@ function variantOfPath(to) {
   if (p === "/listos") return "green";
   if (p === "/alquiler/stock") return "indigo";
   if (p === "/recepcion") return "blue";
+  if (p.startsWith("/ingresos/nuevo")) return "blue";
   if (p === "/administracion/ordenes-entrega") return "indigo";
   if (p === "/cobranzas/facturacion") return "green";
   return null;
@@ -76,6 +79,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canSpareParts = can(user, PERMISSION_CODES.PAGE_SPARE_PARTS);
   const canWarranty = can(user, PERMISSION_CODES.PAGE_WARRANTY);
   const canBejerman = can(user, PERMISSION_CODES.PAGE_BEJERMAN_SYNC);
+  const canBejermanPurchases = can(user, PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES);
   const canRecepcion = can(user, PERMISSION_CODES.PAGE_RECEPCION);
   const canDeliveryOrders = can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS);
   const canBilling = can(user, PERMISSION_CODES.PAGE_BILLING);
@@ -84,16 +88,24 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
     PERMISSION_CODES.PAGE_NEW_INGRESO,
   ]);
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
+  const canCustomerCatalog = CUSTOMER_CATALOG_ROLES.has(String(user?.rol || "").trim().toLowerCase());
 
-  const showRecepcion = canRecepcion || canCreateIngreso;
-  const showDeliveryOrdersInRecepcion = showRecepcion && canDeliveryOrders;
+  const showRecepcion = (canRecepcion || canCreateIngreso || canBejermanPurchases) && canDeliveryOrders;
+  const showDeliveryOrdersInRecepcion = showRecepcion;
   const showDeliveryOrdersInAdministracion = canDeliveryOrders && !showDeliveryOrdersInRecepcion;
   const showServicioTecnico = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
   const showAdministracion =
-    canGeneralCliente || canHistory || canDevices || showDeliveryOrdersInAdministracion || canCreateIngreso || canHome;
+    canGeneralCliente || canHistory || canDevices || showDeliveryOrdersInAdministracion || canHome;
   const showCobranzas = canBilling;
   const showSistema =
-    canMetrics || canUsers || canCatalogs || canSpareParts || canWarranty || canBejerman || canManageTestProtocols;
+    canMetrics ||
+    canUsers ||
+    canCustomerCatalog ||
+    canCatalogs ||
+    canSpareParts ||
+    canWarranty ||
+    canBejerman ||
+    canManageTestProtocols;
 
   const handleNavigate = () => {
     if (onClose) onClose();
@@ -144,12 +156,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
         </div>
         <div className="space-y-3 px-3 pb-3">
           {showRecepcion && (
-            <Section title="Recepción">
-              {canRecepcion && (
-                <LinkItem to="/recepcion" {...linkProps}>
-                  Panel de recepción
-                </LinkItem>
-              )}
+            <Section title="Recepción y entregas">
               {showDeliveryOrdersInRecepcion && (
                 <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
                   Órdenes de entrega
@@ -276,11 +283,13 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                   Usuarios
                 </LinkItem>
               )}
+              {canCustomerCatalog && (
+                <LinkItem to="/catalogo/clientes" {...linkProps}>
+                  Clientes
+                </LinkItem>
+              )}
               {canCatalogs && (
                 <>
-                  <LinkItem to="/catalogo/clientes" {...linkProps}>
-                    Clientes
-                  </LinkItem>
                   <LinkItem to="/catalogo/tipos-equipo" {...linkProps}>
                     Tipos de equipo
                   </LinkItem>

@@ -5,8 +5,20 @@ import { useNavigate } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion, catalogEquipmentLabel } from "../lib/ui-helpers";
 import useQueryState from "../hooks/useQueryState";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
-
+function presupuestoLabel(row) {
+  const v = row?.presupuesto_estado;
+  if (!v) return "-";
+  if (v === "presupuestado") return "Presupuestado";
+  if (v === "no_aplica") return "No aplica";
+  try {
+    const s = String(v);
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  } catch {
+    return String(v);
+  }
+}
 
 export default function GeneralPorCliente() {
   const [clientes, setClientes] = useState([]);
@@ -228,7 +240,49 @@ export default function GeneralPorCliente() {
           Elija un cliente para ver resultados.
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((row) => {
+              const rowId = ingresoIdOf(row);
+              return (
+                <MobileDataCard
+                  key={rowId}
+                  onClick={() => go(row)}
+                  onKeyDown={(e) => onRowKeyDown(e, row)}
+                  className="cursor-pointer hover:bg-gray-50"
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                  data-testid={`row-mobile-${rowId}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(rowId)}
+                        onChange={(e) => toggleRow(e, row)}
+                        aria-label={`Seleccionar ${formatOS(row)}`}
+                        className="h-5 w-5"
+                      />
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Equipo" value={catalogEquipmentLabel(row)} />
+                    <MobileDataField label="Serie">
+                      <DeviceIdentifier row={row} />
+                    </MobileDataField>
+                    <MobileDataField label="Estado" value={row?.estado ?? "-"} />
+                    <MobileDataField label="Presupuesto" value={presupuestoLabel(row)} />
+                    <MobileDataField label="Ubicación" value={row?.ubicacion_nombre ?? row?.ubicacion_id ?? "-"} />
+                    <MobileDataField label="Fecha ingreso" value={formatDateOnly(resolveFechaIngreso(row))} />
+                    <MobileDataField label="Fecha presupuestado" value={formatDateOnly(row?.presupuesto_fecha_emision || row?.presupuesto_fecha_envio)} />
+                  </div>
+                </MobileDataCard>
+              );
+            })}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -245,7 +299,7 @@ export default function GeneralPorCliente() {
                 <th scope="col" className="p-2">Serie</th>
                 <th scope="col" className="p-2">Estado</th>
                 <th scope="col" className="p-2">Presupuesto</th>
-                <th scope="col" className="p-2">Ubicacin</th>
+                <th scope="col" className="p-2">Ubicación</th>
                 <th scope="col" className="p-2">Fecha ingreso</th>
                 <th scope="col" className="p-2">Fecha presupuestado</th>
               </tr>
@@ -274,13 +328,7 @@ export default function GeneralPorCliente() {
                   <td className="p-2">{catalogEquipmentLabel(row)}</td>
                   <td className="p-2"><DeviceIdentifier row={row} /></td>
                   <td className="p-2">{row?.estado ?? "-"}</td>
-                  <td className="p-2">{(() => {
-                    const v = row?.presupuesto_estado;
-                    if (!v) return "-";
-                    if (v === "presupuestado") return "Presupuestado";
-                    if (v === "no_aplica") return "No aplica";
-                    try { const s = String(v); return s.charAt(0).toUpperCase() + s.slice(1); } catch { return String(v); }
-                  })()}</td>
+                  <td className="p-2">{presupuestoLabel(row)}</td>
                   <td className="p-2">{row?.ubicacion_nombre ?? row?.ubicacion_id ?? "-"}</td>
                   <td className="p-2 whitespace-nowrap">{formatDateOnly(resolveFechaIngreso(row))}</td>
                   <td className="p-2 whitespace-nowrap">
@@ -290,6 +338,7 @@ export default function GeneralPorCliente() {
               ))}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}.
           </div>

@@ -228,6 +228,10 @@ class QuoteAnularAPITest(TestCase):
             cur.execute("DELETE FROM quote_items")
             cur.execute("DELETE FROM quotes")
             cur.execute("DELETE FROM ingresos")
+            cur.execute("DELETE FROM devices")
+            cur.execute("DELETE FROM models")
+            cur.execute("DELETE FROM marcas")
+            cur.execute("DELETE FROM customers")
             cur.execute("DELETE FROM repuestos_movimientos")
             cur.execute("DELETE FROM catalogo_repuestos")
 
@@ -251,9 +255,23 @@ class QuoteAnularAPITest(TestCase):
     def _seed_case(self, ingreso_estado: str, presupuesto_estado: str, quote_estado: str, stock: int = 3, qty: int = 2):
         now = timezone.now()
         with connection.cursor() as cur:
+            cur.execute("INSERT INTO customers (razon_social) VALUES (%s)", ["Cliente test"])
+            customer_id = self._last_insert_id(cur)
+            cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Marca test"])
+            marca_id = self._last_insert_id(cur)
+            cur.execute("INSERT INTO models (nombre, tipo_equipo) VALUES (%s,%s)", ["Modelo test", "Equipo"])
+            model_id = self._last_insert_id(cur)
             cur.execute(
-                "INSERT INTO ingresos (estado, presupuesto_estado, asignado_a) VALUES (%s,%s,%s)",
-                [ingreso_estado, presupuesto_estado, self.jefe_user.id],
+                """
+                INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno)
+                VALUES (%s,%s,%s,%s,%s)
+                """,
+                [customer_id, marca_id, model_id, "NS-QA-001", "MG-QA-001"],
+            )
+            device_id = self._last_insert_id(cur)
+            cur.execute(
+                "INSERT INTO ingresos (device_id, estado, presupuesto_estado, asignado_a) VALUES (%s,%s,%s,%s)",
+                [device_id, ingreso_estado, presupuesto_estado, self.jefe_user.id],
             )
             ingreso_id = self._last_insert_id(cur)
 
@@ -502,6 +520,36 @@ class QuoteAnularAPITest(TestCase):
         self.assertEqual(q_estado, "aprobado")
         self.assertIsNotNone(q_fecha_aprob)
         self.assertEqual(stock, Decimal("8"))
+
+    @patch("service.views.quotes_views.notify_repair_ready_for_remito")
+    def test_aprobar_reparado_dispara_aviso_de_remito(self, mock_notify):
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+
+        with patch("service.views.quotes_views.render_quote_pdf", return_value=("quote.pdf", b"%PDF-1.4")):
+            resp = self.client.post(self._url_aprobar(ingreso_id), {}, format="json")
+
+        self.assertEqual(resp.status_code, 200)
+        mock_notify.assert_called_once()
+        args, kwargs = mock_notify.call_args
+        self.assertEqual(args[0], ingreso_id)
+        self.assertIn("request", kwargs)
+
+    @patch("service.views.quotes_views.notify_repair_ready_for_remito")
+    def test_aprobar_presupuesto_ya_aprobado_no_repite_aviso_de_remito(self, mock_notify):
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparado",
+            presupuesto_estado="aprobado",
+            quote_estado="aprobado",
+        )
+
+        resp = self.client.post(self._url_aprobar(ingreso_id), {}, format="json")
+
+        self.assertEqual(resp.status_code, 200)
+        mock_notify.assert_not_called()
 
     def test_rechazar_presupuestado_guarda_fecha_y_comentario(self):
         ingreso_id, quote_id, _repuesto_id = self._seed_case(

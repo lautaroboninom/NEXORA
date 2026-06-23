@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -16,7 +18,15 @@ from django.conf import settings
 from django.utils import timezone
 
 from .bejerman_companies import require_company
+from .bejerman_user_credentials import (
+    BEJERMAN_CREDENTIALS_REQUIRED,
+    BejermanUserCredentialsError,
+    get_user_bejerman_credentials,
+    resolve_user_bejerman_workstation,
+)
 
+
+logger = logging.getLogger(__name__)
 
 REGISTRO_ACTION = "http://localhost:57213/IEFlexSDK_Service/EFlexSDK_WSRegistro"
 EJECUTAR_ACTION = "http://localhost:57213/IEFlexSDK_Service/EFlexSDK_WSEjecutar"
@@ -210,7 +220,7 @@ def normalize_date(value: Any) -> str | None:
     raw = as_string(value)
     if not raw:
         return None
-    match = re.match(r"^/Date\((\d+)\)/$", raw)
+    match = re.match(r"^/Date\((-?\d+)(?:[+-]\d+)?\)/$", raw)
     if match:
         parsed = datetime.utcfromtimestamp(int(match.group(1)) / 1000)
         return parsed.date().isoformat()
@@ -277,10 +287,25 @@ def _response_snippet(value: str, limit: int = 600) -> str:
 
 
 class BejermanSDKClient:
-    def __init__(self, company_key: str | None = None, *, bejerman_company: str | None = None):
+    def __init__(
+        self,
+        company_key: str | None = None,
+        *,
+        bejerman_company: str | None = None,
+        actor_user_id: int | None = None,
+        bejerman_username: str | None = None,
+        bejerman_password: str | None = None,
+        bejerman_workstation: str | None = None,
+        allow_system_credentials: bool = False,
+    ):
         self.wsdl_url = _clean(_setting("BEJERMAN_WSDL_URL"))
         self.endpoint_url = self.wsdl_url.split("?", 1)[0]
         self.timeout = int(_setting("BEJERMAN_REQUEST_TIMEOUT", 30) or 30)
+        self.actor_user_id = actor_user_id
+        self.bejerman_username = _clean(bejerman_username)
+        self.bejerman_password = _clean(bejerman_password)
+        self.bejerman_workstation = _clean(bejerman_workstation)
+        self.allow_system_credentials = bool(allow_system_credentials)
         if bejerman_company:
             self.company_key = _clean(company_key)
             self.company = _clean(bejerman_company)
@@ -292,6 +317,28 @@ class BejermanSDKClient:
             self.company_key = ""
             self.company = _clean(_setting("BEJERMAN_COMPANY"))
         self.token = ""
+
+    def _credentials(self) -> tuple[str, str]:
+        if self.bejerman_username and self.bejerman_password:
+            return self.bejerman_username, self.bejerman_password
+        if self.actor_user_id:
+            try:
+                return get_user_bejerman_credentials(int(self.actor_user_id))
+            except BejermanUserCredentialsError as exc:
+                raise BejermanSdkConfigError(str(exc)) from exc
+        if self.allow_system_credentials:
+            username = _clean(_setting("BEJERMAN_USER"))
+            password = _clean(_setting("BEJERMAN_PASSWORD"))
+            if username and password:
+                return username, password
+        raise BejermanSdkConfigError(BEJERMAN_CREDENTIALS_REQUIRED)
+
+    def _workstation(self) -> str:
+        if self.bejerman_workstation:
+            return self.bejerman_workstation
+        if self.actor_user_id:
+            return resolve_user_bejerman_workstation(int(self.actor_user_id))
+        return _clean(_setting("BEJERMAN_WORKSTATION")) or _clean(_setting("BEJERMAN_SERVICE_WORKSTATION"))
 
     def _post(self, action: str, body: str) -> dict[str, str]:
         if not self.endpoint_url:
@@ -332,12 +379,13 @@ class BejermanSDKClient:
         return parsed
 
     def register(self) -> str:
+        username, password = self._credentials()
         body = (
             '<EFlexSDK_WSRegistro xmlns="http://localhost:57213/">'
-            f"<xUsuario>{escape(_clean(_setting('BEJERMAN_USER')))}</xUsuario>"
-            f"<xClave>{escape(_clean(_setting('BEJERMAN_PASSWORD')))}</xClave>"
+            f"<xUsuario>{escape(username)}</xUsuario>"
+            f"<xClave>{escape(password)}</xClave>"
             f"<xCodEmpresa>{escape(self.company)}</xCodEmpresa>"
-            f"<xPtoTrabajo>{escape(_clean(_setting('BEJERMAN_WORKSTATION')))}</xPtoTrabajo>"
+            f"<xPtoTrabajo>{escape(self._workstation())}</xPtoTrabajo>"
             f"<xCodSucursal>{escape(_clean(_setting('BEJERMAN_BRANCH')))}</xCodSucursal>"
             "</EFlexSDK_WSRegistro>"
         )
@@ -414,12 +462,9 @@ class BejermanSDKClient:
         )
 
     def list_articulos(self, filters: list[dict[str, Any]] | None = None, limit: int = 20) -> dict[str, str]:
-        query = ""
-        for item in filters or []:
-            if isinstance(item, dict) and as_string(item.get("Valor")):
-                query = as_string(item.get("Valor"))
-                break
-        return self.execute("TABLAS", "ObtenerArticulos", params=[query] if query else [])
+        # ObtenerArticulos ignores Bejerman-style filters in this installation.
+        # Fetch the catalog and let build_articles_result apply code/detail search locally.
+        return self.execute("TABLAS", "ObtenerArticulos", params_json=[])
 
     def list_clientes(self) -> dict[str, str]:
         return self.execute("TABLAS", "ObtenerClientes", params_json=[])
@@ -460,11 +505,20 @@ class BejermanSDKClient:
     def obtener_stock_partida(self, partida: str) -> dict[str, str]:
         return self.execute("STOCK", "ObtenerStockPartida", params=[partida])
 
+    def obtener_stock_deposito(self, deposit_code: str) -> dict[str, str]:
+        return self.execute("STOCK", "ObtenerStockDeposito", params=[deposit_code])
+
+    def obtener_depositos(self) -> dict[str, str]:
+        return self.execute("STOCK", "ObtenerDepositos", params_json=[])
+
+    def obtener_partidas(self) -> dict[str, str]:
+        return self.execute("STOCK", "ObtenerPartidas", params_json=[])
+
 
 def validate_sdk_config() -> None:
     missing = [
         name
-        for name in ("BEJERMAN_WSDL_URL", "BEJERMAN_USER", "BEJERMAN_PASSWORD", "BEJERMAN_WORKSTATION")
+        for name in ("BEJERMAN_WSDL_URL", "BEJERMAN_WORKSTATION")
         if not _clean(_setting(name))
     ]
     if missing:
@@ -550,6 +604,201 @@ def build_articles_result(responses: list[dict[str, Any]] | dict[str, Any], quer
     except (TypeError, ValueError):
         limit = 20
     return {"items": items[:limit], "pagination": create_pagination(len(items), 1, limit)}
+
+
+def normalize_article_code(value: Any) -> str:
+    return re.sub(r"[\s-]+", "", as_string(value)).upper()
+
+
+def build_article_code_from_stock(record: dict[str, Any]) -> str:
+    code = as_string(
+        first_value(
+            record,
+            (
+                "Articulo_Codigo",
+                "ArticuloCodigo",
+                "CodigoArticulo",
+                "Codigo",
+                "Art_Codigo",
+                "CodArticulo",
+                "article_code",
+            ),
+        )
+    )
+    if code:
+        return code
+    parts = [
+        as_string(first_value(record, ("Art_CodGen", "ArtCodGen", "stkart_CodGen", "Comprobante_Art_CodGen"))),
+        as_string(first_value(record, ("Art_CodEle1", "ArtCodEle1", "stkart_CodEle1"))),
+        as_string(first_value(record, ("Art_CodEle2", "ArtCodEle2", "stkart_CodEle2"))),
+        as_string(first_value(record, ("Art_CodEle3", "ArtCodEle3", "stkart_CodEle3"))),
+    ]
+    return "-".join(part for part in parts if part)
+
+
+def _stock_quantity(record: dict[str, Any], fields: tuple[str, ...]) -> float | None:
+    return as_number(first_value(record, fields))
+
+
+def map_stock_row(record: dict[str, Any]) -> dict[str, Any] | None:
+    article_code = build_article_code_from_stock(record)
+    deposit_code = as_string(
+        first_value(
+            record,
+            (
+                "Art_CodDeposito",
+                "ArtCodDeposito",
+                "Comprobante_ArtDeposito",
+                "Deposito",
+                "deposito",
+                "stkdep_Cod",
+                "Item_Deposito",
+            ),
+        )
+    )
+    partida = as_string(
+        first_value(
+            record,
+            (
+                "Art_Partida",
+                "ArtPartida",
+                "Comprobante_ArtPartida",
+                "Partida",
+                "partida",
+                "stp_Partida",
+                "Item_Partida",
+            ),
+        )
+    )
+    if not article_code and not deposit_code and not partida:
+        return None
+    return {
+        "articleCode": article_code,
+        "depositCode": deposit_code,
+        "partida": partida,
+        "realQuantity": _stock_quantity(record, ("Art_RealUM1", "ArtRealUM1", "RealUM1", "realQuantity", "Stock")),
+        "committedQuantity": _stock_quantity(record, ("Art_CompUM1", "ArtCompUM1", "CompUM1", "committedQuantity")),
+        "availableQuantity": _stock_quantity(record, ("Art_DispUM1", "ArtDispUM1", "DispUM1", "availableQuantity")),
+        "raw": record,
+    }
+
+
+def build_stock_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    return [row for row in (map_stock_row(record) for record in records_from_response(response)) if row]
+
+
+def map_partida_row(record: dict[str, Any]) -> dict[str, Any] | None:
+    partida = as_string(
+        first_value(
+            record,
+            (
+                "Partida_Codigo",
+                "PartidaCodigo",
+                "Partida",
+                "partida",
+                "Art_Partida",
+            ),
+        )
+    )
+    deposit_code = as_string(
+        first_value(
+            record,
+            (
+                "Deposito_Codigo",
+                "DepositoCodigo",
+                "Deposito",
+                "deposito",
+                "Art_CodDeposito",
+            ),
+        )
+    )
+    if not partida and not deposit_code:
+        return None
+    return {
+        "partida": partida,
+        "depositCode": deposit_code,
+        "expirationDate": normalize_date(
+            first_value(
+                record,
+                (
+                    "Partida_FechaVtoIngreso",
+                    "PartidaFechaVtoIngreso",
+                    "FechaVtoIngreso",
+                    "FechaVencimientoIngreso",
+                    "FechaVencimiento",
+                    "FechaVto",
+                    "Partida_FechaVencimiento",
+                    "Partida_FechaVto",
+                    "expirationDate",
+                ),
+            )
+        ),
+        "raw": record,
+    }
+
+
+def build_partida_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    return [row for row in (map_partida_row(record) for record in records_from_response(response)) if row]
+
+
+def _partida_key(deposit_code: Any, partida: Any) -> str:
+    return f"{as_string(deposit_code).upper()}|{as_string(partida).upper()}"
+
+
+def _partida_only_key(partida: Any) -> str:
+    return as_string(partida).upper()
+
+
+def _sortable_expiration(value: Any) -> str:
+    return normalize_date(value) or "9999-12-31"
+
+
+def build_article_stock_lots(
+    stock_rows: list[dict[str, Any]],
+    partida_rows: list[dict[str, Any]],
+    article_code: Any,
+    deposit_code: Any,
+) -> list[dict[str, Any]]:
+    normalized_article_code = normalize_article_code(article_code)
+    normalized_deposit_code = as_string(deposit_code).upper()
+    partidas_by_key = {_partida_key(row.get("depositCode"), row.get("partida")): row for row in partida_rows}
+    partidas_by_partida: dict[str, dict[str, Any]] = {}
+    for row in partida_rows:
+        key = _partida_only_key(row.get("partida"))
+        current = partidas_by_partida.get(key)
+        if not current or (not current.get("expirationDate") and row.get("expirationDate")):
+            partidas_by_partida[key] = row
+
+    lots: list[dict[str, Any]] = []
+    for row in stock_rows:
+        if normalize_article_code(row.get("articleCode")) != normalized_article_code:
+            continue
+        if as_string(row.get("depositCode")).upper() != normalized_deposit_code:
+            continue
+        partida = as_string(row.get("partida"))
+        if not partida:
+            continue
+        available = row.get("availableQuantity")
+        real = row.get("realQuantity")
+        effective_stock = available if available is not None else real
+        if effective_stock is None or effective_stock <= 0:
+            continue
+        partida_row = partidas_by_key.get(_partida_key(row.get("depositCode"), partida)) or partidas_by_partida.get(
+            _partida_only_key(partida)
+        )
+        lots.append(
+            {
+                "articleCode": row.get("articleCode") or as_string(article_code),
+                "depositCode": row.get("depositCode") or as_string(deposit_code),
+                "partida": partida,
+                "expirationDate": (partida_row or {}).get("expirationDate"),
+                "realQuantity": real,
+                "committedQuantity": row.get("committedQuantity"),
+                "availableQuantity": available,
+            }
+        )
+    lots.sort(key=lambda item: (_sortable_expiration(item.get("expirationDate")), as_string(item.get("partida")).lower()))
+    return lots
 
 
 def build_document_id(payload: dict[str, Any]) -> str:
@@ -714,7 +963,7 @@ def extract_pdf_bytes(response: dict[str, Any]) -> bytes | None:
             data = base64.b64decode(normalized)
         except Exception:
             continue
-        if data:
+        if data and data.lstrip().startswith(b"%PDF-"):
             return data
     return None
 
@@ -727,36 +976,125 @@ def _positive_int_setting(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+@contextmanager
+def _temporary_request_timeout(client: BejermanSDKClient, timeout_seconds: int | None):
+    original = getattr(client, "timeout", None)
+    changed = False
+    if timeout_seconds is not None:
+        try:
+            timeout = int(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = 0
+        if timeout > 0 and hasattr(client, "timeout"):
+            client.timeout = timeout
+            changed = True
+    try:
+        yield
+    finally:
+        if changed:
+            client.timeout = original
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _pdf_log_context(reference: BejermanPdfReference, *, interactive: bool) -> dict[str, Any]:
+    return {
+        "bejerman_pdf_tipo": reference.type,
+        "bejerman_pdf_numero": reference.number,
+        "bejerman_pdf_letra": reference.letter,
+        "bejerman_pdf_punto_venta": reference.point_of_sale,
+        "bejerman_pdf_interactive": interactive,
+    }
+
+
 def fetch_comprobante_pdf(
     client: BejermanSDKClient,
     reference: BejermanPdfReference,
     *,
     retry_attempts: int | None = None,
     retry_delay_ms: int | None = None,
+    interactive: bool = False,
+    request_timeout: int | None = None,
 ) -> tuple[bytes, str]:
-    attempts = retry_attempts if retry_attempts is not None else _positive_int_setting("BEJERMAN_PDF_RETRY_ATTEMPTS", 3)
+    if interactive:
+        attempts = (
+            retry_attempts
+            if retry_attempts is not None
+            else _positive_int_setting("BEJERMAN_PDF_INTERACTIVE_RETRY_ATTEMPTS", 1)
+        )
+        delay_ms = (
+            retry_delay_ms
+            if retry_delay_ms is not None
+            else _positive_int_setting("BEJERMAN_PDF_INTERACTIVE_RETRY_DELAY_MS", 0)
+        )
+        retry_after_ms = _positive_int_setting("BEJERMAN_PDF_INTERACTIVE_RETRY_AFTER_MS", 1200)
+        effective_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else _positive_int_setting("BEJERMAN_PDF_INTERACTIVE_REQUEST_TIMEOUT", 4)
+        )
+    else:
+        attempts = retry_attempts if retry_attempts is not None else _positive_int_setting("BEJERMAN_PDF_RETRY_ATTEMPTS", 3)
+        delay_ms = retry_delay_ms if retry_delay_ms is not None else _positive_int_setting("BEJERMAN_PDF_RETRY_DELAY_MS", 700)
+        retry_after_ms = max(int(delay_ms or 0), 1000)
+        effective_timeout = request_timeout
     attempts = max(1, int(attempts or 1))
-    delay_ms = retry_delay_ms if retry_delay_ms is not None else _positive_int_setting("BEJERMAN_PDF_RETRY_DELAY_MS", 700)
     delay_ms = max(0, int(delay_ms or 0))
-    try:
-        response = client.consultar_comprobante_ventas_pdf(reference)
-        pdf = extract_pdf_bytes(response)
-        if pdf:
-            return pdf, "application/pdf"
-    except BejermanSdkResponseError:
-        pass
-    client.generar_comprobante_ventas_pdf(reference)
-    for attempt in range(attempts):
-        if attempt > 0 and delay_ms:
-            time.sleep(delay_ms / 1000)
+    total_started_at = time.monotonic()
+    log_context = _pdf_log_context(reference, interactive=interactive)
+    with _temporary_request_timeout(client, effective_timeout):
         try:
+            started_at = time.monotonic()
             response = client.consultar_comprobante_ventas_pdf(reference)
-        except BejermanSdkResponseError:
-            continue
-        pdf = extract_pdf_bytes(response)
-        if pdf:
-            return pdf, "application/pdf"
-    raise BejermanPdfPendingError(retry_after_ms=max(delay_ms, 1000))
+            pdf = extract_pdf_bytes(response)
+            logger.info(
+                "bejerman_pdf_initial_consult",
+                extra={**log_context, "duration_ms": _elapsed_ms(started_at), "pdf_ready": bool(pdf)},
+            )
+            if pdf:
+                logger.info("bejerman_pdf_ready", extra={**log_context, "duration_ms": _elapsed_ms(total_started_at)})
+                return pdf, "application/pdf"
+        except (BejermanSdkResponseError, BejermanSdkUnavailable):
+            logger.info("bejerman_pdf_initial_consult_pending", extra=log_context)
+
+        started_at = time.monotonic()
+        try:
+            client.generar_comprobante_ventas_pdf(reference)
+            logger.info("bejerman_pdf_generate_requested", extra={**log_context, "duration_ms": _elapsed_ms(started_at)})
+        except BejermanSdkUnavailable as exc:
+            if interactive:
+                logger.info(
+                    "bejerman_pdf_generate_pending",
+                    extra={**log_context, "duration_ms": _elapsed_ms(started_at), "retry_after_ms": retry_after_ms},
+                )
+                raise BejermanPdfPendingError(retry_after_ms=retry_after_ms) from exc
+            raise
+
+        for attempt in range(attempts):
+            if attempt > 0 and delay_ms:
+                time.sleep(delay_ms / 1000)
+            try:
+                started_at = time.monotonic()
+                response = client.consultar_comprobante_ventas_pdf(reference)
+            except (BejermanSdkResponseError, BejermanSdkUnavailable):
+                logger.info("bejerman_pdf_retry_pending", extra={**log_context, "attempt": attempt + 1})
+                continue
+            pdf = extract_pdf_bytes(response)
+            logger.info(
+                "bejerman_pdf_retry_consult",
+                extra={**log_context, "attempt": attempt + 1, "duration_ms": _elapsed_ms(started_at), "pdf_ready": bool(pdf)},
+            )
+            if pdf:
+                logger.info("bejerman_pdf_ready", extra={**log_context, "duration_ms": _elapsed_ms(total_started_at)})
+                return pdf, "application/pdf"
+    pending_retry_ms = max(retry_after_ms, delay_ms, 1000)
+    logger.info(
+        "bejerman_pdf_pending",
+        extra={**log_context, "duration_ms": _elapsed_ms(total_started_at), "retry_after_ms": pending_retry_ms},
+    )
+    raise BejermanPdfPendingError(retry_after_ms=pending_retry_ms)
 
 
 def customer_codes_match(left: str | None, right: str | None) -> bool:
@@ -799,19 +1137,36 @@ def resolve_customer_document_fields(client: BejermanSDKClient, customer_code: s
 
 
 def equipment_label(equipment: dict[str, Any]) -> str:
+    explicit = as_string(equipment.get("equipmentLabel"))
+    if explicit:
+        return explicit
     model_text = " ".join(part for part in (as_string(equipment.get("model")), as_string(equipment.get("variant"))) if part)
     return " | ".join(part for part in (as_string(equipment.get("equipmentType")), as_string(equipment.get("brand")), model_text) if part) or as_string(equipment.get("articleName")) or "Equipo"
+
+
+def equipment_article_description(equipment: dict[str, Any], fallback: str) -> str:
+    explicit = as_string(equipment.get("equipmentLabel"))
+    if explicit:
+        return explicit
+    model_text = " ".join(part for part in (as_string(equipment.get("model")), as_string(equipment.get("variant"))) if part)
+    detail = " | ".join(part for part in (as_string(equipment.get("equipmentType")), as_string(equipment.get("brand")), model_text) if part)
+    return detail or as_string(equipment.get("articleName")) or fallback
 
 
 SERVICE_RELEASE_RESOLUTION_LABELS = {
     "controlado sin defecto": "controlado sin defecto",
     "controlado_sin_defecto": "controlado sin defecto",
+    "no se encontro falla": "controlado sin defecto",
+    "no_se_encontro_falla": "controlado sin defecto",
     "no reparado": "sin reparar",
     "no_reparado": "sin reparar",
     "sin reparar": "sin reparar",
     "sin_reparar": "sin reparar",
     "reparado": "reparado",
 }
+
+REMITO_ITEM_SEPARATOR = "------------------------------"
+SERVICE_RELEASE_LEGEND_SEPARATOR = REMITO_ITEM_SEPARATOR
 
 
 def service_release_resolution_label(value: Any) -> str:
@@ -878,6 +1233,10 @@ def legend_line(common: dict[str, Any], text: str) -> dict[str, Any]:
     }
 
 
+def item_separator_line(common: dict[str, Any]) -> dict[str, Any]:
+    return legend_line(common, REMITO_ITEM_SEPARATOR)
+
+
 def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: dict[str, str] | None = None) -> dict[str, Any]:
     customer_fields = customer_fields or {}
     equipment = payload.get("equipment") or {}
@@ -890,19 +1249,23 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
     if not article_code:
         raise BejermanSdkResponseError("SERVICE_INGRESS_ARTICLE_REQUIRED")
     issue_date = normalize_date(payload.get("issueDate")) or timezone.localdate().isoformat()
-    tipo = as_string(_setting("BEJERMAN_RIS_TYPE", "RIS")) or "RIS"
-    letter = as_string(_setting("BEJERMAN_RIS_LETTER", "R")) or "R"
-    point = as_string(_setting("BEJERMAN_RIS_POINT_OF_SALE", "00004")) or "00004"
-    operation = as_string(_setting("BEJERMAN_RIS_SERVICE_OPERATION", "REP")) or "REP"
-    deposit = as_string(_setting("BEJERMAN_RIS_DEPOSIT", "STR")) or "STR"
-    update_stock = as_bool(_setting("BEJERMAN_RIS_UPDATE_STOCK", False))
+    profile_payload = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
+    tipo = as_string(profile_payload.get("type") or _setting("BEJERMAN_RIS_TYPE", "RIS")) or "RIS"
+    letter = as_string(profile_payload.get("letter") or _setting("BEJERMAN_RIS_LETTER", "R")) or "R"
+    point = as_string(profile_payload.get("pointOfSale") or _setting("BEJERMAN_RIS_POINT_OF_SALE", "00004")) or "00004"
+    operation = as_string(profile_payload.get("operation") or _setting("BEJERMAN_RIS_SERVICE_OPERATION", "REP")) or "REP"
+    deposit = as_string(profile_payload.get("deposit") or _setting("BEJERMAN_RIS_DEPOSIT", "STR")) or "STR"
+    update_stock = (
+        as_bool(profile_payload.get("updateStock"))
+        if "updateStock" in profile_payload
+        else as_bool(_setting("BEJERMAN_RIS_UPDATE_STOCK", False))
+    )
     serial = as_string(equipment.get("serial"))
     legend = " - ".join(
         part
         for part in (
             "Ingreso a servicio técnico",
             f"OS {payload.get('ingresoId')}" if payload.get("ingresoId") else "",
-            equipment_label(equipment),
             f"Serie {serial}" if serial else "",
             f"Interno {as_string(equipment.get('internalNumber'))}" if as_string(equipment.get("internalNumber")) else "",
             f"Motivo {as_string(equipment.get('repairReason'))}" if as_string(equipment.get("repairReason")) else "",
@@ -910,14 +1273,18 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
         if part
     )
     items = [
-        legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 1), legend),
+        item_separator_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 1)),
+        legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 2), legend),
         {
-            **item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 2),
+            **item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 3),
             "Item_Tipo": "A",
             "Item_CodigoArticulo": article_code,
             "Item_CantidadUM1": 1,
             "Item_CantidadUM2": 1 if update_stock and serial else 0,
-            "Item_DescripArticulo": (as_string(equipment.get("articleName")) or as_string(_setting("BEJERMAN_RIS_GENERIC_ARTICLE_NAME", "Equipo recibido para servicio técnico")))[:250],
+            "Item_DescripArticulo": equipment_article_description(
+                equipment,
+                as_string(_setting("BEJERMAN_RIS_GENERIC_ARTICLE_NAME", "Equipo recibido para servicio técnico")),
+            )[:250],
             "Item_PrecioUnitario": 0,
             "Item_TasaIVAInscrip": 0,
             "Item_TasaIVANoInscrip": 0,
@@ -943,6 +1310,95 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             "Item_DatosAdicionales": None,
         },
     ]
+    raw_equipments = payload.get("equipments")
+    equipments = [item for item in raw_equipments if isinstance(item, dict)] if isinstance(raw_equipments, list) else []
+    if equipments:
+        generic_article_name = as_string(_setting("BEJERMAN_RIS_GENERIC_ARTICLE_NAME", "Equipo recibido para servicio técnico"))
+
+        def batch_article_line(common: dict[str, Any], equipment_item: dict[str, Any]) -> dict[str, Any]:
+            item_serial = as_string(equipment_item.get("serial"))
+            item_article_code = as_string(equipment_item.get("articleCode")) or article_code
+            if not item_article_code:
+                raise BejermanSdkResponseError("SERVICE_INGRESS_ARTICLE_REQUIRED")
+            return {
+                **common,
+                "Item_Tipo": "A",
+                "Item_CodigoArticulo": item_article_code,
+                "Item_CantidadUM1": 1,
+                "Item_CantidadUM2": 1 if update_stock and item_serial else 0,
+                "Item_DescripArticulo": equipment_article_description(equipment_item, generic_article_name)[:250],
+                "Item_PrecioUnitario": 0,
+                "Item_TasaIVAInscrip": 0,
+                "Item_TasaIVANoInscrip": 0,
+                "Item_ImporteIVAInscrip": 0,
+                "Item_ImporteIVANoInscrip": 0,
+                "Item_ImporteTotal": 0,
+                "Item_ImporteDescComercial": 0,
+                "Item_ImporteDescFinanciero": 0,
+                "Item_ImporteDescGeneral": 0,
+                "Item_CodigoConceptoNoGravado": None,
+                "Item_ImporteIVANoGravado": 0,
+                "Item_TipoIVA": "1",
+                "Item_CodigoDescPorLinea": None,
+                "Item_ImporteDescPorLinea": 0,
+                "Item_Deposito": deposit if update_stock else None,
+                "Item_Partida": item_serial if update_stock and item_serial else " ",
+                "Item_TasaDescPorItem": 0,
+                "Item_Importe": 0,
+                "Item_FechaEntrega": issue_date,
+                "Item_Kit": None,
+                "Item_RenglonKit": 0,
+                "Item_EsPromocion": None,
+                "Item_DatosAdicionales": None,
+            }
+
+        items = [
+            legend_line(
+                item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 1),
+                "Se recibe para servicio técnico:",
+            )
+        ]
+        sort_order = 2
+        for equipment_item in equipments:
+            items.append(
+                item_separator_line(
+                    item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order)
+                )
+            )
+            sort_order += 1
+            item_serial = as_string(equipment_item.get("serial"))
+            internal = as_string(equipment_item.get("internalNumber"))
+            os_text = as_string(equipment_item.get("osLabel")) or as_string(equipment_item.get("ingresoId"))
+            detail = " - ".join(
+                part
+                for part in (
+                    f"OS {os_text}" if os_text else "",
+                    f"Serie {item_serial}" if item_serial else "",
+                    f"Interno {internal}" if internal else "",
+                )
+                if part
+            )
+            if detail:
+                items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), detail))
+                sort_order += 1
+            extra = " - ".join(
+                part
+                for part in (
+                    f"Motivo: {as_string(equipment_item.get('repairReason'))}" if as_string(equipment_item.get("repairReason")) else "",
+                    f"Accesorios: {as_string(equipment_item.get('accessories'))}" if as_string(equipment_item.get("accessories")) else "",
+                )
+                if part
+            )
+            if extra:
+                items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), extra))
+                sort_order += 1
+            comments = as_string(equipment_item.get("comments"))
+            if comments:
+                items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), comments))
+                sort_order += 1
+            items.append(batch_article_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), equipment_item))
+            sort_order += 1
+
     notes = "\n".join(
         part
         for part in (
@@ -983,7 +1439,7 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             "Comprobante_DatosAdicionales": None,
             "Comprobante_Cuotas": None,
         },
-        "profile": {"type": tipo, "operation": operation, "deposit": deposit, "pointOfSale": point},
+        "profile": {"type": tipo, "operation": operation, "deposit": deposit, "pointOfSale": point, "updateStock": update_stock},
         "lineCount": len(items),
     }
 
@@ -1014,9 +1470,86 @@ def _amount(value: Any) -> float:
     return parsed if parsed is not None else 0
 
 
+def _percent(value: Any) -> float:
+    parsed = as_number(value)
+    if parsed is None:
+        return 0
+    return min(100, max(0, parsed))
+
+
+def _delivery_price_currency(value: Any) -> str:
+    text = as_string(value).upper().replace(" ", "")
+    if not text:
+        return "ARS"
+    if text in {"$", "PESO", "PESOS"}:
+        return "ARS"
+    if text in {"U$S", "U$D", "US$", "DOLAR", "DOLARES"}:
+        return "USD"
+    return "USD" if text == "USD" else "ARS"
+
+
+def _delivery_exchange_rate(value: Any, fallback: Any = 0) -> float:
+    parsed = as_number(value)
+    if parsed is not None and parsed > 0:
+        return parsed
+    fallback_parsed = as_number(fallback)
+    return fallback_parsed if fallback_parsed is not None else 0
+
+
+def _delivery_item_price_currencies(request: dict[str, Any], orders: list[dict[str, Any]]) -> set[str]:
+    request_currency = _delivery_price_currency(request.get("priceCurrency"))
+    currencies: set[str] = set()
+    for order in orders:
+        order_currency = _delivery_price_currency(order.get("priceCurrency") or request_currency)
+        for item in order.get("items") or []:
+            if isinstance(item, dict):
+                currencies.add(_delivery_price_currency(item.get("priceCurrency") or order_currency))
+    return currencies or {request_currency}
+
+
+def _delivery_decimal_label(value: Any, *, decimals: int = 2) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        number = 0.0
+    label = f"{number:,.{decimals}f}"
+    return label.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def _delivery_percent_label(value: Any) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        number = 0.0
+    if number.is_integer():
+        return str(int(number))
+    return _delivery_decimal_label(number, decimals=2).rstrip("0").rstrip(",")
+
+
+def _delivery_money_label(value: Any, price_currency: str) -> str:
+    symbol = "U$S" if price_currency == "USD" else "$"
+    return f"{symbol} {_delivery_decimal_label(value)}"
+
+
+def _delivery_discount_legend(discount_percent: Any, final_unit_price: Any, line_amount: Any, price_currency: str, quantity: Any) -> str:
+    parts = [
+        f"Descuento aplicado: {_delivery_percent_label(discount_percent)}%",
+        f"Precio final con descuento: {_delivery_money_label(final_unit_price, price_currency)}",
+    ]
+    try:
+        show_line_total = float(quantity or 0) != 1
+    except (TypeError, ValueError):
+        show_line_total = False
+    if show_line_total:
+        parts.append(f"Total neto: {_delivery_money_label(line_amount, price_currency)}")
+    return " - ".join(parts)
+
+
 def _profile_for_delivery_type(delivery_type: str, config: dict[str, Any]) -> dict[str, str]:
     if delivery_type == "rental":
         return {"type": config["rentalType"], "operation": config["rentalOperation"], "deposit": config["rentalDeposit"], "pointOfSale": config["rentalPointOfSale"]}
+    if delivery_type == "demo":
+        return {"type": config["demoType"], "operation": config["demoOperation"], "deposit": config["demoDeposit"], "pointOfSale": config["demoPointOfSale"]}
     if delivery_type == "service_release":
         return {"type": config["serviceType"], "operation": config["serviceOperation"], "deposit": config["serviceDeposit"], "pointOfSale": config["servicePointOfSale"]}
     return {"type": config["saleType"], "operation": config["saleOperation"], "deposit": config["saleDeposit"], "pointOfSale": config["salePointOfSale"]}
@@ -1027,24 +1560,35 @@ def delivery_remito_config(default_profile: dict[str, Any]) -> dict[str, Any]:
         "letter": as_string(_setting("BEJERMAN_REMITO_LETTER", "R")) or "R",
         "priceListCode": as_string(_setting("BEJERMAN_REMITO_PRICE_LIST", "GN")) or "GN",
         "currencyCode": as_string(_setting("BEJERMAN_REMITO_CURRENCY", "")),
+        "arsCurrencyCode": as_string(_setting("BEJERMAN_REMITO_CURRENCY_ARS", _setting("BEJERMAN_REMITO_CURRENCY", ""))),
+        "usdCurrencyCode": as_string(_setting("BEJERMAN_REMITO_CURRENCY_USD", "USD")) or "USD",
         "exchangeTypeCode": as_string(_setting("BEJERMAN_REMITO_EXCHANGE_TYPE", "")),
         "exchangeRate": float(_setting("BEJERMAN_REMITO_EXCHANGE_RATE", 0) or 0),
         "saleType": as_string(_setting("BEJERMAN_REMITO_SALE_TYPE", default_profile.get("type", "RT"))),
         "saleOperation": as_string(_setting("BEJERMAN_REMITO_SALE_OPERATION", default_profile.get("operation", "MC"))),
         "saleDeposit": as_string(_setting("BEJERMAN_REMITO_SALE_DEPOSIT", default_profile.get("deposit", "VAL"))),
-        "salePointOfSale": as_string(_setting("BEJERMAN_REMITO_SALE_POINT_OF_SALE", default_profile.get("pointOfSale", "00002"))),
-        "rentalType": as_string(_setting("BEJERMAN_REMITO_RENTAL_TYPE", "RTA")),
-        "rentalOperation": as_string(_setting("BEJERMAN_REMITO_RENTAL_OPERATION", "ALQ")),
-        "rentalDeposit": as_string(_setting("BEJERMAN_REMITO_RENTAL_DEPOSIT", "STL")),
-        "rentalPointOfSale": as_string(_setting("BEJERMAN_REMITO_RENTAL_POINT_OF_SALE", "00001")),
-        "serviceType": as_string(_setting("BEJERMAN_REMITO_SERVICE_TYPE", "RSS")),
-        "serviceOperation": as_string(_setting("BEJERMAN_REMITO_SERVICE_OPERATION", "REP")),
-        "serviceDeposit": as_string(_setting("BEJERMAN_REMITO_SERVICE_DEPOSIT", "STC")),
-        "servicePointOfSale": as_string(_setting("BEJERMAN_REMITO_SERVICE_POINT_OF_SALE", "00004")),
+        "salePointOfSale": as_string(_setting("BEJERMAN_REMITO_SALE_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "rentalType": as_string(_setting("BEJERMAN_REMITO_RENTAL_TYPE", default_profile.get("type", "RTA"))),
+        "rentalOperation": as_string(_setting("BEJERMAN_REMITO_RENTAL_OPERATION", default_profile.get("operation", "ALQ"))),
+        "rentalDeposit": as_string(_setting("BEJERMAN_REMITO_RENTAL_DEPOSIT", default_profile.get("deposit", "STL"))),
+        "rentalPointOfSale": as_string(_setting("BEJERMAN_REMITO_RENTAL_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "demoType": as_string(_setting("BEJERMAN_REMITO_DEMO_TYPE", default_profile.get("type", "RTN"))),
+        "demoOperation": as_string(_setting("BEJERMAN_REMITO_DEMO_OPERATION", default_profile.get("operation", "DEMO"))),
+        "demoDeposit": as_string(_setting("BEJERMAN_REMITO_DEMO_DEPOSIT", default_profile.get("deposit", "VAL"))),
+        "demoPointOfSale": as_string(_setting("BEJERMAN_REMITO_DEMO_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "serviceType": as_string(_setting("BEJERMAN_REMITO_SERVICE_TYPE", default_profile.get("type", "RSS"))),
+        "serviceOperation": as_string(_setting("BEJERMAN_REMITO_SERVICE_OPERATION", default_profile.get("operation", "REP"))),
+        "serviceDeposit": as_string(_setting("BEJERMAN_REMITO_SERVICE_DEPOSIT", default_profile.get("deposit", "STC"))),
+        "servicePointOfSale": as_string(_setting("BEJERMAN_REMITO_SERVICE_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
     }
 
 
-def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def build_delivery_remito_comprobante(
+    request: dict[str, Any],
+    config: dict[str, Any],
+    customer_fields: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    customer_fields = customer_fields or {}
     orders = request.get("orders") or []
     if not orders:
         raise BejermanSdkResponseError("DELIVERY_ORDERS_REQUIRED")
@@ -1056,10 +1600,30 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
     first_type = orders[0].get("deliveryType") or "sale"
     profile = _profile_for_delivery_type(first_type, config)
     issue_date = normalize_date(request.get("issueDate")) or timezone.localdate().isoformat()
+    item_price_currencies = _delivery_item_price_currencies(request, orders)
+    if len(item_price_currencies) != 1:
+        raise BejermanSdkResponseError("INCOMPATIBLE_DELIVERY_REMITO_CURRENCY")
+    price_currency = next(iter(item_price_currencies))
+    currency_code = config["usdCurrencyCode"] if price_currency == "USD" else config["arsCurrencyCode"]
+    exchange_rate_input = request.get("exchangeRate") or orders[0].get("commercialExchangeRate")
+    exchange_rate = _delivery_exchange_rate(exchange_rate_input, config["exchangeRate"]) if price_currency == "USD" else 0
     items: list[dict[str, Any]] = []
     sort_order = 1
     total = 0.0
     for order in orders:
+        items.append(
+            item_separator_line(
+                item_common(
+                    profile["type"],
+                    config["letter"],
+                    profile["pointOfSale"],
+                    issue_date,
+                    request.get("customerCode"),
+                    sort_order,
+                )
+            )
+        )
+        sort_order += 1
         if order.get("deliveryType") == "service_release":
             legend = service_release_legend(order)
         else:
@@ -1079,9 +1643,12 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
             article_code = as_string(item.get("articleCode"))
             quantity = _positive_quantity(item.get("quantity"))
             unit_price = _amount(item.get("unitPrice"))
+            item_currency = _delivery_price_currency(item.get("priceCurrency") or price_currency)
+            discount_percent = _percent(item.get("discountPercent"))
             partida = as_string(item.get("partida") or item.get("equipmentSerial") or order.get("equipmentSerial"))
+            item_deposit = as_string(item.get("stockDepositCode")) or profile["deposit"]
             article_name = as_string(item.get("articleName")) or as_string(item.get("description")) or article_code
-            line_defs: list[tuple[float, str]] = []
+            line_defs: list[tuple[float, str, str]] = []
             for partida_item in item.get("partidas") or []:
                 if not isinstance(partida_item, dict):
                     continue
@@ -1096,12 +1663,16 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
                         (
                             _positive_quantity(partida_item.get("assignedQuantity") or partida_item.get("quantity")),
                             partida_code,
+                            as_string(partida_item.get("stockDepositCode")) or item_deposit,
                         )
                     )
             if not line_defs:
-                line_defs = [(quantity, partida)]
-            for line_quantity, line_partida in line_defs:
-                amount = line_quantity * unit_price
+                line_defs = [(quantity, partida, item_deposit)]
+            for line_quantity, line_partida, line_deposit in line_defs:
+                gross_amount = line_quantity * unit_price
+                discount_amount = gross_amount * discount_percent / 100
+                amount = gross_amount - discount_amount
+                final_unit_price = unit_price * (1 - discount_percent / 100)
                 total += amount
                 items.append(
                     {
@@ -1109,7 +1680,7 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
                         "Item_Tipo": "A" if article_code else "L",
                         "Item_CodigoArticulo": article_code or None,
                         "Item_CantidadUM1": line_quantity if article_code else 0,
-                        "Item_CantidadUM2": line_quantity if article_code and line_partida else 0,
+                        "Item_CantidadUM2": 0,
                         "Item_DescripArticulo": article_name[:250],
                         "Item_PrecioUnitario": unit_price,
                         "Item_TasaIVAInscrip": 0,
@@ -1124,10 +1695,10 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
                         "Item_ImporteIVANoGravado": 0,
                         "Item_TipoIVA": "1",
                         "Item_CodigoDescPorLinea": None,
-                        "Item_ImporteDescPorLinea": 0,
-                        "Item_Deposito": profile["deposit"] if article_code else None,
+                        "Item_ImporteDescPorLinea": discount_amount,
+                        "Item_Deposito": (line_deposit or profile["deposit"]) if article_code else None,
                         "Item_Partida": line_partida or " ",
-                        "Item_TasaDescPorItem": 0,
+                        "Item_TasaDescPorItem": discount_percent,
                         "Item_Importe": amount,
                         "Item_FechaEntrega": issue_date,
                         "Item_Kit": None,
@@ -1137,6 +1708,21 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
                     }
                 )
                 sort_order += 1
+                if article_code and discount_percent > 0:
+                    items.append(
+                        legend_line(
+                            item_common(
+                                profile["type"],
+                                config["letter"],
+                                profile["pointOfSale"],
+                                issue_date,
+                                request.get("customerCode"),
+                                sort_order,
+                            ),
+                            _delivery_discount_legend(discount_percent, final_unit_price, amount, item_currency, line_quantity),
+                        )
+                    )
+                    sort_order += 1
     notes = "\n".join(part for part in (as_string(request.get("notes")), f"NEXORA {request.get('groupId')}", f"Órdenes {', '.join(as_string(order.get('orderNumber')) for order in orders)}") if part)
     return {
         "comprobante": {
@@ -1147,7 +1733,8 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
             "Comprobante_LoteHasta": "",
             "Comprobante_FechaEmision": issue_date,
             "Cliente_Codigo": request.get("customerCode"),
-            "Cliente_RazonSocial": request.get("customerName"),
+            "Cliente_RazonSocial": customer_fields.get("Cliente_RazonSocial") or request.get("customerName"),
+            **{key: value for key, value in customer_fields.items() if key != "Cliente_RazonSocial" and value},
             "Vendedor_Codigo": seller,
             "Comprobante_CondVenta": request.get("paymentTermCode"),
             "Comprobante_FechaVencimiento": issue_date,
@@ -1155,9 +1742,9 @@ def build_delivery_remito_comprobante(request: dict[str, Any], config: dict[str,
             "Comprobante_Mensaje": notes[:250] or " ",
             "Comprobante_ActualizaStock": "S",
             "Comprobante_ListaPrecios": config["priceListCode"],
-            "Comprobante_Moneda": config["currencyCode"],
+            "Comprobante_Moneda": currency_code,
             "Comprobante_TipoCambio": config["exchangeTypeCode"],
-            "Comprobante_CotizacionCambio": config["exchangeRate"],
+            "Comprobante_CotizacionCambio": exchange_rate,
             "Comprobante_FechaContabilizacion": issue_date,
             "Comprobante_FechaDDJJ": issue_date,
             "Comprobante_TipoOperacion": profile["operation"],
@@ -1237,4 +1824,21 @@ def find_serial_in_detail(serial: str, detail_response: dict[str, Any], checked:
 def lookup_sale_by_serial(client: BejermanSDKClient, serial: str) -> dict[str, Any]:
     normalized = normalize_serial_for_lookup(serial)
     if not normalized:
-        return {"found": False, "serial": serial, "normalizedSeria
+        return {"found": False, "serial": serial, "normalizedSerial": normalized, "checkedComprobantes": 0}
+    months = int(_setting("BEJERMAN_SERIAL_LOOKUP_MONTHS_BACK", 60) or 60)
+    max_comprobantes = int(_setting("BEJERMAN_SERIAL_LOOKUP_MAX_COMPROBANTES", 120) or 120)
+    types = [item.strip() for item in as_string(_setting("BEJERMAN_SERIAL_LOOKUP_TYPES", "FC")).split(",") if item.strip()] or ["FC"]
+    today = timezone.localdate()
+    date_from = (today - timedelta(days=max(1, months) * 31)).isoformat()
+    checked = 0
+    for tipo in types:
+        headers = headers_from_sales_list(client.list_comprobantes_ventas(build_serial_lookup_sales_filters(tipo, date_from, today.isoformat())), max_comprobantes)
+        for header in headers:
+            checked += 1
+            detail_id = comprobante_id_of(header)
+            if not detail_id:
+                continue
+            found = find_serial_in_detail(serial, client.detalle_comprobante_ventas(detail_id), checked)
+            if found:
+                return found
+    return {"found": False, "serial": serial, "normalizedSerial": normalized, "checkedComprobantes": checked}

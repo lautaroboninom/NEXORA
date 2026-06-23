@@ -70,8 +70,10 @@ def render_serial_barcode_pdf(value: str, title: str = "N/S", subtitle: str = ""
     c.setTitle(f"Código de barras {serial}")
 
     c.setFillColor(colors.black)
-    c.setFont("Helvetica-Bold", 7.5)
-    c.drawCentredString(page_w / 2, page_h - 5 * mm, (title or "N/S")[:34])
+    title_text = (title or "").strip()
+    if title_text:
+        c.setFont("Helvetica-Bold", 7.5)
+        c.drawCentredString(page_w / 2, page_h - 5 * mm, title_text[:34])
 
     max_w = page_w - 2 * margin_x
     bar = code128.Code128(serial, barHeight=13 * mm, barWidth=0.22 * mm, humanReadable=False)
@@ -536,6 +538,7 @@ def _detect_logo_path():
         "/app/staticfiles/logo-app.png",
         "/app/staticfiles/logo.png",
         # rutas dentro del repo (dev local)
+        os.path.join(settings.BASE_DIR, "service", "static", "branding", "logo-app.png"),
         os.path.join(settings.BASE_DIR, "web", "public", "branding", "logo-empresa.png"),
         os.path.join(settings.BASE_DIR, "web", "public", "branding", "logo-app.png"),
         os.path.join(settings.BASE_DIR, "..", "web", "public", "branding", "logo-empresa.png"),
@@ -612,13 +615,14 @@ def _logo_path_for_company(code: str) -> str | None:
     # Comunes a cualquier marca
     candidates += [
         os.environ.get("LOGO_PATH"),
-        LOGO_PATH,
-        os.path.join(settings.BASE_DIR, "web", "public", "branding", "logo-empresa.png"),
-        os.path.join(settings.BASE_DIR, "..", "web", "public", "branding", "logo-empresa.png"),
         "/app/staticfiles/branding/logo-app.png",
         "/app/staticfiles/logo-app.png",
-        "/app/staticfiles/logo.png",
+        os.path.join(settings.BASE_DIR, "service", "static", "branding", "logo-app.png"),
         os.path.join(settings.BASE_DIR, "service", "static", "logo-app.png"),
+        os.path.join(settings.BASE_DIR, "web", "public", "branding", "logo-empresa.png"),
+        os.path.join(settings.BASE_DIR, "..", "web", "public", "branding", "logo-empresa.png"),
+        LOGO_PATH,
+        "/app/staticfiles/logo.png",
         os.path.join(settings.BASE_DIR, "service", "static", "logo.png"),
     ]
 

@@ -1,4 +1,5 @@
 import json
+from contextlib import ExitStack, contextmanager
 from unittest import skipUnless
 from unittest.mock import patch
 
@@ -10,12 +11,14 @@ from rest_framework.test import APIClient
 
 from service.auth import issue_token
 from service.bejerman_sync import (
+    BejermanBlockedError,
     BejermanSDKClient,
     BejermanTransientError,
     SYNC_TYPE_STOCK_ENTRY_STR,
     SYNC_TYPE_STOCK_EXIT_RTS,
     SYNC_TYPE_STOCK_STR_TO_STC,
     SYNC_TYPE_STOCK_STR_TO_STL,
+    SYNC_TYPE_STOCK_STR_TO_VAL,
     enqueue_stock_exit_for_ingreso,
     enqueue_stock_entry_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
@@ -23,7 +26,7 @@ from service.bejerman_sync import (
     process_bejerman_jobs,
     restore_target_stock_from_jobs,
 )
-from service.bejerman_sdk import BejermanPdfPendingError, BejermanSdkResponseError
+from service.bejerman_sdk import BejermanPdfPendingError, BejermanSdkResponseError, BejermanSdkUnavailable
 from service.models import User
 
 
@@ -39,6 +42,7 @@ def _bejerman_settings(**extra):
         "BEJERMAN_SOURCE_DEPOSIT": "STR",
         "BEJERMAN_TARGET_DEPOSIT": "STL",
         "BEJERMAN_CLIENT_TARGET_DEPOSIT": "STC",
+        "BEJERMAN_DEMO_TARGET_DEPOSIT": "VAL",
         "BEJERMAN_NUMERA_FLEX": "S",
         "BEJERMAN_STOCK_NUMERA_FLEX": "N",
         "BEJERMAN_STOCK_ENTRY_COMPROBANTE": "ENT",
@@ -98,22 +102,55 @@ class FakeBejermanClient:
 
 
 class FakeRisClient:
-    def __init__(self, number="00001234"):
+    def __init__(self, number="00001234", clients=None, sales_records=None):
         self.number = number
+        self.clients = clients
+        self.sales_records = sales_records or []
         self.ingresar_calls = 0
+        self.comprobantes = []
+        self.ingresar_kwargs = []
 
     def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
         self.ingresar_calls += 1
+        self.comprobantes.append(comprobante)
+        self.ingresar_kwargs.append(kwargs)
+        registered = kwargs.get("emite_reg") == "R"
+        point = comprobante.get("Comprobante_PtoVenta") if registered else comprobante.get("Comprobante_PtoVenta", "00004")
+        number = comprobante.get("Comprobante_Numero") if registered else self.number
         return {
             "Resultado": "OK",
             "DatosJSON": json.dumps(
                 {
-                    "Comprobante_Tipo": "RIS",
-                    "Comprobante_Letra": "R",
-                    "Comprobante_PtoVenta": "00004",
-                    "Comprobante_Numero": self.number,
+                    "Comprobante_Tipo": comprobante.get("Comprobante_Tipo", "RIS"),
+                    "Comprobante_Letra": comprobante.get("Comprobante_Letra", "R"),
+                    "Comprobante_PtoVenta": point,
+                    "Comprobante_Numero": number,
                 }
             ),
+        }
+
+    def list_clientes(self):
+        return {
+            "Resultado": "OK",
+            "DatosJSON": json.dumps(
+                self.clients
+                if self.clients is not None
+                else [
+                    {
+                        "Cliente_Codigo": "CLI-BEJ",
+                        "Cliente_RazonSocial": "Cliente Bejerman",
+                        "Cliente_NroDocumento": "30700000000",
+                        "Cliente_Provincia": "02",
+                        "Cliente_SitIVA": "RI",
+                    }
+                ]
+            ),
+        }
+
+    def list_comprobantes_ventas(self, filters=None):
+        return {
+            "Resultado": "OK",
+            "DatosJSON": json.dumps(self.sales_records),
         }
 
 
@@ -124,6 +161,24 @@ def _ris_customer_fields():
         "Cliente_Provincia": "02",
         "Cliente_SitIVA": "RI",
     }
+
+
+def _ris_article_choice(article_code, **kwargs):
+    return {
+        "article_code": article_code,
+        "article_description": "Artículo CPAP",
+        "raw": {},
+    }
+
+
+@contextmanager
+def _valid_ris_preflight(fake=None):
+    fake = fake or FakeRisClient()
+    with ExitStack() as stack:
+        stack.enter_context(override_settings(BEJERMAN_RIS_ALLOW_GENERIC_ARTICLE=True))
+        stack.enter_context(patch("service.bejerman_ris.BejermanSDKClient", return_value=fake))
+        stack.enter_context(patch("service.bejerman_ris.validate_bejerman_article_choice", side_effect=_ris_article_choice))
+        yield fake
 
 
 @skipUnless(connection.vendor == "postgresql", "Requiere PostgreSQL")
@@ -252,6 +307,25 @@ class BejermanSyncTest(TestCase):
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS catalogo_accesorios (
+                    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    nombre TEXT NOT NULL UNIQUE
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ingreso_accesorios (
+                    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    ingreso_id INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+                    accesorio_id INTEGER NULL REFERENCES catalogo_accesorios(id),
+                    referencia TEXT,
+                    descripcion TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ingreso_events (
                     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                     ticket_id INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
@@ -288,6 +362,7 @@ class BejermanSyncTest(TestCase):
                 "ALTER TABLE models ADD COLUMN IF NOT EXISTS tecnico_id INTEGER NULL",
                 "ALTER TABLE marcas ADD COLUMN IF NOT EXISTS tecnico_id INTEGER NULL",
                 "ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS n_de_control TEXT",
                 "ALTER TABLE devices ADD COLUMN IF NOT EXISTS tipo_equipo TEXT",
                 "ALTER TABLE devices ADD COLUMN IF NOT EXISTS variante TEXT",
                 "ALTER TABLE devices ADD COLUMN IF NOT EXISTS ubicacion_id INTEGER NULL REFERENCES locations(id)",
@@ -332,11 +407,13 @@ class BejermanSyncTest(TestCase):
             cur.execute("DELETE FROM bejerman_ingreso_remitos")
             cur.execute("DELETE FROM bejerman_article_mappings")
             cur.execute("DELETE FROM bejerman_sync_jobs")
+            cur.execute("DELETE FROM ingreso_accesorios")
             cur.execute("DELETE FROM ingreso_events")
             cur.execute("DELETE FROM ingresos")
             cur.execute("DELETE FROM devices")
             cur.execute("DELETE FROM models")
             cur.execute("DELETE FROM marcas")
+            cur.execute("DELETE FROM catalogo_accesorios")
             cur.execute("DELETE FROM customers")
             cur.execute("DELETE FROM locations")
         User.objects.filter(email__endswith="@bejerman.test").delete()
@@ -386,6 +463,7 @@ class BejermanSyncTest(TestCase):
         *,
         serial="SN-BEJ-001",
         numero_interno="",
+        n_de_control="",
         estado="reparado",
         resolucion="reparado",
         ubicacion_id=None,
@@ -393,15 +471,17 @@ class BejermanSyncTest(TestCase):
         customer_id=None,
         device_id=None,
         mg_estado="activo",
+        motivo="reparacion",
+        empresa_bejerman="SEPID",
     ):
         with connection.cursor() as cur:
             if device_id is None:
                 cur.execute(
                     """
                     INSERT INTO devices(
-                        customer_id, marca_id, model_id, numero_serie, numero_interno, variante, alquilado, mg_estado
+                        customer_id, marca_id, model_id, numero_serie, numero_interno, n_de_control, variante, alquilado, mg_estado
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,FALSE,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,FALSE,%s)
                     RETURNING id
                     """,
                     [
@@ -410,6 +490,7 @@ class BejermanSyncTest(TestCase):
                         self.model_id,
                         serial,
                         numero_interno,
+                        n_de_control,
                         equipo_variante,
                         mg_estado,
                     ],
@@ -419,15 +500,16 @@ class BejermanSyncTest(TestCase):
                 """
                 INSERT INTO ingresos(
                     device_id, estado, motivo, fecha_ingreso, fecha_creacion,
-                    resolucion, ubicacion_id, presupuesto_estado, asignado_a, equipo_variante
+                    resolucion, ubicacion_id, presupuesto_estado, asignado_a, equipo_variante,
+                    empresa_bejerman, empresa_facturar
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
                 """,
                 [
                     device_id,
                     estado,
-                    "reparacion",
+                    motivo,
                     timezone.now(),
                     timezone.now(),
                     resolucion,
@@ -435,6 +517,8 @@ class BejermanSyncTest(TestCase):
                     "no_aplica",
                     self.admin.id,
                     equipo_variante,
+                    empresa_bejerman,
+                    empresa_bejerman,
                 ],
             )
             return int(cur.fetchone()[0])
@@ -474,12 +558,14 @@ class BejermanSyncTest(TestCase):
         numero_interno="MG 9999",
         customer_id=None,
         equipo_variante="",
+        empresa_bejerman="SEPID",
     ):
         ingreso_id = self._insert_ingreso(
             serial=serial,
             numero_interno=numero_interno,
             customer_id=customer_id or self.mg_customer_id,
             equipo_variante=equipo_variante,
+            empresa_bejerman=empresa_bejerman,
         )
         event_id = self._insert_liberado_event(ingreso_id)
         enqueue_stock_transfer_for_ingreso(ingreso_id, event_id)
@@ -505,13 +591,24 @@ class BejermanSyncTest(TestCase):
             )
             return int(cur.fetchone()[0])
 
+    def test_worker_blocks_job_without_actor_user_session(self):
+        ingreso_id = self._enqueue_job(serial="SN-SIN-ACTOR")
+
+        with _bejerman_settings():
+            stats = process_bejerman_jobs()
+
+        self.assertEqual(stats["blocked"], 1)
+        job = self._job_row(ingreso_id)
+        self.assertEqual(job["status"], "blocked")
+        self.assertIn("sesión de usuario", job["last_error"])
+
     def test_ris_emitir_devuelve_json_con_remito_sin_bloquear_por_pdf(self):
         ingreso_id = self._insert_ingreso(serial="SN-RIS-JSON-001")
         fake = FakeRisClient(number="00004561")
 
         with (
             _bejerman_settings(),
-            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            _valid_ris_preflight(fake),
             patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
         ):
             response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
@@ -533,7 +630,7 @@ class BejermanSyncTest(TestCase):
 
         with (
             _bejerman_settings(),
-            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            _valid_ris_preflight(fake),
             patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
         ):
             first = self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
@@ -550,7 +647,7 @@ class BejermanSyncTest(TestCase):
 
         with (
             _bejerman_settings(),
-            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            _valid_ris_preflight(fake),
             patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
         ):
             self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
@@ -577,7 +674,7 @@ class BejermanSyncTest(TestCase):
 
         with (
             _bejerman_settings(),
-            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            _valid_ris_preflight(fake),
             patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
         ):
             self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
@@ -592,12 +689,93 @@ class BejermanSyncTest(TestCase):
             pdf_status = cur.fetchone()[0]
         self.assertEqual(pdf_status, "ready")
 
+    def test_ris_print_page_incluye_polling_resiliente_y_textos_utf8(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PRINT-PAGE")
+
+        response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/print/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Cache-Control"], "no-store")
+        html = response.content.decode("utf-8")
+        self.assertIn("Retry-After", html)
+        self.assertIn("retry_after_ms", html)
+        self.assertIn("Cerrar pestaña", html)
+        self.assertIn("Esta pestaña se reemplazará por el PDF", html)
+        self.assertNotIn("maxAttempts", html)
+        self.assertNotIn("maxWaitMs", html)
+        self.assertNotIn("shouldStopWaiting", html)
+        self.assertNotIn("Reintente en unos segundos", html)
+        self.assertNotIn("no es necesario volver a emitir el remito", html)
+        self.assertNotIn("Intento ", html)
+        self.assertNotIn("Esperando PDF (", html)
+        self.assertNotIn(chr(0x00C3), html)
+
+    def test_ris_pdf_sin_emision_devuelve_409_accionable(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PDF-NOT-EMITTED")
+
+        response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("RIS", response.json()["detail"])
+
+    def test_ris_pdf_error_no_marca_emision_como_fallida(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PDF-ERROR")
+        fake = FakeRisClient(number="00004565")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        with patch(
+            "service.bejerman_ris.fetch_comprobante_pdf",
+            side_effect=BejermanSdkResponseError("Servicio PDF no disponible"),
+        ):
+            response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
+
+        self.assertEqual(response.status_code, 502)
+        with connection.cursor() as cur:
+            cur.execute("SELECT status, pdf_status, last_error FROM bejerman_ingreso_remitos WHERE ingreso_id=%s", [ingreso_id])
+            status, pdf_status, last_error = cur.fetchone()
+        self.assertEqual(status, "generated")
+        self.assertEqual(pdf_status, "failed")
+        self.assertIn("Servicio PDF no disponible", last_error)
+
+    def test_ris_pdf_timeout_queda_pendiente_sin_marcar_fallido(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PDF-TIMEOUT")
+        fake = FakeRisClient(number="00004566")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        with patch(
+            "service.bejerman_ris.fetch_comprobante_pdf",
+            side_effect=BejermanSdkUnavailable("Error HTTP Bejerman: Read timed out"),
+        ):
+            response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["pdf_status"], "pending")
+        self.assertEqual(response["Retry-After"], "5")
+        with connection.cursor() as cur:
+            cur.execute("SELECT status, pdf_status, last_error FROM bejerman_ingreso_remitos WHERE ingreso_id=%s", [ingreso_id])
+            status, pdf_status, last_error = cur.fetchone()
+        self.assertEqual(status, "generated")
+        self.assertEqual(pdf_status, "pending")
+        self.assertFalse(last_error)
+
     def test_ris_validacion_bejerman_queda_como_error_visible(self):
         ingreso_id = self._insert_ingreso(serial="SN-RIS-IVA-MISSING")
 
         with (
             _bejerman_settings(),
-            patch("service.bejerman_ris.BejermanSDKClient", return_value=FakeRisClient()),
+            _valid_ris_preflight(FakeRisClient()),
             patch(
                 "service.bejerman_ris.resolve_customer_document_fields",
                 side_effect=BejermanSdkResponseError("El comprobante no se importó. Debe indicar la Situación de IVA del cliente."),
@@ -608,6 +786,163 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertIn("Situación de IVA", response.json()["detail"])
         self.assertEqual(response.json()["ris"]["status"], "failed")
+
+    def test_ris_preflight_valido_no_emite_en_bejerman(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PREFLIGHT-OK")
+        fake = FakeRisClient(number="00009999")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/preflight/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["can_emit"])
+        self.assertEqual(response.data["preview"]["customerCode"], "CLI-BEJ")
+        self.assertEqual(len(response.data["preview"]["items"]), 1)
+        self.assertEqual(fake.ingresar_calls, 0)
+
+    def test_ris_preflight_sin_mapeo_no_valida_articulo_generico(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-NO-MAPPING")
+        fake = FakeRisClient()
+        stock_client = FakeBejermanClient(deposit_records={"": []})
+
+        with (
+            _bejerman_settings(),
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.SyncBejermanSDKClient", return_value=stock_client),
+            patch("service.bejerman_ris.validate_bejerman_article_choice") as validate_article,
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/preflight/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["can_emit"])
+        validate_article.assert_not_called()
+        issue = next(item for item in response.data["issues"] if item["code"] == "BEJERMAN_ARTICLE_MAPPING_REQUIRED")
+        self.assertNotIn("SERVICIO", issue["message"])
+        self.assertEqual(issue["field"], "equipo.modelo_id")
+        self.assertEqual(issue["fix"]["type"], "article_mapping")
+        self.assertEqual(issue["fix"]["model_id"], self.model_id)
+        self.assertEqual(issue["fix"]["variante"], "")
+        self.assertEqual(response.data["preview"]["items"][0]["articleCode"], "")
+
+    def test_ris_preflight_cliente_no_encontrado_informa_candidato(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-CUSTOMER-CANDIDATE")
+        fake = FakeRisClient(
+            clients=[
+                {
+                    "Cliente_Codigo": "CLI-FIX",
+                    "Cliente_RazonSocial": "Cliente Bejerman",
+                    "Cliente_NroDocumento": "30700000000",
+                    "Cliente_Provincia": "02",
+                    "Cliente_SitIVA": "RI",
+                }
+            ]
+        )
+
+        with (
+            _bejerman_settings(),
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.validate_bejerman_article_choice", side_effect=_ris_article_choice),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/preflight/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["can_emit"])
+        issue = next(item for item in response.data["issues"] if item["code"] == "BEJERMAN_CUSTOMER_NOT_FOUND")
+        self.assertEqual(issue["candidates"][0]["code"], "CLI-FIX")
+        self.assertEqual(issue["fix"]["customer_id"], self.customer_id)
+
+    def test_ris_emitir_preflight_invalido_no_llama_bejerman_ni_marca_failed(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PREFLIGHT-BLOCK")
+        fake = FakeRisClient(clients=[])
+
+        with (
+            _bejerman_settings(),
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.validate_bejerman_article_choice", side_effect=_ris_article_choice),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertFalse(response.data["can_emit"])
+        self.assertEqual(fake.ingresar_calls, 0)
+        with connection.cursor() as cur:
+            cur.execute("SELECT status, last_error FROM bejerman_ingreso_remitos WHERE ingreso_id=%s", [ingreso_id])
+            status, last_error = cur.fetchone()
+        self.assertNotEqual(status, "failed")
+        self.assertFalse(last_error)
+
+    def test_ris_preflight_articulo_invalido_sugiere_fix_unico_por_partida(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-ARTICLE-FIX")
+        fake = FakeRisClient()
+        stock_client = FakeBejermanClient(
+            deposit_records={
+                "": [
+                    {
+                        "Articulo_Codigo": "ART-CPAP",
+                        "Art_DescripcionGeneral": "Equipo CPAP AirSense 10",
+                        "Art_CodDeposito": "STR",
+                        "Partida": "SN-RIS-ARTICLE-FIX",
+                    }
+                ]
+            }
+        )
+
+        with (
+            _bejerman_settings(BEJERMAN_RIS_ALLOW_GENERIC_ARTICLE=True),
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.SyncBejermanSDKClient", return_value=stock_client),
+            patch(
+                "service.bejerman_ris.validate_bejerman_article_choice",
+                side_effect=BejermanBlockedError("No se encontró el artículo Bejerman SERVICIO"),
+            ),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/preflight/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["can_emit"])
+        issue = next(item for item in response.data["issues"] if item["code"] == "BEJERMAN_ARTICLE_INVALID")
+        self.assertEqual(issue["fix"]["type"], "article_mapping")
+        self.assertEqual(issue["fix"]["article_code"], "ART-CPAP")
+        self.assertEqual(issue["fix"]["model_id"], self.model_id)
+
+    def test_nuevo_ingreso_lote_preflight_falla_no_crea_ingresos(self):
+        payload = self._lote_payload("SN-LOTE-PREFLIGHT-BLOCK-1", "SN-LOTE-PREFLIGHT-BLOCK-2")
+        preflight = {
+            "can_emit": False,
+            "issues": [
+                {
+                    "code": "BEJERMAN_CUSTOMER_NOT_FOUND",
+                    "severity": "error",
+                    "scope": "cliente",
+                    "field": "cliente.cod_empresa",
+                    "item_index": 0,
+                    "message": "Cliente no encontrado en Bejerman.",
+                    "candidates": [],
+                    "fix": {},
+                }
+            ],
+            "preview": {"items": [], "lineCount": 0},
+            "detail": "La validación previa del RIS encontró problemas.",
+        }
+
+        with patch("service.views.ingresos_views.preflight_ris_for_request_payload", return_value=preflight):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertFalse(response.data["can_emit"])
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ingresos t
+                  JOIN devices d ON d.id = t.device_id
+                 WHERE d.numero_serie IN ('SN-LOTE-PREFLIGHT-BLOCK-1', 'SN-LOTE-PREFLIGHT-BLOCK-2')
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
 
     def test_apply_schema_crea_tabla_indices_y_constraints(self):
         call_command("apply_bejerman_sync_schema", verbosity=0)
@@ -656,14 +991,30 @@ class BejermanSyncTest(TestCase):
         self.assertIn("sync_type", columns)
         self.assertIn("ingreso_event_id", columns)
         self.assertIn("article_code", columns)
+        self.assertIn("company_key", columns)
         self.assertIn("request_payload", columns)
         self.assertIn("uq_bejerman_sync_jobs_type_ingreso", indexes)
         self.assertIn("ix_bejerman_sync_jobs_due", indexes)
+        self.assertIn("ix_bejerman_sync_jobs_company_key", indexes)
         self.assertIn("chk_bejerman_sync_jobs_status", constraints)
         self.assertIn("model_id", mapping_columns)
         self.assertIn("variante_norm", mapping_columns)
         self.assertIn("article_code", mapping_columns)
         self.assertIn("uq_bejerman_article_mappings_model_variant", all_indexes)
+
+    def test_sync_sdk_registra_empresa_mgbio(self):
+        client = BejermanSDKClient(
+            company_key="MGBIO",
+            bejerman_username="sdk-user",
+            bejerman_password="sdk-password",
+            bejerman_workstation="WS",
+        )
+
+        with patch.object(client, "_post", return_value={"Token": "TOKEN"}) as post:
+            client.register()
+
+        body = post.call_args.args[1]
+        self.assertIn("<xCodEmpresa>MGBI</xCodEmpresa>", body)
 
     def test_remito_liberado_encola_transferencia_sin_rss_y_sin_duplicar_si_se_reimprime(self):
         ingreso_id = self._insert_ingreso(serial="SN-REMITO-001")
@@ -691,6 +1042,39 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(transfer["target_deposit"], "STC")
         self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_EXIT_RTS))
 
+    def test_remitos_salida_bulk_devuelve_un_pdf_y_libera_todos_los_ingresos(self):
+        first_id = self._insert_ingreso(serial="SN-REMITO-BULK-001")
+        second_id = self._insert_ingreso(serial="SN-REMITO-BULK-002")
+        url = f"/api/ingresos/remitos-salida/?ids={first_id},{second_id}"
+
+        with (
+            override_settings(SECURE_SSL_REDIRECT=False),
+            patch("service.views.reportes_views.render_remito_salida_pdf", side_effect=[
+                (b"%PDF-1.4 first", "remito-1.pdf"),
+                (b"%PDF-1.4 second", "remito-2.pdf"),
+            ]),
+            patch("service.views.reportes_views._merge_pdf_documents", return_value=b"%PDF-1.4 merged") as merge_pdfs,
+            patch("service.views.reportes_views.notify_ingreso_liberado", return_value=0),
+        ):
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertEqual(response.content, b"%PDF-1.4 merged")
+        merge_pdfs.assert_called_once_with([b"%PDF-1.4 first", b"%PDF-1.4 second"])
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ingreso_events
+                 WHERE ingreso_id IN (%s,%s)
+                   AND a_estado='liberado'
+                """,
+                [first_id, second_id],
+            )
+            events = int(cur.fetchone()[0])
+        self.assertEqual(events, 2)
+
     def test_remito_liberado_equipo_propio_encola_stl_sin_rss(self):
         ingreso_id = self._insert_ingreso(
             serial="SN-REMITO-MG-001",
@@ -713,7 +1097,7 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(transfer["target_deposit"], "STL")
         self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_EXIT_RTS))
 
-    def test_remito_liberado_codigo_mg_de_cliente_encola_stc_sin_rss(self):
+    def test_remito_liberado_codigo_mg_activo_de_cliente_encola_stl_sin_rss(self):
         ingreso_id = self._insert_ingreso(serial="SN-REMITO-MG-CLIENTE", numero_interno="MG 0005")
         url = f"/api/ingresos/{ingreso_id}/remito/"
 
@@ -725,12 +1109,31 @@ class BejermanSyncTest(TestCase):
             response = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL))
-        transfer = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC)
+        transfer = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
         self.assertIsNotNone(transfer)
         self.assertEqual(transfer["source_deposit"], "STR")
-        self.assertEqual(transfer["target_deposit"], "STC")
+        self.assertEqual(transfer["target_deposit"], "STL")
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC))
         self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_EXIT_RTS))
+
+    def test_remito_liberado_devolucion_demo_encola_val_sin_stc(self):
+        ingreso_id = self._insert_ingreso(serial="SN-REMITO-DEMO", motivo="devolución demo")
+        url = f"/api/ingresos/{ingreso_id}/remito/"
+
+        with (
+            override_settings(SECURE_SSL_REDIRECT=False),
+            patch("service.views.reportes_views.render_remito_salida_pdf", return_value=(b"%PDF-1.4", "remito.pdf")),
+            patch("service.views.reportes_views.notify_ingreso_liberado", return_value=0),
+        ):
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL))
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC))
+        transfer = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_VAL)
+        self.assertIsNotNone(transfer)
+        self.assertEqual(transfer["source_deposit"], "STR")
+        self.assertEqual(transfer["target_deposit"], "VAL")
 
     def test_remito_liberado_mg_inactivo_por_venta_encola_stc_sin_stl(self):
         ingreso_id = self._insert_ingreso(
@@ -774,6 +1177,19 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(transfer["target_deposit"], "STC")
         self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_EXIT_RTS))
 
+    def test_entrega_devolucion_demo_encola_solo_transferencia_a_val(self):
+        ingreso_id = self._insert_ingreso(serial="SN-ENTREGA-DEMO", motivo="devolución demo")
+        url = f"/api/ingresos/{ingreso_id}/entregar/"
+
+        response = self.client.post(url, {"remito_salida": "RTN-0001"}, format="json")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC))
+        transfer = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_VAL)
+        self.assertIsNotNone(transfer)
+        self.assertEqual(transfer["source_deposit"], "STR")
+        self.assertEqual(transfer["target_deposit"], "VAL")
+
     def test_entrega_equipo_propio_encola_solo_transferencia_a_stl(self):
         ingreso_id = self._insert_ingreso(
             serial="SN-ENTREGA-MG-001",
@@ -790,7 +1206,7 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(transfer["target_deposit"], "STL")
         self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_EXIT_RTS))
 
-    def test_entrega_nm_nv_y_ce_se_tratan_como_equipos_de_cliente(self):
+    def test_entrega_nm_nv_y_ce_activos_encolan_stl(self):
         for prefix in ("NM", "NV", "CE"):
             with self.subTest(prefix=prefix):
                 ingreso_id = self._insert_ingreso(
@@ -802,9 +1218,10 @@ class BejermanSyncTest(TestCase):
                 response = self.client.post(url, {"remito_salida": f"RSS-{prefix}"}, format="json")
 
                 self.assertEqual(response.status_code, 200, response.data)
-                self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL))
-                transfer = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC)
-                self.assertEqual(transfer["target_deposit"], "STC")
+                transfer = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
+                self.assertIsNotNone(transfer)
+                self.assertEqual(transfer["target_deposit"], "STL")
+                self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC))
                 self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_EXIT_RTS))
 
     def test_nuevo_ingreso_no_encola_entrada_str(self):
@@ -821,6 +1238,8 @@ class BejermanSyncTest(TestCase):
         }
 
         with (
+            _bejerman_settings(),
+            _valid_ris_preflight(),
             patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
             patch(
                 "service.views.ingresos_views.compute_warranty",
@@ -848,6 +1267,8 @@ class BejermanSyncTest(TestCase):
         }
 
         with (
+            _bejerman_settings(),
+            _valid_ris_preflight(),
             patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
             patch(
                 "service.views.ingresos_views.compute_warranty",
@@ -865,6 +1286,449 @@ class BejermanSyncTest(TestCase):
             )
             row = cur.fetchone()
         self.assertEqual(row, ("MGBIO", "MGBIO"))
+
+    def _lote_payload(self, *serials, accesorios_items=None):
+        return {
+            "cliente": {"id": self.customer_id},
+            "empresa_bejerman": "SEPID",
+            "items": [
+                {
+                    "equipo": {
+                        "marca_id": self.marca_id,
+                        "modelo_id": self.model_id,
+                        "numero_serie": serial,
+                        "numero_interno": "",
+                    },
+                    "motivo": "otros",
+                    "ubicacion_id": self.taller_id,
+                    "accesorios_items": accesorios_items if index == 0 and accesorios_items else [],
+                }
+                for index, serial in enumerate(serials)
+            ],
+        }
+
+    def test_nuevo_ingreso_lote_crea_ingresos_y_un_solo_ris(self):
+        with connection.cursor() as cur:
+            cur.execute("INSERT INTO catalogo_accesorios(nombre) VALUES (%s) RETURNING id", ["Bolso"])
+            accesorio_id = int(cur.fetchone()[0])
+        fake = FakeRisClient(number="00004570")
+        payload = self._lote_payload(
+            "SN-LOTE-001",
+            "SN-LOTE-002",
+            accesorios_items=[{"accesorio_id": accesorio_id, "referencia": "B-1"}],
+        )
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        ingreso_ids = response.data["ingreso_ids"]
+        self.assertEqual(len(ingreso_ids), 2)
+        self.assertEqual(response.data["remito_number"], "RIS R 00004-00004570")
+        self.assertEqual(fake.ingresar_calls, 1)
+        legend_lines = [
+            item["Item_DescripArticulo"]
+            for item in fake.comprobantes[0]["Comprobante_Items"]
+            if item["Item_Tipo"] == "L"
+        ]
+        self.assertEqual(legend_lines[0], "Se recibe para servicio técnico:")
+        self.assertEqual(legend_lines.count("------------------------------"), 2)
+        self.assertTrue(any("SN-LOTE-001" in line for line in legend_lines))
+        self.assertTrue(any("Accesorios: Bolso (ref: B-1)" in line for line in legend_lines))
+        with connection.cursor() as cur:
+            cur.execute("SELECT remito_ingreso FROM ingresos WHERE id = ANY(%s) ORDER BY id", [ingreso_ids])
+            self.assertEqual([row[0] for row in cur.fetchall()], ["RIS R 00004-00004570", "RIS R 00004-00004570"])
+            cur.execute("SELECT COUNT(*) FROM ingreso_accesorios WHERE ingreso_id = %s", [ingreso_ids[0]])
+            self.assertEqual(cur.fetchone()[0], 1)
+        for ingreso_id in ingreso_ids:
+            self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_ENTRY_STR))
+
+    def test_nuevo_ingreso_lote_mg_baja_alquiler_emite_rda_con_stock_str(self):
+        fake = FakeRisClient(number="00004571")
+        payload = self._lote_payload("SN-RDA-001")
+        payload["items"][0]["equipo"]["numero_interno"] = "MG 1234"
+        payload["items"][0]["motivo"] = "baja alquiler"
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="baja alquiler"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["remito_number"], "RDA R 00001-00004571")
+        comprobante = fake.comprobantes[0]
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RDA")
+        self.assertEqual(comprobante["Comprobante_TipoOperacion"], "ALQ")
+        self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
+
+    def test_nuevo_ingreso_lote_no_mg_baja_alquiler_sigue_ris(self):
+        fake = FakeRisClient(number="00004572")
+        payload = self._lote_payload("SN-RIS-ALQ-001")
+        payload["items"][0]["motivo"] = "baja alquiler"
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="baja alquiler"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["remito_number"], "RIS R 00004-00004572")
+        comprobante = fake.comprobantes[0]
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RIS")
+        self.assertEqual(comprobante["Comprobante_TipoOperacion"], "REP")
+        self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
+
+    def test_nuevo_ingreso_lote_devolucion_demo_emite_rdn_con_stock_str(self):
+        fake = FakeRisClient(number="00004573")
+        payload = self._lote_payload("SN-RDN-001")
+        payload["items"][0]["motivo"] = "devolución demo"
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="devolución demo"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["remito_number"], "RDN R 00004-00004573")
+        comprobante = fake.comprobantes[0]
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RDN")
+        self.assertEqual(comprobante["Comprobante_TipoOperacion"], "DEMO")
+        self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
+
+    def test_nuevo_ingreso_lote_mixto_bloquea_sin_crear_ingresos(self):
+        fake = FakeRisClient(number="00004574")
+        payload = self._lote_payload("SN-MIX-RDA", "SN-MIX-RIS")
+        payload["items"][0]["equipo"]["numero_interno"] = "MG 1235"
+        payload["items"][0]["motivo"] = "baja alquiler"
+        payload["items"][1]["motivo"] = "otros"
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(fake),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertTrue(any(issue["code"] == "INGRESO_DOCUMENT_PROFILE_MISMATCH" for issue in response.data["issues"]))
+        self.assertEqual(fake.ingresar_calls, 0)
+        with connection.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM devices WHERE numero_serie IN (%s, %s)", ["SN-MIX-RDA", "SN-MIX-RIS"])
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_nuevo_ingreso_lote_registra_remito_manual_sin_pdf(self):
+        fake = FakeRisClient()
+        payload = self._lote_payload("SN-LOTE-REG-001", "SN-LOTE-REG-002")
+        payload.update({"ris_mode": "register", "manual_remito_number": "26249"})
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        ingreso_ids = response.data["ingreso_ids"]
+        self.assertEqual(response.data["document_mode"], "register")
+        self.assertEqual(response.data["pdf_status"], "not_applicable")
+        self.assertEqual(response.data["remito_number"], "RIS R 00001-00026249")
+        self.assertNotIn("pdf_url", response.data)
+        self.assertNotIn("print_url", response.data)
+        self.assertEqual(fake.ingresar_calls, 1)
+        self.assertEqual(fake.ingresar_kwargs[0]["emite_reg"], "R")
+        self.assertEqual(fake.ingresar_kwargs[0]["numera_flex"], "N")
+        comprobante = fake.comprobantes[0]
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RIS")
+        self.assertEqual(comprobante["Comprobante_Letra"], "R")
+        self.assertEqual(comprobante["Comprobante_PtoVenta"], "00001")
+        self.assertEqual(comprobante["Comprobante_Numero"], "00026249")
+        self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(len(article_lines), 2)
+        self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
+        self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-LOTE-REG-001", "SN-LOTE-REG-002"])
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.document_mode, r.manual_remito_number, r.pdf_status, t.remito_ingreso
+                  FROM bejerman_ingreso_remitos r
+                  JOIN ingresos t ON t.id = r.ingreso_id
+                 WHERE r.ingreso_id = ANY(%s)
+                 ORDER BY r.ingreso_id
+                """,
+                [ingreso_ids],
+            )
+            rows = cur.fetchall()
+        self.assertEqual(
+            rows,
+            [
+                ("register", "RIS R 00001-00026249", "not_applicable", "RIS R 00001-00026249"),
+                ("register", "RIS R 00001-00026249", "not_applicable", "RIS R 00001-00026249"),
+            ],
+        )
+
+        pdf_response = self.client.get(f"/api/ingresos/{ingreso_ids[0]}/ris/pdf/")
+        self.assertEqual(pdf_response.status_code, 409, pdf_response.data)
+        self.assertIn("registrado", pdf_response.data["detail"])
+
+    def test_nuevo_ingreso_lote_registrar_exige_numero_manual(self):
+        fake = FakeRisClient()
+        payload = self._lote_payload("SN-LOTE-REG-REQ")
+        payload["ris_mode"] = "register"
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["document_mode"], "register")
+        self.assertTrue(any(issue["code"] == "MANUAL_REMITO_REQUIRED" for issue in response.data["issues"]))
+        self.assertEqual(fake.ingresar_calls, 0)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ingresos t
+                  JOIN devices d ON d.id = t.device_id
+                 WHERE d.numero_serie = 'SN-LOTE-REG-REQ'
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_nuevo_ingreso_lote_registrar_bloquea_duplicado_remoto(self):
+        fake = FakeRisClient(
+            sales_records=[
+                {
+                    "Comprobante_Tipo": "RIS",
+                    "Comprobante_Letra": "R",
+                    "Comprobante_PtoVenta": "00001",
+                    "Comprobante_Numero": "00026249",
+                }
+            ]
+        )
+        payload = self._lote_payload("SN-LOTE-REG-DUP-REMOTE")
+        payload.update({"ris_mode": "register", "manual_remito_number": "26249"})
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertTrue(any(issue["code"] == "MANUAL_REMITO_DUPLICATE_REMOTE" for issue in response.data["issues"]))
+        self.assertEqual(fake.ingresar_calls, 0)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ingresos t
+                  JOIN devices d ON d.id = t.device_id
+                 WHERE d.numero_serie = 'SN-LOTE-REG-DUP-REMOTE'
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_nuevo_ingreso_lote_registrar_bloquea_duplicado_local(self):
+        existing_id = self._insert_ingreso(serial="SN-LOTE-REG-DUP-LOCAL-OLD")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bejerman_ingreso_remitos (
+                    ingreso_id,
+                    status,
+                    pdf_status,
+                    document_mode,
+                    manual_remito_number,
+                    comprobante_tipo,
+                    comprobante_letra,
+                    comprobante_pto_venta,
+                    comprobante_numero,
+                    remito_number,
+                    company_key
+                )
+                VALUES (%s, 'generated', 'not_applicable', 'register', %s, 'RIS', 'R', '00001', '00026249', %s, 'SEPID')
+                """,
+                [existing_id, "RIS R 00001-00026249", "RIS R 00001-00026249"],
+            )
+        fake = FakeRisClient()
+        payload = self._lote_payload("SN-LOTE-REG-DUP-LOCAL")
+        payload.update({"ris_mode": "register", "manual_remito_number": "26249"})
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertTrue(any(issue["code"] == "MANUAL_REMITO_DUPLICATE_LOCAL" for issue in response.data["issues"]))
+        self.assertEqual(fake.ingresar_calls, 0)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ingresos t
+                  JOIN devices d ON d.id = t.device_id
+                 WHERE d.numero_serie = 'SN-LOTE-REG-DUP-LOCAL'
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_nuevo_ingreso_lote_duplicado_no_crea_parciales(self):
+        existing_id = self._insert_ingreso(serial="SN-LOTE-DUP")
+        payload = self._lote_payload("SN-LOTE-NEW", "SN-LOTE-DUP")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["item_index"], 1)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM ingresos t
+                JOIN devices d ON d.id = t.device_id
+                WHERE d.numero_serie IN ('SN-LOTE-NEW', 'SN-LOTE-DUP')
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], 1)
+        self.assertEqual(existing_id, response.data["ingreso_id"])
+
+    def test_nuevo_ingreso_lote_falla_ris_conserva_ingresos_con_estado_visible(self):
+        payload = self._lote_payload("SN-LOTE-FAIL-1", "SN-LOTE-FAIL-2")
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(FakeRisClient()),
+            patch(
+                "service.bejerman_ris.resolve_customer_document_fields",
+                side_effect=BejermanSdkResponseError("Cliente sin situación de IVA"),
+            ),
+        ):
+            response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertIn("No se pudo emitir RIS", response.data["detail"])
+        ingreso_ids = response.data["ingreso_ids"]
+        self.assertEqual(len(ingreso_ids), 2)
+        with connection.cursor() as cur:
+            cur.execute("SELECT status, last_error FROM bejerman_ingreso_remitos WHERE ingreso_id = ANY(%s)", [ingreso_ids])
+            rows = cur.fetchall()
+        self.assertEqual({row[0] for row in rows}, {"failed"})
+        self.assertTrue(all("situación de IVA" in (row[1] or "") for row in rows))
+
+    def test_ris_reintento_desde_ingreso_de_lote_reemite_lote_completo(self):
+        payload = self._lote_payload("SN-LOTE-RETRY-1", "SN-LOTE-RETRY-2")
+
+        with (
+            _bejerman_settings(),
+            patch("service.views.ingresos_views._map_motivo_to_db_label", return_value="otros"),
+            patch(
+                "service.views.ingresos_views.compute_warranty",
+                return_value={"garantia": False, "vence_el": None, "fecha_venta": None},
+            ),
+            _valid_ris_preflight(FakeRisClient()),
+            patch(
+                "service.bejerman_ris.resolve_customer_document_fields",
+                side_effect=BejermanSdkResponseError("Cliente sin situación de IVA"),
+            ),
+        ):
+            created = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
+        ingreso_ids = created.data["ingreso_ids"]
+        fake = FakeRisClient(number="00004571")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_ids[1]}/ris/emitir/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(fake.ingresar_calls, 1)
+        article_lines = [
+            item for item in fake.comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"
+        ]
+        self.assertEqual(len(article_lines), 2)
+        with connection.cursor() as cur:
+            cur.execute("SELECT remito_ingreso FROM ingresos WHERE id = ANY(%s) ORDER BY id", [ingreso_ids])
+            self.assertEqual([row[0] for row in cur.fetchall()], ["RIS R 00004-00004571", "RIS R 00004-00004571"])
 
     def test_entrada_str_legacy_se_bloquea_sin_emitir_movimientos(self):
         ingreso_id = self._insert_ingreso(serial="SN-ENTRY-BLOCKED")
@@ -919,7 +1783,7 @@ class BejermanSyncTest(TestCase):
         self.assertIn("Portal", job["last_error"])
 
     def test_job_stl_legacy_de_cliente_se_cierra_sin_emitir_movimientos(self):
-        ingreso_id = self._insert_ingreso(serial="", numero_interno="MG 7358")
+        ingreso_id = self._insert_ingreso(serial="SN-LEGACY-CLIENT", numero_interno="")
         with connection.cursor() as cur:
             cur.execute("SELECT device_id FROM ingresos WHERE id=%s", [ingreso_id])
             device_id = int(cur.fetchone()[0])
@@ -1015,7 +1879,45 @@ class BejermanSyncTest(TestCase):
         self.assertIsNotNone(job)
         self.assertEqual(job["target_deposit"], "STL")
 
-    def test_codigo_mg_de_cliente_no_encola_str_a_stl_al_quedar_listo(self):
+    def test_controlado_sin_defecto_devolucion_demo_encola_str_a_val(self):
+        ingreso_id = self._insert_ingreso(
+            serial="SN-DEMO-CONTROL",
+            estado="en_reparacion",
+            ubicacion_id=self.taller_id,
+            motivo="devolución demo",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
+
+        response = self.client.post(f"/api/ingresos/{ingreso_id}/controlado-sin-defecto/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL))
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STC))
+        job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_VAL)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["source_deposit"], "STR")
+        self.assertEqual(job["target_deposit"], "VAL")
+
+    def test_controlado_sin_defecto_devolucion_demo_convertido_mg_prioriza_stl(self):
+        ingreso_id = self._insert_ingreso(
+            serial="SN-DEMO-MG-CONTROL",
+            numero_interno="MG 0009",
+            estado="en_reparacion",
+            ubicacion_id=self.taller_id,
+            customer_id=self.mg_customer_id,
+            motivo="devolución demo",
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
+
+        response = self.client.post(f"/api/ingresos/{ingreso_id}/controlado-sin-defecto/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["target_deposit"], "STL")
+        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_VAL))
+
+    def test_codigo_mg_activo_de_cliente_encola_str_a_stl_al_quedar_listo(self):
         ingreso_id = self._insert_ingreso(
             serial="SN-CLIENT-MG-CODE",
             numero_interno="MG 0007",
@@ -1027,9 +1929,12 @@ class BejermanSyncTest(TestCase):
         response = self.client.post(f"/api/ingresos/{ingreso_id}/reparado/", {}, format="json")
 
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL))
+        job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["source_deposit"], "STR")
+        self.assertEqual(job["target_deposit"], "STL")
 
-    def test_ce_reparado_no_encola_str_a_stl(self):
+    def test_ce_activo_reparado_encola_str_a_stl(self):
         ingreso_id = self._insert_ingreso(
             serial="SN-CE-READY",
             numero_interno="CE 0002",
@@ -1041,7 +1946,26 @@ class BejermanSyncTest(TestCase):
         response = self.client.post(f"/api/ingresos/{ingreso_id}/reparado/", {}, format="json")
 
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertIsNone(self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL))
+        job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["target_deposit"], "STL")
+
+    def test_n_de_control_mg_activo_encola_str_a_stl(self):
+        ingreso_id = self._insert_ingreso(
+            serial="SN-CONTROL-MG",
+            n_de_control="MG 2562",
+            estado="en_reparacion",
+            ubicacion_id=self.taller_id,
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
+
+        response = self.client.post(f"/api/ingresos/{ingreso_id}/reparado/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["source_deposit"], "STR")
+        self.assertEqual(job["target_deposit"], "STL")
 
     def test_payload_mueve_partida_desde_str_hacia_stl_con_sal_y_ent(self):
         ingreso_id = self._enqueue_job(serial="SN-MOVE-001")
@@ -1096,6 +2020,37 @@ class BejermanSyncTest(TestCase):
         response_payload = self._json_value(job["response_payload"])
         self.assertIn("sal", response_payload)
         self.assertIn("target_stock_entry", response_payload)
+
+    def test_worker_usa_empresa_del_job_mgbio(self):
+        ingreso_id = self._insert_ingreso(
+            serial="SN-MGBIO-WORKER",
+            numero_interno="MG 3010",
+            customer_id=self.mg_customer_id,
+            empresa_bejerman="MGBIO",
+        )
+        event_id = self._insert_liberado_event(ingreso_id)
+        enqueue_stock_transfer_for_ingreso(ingreso_id, event_id, actor_user_id=self.admin.id)
+        job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
+        self.assertEqual(job["company_key"], "MGBIO")
+
+        fake = FakeBejermanClient(
+            source_records=[
+                {
+                    "Comprobante_ArtPartida": "SN-MGBIO-WORKER",
+                    "Comprobante_ArtDeposito": "STR",
+                    "Comprobante_Art_CodGen": "ART-MGBIO",
+                    "Stock": 1,
+                }
+            ],
+            target_records=[],
+        )
+
+        with _bejerman_settings(), patch("service.bejerman_sync.BejermanSDKClient", return_value=fake) as client_cls:
+            stats = process_bejerman_jobs(limit=1)
+
+        self.assertEqual(stats["succeeded"], 1)
+        client_cls.assert_called_once_with(company_key="MGBIO", actor_user_id=self.admin.id)
+        self.assertEqual(fake.movements[1][0]["Comprobante_ArtDeposito"], "STL")
 
     def test_cliente_sdk_envia_lista_stock_por_parametros_json(self):
         comprobantes = [{"Comprobante_Tipo": "TRA", "Comprobante_ArtPartida": "SN-MOVE-001"}]
@@ -1588,6 +2543,55 @@ class BejermanSyncTest(TestCase):
         self.assertIn("Coincide con la búsqueda", response.data["items"][0]["reasons"])
         self.assertIn("Parece repuesto o accesorio", response.data["items"][1]["warnings"])
 
+    def test_busqueda_y_mapeo_por_modelo_variante_usa_permiso_preflight(self):
+        recepcion = User.objects.create(
+            nombre="Recepción Bejerman",
+            email="recepcion@bejerman.test",
+            hash_pw="",
+            rol="recepcion",
+            activo=True,
+        )
+        fake = FakeBejermanClient(
+            articles=[
+                {
+                    "Art_CodGenerico": "ART-G2",
+                    "Art_DescripcionGeneral": "ResMed AirSense 10 CPAP G2",
+                    "Art_StockPorPartida": "S",
+                    "Art_ParticipaCircuitoStock": "S",
+                    "Art_Tipo": "1",
+                }
+            ]
+        )
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(recepcion)}")
+        with _bejerman_settings(), patch("service.views.bejerman_views.BejermanSDKClient", return_value=fake):
+            response = self.client.get(f"/api/bejerman/articles/?model_id={self.model_id}&variante=G2&q=AirSense")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["context"]["model_id"], self.model_id)
+        self.assertEqual(response.data["context"]["variante"], "G2")
+        self.assertEqual(response.data["items"][0]["article_code"], "ART-G2")
+
+        with _bejerman_settings(), patch("service.views.bejerman_views.BejermanSDKClient", return_value=fake):
+            response = self.client.post(
+                "/api/bejerman/article-mappings/",
+                {
+                    "model_id": self.model_id,
+                    "variante": "G2",
+                    "article_code": "ART-G2",
+                    "article_description": "Artículo G2",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["mapping"]["article_code"], "ART-G2")
+        self.assertEqual(response.data["mapping"]["variante"], "G2")
+
+        response = self.client.get(f"/api/bejerman/article-mappings/?model_id={self.model_id}")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["items"][0]["article_code"], "ART-G2")
+
     def test_mapeo_rechaza_codigo_bejerman_inexistente(self):
         ingreso_id = self._enqueue_job(serial="SN-ARTICLE-BAD")
         job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
@@ -1647,6 +2651,30 @@ class BejermanSyncTest(TestCase):
 
         self.assertEqual(response.status_code, 409, response.data)
         self.assertIn("NEXORA no emite ENT/RIS de ingreso", response.data["detail"])
+
+    def test_listado_bejerman_filtra_y_muestra_empresa(self):
+        sepid_ingreso_id = self._insert_ingreso(
+            serial="SN-COMPANY-SEPID-JOB",
+            numero_interno="MG 1111",
+            customer_id=self.mg_customer_id,
+            empresa_bejerman="SEPID",
+        )
+        mgbio_ingreso_id = self._insert_ingreso(
+            serial="SN-COMPANY-MGBIO-JOB",
+            numero_interno="MG 2222",
+            customer_id=self.mg_customer_id,
+            empresa_bejerman="MGBIO",
+        )
+        enqueue_stock_transfer_for_ingreso(sepid_ingreso_id, self._insert_liberado_event(sepid_ingreso_id))
+        enqueue_stock_transfer_for_ingreso(mgbio_ingreso_id, self._insert_liberado_event(mgbio_ingreso_id))
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
+        response = self.client.get("/api/bejerman/jobs/?company_key=MGBIO")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual([item["ingreso_id"] for item in response.data["items"]], [mgbio_ingreso_id])
+        self.assertEqual(response.data["items"][0]["company_key"], "MGBIO")
+        self.assertEqual(response.data["items"][0]["company_label"], "MG BIO")
 
     def test_listado_bejerman_exige_permiso_de_pagina_especifico(self):
         response = self.client.get("/api/bejerman/jobs/")

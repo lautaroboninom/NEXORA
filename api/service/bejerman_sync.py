@@ -13,21 +13,32 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
 
+from .bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, require_company
+from .bejerman_user_credentials import (
+    BEJERMAN_CREDENTIALS_REQUIRED,
+    BejermanUserCredentialsError,
+    get_user_bejerman_credentials,
+    resolve_user_bejerman_workstation,
+)
+
 logger = logging.getLogger(__name__)
 
 SYNC_TYPE_STOCK_ENTRY_STR = "stock_entry_str"
 SYNC_TYPE_STOCK_STR_TO_STL = "stock_str_to_stl"
 SYNC_TYPE_STOCK_STR_TO_STC = "stock_str_to_stc"
+SYNC_TYPE_STOCK_STR_TO_VAL = "stock_str_to_val"
 SYNC_TYPE_STOCK_STR_TO_STCL = "stock_str_to_stcl"  # Alias legacy previo a STC.
 SYNC_TYPE_STOCK_EXIT_RTS = "stock_exit_rts"  # Nombre legacy; la salida física la gestiona Portal.
 ARTICLE_RECONCILE_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STL,
     SYNC_TYPE_STOCK_STR_TO_STC,
+    SYNC_TYPE_STOCK_STR_TO_VAL,
     SYNC_TYPE_STOCK_STR_TO_STCL,
 )
 TARGET_STOCK_RESTORE_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STL,
     SYNC_TYPE_STOCK_STR_TO_STC,
+    SYNC_TYPE_STOCK_STR_TO_VAL,
     SYNC_TYPE_STOCK_STR_TO_STCL,
 )
 
@@ -37,7 +48,7 @@ JOB_STATUS_SUCCEEDED = "succeeded"
 JOB_STATUS_FAILED = "failed"
 JOB_STATUS_BLOCKED = "blocked"
 
-INTERNAL_CODE_RE = re.compile(r"^MG\s*\d{1,4}$", re.IGNORECASE)
+INTERNAL_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,4}$", re.IGNORECASE)
 TRANSFER_PHASE_SAL_DONE = "sal_done"
 TRANSFER_PHASE_ENT_PENDING = "ent_pending"
 TRANSFER_PHASE_DONE = "done"
@@ -182,9 +193,10 @@ def normalize_article_variant(value: Any) -> str:
     return _text_key(value)
 
 
-def _is_internal_equipment(numero_interno: str, numero_serie: str = "") -> bool:
-    return bool(INTERNAL_CODE_RE.match((numero_interno or "").strip())) or bool(
-        INTERNAL_CODE_RE.match((numero_serie or "").strip())
+def _is_internal_equipment(numero_interno: str, numero_serie: str = "", n_de_control: str = "") -> bool:
+    return any(
+        bool(INTERNAL_CODE_RE.match((value or "").strip()))
+        for value in (numero_interno, numero_serie, n_de_control)
     )
 
 
@@ -586,11 +598,54 @@ def _column_exists(table: str, column: str) -> bool:
 
 
 class BejermanSDKClient:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        company_key: str | None = None,
+        actor_user_id: int | None = None,
+        bejerman_username: str | None = None,
+        bejerman_password: str | None = None,
+        bejerman_workstation: str | None = None,
+        allow_system_credentials: bool = False,
+    ):
         self.wsdl_url = str(_setting("BEJERMAN_WSDL_URL", "") or "").strip()
         self.endpoint_url = self.wsdl_url.split("?", 1)[0]
         self.timeout = int(_setting("BEJERMAN_REQUEST_TIMEOUT", 30) or 30)
+        if company_key:
+            company = require_company(company_key)
+            self.company_key = company.key
+            self.company = company.bejerman_company
+        else:
+            self.company_key = ""
+            self.company = str(_setting("BEJERMAN_COMPANY", "") or "").strip()
+        self.actor_user_id = actor_user_id
+        self.bejerman_username = str(bejerman_username or "").strip()
+        self.bejerman_password = str(bejerman_password or "").strip()
+        self.bejerman_workstation = str(bejerman_workstation or "").strip()
+        self.allow_system_credentials = bool(allow_system_credentials)
         self.token = ""
+
+    def _credentials(self) -> tuple[str, str]:
+        if self.bejerman_username and self.bejerman_password:
+            return self.bejerman_username, self.bejerman_password
+        if self.actor_user_id:
+            try:
+                return get_user_bejerman_credentials(int(self.actor_user_id))
+            except BejermanUserCredentialsError as exc:
+                raise BejermanConfigError(str(exc)) from exc
+        if self.allow_system_credentials:
+            username = str(_setting("BEJERMAN_USER", "") or "").strip()
+            password = str(_setting("BEJERMAN_PASSWORD", "") or "").strip()
+            if username and password:
+                return username, password
+        raise BejermanConfigError(BEJERMAN_CREDENTIALS_REQUIRED)
+
+    def _workstation(self) -> str:
+        if self.bejerman_workstation:
+            return self.bejerman_workstation
+        if self.actor_user_id:
+            return resolve_user_bejerman_workstation(int(self.actor_user_id))
+        return str(_setting("BEJERMAN_WORKSTATION", "") or _setting("BEJERMAN_SERVICE_WORKSTATION", "") or "").strip()
 
     def _post(self, action: str, body: str) -> dict[str, str]:
         if not self.endpoint_url:
@@ -620,12 +675,13 @@ class BejermanSDKClient:
         return parsed
 
     def register(self) -> str:
+        username, password = self._credentials()
         body = (
             '<EFlexSDK_WSRegistro xmlns="http://localhost:57213/">'
-            f"<xUsuario>{escape(str(_setting('BEJERMAN_USER', '') or ''))}</xUsuario>"
-            f"<xClave>{escape(str(_setting('BEJERMAN_PASSWORD', '') or ''))}</xClave>"
-            f"<xCodEmpresa>{escape(str(_setting('BEJERMAN_COMPANY', '') or ''))}</xCodEmpresa>"
-            f"<xPtoTrabajo>{escape(str(_setting('BEJERMAN_WORKSTATION', '') or ''))}</xPtoTrabajo>"
+            f"<xUsuario>{escape(username)}</xUsuario>"
+            f"<xClave>{escape(password)}</xClave>"
+            f"<xCodEmpresa>{escape(self.company)}</xCodEmpresa>"
+            f"<xPtoTrabajo>{escape(self._workstation())}</xPtoTrabajo>"
             f"<xCodSucursal>{escape(str(_setting('BEJERMAN_BRANCH', '') or ''))}</xCodSucursal>"
             "</EFlexSDK_WSRegistro>"
         )
@@ -690,8 +746,6 @@ class BejermanSDKClient:
 def validate_bejerman_config(*, comprobante: str | None = None) -> None:
     required = [
         "BEJERMAN_WSDL_URL",
-        "BEJERMAN_USER",
-        "BEJERMAN_PASSWORD",
         "BEJERMAN_COMPANY",
         "BEJERMAN_WORKSTATION",
     ]
@@ -704,6 +758,13 @@ def validate_bejerman_config(*, comprobante: str | None = None) -> None:
 
 def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
     ingreso_variante_sql = "COALESCE(t.equipo_variante, '')" if _column_exists("ingresos", "equipo_variante") else "''"
+    empresa_bejerman_sql = (
+        "COALESCE(t.empresa_bejerman, 'SEPID')" if _column_exists("ingresos", "empresa_bejerman") else "'SEPID'"
+    )
+    empresa_facturar_sql = (
+        "COALESCE(t.empresa_facturar, 'SEPID')" if _column_exists("ingresos", "empresa_facturar") else "'SEPID'"
+    )
+    n_de_control_sql = "COALESCE(d.n_de_control, '')" if _column_exists("devices", "n_de_control") else "''"
     device_variante_sql = "COALESCE(d.variante, '')" if _column_exists("devices", "variante") else "''"
     model_variante_sql = "COALESCE(m.variante, '')" if _column_exists("models", "variante") else "''"
     model_tipo_sql = "COALESCE(m.tipo_equipo, '')" if _column_exists("models", "tipo_equipo") else "''"
@@ -725,6 +786,9 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
     row = q(
         f"""
         SELECT t.id AS ingreso_id,
+               COALESCE(t.motivo::TEXT, '') AS motivo,
+               {empresa_bejerman_sql} AS empresa_bejerman,
+               {empresa_facturar_sql} AS empresa_facturar,
                d.id AS device_id,
                d.customer_id,
                d.model_id,
@@ -733,6 +797,7 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
                COALESCE(c.razon_social, '') AS customer_name,
                COALESCE(d.numero_serie, '') AS numero_serie,
                COALESCE(d.numero_interno, '') AS numero_interno,
+               {n_de_control_sql} AS n_de_control,
                {mg_estado_sql} AS mg_estado,
                {mg_venta_fecha_sql} AS mg_venta_fecha,
                {mg_venta_factura_sql} AS mg_venta_factura_numero,
@@ -782,7 +847,17 @@ def _ingreso_has_mg_sale(row: dict[str, Any]) -> bool:
 
 def ingreso_is_internal_equipment(ingreso_id: int) -> bool:
     row = _ingreso_context(ingreso_id)
-    return _is_mg_owner_customer(row.get("customer_id")) and not _ingreso_has_mg_sale(row)
+    if _ingreso_has_mg_sale(row):
+        return False
+    return bool(
+        _is_mg_owner_customer(row.get("customer_id"))
+        or _is_internal_equipment(row.get("numero_interno"), row.get("numero_serie"), row.get("n_de_control"))
+    )
+
+
+def ingreso_is_demo_return(ingreso_id: int) -> bool:
+    row = _ingreso_context(ingreso_id)
+    return _text_key(row.get("motivo")) == "devolucion demo"
 
 
 def _last_liberado_event_id(ingreso_id: int) -> int | None:
@@ -801,6 +876,14 @@ def _last_liberado_event_id(ingreso_id: int) -> int | None:
     return event and event.get("id")
 
 
+def _company_key_for_ingreso_row(row: dict[str, Any]) -> str:
+    marker = row.get("empresa_bejerman") or row.get("empresa_facturar") or DEFAULT_INGRESS_COMPANY_KEY
+    try:
+        return require_company(marker).key
+    except ValueError as exc:
+        raise BejermanBlockedError(str(exc)) from exc
+
+
 def _enqueue_stock_job(
     *,
     ingreso_id: int,
@@ -809,15 +892,18 @@ def _enqueue_stock_job(
     target_deposit: str,
     trigger: str,
     ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
 ) -> dict[str, Any]:
     row = _ingreso_context(ingreso_id)
     serial = (row.get("numero_serie") or "").strip()
+    company_key = _company_key_for_ingreso_row(row)
     status = JOB_STATUS_PENDING if serial else JOB_STATUS_BLOCKED
     last_error = None if serial else "Número de serie requerido para sincronizar Bejerman"
     request_payload = {
         "source": "nexora",
         "trigger": trigger,
         "reference": f"NEXORA-OS-{ingreso_id}",
+        "companyKey": company_key,
         "marca": row.get("marca") or "",
         "modelo": row.get("modelo") or "",
         "variante": row.get("variante") or "",
@@ -826,14 +912,16 @@ def _enqueue_stock_job(
         """
         INSERT INTO bejerman_sync_jobs(
           sync_type, ingreso_id, device_id, ingreso_event_id, numero_serie,
-          source_deposit, target_deposit, status, last_error, request_payload
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+          source_deposit, target_deposit, company_key, status, last_error, actor_user_id, request_payload
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
         ON CONFLICT (sync_type, ingreso_id) DO UPDATE
            SET ingreso_event_id = COALESCE(bejerman_sync_jobs.ingreso_event_id, EXCLUDED.ingreso_event_id),
                device_id = EXCLUDED.device_id,
                numero_serie = EXCLUDED.numero_serie,
                source_deposit = EXCLUDED.source_deposit,
                target_deposit = EXCLUDED.target_deposit,
+               company_key = EXCLUDED.company_key,
+               actor_user_id = COALESCE(EXCLUDED.actor_user_id, bejerman_sync_jobs.actor_user_id),
                request_payload = bejerman_sync_jobs.request_payload || EXCLUDED.request_payload,
                status = CASE
                  WHEN bejerman_sync_jobs.status = 'succeeded' THEN bejerman_sync_jobs.status
@@ -854,15 +942,21 @@ def _enqueue_stock_job(
             serial,
             source_deposit,
             target_deposit,
+            company_key,
             status,
             last_error,
+            actor_user_id,
             _json_param(request_payload),
         ],
         one=True,
     )
 
 
-def enqueue_stock_entry_for_ingreso(ingreso_id: int, ingreso_event_id: int | None = None) -> dict[str, Any]:
+def enqueue_stock_entry_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
     target_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
     job = _enqueue_stock_job(
         ingreso_id=ingreso_id,
@@ -871,6 +965,7 @@ def enqueue_stock_entry_for_ingreso(ingreso_id: int, ingreso_event_id: int | Non
         target_deposit=target_deposit,
         trigger="ingreso_creado",
         ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
     )
     if job.get("status") == JOB_STATUS_SUCCEEDED:
         return job
@@ -888,7 +983,11 @@ def enqueue_stock_entry_for_ingreso(ingreso_id: int, ingreso_event_id: int | Non
     )
 
 
-def enqueue_stock_transfer_for_ingreso(ingreso_id: int, ingreso_event_id: int | None = None) -> dict[str, Any]:
+def enqueue_stock_transfer_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
     if not ingreso_is_internal_equipment(ingreso_id):
         raise BejermanBlockedError("Solo los equipos MG pueden transferirse de STR a STL")
     source_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
@@ -902,10 +1001,15 @@ def enqueue_stock_transfer_for_ingreso(ingreso_id: int, ingreso_event_id: int | 
         target_deposit=target_deposit,
         trigger="equipo_propio_listo_alquiler",
         ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
     )
 
 
-def enqueue_client_ready_transfer_for_ingreso(ingreso_id: int, ingreso_event_id: int | None = None) -> dict[str, Any]:
+def enqueue_client_ready_transfer_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
     source_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
     target_deposit = str(_setting("BEJERMAN_CLIENT_TARGET_DEPOSIT", "STC") or "STC").strip() or "STC"
     if ingreso_event_id is None:
@@ -917,6 +1021,27 @@ def enqueue_client_ready_transfer_for_ingreso(ingreso_id: int, ingreso_event_id:
         target_deposit=target_deposit,
         trigger="orden_salida_impresa",
         ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
+    )
+
+
+def enqueue_demo_ready_transfer_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    source_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
+    target_deposit = str(_setting("BEJERMAN_DEMO_TARGET_DEPOSIT", "VAL") or "VAL").strip() or "VAL"
+    if ingreso_event_id is None:
+        ingreso_event_id = _last_liberado_event_id(ingreso_id)
+    return _enqueue_stock_job(
+        ingreso_id=ingreso_id,
+        sync_type=SYNC_TYPE_STOCK_STR_TO_VAL,
+        source_deposit=source_deposit,
+        target_deposit=target_deposit,
+        trigger="demo_lista_val",
+        ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
     )
 
 
@@ -924,6 +1049,7 @@ def enqueue_stock_exit_for_ingreso(
     ingreso_id: int,
     ingreso_event_id: int | None = None,
     source_deposit: str | None = None,
+    actor_user_id: int | None = None,
 ) -> dict[str, Any]:
     if source_deposit is None:
         if ingreso_is_internal_equipment(ingreso_id):
@@ -939,6 +1065,7 @@ def enqueue_stock_exit_for_ingreso(
         target_deposit="SALIDA",
         trigger="remito_salida_rss",
         ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
     )
     return q(
         """
@@ -1133,6 +1260,33 @@ def article_mapping_summary_for_context(model_id: int | None, variante: str = ""
         "match_source": mapping.get("match_source") or "",
         "confirmed_at": mapping.get("confirmed_at"),
         "updated_at": mapping.get("updated_at"),
+    }
+
+
+def article_context_for_model(model_id: int, variante: str = "") -> dict[str, Any]:
+    row = q(
+        """
+        SELECT m.id AS model_id,
+               COALESCE(m.nombre, '') AS modelo,
+               COALESCE(m.tipo_equipo, '') AS tipo_equipo,
+               COALESCE(b.nombre, '') AS marca
+          FROM models m
+          LEFT JOIN marcas b ON b.id = m.marca_id
+         WHERE m.id = %s
+        """,
+        [model_id],
+        one=True,
+    )
+    if not row:
+        raise BejermanBlockedError("Modelo no encontrado")
+    return {
+        "ingreso_id": None,
+        "model_id": row.get("model_id"),
+        "marca": row.get("marca") or "",
+        "modelo": row.get("modelo") or "",
+        "tipo_equipo": row.get("tipo_equipo") or "",
+        "variante": (variante or "").strip(),
+        "variante_norm": normalize_article_variant(variante),
     }
 
 
@@ -1339,6 +1493,30 @@ def search_bejerman_articles_for_job(
     if not row:
         raise BejermanBlockedError("Operación Bejerman no encontrada")
     context = _ingreso_context(int(row["ingreso_id"]))
+    payload = search_bejerman_articles_for_context(
+        context=context,
+        query=query,
+        client=client,
+        limit=limit,
+    )
+    payload["context"] = {
+        **(payload.get("context") or {}),
+        "job_id": job_id,
+        "ingreso_id": context.get("ingreso_id"),
+    }
+    return payload
+
+
+def search_bejerman_articles_for_context(
+    *,
+    context: dict[str, Any],
+    query: str = "",
+    client: BejermanSDKClient | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    model_id = context.get("model_id")
+    if not model_id:
+        raise BejermanBlockedError("Modelo requerido para buscar artículos Bejerman")
     client = client or BejermanSDKClient()
     query = (query or "").strip()
     response = client.obtener_articulos(query)
@@ -1364,16 +1542,15 @@ def search_bejerman_articles_for_job(
     candidates.sort(key=_candidate_sort_key, reverse=True)
     return {
         "context": {
-            "job_id": job_id,
-            "ingreso_id": context.get("ingreso_id"),
             "model_id": context.get("model_id"),
             "marca": context.get("marca") or "",
             "modelo": context.get("modelo") or "",
             "variante": context.get("variante") or "",
             "scope": "modelo_variante",
         },
+        "mapping": article_mapping_summary_for_context(int(model_id), context.get("variante") or ""),
         "related_blocked_jobs": count_blocked_article_jobs_for_context(
-            int(context["model_id"]), context.get("variante") or ""
+            int(model_id), context.get("variante") or ""
         ),
         "items": candidates[: max(1, int(limit or 1))],
     }
@@ -1699,7 +1876,12 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
             return _process_stock_entry(job, client)
         if sync_type == SYNC_TYPE_STOCK_EXIT_RTS:
             return _process_stock_exit(job, client)
-        if sync_type in (SYNC_TYPE_STOCK_STR_TO_STL, SYNC_TYPE_STOCK_STR_TO_STC, SYNC_TYPE_STOCK_STR_TO_STCL):
+        if sync_type in (
+            SYNC_TYPE_STOCK_STR_TO_STL,
+            SYNC_TYPE_STOCK_STR_TO_STC,
+            SYNC_TYPE_STOCK_STR_TO_VAL,
+            SYNC_TYPE_STOCK_STR_TO_STCL,
+        ):
             return _process_stock_transfer(job, client)
         raise BejermanBlockedError(f"Tipo de sincronización no soportado: {sync_type}")
     except BejermanConfigError as exc:
@@ -1722,13 +1904,24 @@ def process_bejerman_jobs(limit: int = 10, job_id: int | None = None, client: Be
         return {"processed": 0, "disabled": 1}
     max_attempts = int(_setting("BEJERMAN_MAX_ATTEMPTS", 8) or 8)
     stats = {"processed": 0, JOB_STATUS_SUCCEEDED: 0, JOB_STATUS_FAILED: 0, JOB_STATUS_BLOCKED: 0}
-    client = client or BejermanSDKClient()
     for _ in range(max(1, int(limit or 1))):
         with transaction.atomic():
             job = _claim_job(max_attempts=max_attempts, job_id=job_id)
         if not job:
             break
-        status = _process_claimed_job(job, client, max_attempts)
+        if client is None and not job.get("actor_user_id"):
+            status = JOB_STATUS_BLOCKED
+            _finish_job(
+                job["id"],
+                status,
+                error="Requiere ejecutar con sesión de usuario y credenciales Bejerman personales.",
+            )
+        else:
+            job_client = client or BejermanSDKClient(
+                company_key=job.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY,
+                actor_user_id=job.get("actor_user_id"),
+            )
+            status = _process_claimed_job(job, job_client, max_attempts)
         stats["processed"] += 1
         stats[status] = stats.get(status, 0) + 1
         if job_id is not None:

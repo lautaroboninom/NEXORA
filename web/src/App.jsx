@@ -3,16 +3,22 @@ import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "./components/Sidebar.jsx";
 import Footer from "./components/Footer.jsx";
 import NotificationBell from "./components/NotificationBell.jsx";
+import BejermanCredentialsModal from "./components/BejermanCredentialsModal.jsx";
+import BejermanSellerCodeModal from "./components/BejermanSellerCodeModal.jsx";
 import useRouteUiState from "./hooks/useRouteUiState";
 import { useAuth } from "./context/AuthContext";
 import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
 
 export default function App() {
-  const { user, logout } = useAuth();
+  const { user, logout, refreshSession } = useAuth();
   const nav = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [dismissedBejermanCredentialsUserId, setDismissedBejermanCredentialsUserId] = useState(null);
   const rol = user?.rol;
+  const bejermanCredentialsPromptUserId = user?.id ?? "__current__";
+  const bejermanCredentialsRequired = !!user?.bejermanCredentials?.required;
+  const bejermanSellerCode = user?.bejermanSellerCode || {};
 
   const canSeeGeneralCliente = canAny(user, [
     PERMISSION_CODES.PAGE_GENERAL_CLIENTE,
@@ -20,19 +26,37 @@ export default function App() {
   ]);
   const canSeeHistorico = can(user, PERMISSION_CODES.PAGE_INGRESOS_HISTORY);
   const canSeeEquipos = can(user, PERMISSION_CODES.PAGE_DEVICES_PREVENTIVOS);
-  const canSeeRecepcion = can(user, PERMISSION_CODES.PAGE_RECEPCION);
   const canSeeDeliveryOrders = can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS);
   const canSeeBilling = can(user, PERMISSION_CODES.PAGE_BILLING);
   const canCreateIngreso = canAny(user, [
     PERMISSION_CODES.ACTION_INGRESO_CREATE,
     PERMISSION_CODES.PAGE_NEW_INGRESO,
   ]);
+  const shouldPromptBejermanCredentials = canAny(user, [
+    PERMISSION_CODES.ACTION_INGRESO_EMIT_INGRESS_ORDER,
+    PERMISSION_CODES.ACTION_BEJERMAN_PURCHASE_ENTRIES_EMIT,
+    PERMISSION_CODES.ACTION_DELIVERY_ORDER_GENERATE_BEJERMAN_REMITO,
+    PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE,
+    PERMISSION_CODES.ACTION_BILLING_VIEW,
+  ]);
+  const showBejermanCredentialsModal =
+    bejermanCredentialsRequired &&
+    shouldPromptBejermanCredentials &&
+    dismissedBejermanCredentialsUserId !== bejermanCredentialsPromptUserId;
+  const showBejermanSellerCodeModal =
+    !!bejermanSellerCode?.required && !showBejermanCredentialsModal;
 
   useRouteUiState();
 
   useEffect(() => {
     setMobileMenuOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!user?.id || !bejermanCredentialsRequired) {
+      setDismissedBejermanCredentialsUserId(null);
+    }
+  }, [user?.id, bejermanCredentialsRequired]);
 
   useEffect(() => {
     if (!mobileMenuOpen) return undefined;
@@ -83,11 +107,6 @@ export default function App() {
           </Link>
 
           <nav className="hidden md:flex items-center gap-6 ml-6">
-            {canSeeRecepcion && (
-              <Link to="/recepcion" className="hover:underline">
-                Recepción
-              </Link>
-            )}
             {canSeeDeliveryOrders && (
               <Link to="/administracion/ordenes-entrega" className="hover:underline">
                 Órdenes
@@ -143,17 +162,27 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 flex">
+      <main className="flex min-w-0 flex-1">
         <Sidebar
           mobileOpen={mobileMenuOpen}
           onClose={() => setMobileMenuOpen(false)}
         />
-        <div className="flex-1 p-3 md:p-6">
+        <div className="min-w-0 flex-1 px-2 py-3 sm:px-3 md:p-5 xl:p-6">
           <Outlet />
         </div>
       </main>
 
       <Footer />
+      <BejermanCredentialsModal
+        open={showBejermanCredentialsModal}
+        onSaved={refreshSession}
+        onExit={() => setDismissedBejermanCredentialsUserId(bejermanCredentialsPromptUserId)}
+      />
+      <BejermanSellerCodeModal
+        open={showBejermanSellerCodeModal}
+        initialCode={bejermanSellerCode.code || ""}
+        onSaved={refreshSession}
+      />
     </div>
   );
 }

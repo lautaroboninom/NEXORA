@@ -363,7 +363,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
         self.assertEqual(resp.data["device"]["customer_id"], self.customer_mg_id)
         self.assertTrue(resp.data["device"].get("es_cliente_mg_owner"))
 
-    def test_codigo_mg_no_implica_propiedad_mg(self):
+    def test_codigo_mg_activo_implica_propiedad_mg(self):
         flags = resolve_mg_flags(
             {
                 "customer_id": self.customer_cli_id,
@@ -375,7 +375,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
         )
 
         self.assertTrue(flags.get("tiene_codigo_mg"))
-        self.assertFalse(flags.get("es_propietario_mg"))
+        self.assertTrue(flags.get("es_propietario_mg"))
 
     @override_settings(BAJA_NOTIFY_RECIPIENTS=["patrimonio@example.com"])
     @patch("service.views.ingresos_views._send_mail_with_fallback", return_value=(True, {}))
@@ -437,6 +437,19 @@ class IngresoConvertirPropioMgAPITest(TestCase):
             estado = cur.fetchone()[0]
         self.assertEqual(estado, "baja")
 
+    def test_permite_baja_directa_si_mg_activo_esta_asociado_a_cliente(self):
+        device_id = self._crear_equipo(numero_serie="NS-RT-100E2", numero_interno="MG 6960", customer_id=self.customer_cli_id)
+        ingreso_id = self._crear_ingreso(device_id=device_id)
+
+        resp = self.client.post(self._url_baja(ingreso_id), {}, format="json")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "baja")
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado FROM ingresos WHERE id=%s", [ingreso_id])
+            estado = cur.fetchone()[0]
+        self.assertEqual(estado, "baja")
+
     def test_rechaza_solicitud_baja_si_equipo_no_es_propio_mg(self):
         self._auth(self.tecnico_token)
         device_id = self._crear_equipo(numero_serie="NS-RT-100F", customer_id=self.customer_cli_id)
@@ -450,6 +463,25 @@ class IngresoConvertirPropioMgAPITest(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.data.get("detail"), "Solo se puede solicitar BAJA para equipos propios MG.")
+
+    @patch("service.views.ingresos_views.notify_solicitud_baja")
+    def test_permite_solicitud_baja_si_mg_activo_esta_asociado_a_cliente(self, mock_notify):
+        self._auth(self.tecnico_token)
+        device_id = self._crear_equipo(numero_serie="NS-RT-100G", numero_interno="MG 6960", customer_id=self.customer_cli_id)
+        ingreso_id = self._crear_ingreso(device_id=device_id)
+
+        resp = self.client.post(
+            self._url_solicitar_baja(ingreso_id),
+            {"motivo": "Equipo propio fuera de servicio"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data.get("ok"))
+        with connection.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM ingreso_baja_requests WHERE ingreso_id=%s", [ingreso_id])
+            count = cur.fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_permite_alta_mg_con_cualquier_motivo(self):
         device_id = self._crear_equipo(numero_serie="NS-RT-101")

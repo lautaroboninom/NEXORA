@@ -11,6 +11,11 @@ import { MOTIVO_OPTIONS } from "./constants";
 
   const BASE = normalizeApiBase(import.meta.env.VITE_API_URL);
 
+  export function resolveApiUrl(path) {
+    const value = String(path || "");
+    return value.startsWith("http") ? value : `${BASE}${value}`;
+  }
+
   /* ===== Token en memoria (compatibilidad) ===== */
   let token = null;
   export const setToken = (t) => {
@@ -106,6 +111,19 @@ import { MOTIVO_OPTIONS } from "./constants";
   };
   export default api;
 
+  export function fetchWithAuth(path, opts = {}) {
+    const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
+    const { headers: extraHeaders, ...restOpts } = opts || {};
+    return fetch(resolveApiUrl(path), {
+      credentials: "include",
+      ...restOpts,
+      headers: {
+        ...authHeader,
+        ...(extraHeaders || {}),
+      },
+    });
+  }
+
   /* ================== AUTH ================== */
   export const postLogin = (email, password) =>
     api.post("/api/auth/login/", { email, password });
@@ -115,6 +133,12 @@ import { MOTIVO_OPTIONS } from "./constants";
     api.post("/api/auth/reset/", { token, password });
   export const getAuthSession = () => api.get("/api/auth/session/");
   export const postAuthLogout = () => api.post("/api/auth/logout/");
+  export const getBejermanCredentials = () => api.get("/api/auth/bejerman-credentials/");
+  export const postBejermanCredentials = (payload) =>
+    api.post("/api/auth/bejerman-credentials/", payload);
+  export const getBejermanSellerCode = () => api.get("/api/auth/bejerman-seller-code/");
+  export const postBejermanSellerCode = (payload) =>
+    api.post("/api/auth/bejerman-seller-code/", payload);
 
 
   /* =============== USUARIOS ================= */
@@ -146,6 +170,12 @@ import { MOTIVO_OPTIONS } from "./constants";
     api.post(`/api/notificaciones/${id}/click/`, {});
   export const postNotificacionesReadAll = () =>
     api.post("/api/notificaciones/read-all/", {});
+  export const getPushNotificationConfig = () =>
+    api.get("/api/notificaciones/push/config/");
+  export const postPushNotificationSubscription = (payload) =>
+    api.post("/api/notificaciones/push/subscription/", payload);
+  export const deletePushNotificationSubscription = (payload = {}) =>
+    api.delete("/api/notificaciones/push/subscription/", { body: payload });
 
   /* =============== catalogos =============== */
 
@@ -276,7 +306,10 @@ export const deleteCatalogVariante = (varianteId) =>
   api.del(`/api/catalogo/variantes/${varianteId}/`);
 
 
-  export const getClientes = () => api.get("/api/catalogos/clientes/");
+  export const getClientes = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/catalogos/clientes/${qs ? `?${qs}` : ""}`);
+  };
   export const getClientesBasico = () => api.get("/api/clientes/");
   export const postCliente = (payload) =>
     api.post("/api/catalogos/clientes/", payload);
@@ -286,6 +319,12 @@ export const deleteCatalogVariante = (varianteId) =>
     api.del(`/api/catalogos/clientes/${id}/`);
   export const postClienteMerge = (sourceId, targetId) =>
     api.post("/api/catalogos/clientes/merge/", { source_id: sourceId, target_id: targetId });
+  export const postClienteBejermanSync = (payload = {}) =>
+    api.post("/api/catalogos/clientes/sincronizar-bejerman/", payload);
+  export const getClienteBejermanCandidates = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/catalogos/clientes/bejerman-candidatos/${qs ? `?${qs}` : ""}`);
+  };
   export const getRoles = () => api.get("/api/catalogos/roles/");
   export const getMarcas = () => api.get("/api/catalogos/marcas/");
   export const postMarca = (nombre) =>
@@ -437,10 +476,20 @@ export const postModelo = (brandId, payloadOrNombre) => {
   /* =============== INGRESOS ================= */
   export const postNuevoIngreso = (payload) =>
     api.post("/api/ingresos/nuevo/", payload);
+  export const postNuevoIngresoLote = (payload) =>
+    api.post("/api/ingresos/nuevo/lote/", payload);
   export const getBejermanIngressCompanies = () =>
     api.get("/api/bejerman/ingress-companies/");
   export const getIngresoRisStatus = (ingresoId) =>
     api.get(`/api/ingresos/${ingresoId}/ris/`);
+  export const postRisPreflight = (payload) =>
+    api.post("/api/ingresos/ris/preflight/", payload);
+  export const postIngresoRisPreflight = (ingresoId) =>
+    api.post(`/api/ingresos/${ingresoId}/ris/preflight/`, {});
+  export const postRisPreflightCustomerFix = (payload) =>
+    api.post("/api/ingresos/ris/preflight/customer-fix/", payload);
+  export const postRisPreflightArticleFix = (payload) =>
+    api.post("/api/ingresos/ris/preflight/article-fix/", payload);
   export const postIngresoRisEmitir = (ingresoId) =>
     api.post(`/api/ingresos/${ingresoId}/ris/emitir/`);
   export const getIngresoRisPdfBlob = (ingresoId) =>
@@ -645,8 +694,78 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.get(`/api/bejerman/articles/${qs ? `?${qs}` : ""}`);
   };
 
+  export const getBejermanArticleMappings = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/article-mappings/${qs ? `?${qs}` : ""}`);
+  };
+
   export const postBejermanArticleMapping = (payload) =>
     api.post("/api/bejerman/article-mappings/", payload);
+
+  export const getBejermanPurchaseProviders = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/purchase-providers/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getBejermanPurchaseArticles = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/purchase-articles/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getBejermanPurchaseEntries = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/purchase-entries/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const postBejermanPurchaseEntry = (payload = {}) =>
+    api.post("/api/bejerman/purchase-entries/", payload);
+
+  export const getBejermanPurchaseEntry = (entryId) =>
+    api.get(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/`);
+
+  export const patchBejermanPurchaseEntry = (entryId, payload = {}) =>
+    api.patch(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/`, payload);
+
+  export const deleteBejermanPurchaseEntry = (entryId) =>
+    api.delete(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/`);
+
+  export const postBejermanPurchaseEntryLine = (entryId, payload = {}) =>
+    api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/lines/`, payload);
+
+  export const patchBejermanPurchaseEntryLine = (entryId, lineId, payload = {}) =>
+    api.patch(
+      `/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/lines/${encodeURIComponent(lineId)}/`,
+      payload
+    );
+
+  export const deleteBejermanPurchaseEntryLine = (entryId, lineId) =>
+    api.delete(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/lines/${encodeURIComponent(lineId)}/`);
+
+  export const postBejermanPurchaseEntryScan = (entryId, lineId, payload = {}) =>
+    api.post(
+      `/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/lines/${encodeURIComponent(lineId)}/scans/`,
+      payload
+    );
+
+  export const patchBejermanPurchaseEntryScan = (entryId, scanId, payload = {}) =>
+    api.patch(
+      `/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/scans/${encodeURIComponent(scanId)}/`,
+      payload
+    );
+
+  export const deleteBejermanPurchaseEntryScan = (entryId, scanId) =>
+    api.delete(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/scans/${encodeURIComponent(scanId)}/`);
+
+  export const postBejermanPurchaseEntryValidate = (entryId, payload = {}) =>
+    api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/validate/`, payload);
+
+  export const postBejermanPurchaseEntryEmit = (entryId, payload = {}) =>
+    api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/emit/`, payload);
+
+  export const getBejermanPurchaseHistory = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/purchase-entries/historial/${qs ? `?${qs}` : ""}`);
+  };
 
   /* =============== NEXORA: ÓRDENES Y COBRANZAS =============== */
   export const getDeliveryOrders = (params = {}) => {
@@ -659,6 +778,12 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export const postDeliveryOrder = (payload) =>
     api.post("/api/ordenes-entrega/", payload);
+
+  export const postDeliveryOrderDriveSync = (payload = {}) =>
+    api.post("/api/ordenes-entrega/sincronizar-drive/", payload);
+
+  export const patchDeliveryOrder = (orderId, payload = {}) =>
+    api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/`, payload);
 
   export const postDeliveryOrderPrepared = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/preparar/`, payload);
@@ -700,8 +825,29 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.get(`/api/ordenes-entrega/bejerman-articulos/${qs ? `?${qs}` : ""}`);
   };
 
+  export const getDeliveryOrderBejermanDeposits = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/ordenes-entrega/bejerman-depositos/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getDeliveryOrderBejermanArticleStock = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/ordenes-entrega/bejerman-articulos-stock/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getDeliveryOrderRentalAvailableEquipment = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/ordenes-entrega/alquiler/equipos-disponibles/${qs ? `?${qs}` : ""}`);
+  };
+
   export const getDeliveryOrderRemitoPdfBlob = (groupId) =>
     getBlob(`/api/ordenes-entrega/remito-bejerman/${encodeURIComponent(groupId)}/pdf/`);
+
+  export const deliveryOrderInvoicePdfUrl = (orderId) =>
+    `/api/ordenes-entrega/${encodeURIComponent(orderId)}/factura/pdf/`;
+
+  export const getDeliveryOrderInvoicePdfBlob = (orderId) =>
+    getBlob(deliveryOrderInvoicePdfUrl(orderId));
 
   export const getBillingCustomers = () =>
     api.get("/api/cobranzas/facturacion/clientes/");
@@ -715,6 +861,17 @@ export const postModelo = (brandId, payloadOrNombre) => {
     const qs = buildQuery({ customerCode });
     return getBlob(`/api/cobranzas/facturacion/documentos/${encodeURIComponent(documentId)}/pdf/${qs ? `?${qs}` : ""}`);
   };
+
+  export const getServiceOrdersToBill = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/cobranzas/os-a-facturar/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getServiceOrderBillingPdfBlob = (ingresoId) =>
+    getBlob(`/api/cobranzas/os-a-facturar/${encodeURIComponent(ingresoId)}/pdf/`);
+
+  export const postServiceOrderInvoice = (ingresoId, payload) =>
+    api.post(`/api/cobranzas/os-a-facturar/${encodeURIComponent(ingresoId)}/factura/`, payload);
 
   export const getHistoricoIngresos = (params = {}) => {
     const qs = buildQuery(params);
@@ -906,18 +1063,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   // === GET binario (Blob) con auth y cookies ===
   export async function getBlob(path, opts = {}) {
-    const url = path.startsWith("http") ? path : `${BASE}${path}`;
-    const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
-    const { headers: extraHeaders, ...restOpts } = opts;
-
-    const res = await fetch(url, {
+    const res = await fetchWithAuth(path, {
       method: "GET",
-      headers: {
-        ...authHeader,
-        ...(extraHeaders || {}),
-      },
-      credentials: "include",
-      ...restOpts,
+      ...opts,
     });
 
     if (!res.ok) {

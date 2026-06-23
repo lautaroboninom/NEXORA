@@ -1,0 +1,69 @@
+{
+  "sheet": "RECEPCIÓN",
+  "dateFilter": "2026-06-23",
+  "previousLastDataRow": 5008,
+  "writeRange": "A5009:I5013",
+  "sourceOrdersAfterFilter": 5,
+  "alreadyInDrive": 0,
+  "appendedRows": 5,
+  "excludedPolicy": {
+    "statuses": [
+      "cancelado"
+    ],
+    "testPartidasOrSerials": [
+      "demo123",
+      "demo456",
+      "prueba123",
+      "asd123"
+    ]
+  },
+  "skippedMatches": [],
+  "appendedOrders": [
+    {
+      "row": 5009,
+      "orderNumber": "OE-00023",
+      "orderDate": "2026-06-23",
+      "status": "pendiente_armado",
+      "deliveryType": "sale",
+      "customer": "OXIDOM S.R.L."
+    },
+    {
+      "row": 5010,
+      "orderNumber": "OE-00024",
+      "orderDate": "2026-06-23",
+      "status": "pendiente_armado",
+      "deliveryType": "sale",
+      "customer": "NOVOCARE S.R.L."
+    },
+    {
+      "row": 5011,
+      "orderNumber": "OE-00025",
+      "orderDate": "2026-06-23",
+      "status": "pendiente_armado",
+      "deliveryType": "sale",
+      "customer": "OXIDOM S.R.L."
+    },
+    {
+      "row": 5012,
+      "orderNumber": "OE-00026",
+      "orderDate": "2026-06-23",
+      "status": "pendiente_armado",
+      "deliveryType": "sale",
+      "customer": "OXIDOM S.R.L."
+    },
+    {
+      "row": 5013,
+      "orderNumber": "OE-00027",
+      "orderDate": "2026-06-23",
+      "status": "pendiente_armado",
+      "deliveryType": "sale",
+      "customer": "ETICA S.A."
+    }
+  ],
+  "files": {
+    "workspaceXlsx": "Z:\\Servicio Tecnico\\1_SISTEMA REPARACIONES\\NEXORA\\output\\drive_reverse_sync\\pedidos_nexora_para_drive_2026-06-23.xlsx",
+    "workspaceTsv": "Z:\\Servicio Tecnico\\1_SISTEMA REPARACIONES\\NEXORA\\output\\drive_reverse_sync\\pedidos_nexora_para_drive_2026-06-23.tsv",
+    "driveXlsx": "H:\\Mi unidad\\Sepid\\NEXORA\\pedidos_nexora_para_drive_2026-06-23.xlsx",
+    "driveTsv": "H:\\Mi unidad\\Sepid\\NEXORA\\pedidos_nexora_para_drive_2026-06-23.tsv"
+  }
+}

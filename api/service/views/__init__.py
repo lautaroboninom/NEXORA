@@ -18,6 +18,8 @@ from .auth_views import (
     LoginView,
     LogoutView,
     SessionView,
+    BejermanCredentialsView,
+    BejermanSellerCodeView,
     ForgotPasswordView,
     ResetPasswordView,
 )
@@ -62,6 +64,7 @@ from .ingresos_views import (
     GarantiaReparacionCheckView,
     GarantiaFabricaCheckView,
     NuevoIngresoView,
+    NuevoIngresoLoteView,
     IngresoDetalleView,
     IngresoAsignarTecnicoView,
     IngresoSolicitarAsignacionView,
@@ -176,6 +179,8 @@ from .notifications_views import (
     NotificacionesView,
     NotificacionClickView,
     NotificacionesReadAllView,
+    NotificacionesPushConfigView,
+    NotificacionesPushSubscriptionView,
     UsuarioNotificacionesView,
 )
 
@@ -217,12 +222,15 @@ from .proveedores_views import (
 from .clientes_views import (
     CustomersListView,
     ClientesView,
+    ClienteBejermanCandidatesView,
+    ClientesBejermanSyncView,
     ClienteDeleteView,
     ClienteMergeView,
 )
 
 from .reportes_views import (
     RemitoSalidaPdfView,
+    RemitosSalidaBulkPdfView,
     RemitoDerivacionPdfView,
 )
 
@@ -246,8 +254,25 @@ from .bejerman_views import (
     BejermanArticleMappingsView,
     BejermanArticlesView,
 )
+from .bejerman_purchase_views import (
+    BejermanPurchaseProvidersView,
+    BejermanPurchaseArticlesView,
+    BejermanPurchaseEntriesView,
+    BejermanPurchaseEntryDetailView,
+    BejermanPurchaseEntryLinesView,
+    BejermanPurchaseEntryLineDetailView,
+    BejermanPurchaseEntryLineScansView,
+    BejermanPurchaseEntryScanDetailView,
+    BejermanPurchaseEntryValidateView,
+    BejermanPurchaseEntryEmitView,
+    BejermanPurchaseHistoryView,
+)
 from .bejerman_ris_views import (
     IngresoRisStatusView,
+    IngresoRisPreflightPayloadView,
+    IngresoRisPreflightView,
+    IngresoRisPreflightCustomerFixView,
+    IngresoRisPreflightArticleFixView,
     IngresoRisEmitirView,
     IngresoRisPdfView,
     IngresoRisPrintView,
@@ -256,6 +281,7 @@ from .bejerman_ris_views import (
 )
 from .delivery_orders_views import (
     DeliveryOrdersView,
+    DeliveryOrderDriveSyncView,
     DeliveryOrderDetailView,
     DeliveryOrderExitRemitoPdfView,
     DeliveryOrderPreparedView,
@@ -268,11 +294,18 @@ from .delivery_orders_views import (
     DeliveryOrderBejermanRemitoView,
     DeliveryOrderBejermanRemitoHistoryView,
     DeliveryOrderBejermanArticlesView,
+    DeliveryOrderBejermanDepositsView,
+    DeliveryOrderBejermanArticleStockView,
+    DeliveryOrderRentalEquipmentView,
     DeliveryOrderBejermanRemitoPdfView,
     DeliveryOrderBejermanRemitoPrintView,
+    DeliveryOrderInvoicePdfView,
     FacturacionCompanyOptionsView,
     FacturacionClienteDocumentosView,
     FacturacionDocumentoPdfView,
+    ServiceOrderBillingListView,
+    ServiceOrderBillingInvoiceView,
+    ServiceOrderBillingPdfView,
 )
 
 __all__ = [
@@ -281,6 +314,8 @@ __all__ = [
     "LoginView",
     "LogoutView",
     "SessionView",
+    "BejermanCredentialsView",
+    "BejermanSellerCodeView",
     "ForgotPasswordView",
     "ResetPasswordView",
     # metricas
@@ -411,6 +446,8 @@ __all__ = [
     "NotificacionesView",
     "NotificacionClickView",
     "NotificacionesReadAllView",
+    "NotificacionesPushConfigView",
+    "NotificacionesPushSubscriptionView",
     "UsuarioNotificacionesView",
     # derivaciones
     "DerivarIngresoView",
@@ -442,10 +479,13 @@ __all__ = [
     # clientes
     "CustomersListView",
     "ClientesView",
+    "ClienteBejermanCandidatesView",
+    "ClientesBejermanSyncView",
     "ClienteDeleteView",
     "ClienteMergeView",
     # reportes
     "RemitoSalidaPdfView",
+    "RemitosSalidaBulkPdfView",
     "RemitoDerivacionPdfView",
     # scan lookup
     "ScanLookupView",
@@ -465,7 +505,22 @@ __all__ = [
     "BejermanJobRetryView",
     "BejermanArticleMappingsView",
     "BejermanArticlesView",
+    "BejermanPurchaseProvidersView",
+    "BejermanPurchaseArticlesView",
+    "BejermanPurchaseEntriesView",
+    "BejermanPurchaseEntryDetailView",
+    "BejermanPurchaseEntryLinesView",
+    "BejermanPurchaseEntryLineDetailView",
+    "BejermanPurchaseEntryLineScansView",
+    "BejermanPurchaseEntryScanDetailView",
+    "BejermanPurchaseEntryValidateView",
+    "BejermanPurchaseEntryEmitView",
+    "BejermanPurchaseHistoryView",
     "IngresoRisStatusView",
+    "IngresoRisPreflightPayloadView",
+    "IngresoRisPreflightView",
+    "IngresoRisPreflightCustomerFixView",
+    "IngresoRisPreflightArticleFixView",
     "IngresoRisEmitirView",
     "IngresoRisPdfView",
     "IngresoRisPrintView",
@@ -473,6 +528,7 @@ __all__ = [
     "IngresoBarcodePdfView",
     # NEXORA delivery orders / billing
     "DeliveryOrdersView",
+    "DeliveryOrderDriveSyncView",
     "DeliveryOrderDetailView",
     "DeliveryOrderExitRemitoPdfView",
     "DeliveryOrderPreparedView",
@@ -485,9 +541,16 @@ __all__ = [
     "DeliveryOrderBejermanRemitoView",
     "DeliveryOrderBejermanRemitoHistoryView",
     "DeliveryOrderBejermanArticlesView",
+    "DeliveryOrderBejermanDepositsView",
+    "DeliveryOrderBejermanArticleStockView",
+    "DeliveryOrderRentalEquipmentView",
     "DeliveryOrderBejermanRemitoPdfView",
     "DeliveryOrderBejermanRemitoPrintView",
+    "DeliveryOrderInvoicePdfView",
     "FacturacionCompanyOptionsView",
     "FacturacionClienteDocumentosView",
     "FacturacionDocumentoPdfView",
+    "ServiceOrderBillingListView",
+    "ServiceOrderBillingInvoiceView",
+    "ServiceOrderBillingPdfView",
 ]

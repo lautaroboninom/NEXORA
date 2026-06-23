@@ -21,10 +21,20 @@ import {
   postDeviceMgVenta,
   postDeviceMgReactivar,
   postIngresoCorreccionHistorica,
+  postIngresoRisPreflight,
+  postRisPreflightCustomerFix,
+  postRisPreflightArticleFix,
   postIngresoRisEmitir,
   getIngresoBarcodeBlob,
 } from "../lib/api";
-import { openPdfBlob, reservePdfWindow } from "../lib/pdf";
+import { openPdfBlob } from "../lib/pdf";
+import {
+  isRisGenerated,
+  isRisRegistered,
+  openRisPrintablePdf,
+  risRemitoFrom,
+  waitForRisPdfBlob,
+} from "../lib/ris-print";
 import {
   getMarcas,
   getModelosByBrand,
@@ -40,6 +50,7 @@ import {
   resolveFechaCreacion,
   isMotivoCotizacionEquipo,
   isMotivoRevisionTecnica,
+  isMgOwned,
   isSaleTicketState,
   deviceIdentifierPartsOf,
   nsPreferInternoOf,
@@ -60,6 +71,8 @@ import RisProgressModal, {
   waitForRisProgressMinimum,
   waitForRisProgressPaint,
 } from "../components/RisProgressModal.jsx";
+import RisPreflightPanel from "../components/RisPreflightPanel.jsx";
+import ReleaseOrderModal from "../components/ReleaseOrderModal.jsx";
 
 const TAB_VALUES = ["principal", "diagnostico", "test", "presupuesto", "derivaciones", "historial", "archivos"];
 const isValidTab = (value) => TAB_VALUES.includes((value || "").toString().trim());
@@ -170,12 +183,12 @@ function IdentifierConflictModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-2 sm:p-4"
       role="dialog"
       aria-modal="true"
       onClick={() => { if (!conflict.mergeSaving) onClose(); }}
     >
-      <div className="bg-white rounded shadow-xl w-full max-w-6xl max-h-[92vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>
+      <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-6xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 mb-3">
           <div>
             <h2 className="text-lg font-semibold">Conflicto de identificadores</h2>
@@ -436,6 +449,7 @@ export default function ServiceSheet() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [identifierConflict, setIdentifierConflict] = useState(null);
+  const [releaseOrderRow, setReleaseOrderRow] = useState(null);
 
   // entrega
   const [entrega, setEntrega] = useState({ remito_salida: "", factura_numero: "", fecha_entrega: "", serial_confirm: "" });
@@ -520,6 +534,10 @@ export default function ServiceSheet() {
   const actionsMenuRef = useRef(null);
   const [risBusy, setRisBusy] = useState(false);
   const [risProgressStatus, setRisProgressStatus] = useState("");
+  const [manualRisPrint, setManualRisPrint] = useState(null);
+  const [risPreflight, setRisPreflight] = useState(null);
+  const [risPreflightLoading, setRisPreflightLoading] = useState(false);
+  const [risPreflightError, setRisPreflightError] = useState("");
   const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [savingBaja, setSavingBaja] = useState(false);
   const [savingAlta, setSavingAlta] = useState(false);
@@ -586,7 +604,10 @@ export default function ServiceSheet() {
     (v) => {
       const needle = normalizeClientText(v);
       if (!needle) return null;
-      return (clientes || []).find((c) => normalizeClientText(c?.razon_social) === needle) || null;
+      return (clientes || []).find((c) => (
+        normalizeClientText(c?.razon_social) === needle
+        || normalizeClientText(c?.alias_interno) === needle
+      )) || null;
     },
     [clientes, normalizeClientText],
   );
@@ -804,33 +825,120 @@ export default function ServiceSheet() {
     }
   }
 
+  async function runRisPreflight({ silent = false } = {}) {
+    setRisPreflightLoading(true);
+    setRisPreflightError("");
+    try {
+      const result = await postIngresoRisPreflight(id);
+      setRisPreflight(result);
+      if (!result?.can_emit && silent) {
+        setErr(result?.detail || "La validación previa del RIS encontró problemas.");
+      }
+      return result;
+    } catch (error) {
+      const detail = error?.data?.detail || error?.message || "No se pudo validar el RIS.";
+      if (Array.isArray(error?.data?.issues)) {
+        setRisPreflight(error.data);
+      }
+      setRisPreflightError(detail);
+      if (silent) setErr(detail);
+      return null;
+    } finally {
+      setRisPreflightLoading(false);
+    }
+  }
+
+  async function applyRisCustomerFix(payload) {
+    try {
+      setRisPreflightLoading(true);
+      setRisPreflightError("");
+      await postRisPreflightCustomerFix(payload);
+      await loadClientesCatalogo();
+      await refreshIngreso({ strong: 1 });
+      await runRisPreflight();
+    } catch (error) {
+      setRisPreflightError(error?.data?.detail || error?.message || "No se pudo aplicar el cliente de Bejerman.");
+    } finally {
+      setRisPreflightLoading(false);
+    }
+  }
+
+  async function applyRisArticleFix(payload) {
+    try {
+      setRisPreflightLoading(true);
+      setRisPreflightError("");
+      await postRisPreflightArticleFix(payload);
+      await runRisPreflight();
+    } catch (error) {
+      setRisPreflightError(error?.data?.detail || error?.message || "No se pudo aplicar el artículo.");
+    } finally {
+      setRisPreflightLoading(false);
+    }
+  }
+
   async function emitirRisIngreso() {
     if (risBusy) return;
+    setActionsOpen(false);
+    setErr("");
+    setManualRisPrint(null);
+    if (isRisRegistered(data)) {
+      const remito = risRemitoFrom(data);
+      setToastMsg(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
+      setTimeout(() => setToastMsg(""), 2500);
+      return;
+    }
     const progressStartedAt = Date.now();
-    const risPdfWindow = reservePdfWindow({
-      title: "REMITO",
-      message: "Preparando RIS...",
-    });
-    let risPdfOpened = false;
     try {
       setRisBusy(true);
-      setRisProgressStatus("Emitiendo RIS en Bejerman...");
-      setActionsOpen(false);
       await waitForRisProgressPaint();
-      const risResult = await postIngresoRisEmitir(id);
-      setRisProgressStatus("Preparando PDF...");
-      risPdfOpened = risPdfWindow.openUrl(risResult?.print_url);
-      const remito = risResult?.remito_number || risResult?.ris?.remito_number || data?.ris?.remito_number || "";
-      setToastMsg(remito ? `RIS ${remito} emitido. Preparando PDF.` : "RIS emitido. Preparando PDF.");
-      setTimeout(() => setToastMsg(""), 2500);
-      await refreshIngreso({ strong: 1 });
+      let risSource = data;
+      if (!isRisGenerated(data)) {
+        setRisProgressStatus("Validando RIS...");
+        const preflight = await runRisPreflight({ silent: true });
+        if (!preflight?.can_emit) return;
+        setRisProgressStatus("Emitiendo RIS en Bejerman...");
+        await waitForRisProgressPaint();
+        risSource = await postIngresoRisEmitir(id);
+        await refreshIngreso({ strong: 1 });
+      }
+      const remito = risRemitoFrom(risSource) || risRemitoFrom(data);
+      const blob = await waitForRisPdfBlob(id, risSource, {
+        onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del RIS..."),
+      });
+      setRisProgressStatus("Abriendo impresión...");
+      const opened = openRisPrintablePdf(blob, risSource).opened;
+      if (opened) {
+        setToastMsg(remito ? `RIS ${remito} listo para imprimir.` : "RIS listo para imprimir.");
+        setTimeout(() => setToastMsg(""), 2500);
+      } else {
+        setManualRisPrint({ blob, source: risSource, remito });
+        setErr("El PDF del RIS ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.");
+      }
     } catch (e) {
+      if (Array.isArray(e?.data?.issues)) {
+        setRisPreflight(e.data);
+        setErr(e?.data?.detail || "La validación previa del RIS encontró problemas.");
+        return;
+      }
       setErr(e?.message || "No se pudo emitir o reimprimir el RIS");
     } finally {
-      if (!risPdfOpened) risPdfWindow.close();
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
       setRisProgressStatus("");
+    }
+  }
+
+  function abrirRisManualPendiente() {
+    if (!manualRisPrint?.blob) return;
+    const opened = openRisPrintablePdf(manualRisPrint.blob, manualRisPrint.source || data).opened;
+    if (opened) {
+      const remito = manualRisPrint.remito || risRemitoFrom(manualRisPrint.source) || risRemitoFrom(data);
+      setManualRisPrint(null);
+      setErr("");
+      setToastMsg(remito ? `RIS ${remito} listo para imprimir.` : "RIS listo para imprimir.");
+      setTimeout(() => setToastMsg(""), 2500);
+    } else {
+      setErr("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
     }
   }
 
@@ -871,6 +979,7 @@ export default function ServiceSheet() {
     setRelatedRows([]);
     setRelatedErr("");
     setRelatedLoading(false);
+    setManualRisPrint(null);
     setSolicitarBajaOpen(false);
     setSolicitarBajaMotivo("");
     setSavingSolicitarBaja(false);
@@ -1074,7 +1183,10 @@ export default function ServiceSheet() {
         const hasCodInArr = arr.some((c) => String(c?.cod_empresa || "").trim() !== "");
         hasCodCatalogRuntime = hasCodInArr;
         const byRs = clienteRsInput
-          ? arr.find((c) => normalizeClientText(c?.razon_social) === normalizeClientText(clienteRsInput))
+          ? arr.find((c) => (
+              normalizeClientText(c?.razon_social) === normalizeClientText(clienteRsInput)
+              || normalizeClientText(c?.alias_interno) === normalizeClientText(clienteRsInput)
+            ))
           : null;
         const byCod = hasCodInArr && clienteCodInput
           ? arr.find((c) => normalizeClientText(c?.cod_empresa) === normalizeClientText(clienteCodInput))
@@ -1634,7 +1746,7 @@ export default function ServiceSheet() {
   const userId = Number(user?.id || 0);
   const assignedToMe = userId && data?.asignado_a === userId;
   const isCotizacion = isMotivoCotizacionEquipo(data?.motivo);
-  const isOwnedByMgCustomer = Boolean(data?.es_cliente_mg_owner);
+  const isOwnedByMgCustomer = isMgOwned(data);
   const permiteReparacion = Boolean(data?.permite_reparacion ?? true);
   const canEditDiag = canEditDiagPermission && (canAssignTecnico || assignedToMe);
   const canManagePhotos = canEditDiag;
@@ -1651,9 +1763,21 @@ export default function ServiceSheet() {
         || canEditEntrega
         || canManageDerivations
         || canRepairTransitions
-        || canManagePresupuesto
+      || canManagePresupuesto
     )
   );
+  const openReleaseOrderModal = (row = data) => {
+    if (!canReleaseOrder || !row) return;
+    setErr("");
+    setReleaseOrderRow(row);
+  };
+  const handleReleaseOrderDone = async ({ opened } = {}) => {
+    await refreshIngreso({ strong: 1 });
+    if (opened) {
+      setToastMsg("Orden de salida lista para imprimir.");
+      setTimeout(() => setToastMsg(""), 2500);
+    }
+  };
   const hasPendingBajaRequest = Boolean(
     data?.baja_solicitada_id
       || String(data?.baja_solicitada_motivo || "").trim()
@@ -1666,8 +1790,30 @@ export default function ServiceSheet() {
   const canEditAccesorios = canEditDiag;
   const canManageMgFromMenu = Boolean(canManageDevices && isOwnedByMgCustomer);
   const canConvertToOwnMg = Boolean((canManageDevices || canBajaAltaPermission) && data?.device_id && !isOwnedByMgCustomer);
-  const canShowRisAction = Boolean(canEmitIngressOrder);
+  const isRegisteredRis = isRisRegistered(data);
+  const canShowRisAction = Boolean(canEmitIngressOrder && !isRegisteredRis);
   const canPrintIngresoBarcode = Boolean(canPrintBarcode && (data?.numero_serie || data?.numero_interno));
+  const hasGeneratedRis = Boolean(!isRegisteredRis && data?.ris?.status === "generated" && data?.ris?.remito_number);
+  const showRisErrorBanner = Boolean(!isRegisteredRis && data?.ris?.available && (data?.ris?.status === "failed" || data?.ris?.pdf_status === "failed"));
+  const risBannerTitle = hasGeneratedRis && data?.ris?.pdf_status === "failed"
+    ? `RIS ${data.ris.remito_number} emitido; PDF no disponible`
+    : "RIS pendiente";
+  const risBannerMessage = data?.ris?.last_error || (
+    hasGeneratedRis
+      ? "El comprobante está emitido, pero no se pudo recuperar el PDF desde Bejerman. Use Ver RIS para buscar el PDF existente."
+      : "no se pudo completar la emisión o el PDF."
+  );
+  const risPreflightIssues = Array.isArray(risPreflight?.issues) ? risPreflight.issues : [];
+  const showRisPreflightPanel = Boolean(
+    canShowRisAction
+      && (
+        risPreflightError
+        || (risPreflight && (!risPreflight.can_emit || risPreflightIssues.length > 0))
+      )
+  );
+  const risPreflightPanelResult = risPreflight || (
+    risPreflightError ? { can_emit: false, detail: risPreflightError, issues: [] } : null
+  );
   const maxDateOnly = maxLocalNow.slice(0, 10);
   const hasMenuActions = Boolean(
     (canSeeHistory && numeroSerie)
@@ -1697,8 +1843,15 @@ export default function ServiceSheet() {
     <div className="max-w-none p-4">
       <RisProgressModal
         open={risBusy}
-        title="Emitiendo RIS"
+        title={risProgressStatus.toLowerCase().includes("validando") ? "Validando RIS" : "Emitiendo RIS"}
         status={risProgressStatus || "Emitiendo RIS en Bejerman..."}
+      />
+      <ReleaseOrderModal
+        open={Boolean(releaseOrderRow)}
+        row={releaseOrderRow}
+        canManageResolution={canResolve}
+        onClose={() => setReleaseOrderRow(null)}
+        onReleased={handleReleaseOrderDone}
       />
       <button type="button" onClick={() => navigate(-1)} className="mb-3 inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800">
         Volver
@@ -1752,7 +1905,7 @@ export default function ServiceSheet() {
                       {risBusy
                         ? "Preparando RIS..."
                         : data?.ris?.remito_number
-                          ? "Reimprimir RIS"
+                          ? "Ver RIS"
                           : "Emitir RIS"}
                     </button>
                   )}
@@ -1846,14 +1999,39 @@ export default function ServiceSheet() {
         )}
       </div>
       <ServiceCriticalStrip data={data} isCotizacion={isCotizacion} />
-      {data?.ris?.available && (data?.ris?.status === "failed" || data?.ris?.pdf_status === "failed") && (
+      {showRisErrorBanner && (
         <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-800">
-          RIS pendiente: {data?.ris?.last_error || "no se pudo completar la emisión o el PDF."}
+          <span className="font-semibold">{risBannerTitle}:</span> {risBannerMessage}
         </div>
       )}
       
 
-      {err && <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-4">{err}</div>}
+      {showRisPreflightPanel && (
+        <div className="mb-4">
+          <RisPreflightPanel
+            result={risPreflightPanelResult}
+            loading={risPreflightLoading}
+            error={risPreflightError}
+            onApplyCustomer={applyRisCustomerFix}
+            onApplyArticle={applyRisArticleFix}
+          />
+        </div>
+      )}
+
+      {err && (
+        <div className="mb-4 rounded border border-red-300 bg-red-100 p-2 text-red-700">
+          <div>{err}</div>
+          {manualRisPrint?.blob && (
+            <button
+              type="button"
+              onClick={abrirRisManualPendiente}
+              className="mt-2 rounded bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-800"
+            >
+              Abrir e imprimir RIS
+            </button>
+          )}
+        </div>
+      )}
       <Tabs
         value={activeTab}
         onChange={setTabPersisted}
@@ -1895,9 +2073,11 @@ export default function ServiceSheet() {
           setUbicacionId={setUbicacionId}
           canEditLocation={canEditLocation}
           canEditAlquiler={canEditAlquiler}
+          canManageReleaseResolution={canResolve}
           canShowRisAction={canShowRisAction}
           risBusy={risBusy}
           onEmitRis={emitirRisIngreso}
+          onOpenReleaseModal={openReleaseOrderModal}
           tecnicos={tecnicos}
           tecnicoId={tecnicoId}
           setTecnicoId={setTecnicoId}
@@ -1954,6 +2134,7 @@ export default function ServiceSheet() {
           setShowReparadoToast={setShowReparadoToast}
           savingDiag={savingDiag}
           canManagePhotos={canManagePhotos}
+          onOpenReleaseModal={openReleaseOrderModal}
         />
       )}
 
@@ -1976,6 +2157,7 @@ export default function ServiceSheet() {
           isCotizacion={isCotizacion}
           refreshIngreso={refreshIngreso}
           setErr={setErr}
+          onOpenReleaseModal={canReleaseOrder ? openReleaseOrderModal : undefined}
         />
       )}
 
@@ -1985,8 +2167,8 @@ export default function ServiceSheet() {
       )}
 
       {relatedOpen && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" onClick={() => setRelatedOpen(false)}>
-          <div className="bg-white rounded shadow-xl max-w-4xl w-full max-h-[80vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-black/50 p-2 sm:p-4" role="dialog" aria-modal="true" onClick={() => setRelatedOpen(false)}>
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-4xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold">Ingresos del equipo</h2>
@@ -2048,11 +2230,11 @@ export default function ServiceSheet() {
 
       {showDecisionBajaModal && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/60 p-2 sm:p-4"
           role="dialog"
           aria-modal="true"
         >
-          <div className="bg-white rounded shadow-xl max-w-xl w-full p-5">
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-xl overflow-y-auto rounded bg-white p-4 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-5">
             <h2 className="text-lg font-semibold">Solicitud de BAJA pendiente</h2>
             <div className="text-sm text-gray-600 mt-1">
               OS: {formatOSHelper(data, id)} - NS: {serialLabel}
@@ -2092,12 +2274,12 @@ export default function ServiceSheet() {
 
       {solicitarBajaOpen && (
         <div
-          className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+          className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-black/50 p-2 sm:p-4"
           role="dialog"
           aria-modal="true"
           onClick={() => { if (!savingSolicitarBaja) setSolicitarBajaOpen(false); }}
         >
-          <div className="bg-white rounded shadow-xl max-w-xl w-full p-4" onClick={(e) => e.stopPropagation()}>
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold">Solicitar BAJA</h2>
@@ -2158,12 +2340,12 @@ export default function ServiceSheet() {
 
       {histModalOpen && canForceHistorical && (
         <div
-          className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+          className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-black/50 p-2 sm:p-4"
           role="dialog"
           aria-modal="true"
           onClick={() => { if (!histSaving) setHistModalOpen(false); }}
         >
-          <div className="bg-white rounded shadow-xl max-w-2xl w-full p-4" onClick={(e) => e.stopPropagation()}>
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-2xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold">Corrección histórica</h2>
@@ -2328,12 +2510,12 @@ export default function ServiceSheet() {
 
       {mgModalOpen && canManageMgFromMenu && (
         <div
-          className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+          className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-black/50 p-2 sm:p-4"
           role="dialog"
           aria-modal="true"
           onClick={() => { if (!mgSaving) setMgModalOpen(false); }}
         >
-          <div className="bg-white rounded shadow-xl max-w-2xl w-full p-4" onClick={(e) => e.stopPropagation()}>
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-2xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold">Venta del equipo (MG)</h2>
@@ -2396,7 +2578,7 @@ export default function ServiceSheet() {
                         <option value="">Seleccionar cliente</option>
                         {(clientes || []).map((c) => (
                           <option key={c.id} value={String(c.id)}>
-                            {c.razon_social}
+                            {c.razon_social}{c.alias_interno ? ` [${c.alias_interno}]` : ""}
                           </option>
                         ))}
                       </select>
@@ -2479,12 +2661,12 @@ export default function ServiceSheet() {
 
       {mgAddCustomerOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/60 p-2 sm:p-4"
           role="dialog"
           aria-modal="true"
           onClick={() => { if (!mgAddCustomerSaving) setMgAddCustomerOpen(false); }}
         >
-          <div className="bg-white rounded shadow-xl max-w-lg w-full p-4" onClick={(e) => e.stopPropagation()}>
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-lg overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <h3 className="text-lg font-semibold">Alta rápida de cliente</h3>
               <button
@@ -2577,12 +2759,12 @@ export default function ServiceSheet() {
 
       {propioMgModalOpen && canConvertToOwnMg && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/60 p-2 sm:p-4"
           role="dialog"
           aria-modal="true"
           onClick={() => { if (!propioMgSaving) setPropioMgModalOpen(false); }}
         >
-          <div className="bg-white rounded shadow-xl max-w-xl w-full p-4" onClick={(e) => e.stopPropagation()}>
+          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold">Alta de MG</h2>
@@ -2656,12 +2838,12 @@ export default function ServiceSheet() {
       />
 
       {toastMsg && (
-        <div className="fixed right-4 top-4 bg-emerald-600 text-white px-4 py-2 rounded shadow-lg" role="status">
+        <div className="fixed left-3 right-3 top-3 bg-emerald-600 text-white px-4 py-2 rounded shadow-lg sm:left-auto sm:right-4 sm:top-4" role="status">
           {toastMsg}
         </div>
       )}
       {showReparadoToast && (
-        <div className="fixed right-4 top-4 bg-emerald-600 text-white px-4 py-2 rounded shadow-lg" role="status">
+        <div className="fixed left-3 right-3 top-3 bg-emerald-600 text-white px-4 py-2 rounded shadow-lg sm:left-auto sm:right-4 sm:top-4" role="status">
           Marcado como reparado
         </div>
       )}
@@ -2671,9 +2853,9 @@ export default function ServiceSheet() {
         <HistorialTab hErr={hErr} hLoading={hLoading} hist={hist} />
       )}
 
-      {/* Boton flotante para edicion basica */}
+      {/* Botón flotante para edición básica */}
       {canEditBasics && (
-        <div className="fixed bottom-4 right-4 z-20 flex gap-2">
+        <div className="fixed bottom-3 left-3 right-3 z-20 flex justify-end gap-2 sm:left-auto sm:right-4">
           {!editBasics ? (
             <button className="text-xs px-3 py-2 rounded shadow bg-neutral-800 text-white hover:bg-neutral-700" onClick={startEditBasics} type="button" title="Habilitar edición de datos">
               Editar datos

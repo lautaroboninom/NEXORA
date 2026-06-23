@@ -16,6 +16,7 @@ REQUIRED_COLUMNS = {
         "order_number",
         "customer_id",
         "bejerman_customer_code",
+        "company_key",
         "delivery_type",
         "status",
         "remito_number",
@@ -26,9 +27,12 @@ REQUIRED_COLUMNS = {
     "delivery_order_items": {
         "id",
         "order_id",
+        "ingreso_id",
+        "device_id",
         "article_code",
         "quantity",
         "unit_price",
+        "discount_percent",
         "partida",
     },
     "delivery_order_item_partidas": {
@@ -40,6 +44,7 @@ REQUIRED_COLUMNS = {
     "bejerman_remito_groups": {
         "id",
         "remito_number",
+        "company_key",
         "customer_code",
         "order_ids",
         "response_summary",
@@ -70,6 +75,26 @@ class Command(BaseCommand):
                 )
 
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT")
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code_confirmed_at TIMESTAMPTZ NULL"
+                )
+                cur.execute(
+                    """
+                    SELECT UPPER(TRIM(bejerman_seller_code)) AS code, COUNT(*) AS count
+                      FROM users
+                     WHERE NULLIF(TRIM(bejerman_seller_code), '') IS NOT NULL
+                     GROUP BY UPPER(TRIM(bejerman_seller_code))
+                    HAVING COUNT(*) > 1
+                     ORDER BY COUNT(*) DESC, code ASC
+                     LIMIT 1
+                    """
+                )
+                duplicate_seller_code = cur.fetchone()
+                if duplicate_seller_code:
+                    raise RuntimeError(
+                        "No se puede crear la unicidad de código de vendedor Bejerman: "
+                        f"el código {duplicate_seller_code[0]} está asignado a {duplicate_seller_code[1]} usuarios"
+                    )
 
                 cur.execute(
                     """
@@ -80,6 +105,7 @@ class Command(BaseCommand):
                       bejerman_customer_code          TEXT NULL,
                       customer_name                   TEXT NOT NULL DEFAULT '',
                       delivery_type                   TEXT NOT NULL DEFAULT 'sale',
+                      company_key                     TEXT NULL,
                       source_system                   TEXT NOT NULL DEFAULT 'nexora',
                       source_external_id              TEXT NULL,
                       source_reference                TEXT NULL,
@@ -100,6 +126,7 @@ class Command(BaseCommand):
                       commercial_terms                TEXT NULL,
                       commercial_price                TEXT NULL,
                       commercial_exchange_rate        TEXT NULL,
+                      price_currency                  VARCHAR(3) NOT NULL DEFAULT 'ARS',
                       commercial_condition            TEXT NULL,
                       commercial_deadline             TEXT NULL,
                       status                          TEXT NOT NULL DEFAULT 'pendiente_armado',
@@ -127,8 +154,10 @@ class Command(BaseCommand):
                       delivered_at                    TIMESTAMPTZ NULL,
                       invoiced_at                     TIMESTAMPTZ NULL,
                       cancelled_at                    TIMESTAMPTZ NULL,
-                      CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental')),
-                      CONSTRAINT chk_delivery_orders_status CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','facturado','cancelado')),
+                      CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental','demo')),
+                      CONSTRAINT chk_delivery_orders_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
+                      CONSTRAINT chk_delivery_orders_price_currency CHECK (price_currency IN ('ARS','USD')),
+                      CONSTRAINT chk_delivery_orders_status CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado')),
                       CONSTRAINT chk_delivery_orders_priority CHECK (priority IN ('normal','urgente')),
                       CONSTRAINT chk_delivery_orders_remito_location CHECK (remito_location IS NULL OR remito_location IN ('recepcion','oficina'))
                     )
@@ -137,14 +166,94 @@ class Command(BaseCommand):
 
                 cur.execute(
                     """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS company_key TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS'
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE delivery_orders
+                       SET price_currency = 'ARS'
+                     WHERE price_currency IS NULL OR TRIM(price_currency) = ''
+                    """
+                )
+                cur.execute("UPDATE delivery_orders SET price_currency = UPPER(TRIM(price_currency))")
+                cur.execute("UPDATE delivery_orders SET price_currency = 'ARS' WHERE price_currency NOT IN ('ARS','USD')")
+                cur.execute("ALTER TABLE delivery_orders ALTER COLUMN price_currency SET DEFAULT 'ARS'")
+                cur.execute("ALTER TABLE delivery_orders ALTER COLUMN price_currency SET NOT NULL")
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    DROP CONSTRAINT IF EXISTS chk_delivery_orders_price_currency
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD CONSTRAINT chk_delivery_orders_price_currency
+                    CHECK (price_currency IN ('ARS','USD'))
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    DROP CONSTRAINT IF EXISTS chk_delivery_orders_type
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD CONSTRAINT chk_delivery_orders_type
+                    CHECK (delivery_type IN ('sale','service_release','rental','demo'))
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    DROP CONSTRAINT IF EXISTS chk_delivery_orders_company_key
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD CONSTRAINT chk_delivery_orders_company_key
+                    CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO'))
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    DROP CONSTRAINT IF EXISTS chk_delivery_orders_status
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD CONSTRAINT chk_delivery_orders_status
+                    CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado'))
+                    """
+                )
+
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS delivery_order_items (
                       id                        TEXT PRIMARY KEY,
                       order_id                  TEXT NOT NULL REFERENCES delivery_orders(id) ON DELETE CASCADE,
+                      ingreso_id                INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL,
+                      device_id                 INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL,
                       article_code              TEXT NULL,
                       article_name              TEXT NULL,
                       description               TEXT NOT NULL DEFAULT '',
                       quantity                  NUMERIC NOT NULL DEFAULT 1,
                       unit_price                NUMERIC NULL,
+                      price_currency            VARCHAR(3) NOT NULL DEFAULT 'ARS',
+                      discount_percent          NUMERIC(6,2) NOT NULL DEFAULT 0,
                       source_text               TEXT NULL,
                       partida                   TEXT NULL,
                       partida_expiration_date   DATE NULL,
@@ -154,8 +263,76 @@ class Command(BaseCommand):
                       sort_order                INTEGER NOT NULL DEFAULT 0,
                       created_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       updated_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                      CONSTRAINT chk_delivery_order_items_quantity CHECK (quantity > 0)
+                      CONSTRAINT chk_delivery_order_items_quantity CHECK (quantity > 0),
+                      CONSTRAINT chk_delivery_order_items_price_currency CHECK (price_currency IN ('ARS','USD')),
+                      CONSTRAINT chk_delivery_order_items_discount_percent CHECK (discount_percent >= 0 AND discount_percent <= 100)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD COLUMN IF NOT EXISTS ingreso_id INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD COLUMN IF NOT EXISTS device_id INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS'
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE delivery_order_items doi
+                       SET price_currency = COALESCE(NULLIF(UPPER(TRIM(o.price_currency)), ''), 'ARS')
+                      FROM delivery_orders o
+                     WHERE o.id = doi.order_id
+                       AND (doi.price_currency IS NULL OR TRIM(doi.price_currency) = '')
+                    """
+                )
+                cur.execute("UPDATE delivery_order_items SET price_currency = UPPER(TRIM(price_currency))")
+                cur.execute("UPDATE delivery_order_items SET price_currency = 'ARS' WHERE price_currency NOT IN ('ARS','USD')")
+                cur.execute("ALTER TABLE delivery_order_items ALTER COLUMN price_currency SET DEFAULT 'ARS'")
+                cur.execute("ALTER TABLE delivery_order_items ALTER COLUMN price_currency SET NOT NULL")
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    DROP CONSTRAINT IF EXISTS chk_delivery_order_items_price_currency
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD CONSTRAINT chk_delivery_order_items_price_currency
+                    CHECK (price_currency IN ('ARS','USD'))
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(6,2) NOT NULL DEFAULT 0
+                    """
+                )
+                cur.execute("UPDATE delivery_order_items SET discount_percent = 0 WHERE discount_percent IS NULL")
+                cur.execute("ALTER TABLE delivery_order_items ALTER COLUMN discount_percent SET DEFAULT 0")
+                cur.execute("ALTER TABLE delivery_order_items ALTER COLUMN discount_percent SET NOT NULL")
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    DROP CONSTRAINT IF EXISTS chk_delivery_order_items_discount_percent
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD CONSTRAINT chk_delivery_order_items_discount_percent
+                    CHECK (discount_percent >= 0 AND discount_percent <= 100)
                     """
                 )
 
@@ -182,6 +359,7 @@ class Command(BaseCommand):
                     """
                     CREATE TABLE IF NOT EXISTS bejerman_remito_groups (
                       id                         TEXT PRIMARY KEY,
+                      company_key                TEXT NULL,
                       comprobante_tipo           TEXT NOT NULL,
                       comprobante_letra          TEXT NOT NULL DEFAULT 'R',
                       comprobante_pto_venta      TEXT NULL,
@@ -200,11 +378,62 @@ class Command(BaseCommand):
                       source_created_by_user_id  TEXT NULL,
                       created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       generated_at               TIMESTAMPTZ NULL,
+                      CONSTRAINT chk_bejerman_remito_groups_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
                       CONSTRAINT chk_bejerman_remito_groups_status CHECK (status IN ('pending','generated','failed'))
                     )
                     """
                 )
 
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS company_key TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    DROP CONSTRAINT IF EXISTS chk_bejerman_remito_groups_company_key
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD CONSTRAINT chk_bejerman_remito_groups_company_key
+                    CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO'))
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE delivery_orders AS o
+                       SET status = 'entregado_no_facturable'
+                      FROM bejerman_remito_groups AS g
+                     WHERE o.bejerman_remito_group_id = g.id
+                       AND o.status = 'entregado_pendiente_facturacion'
+                       AND UPPER(COALESCE(
+                             NULLIF(g.comprobante_tipo, ''),
+                             NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
+                             NULLIF(g.response_summary ->> 'comprobanteTipo', '')
+                           )) IS DISTINCT FROM 'RT'
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE bejerman_remito_groups AS g
+                       SET response_summary = jsonb_set(
+                             COALESCE(g.response_summary, '{}'::jsonb),
+                             '{billingRequired}',
+                             'false'::jsonb,
+                             true
+                           )
+                     WHERE UPPER(COALESCE(
+                             NULLIF(g.comprobante_tipo, ''),
+                             NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
+                             NULLIF(g.response_summary ->> 'comprobanteTipo', '')
+                           )) IS DISTINCT FROM 'RT'
+                       AND COALESCE(g.response_summary ->> 'billingRequired', '') IS DISTINCT FROM 'false'
+                    """
+                )
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS delivery_order_events (
@@ -251,16 +480,21 @@ class Command(BaseCommand):
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_status_priority ON delivery_orders(status, priority, order_date DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_customer ON delivery_orders(customer_id, status, order_date DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_bejerman_customer_code ON delivery_orders(bejerman_customer_code)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_orders_company_key ON delivery_orders(company_key, status, order_date DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_delivery_type ON delivery_orders(delivery_type, status, order_date DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_remito_group ON delivery_orders(bejerman_remito_group_id)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_ingreso ON delivery_orders(ingreso_id) WHERE ingreso_id IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_order ON delivery_order_items(order_id, sort_order)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_article ON delivery_order_items(article_code)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_ingreso ON delivery_order_items(ingreso_id) WHERE ingreso_id IS NOT NULL",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_device ON delivery_order_items(device_id) WHERE device_id IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_item ON delivery_order_item_partidas(order_item_id, sort_order, created_at)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_events_order ON delivery_order_events(order_id, created_at)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_customer ON bejerman_remito_groups(customer_code, created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_users_bejerman_seller_code ON users(bejerman_seller_code)",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_bejerman_seller_code_ci ON users ((UPPER(TRIM(bejerman_seller_code)))) WHERE NULLIF(TRIM(bejerman_seller_code), '') IS NOT NULL",
                 ):
                     cur.execute(sql)
 
@@ -326,10 +560,27 @@ class Command(BaseCommand):
                       FROM information_schema.columns
                      WHERE table_schema = ANY(current_schemas(true))
                        AND table_name = 'users'
-                       AND column_name = 'bejerman_seller_code'
+                       AND column_name IN ('bejerman_seller_code', 'bejerman_seller_code_confirmed_at')
+                    """
+                )
+                user_columns = {row[0] for row in cur.fetchall()}
+                missing_user_columns = sorted(
+                    {"bejerman_seller_code", "bejerman_seller_code_confirmed_at"} - user_columns
+                )
+                if missing_user_columns:
+                    raise RuntimeError(f"No se aplicaron columnas en users: {', '.join(missing_user_columns)}")
+
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM pg_class idx
+                      JOIN pg_namespace ns ON ns.oid = idx.relnamespace
+                     WHERE idx.relkind = 'i'
+                       AND idx.relname = 'uq_users_bejerman_seller_code_ci'
+                       AND ns.nspname = ANY(current_schemas(true))
                     """
                 )
                 if not cur.fetchone():
-                    raise RuntimeError("No se aplicó users.bejerman_seller_code")
+                    raise RuntimeError("No se aplicó el índice uq_users_bejerman_seller_code_ci")
 
         self.stdout.write("APLICADO OK: esquema de órdenes de entrega NEXORA")

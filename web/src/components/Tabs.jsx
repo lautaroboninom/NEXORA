@@ -1,11 +1,11 @@
 export default function Tabs({ value, onChange, items, extraRight }) {
   return (
-    <div className="border-b mb-4 flex items-center">
-      <div className="flex gap-2">
+    <div className="mb-4 flex items-center gap-2 overflow-x-auto border-b">
+      <div className="flex min-w-max gap-2">
         {items.map((it) => (
           <button
             key={it.value}
-            className={`px-3 py-2 rounded-t ${
+            className={`whitespace-nowrap px-3 py-2 rounded-t ${
               value === it.value
                 ? "bg-white border border-b-0"
                 : "text-gray-600 hover:text-black"
@@ -17,8 +17,7 @@ export default function Tabs({ value, onChange, items, extraRight }) {
           </button>
         ))}
       </div>
-      <div className="ml-auto">{extraRight}</div>
+      <div className="ml-auto shrink-0">{extraRight}</div>
     </div>
   );
 }
-

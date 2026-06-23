@@ -5,6 +5,7 @@ from django.db import connection, transaction
 TABLES = [
     "notifications",
     "notification_user_preferences",
+    "notification_push_subscriptions",
 ]
 
 
@@ -66,6 +67,44 @@ class Command(BaseCommand):
                     )
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS notification_push_subscriptions (
+                      id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                      user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                      endpoint          TEXT NOT NULL,
+                      p256dh            TEXT NOT NULL,
+                      auth              TEXT NOT NULL,
+                      content_encoding  TEXT NOT NULL DEFAULT 'aes128gcm',
+                      user_agent        TEXT NOT NULL DEFAULT '',
+                      disabled_at       TIMESTAMPTZ NULL,
+                      failure_count     INTEGER NOT NULL DEFAULT 0,
+                      last_error        TEXT NOT NULL DEFAULT '',
+                      last_success_at   TIMESTAMPTZ NULL,
+                      created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_notification_push_endpoint CHECK (NULLIF(TRIM(endpoint), '') IS NOT NULL),
+                      CONSTRAINT chk_notification_push_p256dh CHECK (NULLIF(TRIM(p256dh), '') IS NOT NULL),
+                      CONSTRAINT chk_notification_push_auth CHECK (NULLIF(TRIM(auth), '') IS NOT NULL),
+                      CONSTRAINT chk_notification_push_failure_count CHECK (failure_count >= 0)
+                    )
+                    """
+                )
+                for _column, statement in (
+                    ("user_id", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE"),
+                    ("endpoint", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS endpoint TEXT"),
+                    ("p256dh", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS p256dh TEXT"),
+                    ("auth", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS auth TEXT"),
+                    ("content_encoding", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS content_encoding TEXT NOT NULL DEFAULT 'aes128gcm'"),
+                    ("user_agent", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT ''"),
+                    ("disabled_at", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ NULL"),
+                    ("failure_count", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0"),
+                    ("last_error", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''"),
+                    ("last_success_at", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ NULL"),
+                    ("created_at", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+                    ("updated_at", "ALTER TABLE notification_push_subscriptions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+                ):
+                    cur.execute(statement)
 
                 cur.execute(
                     """
@@ -92,6 +131,19 @@ class Command(BaseCommand):
                       ON notification_user_preferences(user_id)
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_push_endpoint
+                      ON notification_push_subscriptions(endpoint)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_notification_push_active_user
+                      ON notification_push_subscriptions(user_id, updated_at DESC)
+                      WHERE disabled_at IS NULL
+                    """
+                )
 
                 if connection.vendor == "postgresql":
                     cur.execute(
@@ -105,6 +157,11 @@ class Command(BaseCommand):
                           IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_preferences_set_updated_at') THEN
                             CREATE TRIGGER trg_notification_preferences_set_updated_at
                             BEFORE UPDATE ON notification_user_preferences
+                            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                          END IF;
+                          IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_push_subscriptions_set_updated_at') THEN
+                            CREATE TRIGGER trg_notification_push_subscriptions_set_updated_at
+                            BEFORE UPDATE ON notification_push_subscriptions
                             FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                           END IF;
                         END $$;

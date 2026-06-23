@@ -5,8 +5,9 @@ import { useNavigate } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import useQueryState from "../hooks/useQueryState";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
-// Ajust si tu backend usa otra ruta
+// Ajustar si el backend usa otra ruta.
 
 
 const ENDPOINT = "/api/ingresos/aprobados-reparados/";
@@ -78,7 +79,7 @@ export default function Reparados() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value={q}
@@ -103,7 +104,39 @@ export default function Reparados() {
       ) : filtered.length === 0 ? (
         <div className="text-sm text-gray-500">No hay reparados que coincidan con el filtro.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((row) => (
+              <MobileDataCard
+                key={ingresoIdOf(row)}
+                as="button"
+                type="button"
+                onClick={() => go(row)}
+                className="hover:bg-gray-50"
+                aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                data-testid={`row-mobile-${ingresoIdOf(row)}`}
+              >
+                <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                  <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                  <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
+                  <MobileDataField label="Serie">
+                    <DeviceIdentifier row={row} />
+                  </MobileDataField>
+                  <MobileDataField label="Fecha ingreso" value={formatDateOnly(resolveFechaIngreso(row))} />
+                  <MobileDataField label="Fecha reparación">
+                    {formatDateOnly(
+                      row?.fecha_reparado ??
+                        row?.fecha_reparacion ??
+                        row?.reparado_fecha ??
+                        row?.estado_fecha
+                    )}
+                  </MobileDataField>
+                </div>
+              </MobileDataCard>
+            ))}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -112,7 +145,7 @@ export default function Reparados() {
                 <th scope="col" className="p-2">Equipo</th>
                 <th scope="col" className="p-2">Serie</th>
                 <th scope="col" className="p-2">Fecha ingreso</th>
-                <th scope="col" className="p-2">Fecha reparacin</th>
+                <th scope="col" className="p-2">Fecha reparación</th>
               </tr>
             </thead>
             <tbody>
@@ -145,6 +178,7 @@ export default function Reparados() {
               ))}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}.
           </div>

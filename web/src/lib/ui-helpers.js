@@ -100,6 +100,8 @@ export const catalogEquipmentLabel = (row, fallback = "-") => {
 };
 
 export const SALE_TICKET_STATES = new Set(["vendido_pendiente_entrega", "vendido_entregado"]);
+const MG_CODE_RE = /^(MG|NM|NV|CE)\s*\d{1,4}$/i;
+const cleanText = (v) => (v == null ? "" : String(v).trim());
 
 export const isSaleTicketState = (value) =>
   SALE_TICKET_STATES.has(String(value ?? "").trim().toLowerCase());
@@ -114,6 +116,31 @@ export const isMgInactiveBySale = (row) => {
     || mgEstado === "inactivo_venta"
     || isSaleTicketState(estado)
   );
+};
+
+export const hasMgCode = (row) => {
+  if (!row) return false;
+  if (row?.tiene_codigo_mg || row?.equipo?.tiene_codigo_mg) return true;
+  return [
+    row?.numero_interno,
+    row?.equipo?.numero_interno,
+    row?.numero_serie,
+    row?.equipo?.numero_serie,
+  ].some((value) => MG_CODE_RE.test(cleanText(value)));
+};
+
+export const isMgOwned = (row) => {
+  if (!row || isMgInactiveBySale(row)) return false;
+  if (row?.es_propietario_mg === true || row?.equipo?.es_propietario_mg === true) return true;
+  if (row?.es_cliente_mg_owner === true || row?.equipo?.es_cliente_mg_owner === true) return true;
+  return hasMgCode(row);
+};
+
+export const propiedadEquipoLabelOf = (row) => {
+  if (!row) return "-";
+  if (hasMgCode(row) && isMgInactiveBySale(row)) return "Cliente (MG histórico)";
+  if (isMgOwned(row)) return "MG BIO";
+  return "Cliente";
 };
 
 export const deviceIdentifierPartsOf = (row, fallback = "-") => {
@@ -131,12 +158,8 @@ export const deviceIdentifierPartsOf = (row, fallback = "-") => {
   }
   const str = (v) => (v == null ? "" : String(v).trim());
   const sold = isMgInactiveBySale(row);
-  const ownershipFlag =
-    row?.es_cliente_mg_owner ??
-    row?.es_propietario_mg ??
-    row?.equipo?.es_cliente_mg_owner ??
-    row?.equipo?.es_propietario_mg;
-  const clientOwned = ownershipFlag === false;
+  const mgOwned = isMgOwned(row);
+  const clientOwned = !mgOwned;
   const interno =
     str(row?.numero_interno) ||
     str(row?.equipo?.numero_interno);
@@ -148,7 +171,7 @@ export const deviceIdentifierPartsOf = (row, fallback = "-") => {
     str(row?.equipo?.numero_alternativo);
   const historicalMg = sold;
   const primary = (sold || clientOwned) ? (serie || interno || fallback) : (interno || serie || fallback);
-  const isMgOwner = ownershipFlag === true && !sold;
+  const isMgOwner = mgOwned && !sold;
   const ownerLabel = isMgOwner ? "propio" : "cliente";
   const internalOwnerLabel = sold ? "MG histórico" : ownerLabel;
   const identifiers = [

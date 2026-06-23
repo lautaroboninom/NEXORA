@@ -17,10 +17,10 @@ from .helpers import (
     require_roles,
     os_label,
 )
-from ..delivery_orders import load_items_by_order
+from ..delivery_orders import delivery_source_reference, load_items_by_order
 
 
-VIEW_ROLES = ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
+VIEW_ROLES = ["jefe", "admin", "ventas", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
 MANAGE_ROLES = ["jefe", "admin", "jefe_veedor"]
 TERMINAL_STATES = ("entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado")
 TALLER_LOCATION = "taller"
@@ -239,6 +239,8 @@ def _dashboard_variant(request):
     role = _normalize_role_value(_rol(request))
     if role in {"jefe", "jefe_veedor"}:
         return "jefe"
+    if role == "ventas":
+        return "admin"
     if role in {"tecnico", "recepcion", "admin", "cobranzas"}:
         return role
     return "jefe"
@@ -471,7 +473,7 @@ def _fetch_objectives(period_type, request=None):
         return []
     role = _normalize_role_value(_rol(request)) if request is not None else "jefe"
     user_id = _current_user_id(request) if request is not None else None
-    if role in {"admin", "recepcion", "cobranzas"}:
+    if role in {"admin", "ventas", "recepcion", "cobranzas"}:
         return []
     where = [
         "wo.active = TRUE",
@@ -819,7 +821,6 @@ def _active_work_count(request):
 DELIVERY_OPEN_STATUSES = (
     "pendiente_armado",
     "armado_pendiente_entrega",
-    "entregado_pendiente_facturacion",
 )
 
 
@@ -828,6 +829,7 @@ def _empty_delivery_counts():
         "pendiente_armado": 0,
         "armado_pendiente_entrega": 0,
         "entregado_pendiente_facturacion": 0,
+        "entregado_no_facturable": 0,
         "facturado": 0,
         "cancelado": 0,
         "active": 0,
@@ -849,8 +851,29 @@ def _delivery_order_counts():
         status = row.get("status")
         if status:
             counts[status] = int(row.get("total") or 0)
+    open_condition = _delivery_not_imported_delivered_sql()
+    for status in DELIVERY_OPEN_STATUSES:
+        row = _safe_one(
+            f"""
+            SELECT COUNT(*) AS total
+              FROM delivery_orders
+             WHERE status = %s
+               AND {open_condition}
+            """,
+            [status],
+        )
+        counts[status] = int(row.get("total") or 0)
     counts["active"] = sum(int(counts.get(status) or 0) for status in DELIVERY_OPEN_STATUSES)
     return counts
+
+
+def _delivery_not_imported_delivered_sql(alias=""):
+    if not _has_table_column("delivery_orders", "imported_delivered_flag"):
+        return "1 = 1"
+    column = f"{alias}.imported_delivered_flag" if alias else "imported_delivered_flag"
+    if connection.vendor == "postgresql":
+        return f"COALESCE({column}, FALSE) = FALSE"
+    return f"COALESCE({column}, 0) = 0"
 
 
 def _pending_billing_customer_count():
@@ -904,7 +927,7 @@ def _format_delivery_order(row):
         "equipmentInternalNumber": row.get("equipment_internal_number") or "",
         "sourceSystem": row.get("source_system") or "",
         "sourceExternalId": row.get("source_external_id") or "",
-        "sourceReference": row.get("source_reference") or "",
+        "sourceReference": delivery_source_reference(row.get("source_reference"), row.get("delivery_type"), row.get("ingreso_id")),
         "sourceSheet": row.get("source_sheet") or "",
         "sourceRow": row.get("source_row"),
         "sourceColor": row.get("source_color") or "",
@@ -933,6 +956,9 @@ def _delivery_order_items(variant, limit=8):
     if not statuses:
         return []
     placeholders = ",".join(["%s"] * len(statuses))
+    open_only_condition = ""
+    if set(statuses).issubset(set(DELIVERY_OPEN_STATUSES)):
+        open_only_condition = f"AND {_delivery_not_imported_delivered_sql()}"
 
     def order_column(name, default="''"):
         return name if _has_table_column("delivery_orders", name) else f"{default} AS {name}"
@@ -940,6 +966,7 @@ def _delivery_order_items(variant, limit=8):
     rows = _safe_rows(
         f"""
         SELECT id, order_number, customer_name, bejerman_customer_code, delivery_type, status, priority,
+               {order_column("ingreso_id", "NULL")},
                order_date, {order_column("seller_name")}, {order_column("seller_code")},
                {order_column("operation_company_label")}, {order_column("raw_pedido")},
                {order_column("commercial_terms")}, {order_column("commercial_price")},
@@ -952,6 +979,7 @@ def _delivery_order_items(variant, limit=8):
                remito_number, remito_location, invoice_number, created_at
           FROM delivery_orders
          WHERE status IN ({placeholders})
+           {open_only_condition}
          ORDER BY
            CASE priority WHEN 'urgente' THEN 0 ELSE 1 END,
            order_date DESC,
@@ -984,7 +1012,7 @@ def _build_kpis(request, raw):
         "derivados_en_espera": {"key": "derivados_en_espera", "label": "Derivados en espera", "value": len(raw.get("derivado_sin_devolucion") or []), "severity": "warning"},
         "preventivos_vencidos": {"key": "preventivos_vencidos", "label": "Preventivos vencidos", "value": len(raw.get("preventivo_vencido") or []), "severity": "critical"},
         "preventivos_proximos": {"key": "preventivos_proximos", "label": "Preventivos próximos", "value": len(raw.get("preventivo_proximo") or []), "severity": "warning"},
-        "pedidos_abiertos": {"key": "pedidos_abiertos", "label": "Pedidos abiertos", "value": int(delivery_counts.get("active") or 0), "severity": "info"},
+        "pedidos_abiertos": {"key": "pedidos_abiertos", "label": "Pedidos sin entregar", "value": int(delivery_counts.get("active") or 0), "severity": "info"},
         "pedidos_pendientes_armado": {"key": "pedidos_pendientes_armado", "label": "Pedidos a armar", "value": int(delivery_counts.get("pendiente_armado") or 0), "severity": "warning"},
         "pedidos_listos_entrega": {"key": "pedidos_listos_entrega", "label": "Listos para entrega", "value": int(delivery_counts.get("armado_pendiente_entrega") or 0), "severity": "info"},
         "remitos_pendientes_facturacion": {"key": "remitos_pendientes_facturacion", "label": "Remitos a facturar", "value": int(delivery_counts.get("entregado_pendiente_facturacion") or 0), "severity": "warning"},
@@ -1299,6 +1327,9 @@ class GlobalSearchView(APIView):
             return Response({"q": term, "groups": [], "total": 0})
         like = f"%{term}%"
         mg_select_sql = _mg_list_select_sql("d")
+        has_customer_alias = _has_table_column("customers", "alias_interno")
+        customer_alias_select = "COALESCE(c.alias_interno,'') AS alias_interno," if has_customer_alias else "'' AS alias_interno,"
+        customer_alias_where = "OR COALESCE(c.alias_interno,'') ILIKE %s" if has_customer_alias else ""
         ingreso_rows = _safe_rows(
             f"""
             SELECT t.id AS ingreso_id,
@@ -1322,15 +1353,16 @@ class GlobalSearchView(APIView):
              WHERE CAST(t.id AS TEXT) ILIKE %s
                 OR COALESCE(c.razon_social,'') ILIKE %s
                 OR COALESCE(c.cod_empresa,'') ILIKE %s
+                {customer_alias_where}
                 OR COALESCE(d.numero_serie,'') ILIKE %s
                 OR COALESCE(d.numero_interno,'') ILIKE %s
                 OR COALESCE(b.nombre,'') ILIKE %s
                 OR COALESCE(m.nombre,'') ILIKE %s
                 OR COALESCE(m.tipo_equipo,'') ILIKE %s
              ORDER BY t.id DESC
-             LIMIT 12
+            LIMIT 12
             """,
-            [like, like, like, like, like, like, like, like],
+            [like, like, like] + ([like] if has_customer_alias else []) + [like, like, like, like, like],
         )
         ingresos = [
             {
@@ -1364,17 +1396,18 @@ class GlobalSearchView(APIView):
                  WHERE t.device_id = d.id
                  ORDER BY COALESCE(t.fecha_ingreso, t.fecha_creacion) DESC, t.id DESC
                  LIMIT 1
-              ) last_ingreso ON TRUE
+             ) last_ingreso ON TRUE
              WHERE COALESCE(c.razon_social,'') ILIKE %s
+                {customer_alias_where}
                 OR COALESCE(d.numero_serie,'') ILIKE %s
                 OR COALESCE(d.numero_interno,'') ILIKE %s
                 OR COALESCE(b.nombre,'') ILIKE %s
                 OR COALESCE(m.nombre,'') ILIKE %s
                 OR COALESCE(m.tipo_equipo,'') ILIKE %s
              ORDER BY d.id DESC
-             LIMIT 8
+            LIMIT 8
             """,
-            [like, like, like, like, like, like],
+            [like] + ([like] if has_customer_alias else []) + [like, like, like, like, like],
         )
         equipos = [
             {
@@ -1386,20 +1419,22 @@ class GlobalSearchView(APIView):
         ]
 
         clientes = _safe_rows(
-            """
+            f"""
             SELECT c.id AS customer_id,
                    c.razon_social,
                    COALESCE(c.cod_empresa,'') AS cod_empresa,
+                   {customer_alias_select}
                    COALESCE(c.telefono,'') AS telefono,
                    COALESCE(c.email,'') AS email
               FROM customers c
              WHERE COALESCE(c.razon_social,'') ILIKE %s
                 OR COALESCE(c.cod_empresa,'') ILIKE %s
+                {customer_alias_where}
                 OR COALESCE(c.cuit,'') ILIKE %s
              ORDER BY c.razon_social ASC
-             LIMIT 8
+            LIMIT 8
             """,
-            [like, like, like],
+            [like, like] + ([like] if has_customer_alias else []) + [like],
         )
         clientes = [
             {

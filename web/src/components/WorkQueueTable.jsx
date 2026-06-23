@@ -10,6 +10,12 @@ import {
   resolveFechaCreacion,
   resolveFechaIngreso,
 } from "../lib/ui-helpers";
+import {
+  DesktopTableWrap,
+  MobileDataCard,
+  MobileDataField,
+  MobileDataList,
+} from "./Responsive.jsx";
 
 function ageDays(row) {
   const raw = resolveFechaIngreso(row) || resolveFechaCreacion(row);
@@ -101,7 +107,58 @@ export default function WorkQueueTable({
   }
 
   return (
-    <div className="overflow-x-auto">
+    <div>
+      <MobileDataList>
+        {data.map((row, index) => {
+          const id = ingresoIdOf(row);
+          const priority = priorityOf(row);
+          const days = ageDays(row);
+          const priorityClass = toneClasses[priority.tone] || toneClasses.gray;
+          const esCotizacion = isMotivoCotizacionEquipo(row?.motivo);
+          return (
+            <MobileDataCard
+              key={id || `${row?.alert_key || "row"}-${row?.preventivo_plan_id || row?.device_id || index}`}
+              as="button"
+              type="button"
+              onClick={() => openRow(row)}
+              className="hover:bg-gray-50"
+              aria-label={`Abrir trabajo ${formatOS(row)}`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                  {esCotizacion && (
+                    <span className="mt-1 inline-flex px-2 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800">
+                      Cotización
+                    </span>
+                  )}
+                </div>
+                <span className={`inline-flex shrink-0 items-center px-2 py-0.5 rounded-full text-[11px] font-medium ring-1 ring-inset ${priorityClass}`}>
+                  {priority.label}
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                <MobileDataField label="Equipo" value={catalogEquipmentLabel(row)} />
+                <MobileDataField label="N/S o MG">
+                  <DeviceIdentifier row={row} />
+                </MobileDataField>
+                {showTechnician && <MobileDataField label="Técnico" value={technicianOf(row) || "-"} />}
+                <MobileDataField label="Antigüedad" value={days == null ? "-" : `${days} días`} />
+                <MobileDataField label="Estado">
+                  <StatusChip value={row?.estado} />
+                </MobileDataField>
+                <MobileDataField label="Presupuesto">
+                  <StatusChip value={row?.presupuesto_estado} />
+                </MobileDataField>
+                <MobileDataField label="Próxima acción" value={nextActionOf(row)} className="min-[420px]:col-span-2" />
+              </div>
+            </MobileDataCard>
+          );
+        })}
+      </MobileDataList>
+
+      <DesktopTableWrap>
       <table className="min-w-full text-sm border-separate border-spacing-0">
         <thead>
           <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
@@ -177,6 +234,7 @@ export default function WorkQueueTable({
           })}
         </tbody>
       </table>
+      </DesktopTableWrap>
       <div className="text-xs text-gray-500 mt-2">Mostrando {data.length} trabajos.</div>
     </div>
   );

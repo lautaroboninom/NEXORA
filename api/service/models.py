@@ -8,6 +8,8 @@ class User(models.Model):
     hash_pw = models.TextField()
     rol = models.TextField()
     activo = models.BooleanField(default=True)
+    bejerman_seller_code = models.TextField(null=True)
+    bejerman_seller_code_confirmed_at = models.DateTimeField(null=True)
 
     @property
     def is_authenticated(self):
@@ -24,12 +26,31 @@ class User(models.Model):
 class Customer(models.Model):
     id = models.AutoField(primary_key=True)
     cod_empresa = models.TextField(null=True)
+    alias_interno = models.TextField(null=True)
     razon_social = models.TextField()
     cuit = models.TextField(null=True)
     contacto = models.TextField(null=True)
     telefono = models.TextField(null=True)
     telefono_2 = models.TextField(null=True)
     email = models.TextField(null=True)
+    bejerman_nombre_fantasia = models.TextField(null=True)
+    bejerman_tipo_documento = models.TextField(null=True)
+    bejerman_domicilio = models.TextField(null=True)
+    bejerman_localidad = models.TextField(null=True)
+    bejerman_provincia = models.TextField(null=True)
+    bejerman_codigo_postal = models.TextField(null=True)
+    bejerman_pais = models.TextField(null=True)
+    bejerman_condicion_iva = models.TextField(null=True)
+    bejerman_numero_iibb = models.TextField(null=True)
+    bejerman_condicion_venta = models.TextField(null=True)
+    bejerman_vendedor = models.TextField(null=True)
+    bejerman_lista_precio = models.TextField(null=True)
+    bejerman_contacto = models.TextField(null=True)
+    bejerman_telefono = models.TextField(null=True)
+    bejerman_telefono_2 = models.TextField(null=True)
+    bejerman_email = models.TextField(null=True)
+    bejerman_synced_at = models.DateTimeField(null=True)
+    bejerman_raw = models.JSONField(default=dict)
 
     class Meta:
         managed = False

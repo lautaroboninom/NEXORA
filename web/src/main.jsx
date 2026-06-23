@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { createBrowserRouter, Navigate, RouterProvider } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import ErrorBoundary from "./components/ErrorBoundary";
 
@@ -56,18 +56,20 @@ function NotFound() {
 
 function IndexRoute() {
   const { user } = useAuth();
-  if (
-    canAny(user, [
-      PERMISSION_CODES.PAGE_HOME_SEARCH,
-      PERMISSION_CODES.PAGE_RECEPCION,
-      PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
-      PERMISSION_CODES.PAGE_BILLING,
-      PERMISSION_CODES.ACTION_INGRESO_CREATE,
-      PERMISSION_CODES.PAGE_NEW_INGRESO,
-      PERMISSION_CODES.PAGE_LIBERADOS,
-    ])
-  ) {
+  const canUseDashboard = canAny(user, [
+    PERMISSION_CODES.PAGE_HOME_SEARCH,
+    PERMISSION_CODES.PAGE_RECEPCION,
+    PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
+    PERMISSION_CODES.PAGE_BILLING,
+    PERMISSION_CODES.ACTION_INGRESO_CREATE,
+    PERMISSION_CODES.PAGE_NEW_INGRESO,
+    PERMISSION_CODES.PAGE_LIBERADOS,
+  ]);
+  if (canUseDashboard) {
     return <WorkDashboard />;
+  }
+  if (canAny(user, [PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES])) {
+    return <Navigate to="/ingresos/nuevo?tab=mercaderia" replace />;
   }
   return <Forbidden />;
 }
@@ -93,6 +95,7 @@ const router = createBrowserRouter([
               PERMISSION_CODES.ACTION_INGRESO_CREATE,
               PERMISSION_CODES.PAGE_NEW_INGRESO,
               PERMISSION_CODES.PAGE_LIBERADOS,
+              PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES,
             ]}
           >
             <IndexRoute />
@@ -279,6 +282,7 @@ const router = createBrowserRouter([
             permissions={[
               PERMISSION_CODES.ACTION_INGRESO_CREATE,
               PERMISSION_CODES.PAGE_NEW_INGRESO,
+              PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES,
             ]}
           >
             <NuevoIngreso />
@@ -334,6 +338,14 @@ const router = createBrowserRouter([
         ),
       },
       {
+        path: "bejerman/ingresos-mercaderia",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES}>
+            <Navigate to="/ingresos/nuevo?tab=mercaderia" replace />
+          </ProtectedRoute>
+        ),
+      },
+      {
         path: "garantias",
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_WARRANTY}>
@@ -352,7 +364,7 @@ const router = createBrowserRouter([
       {
         path: "catalogo/clientes",
         element: (
-          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_CATALOGS}>
+          <ProtectedRoute roles={["jefe", "admin", "ventas", "jefe_veedor"]}>
             <CatalogoClientes />
           </ProtectedRoute>
         ),
@@ -453,7 +465,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
   </React.StrictMode>,
 );
 
-if (import.meta.env.PROD && "serviceWorker" in navigator) {
+if (import.meta.env.PROD && import.meta.env.VITE_SW !== "1" && "serviceWorker" in navigator) {
   try {
     navigator.serviceWorker.getRegistrations?.().then((regs) => {
       regs?.forEach((r) => r.unregister().catch(() => {}));
@@ -464,7 +476,7 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
   } catch (_) {}
 }
 
-if (import.meta.env.PROD && import.meta.env.VITE_SW === "1" && "serviceWorker" in navigator) {
+if (import.meta.env.VITE_SW === "1" && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   });

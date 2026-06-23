@@ -62,6 +62,8 @@ class Command(BaseCommand):
                       ingreso_id             INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
                       status                 TEXT NOT NULL DEFAULT 'pending',
                       pdf_status             TEXT NOT NULL DEFAULT 'pending',
+                      document_mode          TEXT NOT NULL DEFAULT 'emit',
+                      manual_remito_number   TEXT NULL,
                       attempts               INTEGER NOT NULL DEFAULT 0,
                       last_error             TEXT NULL,
                       request_payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -81,9 +83,23 @@ class Command(BaseCommand):
                       CONSTRAINT chk_bejerman_ingreso_remitos_status
                         CHECK (status IN ('pending','running','generated','failed')),
                       CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
-                        CHECK (pdf_status IN ('pending','ready','failed')),
+                        CHECK (pdf_status IN ('pending','ready','failed','not_applicable')),
+                      CONSTRAINT chk_bejerman_ingreso_remitos_document_mode
+                        CHECK (document_mode IN ('emit','register')),
                       CONSTRAINT chk_bejerman_ingreso_remitos_attempts CHECK (attempts >= 0)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD COLUMN IF NOT EXISTS document_mode TEXT NOT NULL DEFAULT 'emit'
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD COLUMN IF NOT EXISTS manual_remito_number TEXT NULL
                     """
                 )
                 cur.execute(
@@ -102,6 +118,41 @@ class Command(BaseCommand):
                     """
                     ALTER TABLE bejerman_ingreso_remitos
                       ADD COLUMN IF NOT EXISTS bejerman_company TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE bejerman_ingreso_remitos
+                       SET document_mode = COALESCE(NULLIF(TRIM(document_mode), ''), 'emit')
+                     WHERE document_mode IS NULL OR TRIM(document_mode) = ''
+                    """
+                )
+                cur.execute("ALTER TABLE bejerman_ingreso_remitos ALTER COLUMN document_mode SET DEFAULT 'emit'")
+                cur.execute("ALTER TABLE bejerman_ingreso_remitos ALTER COLUMN document_mode SET NOT NULL")
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      DROP CONSTRAINT IF EXISTS chk_bejerman_ingreso_remitos_pdf_status
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
+                      CHECK (pdf_status IN ('pending','ready','failed','not_applicable'))
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      DROP CONSTRAINT IF EXISTS chk_bejerman_ingreso_remitos_document_mode
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD CONSTRAINT chk_bejerman_ingreso_remitos_document_mode
+                      CHECK (document_mode IN ('emit','register'))
                     """
                 )
                 cur.execute(
@@ -160,6 +211,8 @@ class Command(BaseCommand):
                         "ingreso_id",
                         "status",
                         "pdf_status",
+                        "document_mode",
+                        "manual_remito_number",
                         "attempts",
                         "request_payload",
                         "response_payload",

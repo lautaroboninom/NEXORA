@@ -5,6 +5,7 @@ import {
   getTecnicos, patchMarcaTecnico, postMarcaAplicarTecnico, patchModeloTecnico,
   getTiposEquipo, patchModeloTipoEquipo,
   patchMarca, patchModelo, postModelMerge, postMarcaMerge,
+  getBejermanArticles, getBejermanArticleMappings, postBejermanArticleMapping,
   // Catlogo jerrquico (v2)
   getCatalogTipos as fetchCatalogTipos,
   getCatalogModelos as fetchCatalogModelos,
@@ -12,12 +13,140 @@ import {
   postCatalogModelo as createCatalogModelo,
   postCatalogVariante, patchCatalogVariante, deleteCatalogVariante,
 } from "../lib/api";
+import { useAuth } from "../context/AuthContext";
+import { canAny, PERMISSION_CODES } from "../lib/permissions";
 import { norm } from "../lib/ui-helpers";
 
 const Input  = (p) => <input  {...p} className="border rounded p-2 w-full" />;
 const Select = (p) => <select {...p} className="border rounded p-2 w-full" />;
 
+const articleVariantKey = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+function ArticleCandidateButton({ candidate, selected, onSelect }) {
+  const code = candidate?.article_code || candidate?.code || "";
+  return (
+    <button
+      type="button"
+      className={`rounded border p-2 text-left text-xs ${
+        selected ? "border-emerald-500 bg-emerald-50" : "border-gray-200 bg-white hover:bg-gray-50"
+      }`}
+      onClick={() => onSelect(candidate)}
+    >
+      <div className="font-mono font-semibold text-gray-900">{code || "-"}</div>
+      <div className="mt-1 text-gray-700">{candidate?.article_description || candidate?.description || "Sin descripción"}</div>
+    </button>
+  );
+}
+
+function BejermanArticleMappingBox({
+  modelId,
+  variante,
+  label,
+  mapping,
+  state,
+  canManage,
+  onUpdate,
+  onSearch,
+  onSelect,
+  onSave,
+}) {
+  const code = state?.article_code ?? mapping?.article_code ?? "";
+  const description = state?.article_description ?? mapping?.article_description ?? "";
+  const items = Array.isArray(state?.items) ? state.items : [];
+  return (
+    <div className="rounded border border-gray-200 bg-white p-2">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">{label}</div>
+          <div className="mt-0.5 text-xs text-gray-600">
+            {mapping?.article_code ? (
+              <>
+                Actual: <span className="font-mono">{mapping.article_code}</span>
+                {mapping.article_description ? ` - ${mapping.article_description}` : ""}
+              </>
+            ) : (
+              "Sin artículo Bejerman"
+            )}
+          </div>
+        </div>
+      </div>
+
+      {canManage && (
+        <div className="mt-2 space-y-2">
+          <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+            <Input
+              value={state?.query || ""}
+              onChange={(event) => onUpdate(modelId, variante, { query: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onSearch(modelId, variante);
+                }
+              }}
+              placeholder="Código o descripción Bejerman"
+            />
+            <button
+              type="button"
+              className="rounded border border-gray-300 px-3 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-60"
+              disabled={state?.loading}
+              onClick={() => onSearch(modelId, variante)}
+            >
+              {state?.loading ? "Buscando..." : "Buscar"}
+            </button>
+          </div>
+          {state?.error && <div className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">{state.error}</div>}
+          {items.length > 0 && (
+            <div className="grid gap-2 md:grid-cols-2">
+              {items.map((candidate, index) => (
+                <ArticleCandidateButton
+                  key={`${candidate?.article_code || candidate?.code || index}`}
+                  candidate={candidate}
+                  selected={code && code === (candidate?.article_code || candidate?.code)}
+                  onSelect={(item) => onSelect(modelId, variante, item)}
+                />
+              ))}
+            </div>
+          )}
+          <div className="grid gap-2 md:grid-cols-[160px_1fr_auto]">
+            <Input
+              value={code}
+              onChange={(event) => onUpdate(modelId, variante, { article_code: event.target.value })}
+              placeholder="Código"
+            />
+            <Input
+              value={description}
+              onChange={(event) => onUpdate(modelId, variante, { article_description: event.target.value })}
+              placeholder="Descripción"
+            />
+            <button
+              type="button"
+              className="rounded bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+              disabled={state?.saving || !String(code || "").trim()}
+              onClick={() => onSave(modelId, variante)}
+            >
+              {state?.saving ? "Guardando..." : "Guardar"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CatalogoMarcas() {
+  const { user } = useAuth();
+  const canManageBejermanArticles = canAny(user, [
+    PERMISSION_CODES.ACTION_INGRESO_FIX_RIS_PREFLIGHT,
+    PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE,
+  ]);
   // Canonicalizador general: minsculas, sin acentos y con espacios colapsados
   const canon   = (v) => norm(v).replace(/\s+/g, " ").trim();
   const typeKey = (v) => (v ?? "").toString().toLowerCase().replace(/\s+/g, " ").trim();
@@ -54,6 +183,8 @@ export default function CatalogoMarcas() {
 
   // Variantes por modelo (inline)
   const [perModelVariants, setPerModelVariants] = useState({});
+  const [articleMappingsByModel, setArticleMappingsByModel] = useState({});
+  const [articleMappingState, setArticleMappingState] = useState({});
   function updatePMV(modelId, updater) {
     setPerModelVariants((prev) => {
       const cur = prev[modelId] || { loading:false, error:"", variantes:[], tipoId:null, serieId:null, newName:"" };
@@ -62,8 +193,82 @@ export default function CatalogoMarcas() {
     });
   }
 
+  const articleStateKey = (modelId, variante = "") => `${modelId}::${articleVariantKey(variante)}`;
+  const articleMappingFor = (modelId, variante = "") => {
+    const key = articleVariantKey(variante);
+    return (articleMappingsByModel[modelId] || []).find((item) => (item?.variante_norm || "") === key) || null;
+  };
+  const updateArticleState = (modelId, variante, patch) => {
+    const key = articleStateKey(modelId, variante);
+    setArticleMappingState((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), ...(patch || {}) } }));
+  };
+  const loadArticleMappings = async (modelId) => {
+    if (!modelId || !canManageBejermanArticles) return;
+    try {
+      const result = await getBejermanArticleMappings({ model_id: modelId });
+      setArticleMappingsByModel((prev) => ({ ...prev, [modelId]: Array.isArray(result?.items) ? result.items : [] }));
+    } catch (e) {
+      setErr(e?.message || "No se pudieron cargar artículos Bejerman del modelo");
+    }
+  };
+  const searchArticleMapping = async (modelId, variante = "") => {
+    const key = articleStateKey(modelId, variante);
+    const state = articleMappingState[key] || {};
+    updateArticleState(modelId, variante, { loading: true, error: "" });
+    try {
+      const result = await getBejermanArticles({
+        model_id: modelId,
+        variante,
+        q: state.query || "",
+        limit: 20,
+      });
+      updateArticleState(modelId, variante, { loading: false, items: Array.isArray(result?.items) ? result.items : [] });
+    } catch (e) {
+      updateArticleState(modelId, variante, {
+        loading: false,
+        items: [],
+        error: e?.data?.detail || e?.message || "No se pudieron buscar artículos Bejerman",
+      });
+    }
+  };
+  const selectArticleCandidate = (modelId, variante, candidate) => {
+    updateArticleState(modelId, variante, {
+      article_code: candidate?.article_code || candidate?.code || "",
+      article_description: candidate?.article_description || candidate?.description || "",
+    });
+  };
+  const saveArticleMapping = async (modelId, variante = "") => {
+    const key = articleStateKey(modelId, variante);
+    const state = articleMappingState[key] || {};
+    const current = articleMappingFor(modelId, variante) || {};
+    const articleCode = String(state.article_code ?? current.article_code ?? "").trim();
+    const articleDescription = String(state.article_description ?? current.article_description ?? "").trim();
+    if (!articleCode) {
+      updateArticleState(modelId, variante, { error: "Código de artículo Bejerman requerido" });
+      return;
+    }
+    updateArticleState(modelId, variante, { saving: true, error: "" });
+    try {
+      await postBejermanArticleMapping({
+        model_id: modelId,
+        variante,
+        article_code: articleCode,
+        article_description: articleDescription,
+      });
+      updateArticleState(modelId, variante, { saving: false });
+      await loadArticleMappings(modelId);
+      setMsg("Artículo Bejerman guardado");
+    } catch (e) {
+      updateArticleState(modelId, variante, {
+        saving: false,
+        error: e?.data?.detail || e?.message || "No se pudo guardar el artículo Bejerman",
+      });
+    }
+  };
+
   async function ensureModelCatalogVariants(md) {
     if (!sel?.id || !md) return;
+    loadArticleMappings(md.id);
     updatePMV(md.id, { loading:true, error:"" });
     try {
       const tipos = await fetchCatalogTipos(sel.id, true);
@@ -132,6 +337,7 @@ export default function CatalogoMarcas() {
   const loadTipos = async () => { try { setTipos(await getTiposEquipo()); } catch (e) { setErr(e.message); } };
   const loadModelos = async (brandId) => {
     setModelos([]); setMdlTecSel({}); setMdlTipoSel({});
+    setArticleMappingsByModel({}); setArticleMappingState({});
     if (!brandId) return;
     try {
       const ms = await getModelos(brandId);
@@ -219,6 +425,43 @@ export default function CatalogoMarcas() {
     } finally{
       setLoading(false);
     }
+  }
+
+  function renderBejermanMappingSection(md) {
+    if (!canManageBejermanArticles) return null;
+    const variants = perModelVariants[md.id]?.variantes || [];
+    const rows = [{ key: "__base__", label: md.variante ? `Variante base: ${md.variante}` : "Modelo sin variante", variante: md.variante || "" }];
+    variants.forEach((variant) => {
+      const name = variant?.name || variant?.nombre || "";
+      const key = articleVariantKey(name);
+      if (!key || rows.some((row) => articleVariantKey(row.variante) === key)) return;
+      rows.push({ key: variant?.id ?? key, label: `Variante: ${name}`, variante: name });
+    });
+    return (
+      <div className="md:col-span-12">
+        <label className="text-sm block mb-1">Artículo Bejerman</label>
+        <div className="space-y-2">
+          {rows.map((row) => {
+            const stateKey = articleStateKey(md.id, row.variante);
+            return (
+              <BejermanArticleMappingBox
+                key={row.key}
+                modelId={md.id}
+                variante={row.variante}
+                label={row.label}
+                mapping={articleMappingFor(md.id, row.variante)}
+                state={articleMappingState[stateKey] || {}}
+                canManage={canManageBejermanArticles}
+                onUpdate={updateArticleState}
+                onSearch={searchArticleMapping}
+                onSelect={selectArticleCandidate}
+                onSave={saveArticleMapping}
+              />
+            );
+          })}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -362,6 +605,7 @@ export default function CatalogoMarcas() {
                         {tecnicos.map((t) => (<option key={t.id} value={t.id}>{t.nombre}</option>))}
                       </Select>
                     </div>
+                    {renderBejermanMappingSection(md)}
                     <div className="md:col-span-12">
                       <label className="text-sm block mb-1">Variantes (catlogo)</label>
                       {perModelVariants[md.id]?.error ? (<div className="text-xs text-red-600 mb-2">{perModelVariants[md.id]?.error}</div>) : null}

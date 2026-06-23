@@ -7,7 +7,14 @@ import {
   postEntregarIngreso,
   postIngresoRisEmitir,
 } from "../lib/api";
-import { openPdfBlob, reservePdfWindow } from "../lib/pdf";
+import { openPdfBlob } from "../lib/pdf";
+import {
+  isRisGenerated,
+  isRisRegistered,
+  openRisPrintablePdf,
+  risRemitoFrom,
+  waitForRisPdfBlob,
+} from "../lib/ris-print";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import { formatOS } from "../lib/ui-helpers";
@@ -108,6 +115,7 @@ export default function QrScanCard({
   const [risProgressStatus, setRisProgressStatus] = useState("");
   const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [actionOk, setActionOk] = useState("");
+  const [manualRisPrint, setManualRisPrint] = useState(null);
 
   const config = MODE_CONFIG[scanMode] || MODE_CONFIG.ingreso;
   const canCreateIngreso = can(user, PERMISSION_CODES.ACTION_INGRESO_CREATE) || can(user, PERMISSION_CODES.PAGE_NEW_INGRESO);
@@ -135,6 +143,7 @@ export default function QrScanCard({
     setRisBusy(false);
     setBarcodeBusy(false);
     setActionOk("");
+    setManualRisPrint(null);
   };
 
   const openModal = (mode = scanMode) => {
@@ -483,32 +492,53 @@ export default function QrScanCard({
 
   const imprimirRis = async () => {
     if (!ingreso?.id || risBusy || !canEmitRis) return;
-    const progressStartedAt = Date.now();
-    const risPdfWindow = reservePdfWindow({
-      title: "REMITO",
-      message: "Preparando RIS...",
-    });
-    let risPdfOpened = false;
-    setRisBusy(true);
-    setRisProgressStatus("Emitiendo RIS en Bejerman...");
     setErr("");
     setActionOk("");
+    setManualRisPrint(null);
+    if (isRisRegistered(ingreso)) {
+      const remito = risRemitoFrom(ingreso);
+      setActionOk(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
+      return;
+    }
+    const progressStartedAt = Date.now();
+    setRisBusy(true);
+    setRisProgressStatus(isRisGenerated(ingreso) ? "Buscando PDF del RIS..." : "Emitiendo RIS en Bejerman...");
     try {
       await waitForRisProgressPaint();
-      const risResult = await postIngresoRisEmitir(ingreso.id);
-      setRisProgressStatus("Preparando PDF...");
-      risPdfOpened = risPdfWindow.openUrl(risResult?.print_url);
-      const remito = risResult?.remito_number || risResult?.ris?.remito_number || "";
-      setActionOk(remito ? `RIS ${remito} emitido. Preparando PDF.` : "RIS emitido. Preparando PDF.");
+      const risSource = isRisGenerated(ingreso) ? ingreso : await postIngresoRisEmitir(ingreso.id);
+      const remito = risRemitoFrom(risSource);
+      const blob = await waitForRisPdfBlob(ingreso.id, risSource, {
+        onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del RIS..."),
+      });
+      setRisProgressStatus("Abriendo impresión...");
+      const opened = openRisPrintablePdf(blob, risSource).opened;
+      if (opened) {
+        setActionOk(remito ? `RIS ${remito} listo para imprimir.` : "RIS listo para imprimir.");
+      } else {
+        setManualRisPrint({ blob, source: risSource, remito });
+        setErr("El PDF del RIS ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.");
+      }
     } catch (e2) {
       setErr(e2?.message || "No se pudo emitir o reimprimir el RIS.");
     } finally {
-      if (!risPdfOpened) risPdfWindow.close();
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
       setRisProgressStatus("");
       setTimeout(() => inputRef.current?.focus(), 50);
     }
+  };
+
+  const abrirRisManualPendiente = () => {
+    if (!manualRisPrint?.blob) return;
+    const opened = openRisPrintablePdf(manualRisPrint.blob, manualRisPrint.source || ingreso).opened;
+    if (opened) {
+      setManualRisPrint(null);
+      setErr("");
+      setActionOk(manualRisPrint.remito ? `RIS ${manualRisPrint.remito} listo para imprimir.` : "RIS listo para imprimir.");
+    } else {
+      setErr("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
+    }
+    setTimeout(() => inputRef.current?.focus(), 50);
   };
 
   const imprimirEtiqueta = async () => {
@@ -676,6 +706,18 @@ export default function QrScanCard({
 
             {loading && <div className="text-sm text-gray-500 mt-3">Buscando...</div>}
             {err && <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mt-3">{err}</div>}
+            {manualRisPrint?.blob && (
+              <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900">
+                <div>El PDF del RIS está listo. Si no se abrió automáticamente, imprímalo desde este botón.</div>
+                <button
+                  type="button"
+                  onClick={abrirRisManualPendiente}
+                  className="mt-2 rounded bg-amber-700 px-3 py-1.5 font-medium text-white hover:bg-amber-800"
+                >
+                  Abrir e imprimir RIS
+                </button>
+              </div>
+            )}
             {actionOk && (
               <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-800">
                 {actionOk}
@@ -732,7 +774,13 @@ export default function QrScanCard({
                           onClick={imprimirRis}
                           disabled={risBusy}
                         >
-                          {risBusy ? "Preparando RIS..." : "Emitir/Reimprimir RIS"}
+                          {risBusy
+                            ? "Preparando RIS..."
+                            : isRisRegistered(ingreso)
+                              ? "Remito registrado"
+                              : isRisGenerated(ingreso)
+                                ? "Ver RIS"
+                                : "Emitir RIS"}
                         </button>
                       )}
                     </div>

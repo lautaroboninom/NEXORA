@@ -15,10 +15,11 @@ VALID_STATUSES = {
     "pendiente_armado",
     "armado_pendiente_entrega",
     "entregado_pendiente_facturacion",
+    "entregado_no_facturable",
     "facturado",
     "cancelado",
 }
-VALID_TYPES = {"sale", "service_release", "rental"}
+VALID_TYPES = {"sale", "service_release", "rental", "demo"}
 REQUIRED_PORTAL_TABLES = {
     "companies",
     "sales_orders",

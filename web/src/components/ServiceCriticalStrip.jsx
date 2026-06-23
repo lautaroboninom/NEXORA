@@ -3,9 +3,9 @@ import {
   deviceIdentifierPartsOf,
   formatDateOnly,
   formatOS,
-  isMgInactiveBySale,
   modeloSerieVarianteOf,
   parseDateLocal,
+  propiedadEquipoLabelOf,
   resolveFechaCreacion,
   resolveFechaIngreso,
   tipoEquipoOf,
@@ -32,18 +32,6 @@ function Field({ label, children, title, className = "", truncateValue = true })
   );
 }
 
-function propiedadEquipoLabel(data) {
-  const ownershipFlag =
-    data?.es_cliente_mg_owner ??
-    data?.es_propietario_mg ??
-    data?.equipo?.es_cliente_mg_owner ??
-    data?.equipo?.es_propietario_mg;
-  if (ownershipFlag == null) return "-";
-  if (ownershipFlag) return "MG BIO";
-  const tieneMg = Boolean(String(data?.numero_interno || data?.equipo?.numero_interno || "").trim());
-  return tieneMg && isMgInactiveBySale(data) ? "Cliente (Ex MG)" : "Cliente";
-}
-
 function identifierLine(data) {
   const parts = deviceIdentifierPartsOf(data, "-");
   const items = [parts.primary];
@@ -63,7 +51,7 @@ export default function ServiceCriticalStrip({ data, isCotizacion = false }) {
   const tipoEquipo = tipoEquipoOf(data, "-");
   const marca = (data?.marca || data?.equipo?.marca || "-").toString().trim() || "-";
   const modelo = modeloSerieVarianteOf(data, "-");
-  const propiedad = propiedadEquipoLabel(data);
+  const propiedad = propiedadEquipoLabelOf(data);
   const identificador = identifierLine(data);
   if (data?.garantia_reparacion || data?.garantia) alerts.push("Garantía");
   if (days != null && days >= 16) alerts.push("16+ días");

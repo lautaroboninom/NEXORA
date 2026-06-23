@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 
 from ..pdf import render_quote_pdf
 from ..notifications import emit_notification, notify_presupuesto_aprobado
+from ..repair_ready_notifications import notify_repair_ready_for_remito
 from ..permissions import user_has_permission
 from ..rejected_budget import has_rejected_budget_charge_schema
 from ..serializers import (
@@ -1282,6 +1283,7 @@ class AprobarPresupuestoView(APIView):
         require_roles_strict(request, ["jefe", "admin"])
         qid = None
         was_approved = False
+        should_notify_repair_ready = False
         alert_items = []
         with transaction.atomic():
             current = _get_current_quote_row(ingreso_id, for_update=True)
@@ -1319,6 +1321,10 @@ class AprobarPresupuestoView(APIView):
                 [ingreso_id],
                 one=True,
             ) or {}
+            should_notify_repair_ready = (
+                not was_approved
+                and _quote_estado_str(ingreso_row.get("estado")).lower() == "reparado"
+            )
             bloqueada_por_cotizacion = _motivo_is_cotizacion_equipo(ingreso_row.get("motivo")) and not bool(
                 ingreso_row.get("permite_reparacion")
             )
@@ -1460,6 +1466,17 @@ class AprobarPresupuestoView(APIView):
         except Exception:
             _clear_transaction_rollback()
             pass
+
+        if should_notify_repair_ready:
+            try:
+                notify_repair_ready_for_remito(
+                    ingreso_id,
+                    request=request,
+                    actor_name=getattr(request.user, "nombre", ""),
+                )
+            except Exception:
+                _clear_transaction_rollback()
+                pass
 
         if alert_items:
             try:

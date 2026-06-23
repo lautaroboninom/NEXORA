@@ -6,9 +6,10 @@ import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFecha
 import StatusChip from "../components/StatusChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import useQueryState from "../hooks/useQueryState";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 
-// Ajust si tu backend usa otra ruta
+// Ajustar si el backend usa otra ruta.
 const ENDPOINT = "/api/presupuestos/pendientes/";
 
 export default function PendientesPresupuesto() {
@@ -86,7 +87,7 @@ export default function PendientesPresupuesto() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value={q}
@@ -111,7 +112,35 @@ export default function PendientesPresupuesto() {
       ) : filtered.length === 0 ? (
         <div className="text-sm text-gray-500">No hay pendientes que coincidan con el filtro.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((row) => (
+              <MobileDataCard
+                key={ingresoIdOf(row)}
+                as="button"
+                type="button"
+                onClick={() => go(row)}
+                className="hover:bg-gray-50"
+                aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                data-testid={`row-mobile-${ingresoIdOf(row)}`}
+              >
+                <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                  <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                  <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
+                  <MobileDataField label="Estado">
+                    <StatusChip value={row?.estado} title="Estado del equipo" />
+                  </MobileDataField>
+                  <MobileDataField label="N/S">
+                    <DeviceIdentifier row={row} />
+                  </MobileDataField>
+                  <MobileDataField label="Fecha ingreso" value={formatDateOnly(resolveFechaIngreso(row))} />
+                  <MobileDataField label="Fecha servicio" value={formatDateOnly(row?.fecha_servicio)} />
+                </div>
+              </MobileDataCard>
+            ))}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -155,6 +184,7 @@ export default function PendientesPresupuesto() {
               })}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}.
           </div>

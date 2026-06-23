@@ -1,6 +1,7 @@
 import secrets
 import hashlib
 import datetime as dt
+import logging
 
 from django.conf import settings
 from django.db import connection, transaction, IntegrityError
@@ -34,6 +35,8 @@ from ..permissions import (
 )
 from ..roles import ROLE_KEYS, ROLE_CHOICES
 
+logger = logging.getLogger(__name__)
+
 
 class UsuariosView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -50,8 +53,19 @@ class UsuariosView(APIView):
                   u.rol,
                   u.activo,
                   u.bejerman_seller_code,
+                  (ubc.user_id IS NOT NULL) AS bejerman_credentials_configured,
+                  COALESCE(ubc.is_valid, FALSE) AS bejerman_credentials_valid,
+                  CASE
+                    WHEN COALESCE(ubc.bejerman_username, '') = '' THEN ''
+                    WHEN LENGTH(ubc.bejerman_username) <= 2 THEN ubc.bejerman_username
+                    ELSE SUBSTRING(ubc.bejerman_username FROM 1 FOR 1)
+                         || REPEAT('*', GREATEST(LENGTH(ubc.bejerman_username) - 2, 1))
+                         || SUBSTRING(ubc.bejerman_username FROM LENGTH(ubc.bejerman_username) FOR 1)
+                  END AS bejerman_credentials_username,
+                  COALESCE(ubc.last_error, '') AS bejerman_credentials_last_error,
                   COALESCE(up.cnt, 0) AS permisos_personalizados
                 FROM users u
+                LEFT JOIN user_bejerman_credentials ubc ON ubc.user_id = u.id
                 LEFT JOIN (
                   SELECT user_id, COUNT(*) AS cnt
                   FROM user_permission_overrides
@@ -142,9 +156,24 @@ class UsuariosView(APIView):
                     try:
                         txt = _email_append_footer_text(txt)
                         html = _email_append_footer_html(html)
-                        send_mail(subj, txt, settings.DEFAULT_FROM_EMAIL, [user["email"]], html_message=html, fail_silently=True)
+                        sent = send_mail(
+                            subj,
+                            txt,
+                            settings.DEFAULT_FROM_EMAIL,
+                            [user["email"]],
+                            html_message=html,
+                            fail_silently=False,
+                        )
+                        if sent < 1:
+                            logger.warning(
+                                "No se pudo enviar el correo de invitación: el backend no aceptó el mensaje.",
+                                extra={"user_id": user["id"], "recipient": user["email"]},
+                            )
                     except Exception:
-                        pass
+                        logger.exception(
+                            "No se pudo enviar el correo de invitación.",
+                            extra={"user_id": user["id"], "recipient": user["email"]},
+                        )
             except Exception:
                 pass
 
@@ -200,14 +229,31 @@ class UsuarioResetPassView(APIView):
             <p><a href="{url}">{url}</a></p>
             <p>Si no fue usted, ignore este correo.</p>
         """
+        email_sent = False
         try:
             txt = _email_append_footer_text(txt)
             html = _email_append_footer_html(html)
-            send_mail(subj, txt, settings.DEFAULT_FROM_EMAIL, [user["email"]], html_message=html, fail_silently=True)
+            sent = send_mail(
+                subj,
+                txt,
+                settings.DEFAULT_FROM_EMAIL,
+                [user["email"]],
+                html_message=html,
+                fail_silently=False,
+            )
+            email_sent = sent > 0
+            if not email_sent:
+                logger.warning(
+                    "No se pudo enviar el correo de restablecimiento: el backend no aceptó el mensaje.",
+                    extra={"user_id": user["id"], "recipient": user["email"]},
+                )
         except Exception:
-            pass
+            logger.exception(
+                "No se pudo enviar el correo de restablecimiento.",
+                extra={"user_id": user["id"], "recipient": user["email"]},
+            )
 
-        return Response({"ok": True, "sent": True})
+        return Response({"ok": True, "sent": email_sent})
 
 
 class UsuarioRolePermView(APIView):

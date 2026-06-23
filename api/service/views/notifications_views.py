@@ -3,10 +3,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from service.notifications import (
+    delete_push_subscription,
     get_user_notification_settings,
+    get_push_config_for_user,
     list_notifications_for_user,
     mark_all_notifications_read,
     mark_notification_clicked,
+    save_push_subscription,
     save_user_notification_settings,
 )
 
@@ -57,6 +60,47 @@ class NotificacionesReadAllView(APIView):
         return Response({"ok": True, "updated": updated})
 
 
+class NotificacionesPushConfigView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        uid = _current_user_id(request)
+        if not uid:
+            return Response({"available": False, "publicKey": "", "active": False})
+        return Response(get_push_config_for_user(uid))
+
+
+class NotificacionesPushSubscriptionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        uid = _current_user_id(request)
+        if not uid:
+            return Response({"detail": "Usuario inválido"}, status=400)
+        _set_audit_user(request)
+        try:
+            data = save_push_subscription(
+                uid,
+                request.data or {},
+                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except RuntimeError as exc:
+            return Response({"detail": str(exc)}, status=503)
+        return Response({"ok": True, **data})
+
+    def delete(self, request):
+        uid = _current_user_id(request)
+        if not uid:
+            return Response({"detail": "Usuario inválido"}, status=400)
+        payload = request.data or {}
+        endpoint = payload.get("endpoint") if isinstance(payload, dict) else None
+        _set_audit_user(request)
+        deleted = delete_push_subscription(uid, endpoint=endpoint)
+        return Response({"ok": True, "deleted": deleted})
+
+
 class UsuarioNotificacionesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -90,5 +134,7 @@ __all__ = [
     "NotificacionesView",
     "NotificacionClickView",
     "NotificacionesReadAllView",
+    "NotificacionesPushConfigView",
+    "NotificacionesPushSubscriptionView",
     "UsuarioNotificacionesView",
 ]

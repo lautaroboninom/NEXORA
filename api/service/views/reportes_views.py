@@ -8,12 +8,61 @@ from .helpers import _set_audit_user, exec_void, q, require_roles
 from ..rejected_budget import get_rejected_quote_summary, get_stored_rejected_budget_fields, has_rejected_budget_charge_schema
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
+    enqueue_demo_ready_transfer_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
+    ingreso_is_demo_return,
     ingreso_is_internal_equipment,
 )
 from ..delivery_orders import ensure_service_release_order_for_ingreso
 from ..pdf import render_remito_salida_pdf, render_remito_derivacion_pdf
 from ..notifications import notify_ingreso_liberado
+from ..service_order_billing import notify_service_order_ready_to_bill
+
+
+def _parse_ingreso_ids(raw_ids: str, *, max_ids: int = 100) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for raw in (raw_ids or "").split(","):
+        value = (raw or "").strip()
+        if not value:
+            continue
+        try:
+            ingreso_id = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("Parámetro 'ids' inválido")
+        if ingreso_id <= 0:
+            raise ValueError("Parámetro 'ids' inválido")
+        if ingreso_id in seen:
+            continue
+        seen.add(ingreso_id)
+        ids.append(ingreso_id)
+    if not ids:
+        raise ValueError("Parámetro 'ids' requerido")
+    if len(ids) > max_ids:
+        raise ValueError(f"Demasiados ingresos (máximo {max_ids})")
+    return ids
+
+
+def _merge_pdf_documents(documents: list[bytes]) -> bytes:
+    pdfs = [bytes(doc or b"") for doc in documents if doc]
+    if not pdfs:
+        return b""
+    if len(pdfs) == 1:
+        return pdfs[0]
+
+    import fitz
+
+    merged = fitz.open()
+    try:
+        for pdf in pdfs:
+            src = fitz.open(stream=pdf, filetype="pdf")
+            try:
+                merged.insert_pdf(src)
+            finally:
+                src.close()
+        return merged.tobytes(garbage=4, deflate=True)
+    finally:
+        merged.close()
 
 
 class RemitoSalidaPdfView(APIView):
@@ -96,10 +145,13 @@ class RemitoSalidaPdfView(APIView):
         if estado_actual not in ("entregado", "baja", "vendido_pendiente_entrega", "vendido_entregado"):
             try:
                 with transaction.atomic():
+                    uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
                     if ingreso_is_internal_equipment(ingreso_id):
-                        enqueue_stock_transfer_for_ingreso(ingreso_id)
+                        enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=uid)
+                    elif ingreso_is_demo_return(ingreso_id):
+                        enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=uid)
                     else:
-                        enqueue_client_ready_transfer_for_ingreso(ingreso_id)
+                        enqueue_client_ready_transfer_for_ingreso(ingreso_id, actor_user_id=uid)
             except Exception:
                 pass
 
@@ -116,9 +168,52 @@ class RemitoSalidaPdfView(APIView):
         except Exception:
             pass
 
+        try:
+            if not es_venta_pendiente:
+                notify_service_order_ready_to_bill(
+                    ingreso_id,
+                    request=request,
+                    actor_name=getattr(getattr(request, "user", None), "nombre", ""),
+                )
+        except Exception:
+            pass
+
         pdf_bytes, fname = render_remito_salida_pdf(ingreso_id, printed_by=getattr(request.user, "nombre", ""))
         resp = HttpResponse(pdf_bytes, content_type="application/pdf")
         resp["Content-Disposition"] = f'inline; filename="{fname}"'
+        return resp
+
+
+class RemitosSalidaBulkPdfView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        require_roles(request, ["jefe", "admin", "recepcion", "jefe_veedor"])
+        try:
+            ingreso_ids = _parse_ingreso_ids(request.GET.get("ids") or "")
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        documents = []
+        single_view = RemitoSalidaPdfView()
+        for ingreso_id in ingreso_ids:
+            response = single_view.get(request, ingreso_id)
+            if getattr(response, "status_code", 500) != 200:
+                detail = ""
+                try:
+                    detail = response.data.get("detail") if isinstance(response.data, dict) else ""
+                except Exception:
+                    detail = ""
+                suffix = f": {detail}" if detail else ""
+                return Response(
+                    {"detail": f"No se pudo generar el remito de salida de OS {ingreso_id}{suffix}"},
+                    status=getattr(response, "status_code", 400),
+                )
+            documents.append(response.content)
+
+        merged_pdf = _merge_pdf_documents(documents)
+        resp = HttpResponse(merged_pdf, content_type="application/pdf")
+        resp["Content-Disposition"] = f'inline; filename="Remitos_salida_{len(ingreso_ids)}_OS.pdf"'
         return resp
 
 
@@ -143,4 +238,4 @@ class RemitoDerivacionPdfView(APIView):
         return resp
 
 
-__all__ = ['RemitoSalidaPdfView', 'RemitoDerivacionPdfView']
+__all__ = ['RemitoSalidaPdfView', 'RemitosSalidaBulkPdfView', 'RemitoDerivacionPdfView']

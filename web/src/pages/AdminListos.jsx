@@ -9,9 +9,10 @@ import { resolutionLabel } from "../lib/constants";
 import useQueryState from "../hooks/useQueryState";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 
-// Ajust si tu backend usa otra ruta
+// Ajustar si el backend usa otra ruta.
 const ENDPOINT = "/api/listos-para-retiro/";
 
 
@@ -137,7 +138,7 @@ export default function AdminListos() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value={q}
@@ -162,7 +163,69 @@ export default function AdminListos() {
       ) : filtered.length === 0 ? (
         <div className="text-sm text-gray-500">No hay equipos listos para retiro.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((row) => {
+              const rowId = ingresoIdOf(row);
+              const isSalePending = String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega";
+              return (
+                <MobileDataCard
+                  key={rowId}
+                  onClick={() => go(row)}
+                  onKeyDown={(e) => onRowKeyDown(e, row)}
+                  className="cursor-pointer hover:bg-gray-50"
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                  data-testid={`row-mobile-${rowId}`}
+                >
+                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                    <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
+                    <MobileDataField label="Resolución">
+                      <StatusChip value={resolutionLabel(row?.resolucion)} title="Resolución" />
+                    </MobileDataField>
+                    <MobileDataField label="Serie">
+                      <DeviceIdentifier row={row} />
+                    </MobileDataField>
+                    <MobileDataField label="Fecha listo" value={formatDateOnly(row?.fecha_listo ?? "-")} />
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    {release && (
+                      <button
+                        className="btn w-full justify-center"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          verOrdenSalida(row);
+                        }}
+                        disabled={remitoBusyId === rowId}
+                        aria-busy={remitoBusyId === rowId ? "true" : "false"}
+                        title="Ver o reimprimir orden de salida"
+                      >
+                        Ver OS
+                      </button>
+                    )}
+                    {canDeliver && (
+                      <button
+                        className="btn-secondary w-full justify-center"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          entregar(row);
+                        }}
+                        disabled={busyId === rowId}
+                        aria-busy={busyId === rowId ? "true" : "false"}
+                        title={isSalePending ? "Completar entrega de venta" : "Marcar como entregado"}
+                      >
+                        {isSalePending ? "Completar entrega" : "Entregado"}
+                      </button>
+                    )}
+                  </div>
+                </MobileDataCard>
+              );
+            })}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -217,7 +280,7 @@ export default function AdminListos() {
                         <button
                           className="btn-secondary"
                           onClick={(e) => {
-                            e.stopPropagation(); // no navegar al clickear
+                            e.stopPropagation();
                             entregar(row);
                           }}
                           disabled={busyId === ingresoIdOf(row)}
@@ -233,6 +296,7 @@ export default function AdminListos() {
               ))}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}.
           </div>

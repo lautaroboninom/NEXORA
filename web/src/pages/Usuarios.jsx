@@ -512,6 +512,7 @@ export default function Usuarios() {
               <th className="p-2">Nombre</th>
               <th className="p-2">Email</th>
               <th className="p-2">Rol</th>
+              <th className="p-2">Bejerman</th>
               <th className="p-2 w-[92px] whitespace-nowrap" title="Permisos personalizados">
                 Perm.
               </th>
@@ -541,6 +542,24 @@ export default function Usuarios() {
                       </Select>
                     ) : (
                       <span className="px-2 py-1 rounded bg-gray-100">{roleLabel(u.rol)}</span>
+                    )}
+                  </td>
+                  <td className="p-2">
+                    {u.bejerman_credentials_valid ? (
+                      <span className="inline-flex rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                        Validado {u.bejerman_credentials_username || ""}
+                      </span>
+                    ) : u.bejerman_credentials_configured ? (
+                      <span
+                        className="inline-flex rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700"
+                        title={u.bejerman_credentials_last_error || ""}
+                      >
+                        Revisar
+                      </span>
+                    ) : (
+                      <span className="inline-flex rounded bg-gray-100 px-2 py-1 text-xs text-gray-600">
+                        Pendiente
+                      </span>
                     )}
                   </td>
                   <td className="p-2 w-[92px]">
@@ -587,7 +606,7 @@ export default function Usuarios() {
             })}
             {!rows.length && (
               <tr>
-                <td colSpan="7" className="p-4 text-center text-gray-500">
+                <td colSpan="8" className="p-4 text-center text-gray-500">
                   Sin usuarios
                 </td>
               </tr>

@@ -1,12 +1,21 @@
 import Row from "../../../components/Row";
 import StatusChip from "../../../components/StatusChip";
 import { useMemo, useState, useEffect, useCallback } from "react";
-import { formatDateOnly as formatDateOnlyHelper, formatDateTime as formatDateTimeHelper, isSaleTicketState, resolveFechaIngreso } from "../../../lib/ui-helpers";
+import {
+  formatDateOnly as formatDateOnlyHelper,
+  formatDateTime as formatDateTimeHelper,
+  hasMgCode,
+  isMgOwned,
+  isSaleTicketState,
+  propiedadEquipoLabelOf,
+  resolveFechaIngreso,
+} from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
+import { isRisRegistered, risRemitoFrom } from "../../../lib/ris-print";
+import { getReleaseFlow } from "../../../lib/release-flow";
 import { Printer } from "lucide-react";
 import {
-  getBlob,
   postEntregarIngreso,
   patchIngreso,
   checkGarantiaFabrica,
@@ -51,9 +60,11 @@ export default function PrincipalTab(props) {
     setUbicacionId,
     canEditLocation,
     canEditAlquiler,
+    canManageReleaseResolution,
     canShowRisAction,
     risBusy,
     onEmitRis,
+    onOpenReleaseModal,
     // savingUb,
     // saveUbicacion,
     // ubDirty,
@@ -84,7 +95,13 @@ export default function PrincipalTab(props) {
   } = props;
 
   const canUncheckAlquilado = isJefe(user);
-  const hasRisRemito = Boolean((data?.ris?.remito_number || data?.remito_ingreso || "").toString().trim());
+  const isRegisteredRis = isRisRegistered(data);
+  const risRemito = risRemitoFrom(data);
+  const hasRisRemito = Boolean(risRemito);
+  const releaseFlow = useMemo(
+    () => getReleaseFlow(data, { canManageResolution: canManageReleaseResolution }),
+    [data, canManageReleaseResolution],
+  );
 
   // Derivados del catlogo (para filtros de equipo)
   const tiposDisponibles = useMemo(() => {
@@ -176,16 +193,15 @@ export default function PrincipalTab(props) {
   const mgVendido = Boolean(data?.mg_inactivo_venta)
     || String(data?.mg_estado || "").trim().toLowerCase() === "inactivo_venta"
     || isSaleTicketState(estadoLower);
-  const ownershipFlag = data?.es_cliente_mg_owner ?? data?.es_propietario_mg;
-  const ownershipKnown = ownershipFlag !== null && ownershipFlag !== undefined;
-  const isOwnedByMgCustomer = ownershipFlag === true;
   const numeroInternoActual = String((editBasics ? formBasics?.numero_interno : data?.numero_interno) || data?.numero_interno || "").trim();
-  const mgHistorico = Boolean(numeroInternoActual && mgVendido);
-  const propiedadLabel = ownershipKnown
-    ? (isOwnedByMgCustomer ? "MG BIO" : (mgHistorico ? "Cliente (Ex MG)" : "Cliente"))
-    : "-";
+  const equipoOwnership = { ...data, numero_interno: numeroInternoActual };
+  const isOwnedByMgCustomer = isMgOwned(equipoOwnership);
+  const mgHistorico = Boolean(hasMgCode(equipoOwnership) && mgVendido);
+  const propiedadLabel = propiedadEquipoLabelOf(equipoOwnership);
   const propiedadClass = isOwnedByMgCustomer
     ? "bg-emerald-100 text-emerald-800"
+    : mgHistorico
+      ? "bg-amber-100 text-amber-800"
     : "bg-gray-100 text-gray-700";
   const mgHistoricoHelp = "Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.";
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
@@ -287,23 +303,27 @@ export default function PrincipalTab(props) {
     if (!clienteRsInput) return null;
     const needle = normClient(clienteRsInput);
     if (!needle) return null;
-    return (clientes || []).find((c) => normClient(c?.razon_social) === needle) || null;
+    return (clientes || []).find((c) => normClient(c?.razon_social) === needle || normClient(c?.alias_interno) === needle) || null;
   }, [clienteRsInput, clientes, normClient]);
   const alquilerMatch = useMemo(() => {
     const val = normClient(alquilerAInput);
     if (!val) return null;
-    return (clientes || []).find((c) => normClient(c?.razon_social) === val) || null;
+    return (clientes || []).find((c) => normClient(c?.razon_social) === val || normClient(c?.alias_interno) === val) || null;
   }, [alquilerAInput, clientes, normClient]);
 
   const commitAlquilerText = useCallback(async (field, value) => {
     if (!alquilerEditable) return;
-    const next = String(value || "").trim();
+    let next = String(value || "").trim();
+    if (field === "alquiler_a") {
+      const selected = (clientes || []).find((c) => normClient(c?.razon_social) === normClient(next) || normClient(c?.alias_interno) === normClient(next));
+      next = selected?.razon_social || next;
+    }
     const current = String((field === "alquiler_a" ? data?.alquiler_a : data?.alquiler_remito) || "").trim();
     if (field === "alquiler_a") setAlquilerAInput(next);
     if (field === "alquiler_remito") setAlquilerRemitoInput(next);
     if (next === current) return;
     await patch({ [field]: next });
-  }, [alquilerEditable, data?.alquiler_a, data?.alquiler_remito, patch]);
+  }, [alquilerEditable, clientes, data?.alquiler_a, data?.alquiler_remito, normClient, patch]);
 
   const blurOnEnter = useCallback((event) => {
     if (event.key !== "Enter") return;
@@ -441,18 +461,22 @@ export default function PrincipalTab(props) {
                     value={clienteRsInput}
                     onChange={(e) => {
                       const v = e.target.value;
-                      setClienteRsInput(v);
-                      const selected = (clientes || []).find((c) => normClient(c?.razon_social) === normClient(v));
+                      const selected = (clientes || []).find((c) => normClient(c?.razon_social) === normClient(v) || normClient(c?.alias_interno) === normClient(v));
+                      const nextRs = selected?.razon_social || v;
+                      setClienteRsInput(nextRs);
                       const nextCod = selected?.cod_empresa || "";
                       setClienteCodInput(nextCod);
-                      syncClienteFromInputs(v, nextCod);
+                      syncClienteFromInputs(nextRs, nextCod);
                     }}
                     placeholder="Elija de la lista"
                   />
                   {clientesPerm && (
                     <datalist id="service_clientes_rs">
                       {(clientes || []).map((c) => (
-                        <option key={c.id} value={c.razon_social} />
+                        <option key={`rs-${c.id}`} value={c.razon_social} label={[c.alias_interno, c.cod_empresa].filter(Boolean).join(" - ")} />
+                      ))}
+                      {(clientes || []).filter((c) => c.alias_interno).map((c) => (
+                        <option key={`alias-${c.id}`} value={c.alias_interno} label={c.razon_social} />
                       ))}
                     </datalist>
                   )}
@@ -678,13 +702,15 @@ export default function PrincipalTab(props) {
                 />
               ) : (
                 <span className="inline-flex flex-col items-start gap-1">
-                  <span>{data.remito_ingreso || "-"}</span>
+                  <span>{risRemito || data.remito_ingreso || "-"}</span>
                   {data?.ris?.available && (
                     <span className="block text-xs text-gray-500">
-                      RIS: {data?.ris?.remito_number || data?.ris?.status || "pendiente"}
+                      {isRegisteredRis
+                        ? `Remito registrado: ${risRemito || data?.ris?.status || "pendiente"}`
+                        : `RIS: ${data?.ris?.remito_number || data?.ris?.status || "pendiente"}`}
                     </span>
                   )}
-                  {canShowRisAction && typeof onEmitRis === "function" && (
+                  {!isRegisteredRis && canShowRisAction && typeof onEmitRis === "function" && (
                     <button
                       type="button"
                       onClick={onEmitRis}
@@ -692,7 +718,7 @@ export default function PrincipalTab(props) {
                       className="mt-1 inline-flex items-center gap-1 rounded border border-sky-200 px-2 py-1 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                      {risBusy ? "Preparando RIS..." : hasRisRemito ? "Reimprimir RIS" : "Emitir RIS"}
+                      {risBusy ? "Preparando RIS..." : hasRisRemito ? "Ver RIS" : "Emitir RIS"}
                     </button>
                   )}
                 </span>
@@ -943,27 +969,39 @@ export default function PrincipalTab(props) {
         </div>
       </div>
 
-      {/* Botón de orden de salida (liberar) */}
-      {release && (Boolean(data?.resolucion) || data?.estado === "liberado") && (
-        <button
-          className="bg-neutral-800 text-white px-3 py-2 rounded mt-4"
-          onClick={async () => {
-            try {
-              const blob = await getBlob(`/api/ingresos/${id}/remito/`);
-              if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
-              const url = URL.createObjectURL(blob);
-              window.open(url, "_blank", "noopener");
-              setTimeout(() => URL.revokeObjectURL(url), 60_000);
-              await refreshIngreso();
-                                setMailEnviado(true);
-            } catch (e) {
-              setErr(e?.message || "No se pudo imprimir la orden de salida");
-            }
-          }}
-          type="button"
-        >
-          Imprimir orden de salida (liberar)
-        </button>
+      {/* Salida del equipo */}
+      {release && (
+        <div className="mt-4 rounded border border-slate-200 bg-slate-50 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="font-semibold">Salida del equipo</h2>
+              <div className="mt-1 text-sm text-slate-700">{releaseFlow.statusText}</div>
+            </div>
+            <button
+              className="btn inline-flex w-full items-center justify-center gap-2 sm:w-auto"
+              onClick={() => onOpenReleaseModal?.(data)}
+              type="button"
+              title={releaseFlow.statusText}
+            >
+              <Printer className="h-4 w-4" aria-hidden="true" />
+              {releaseFlow.primaryLabel}
+            </button>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase text-gray-500">Estado</div>
+              <div className="mt-1"><StatusChip value={data?.estado} /></div>
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold uppercase text-gray-500">Presupuesto</div>
+              <div className="mt-1"><StatusChip value={data?.presupuesto_estado} /></div>
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold uppercase text-gray-500">Resolución</div>
+              <div className="mt-1 text-gray-900">{data?.resolucion ? resolutionLabel(data.resolucion) : "Sin definir"}</div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Entrega + Alquiler */}
@@ -1189,7 +1227,10 @@ export default function PrincipalTab(props) {
             {clientesPerm && (
               <datalist id="alquiler_clientes_rs">
                 {(clientes || []).map((c) => (
-                  <option key={c.id} value={c.razon_social} />
+                  <option key={`alq-rs-${c.id}`} value={c.razon_social} label={[c.alias_interno, c.cod_empresa].filter(Boolean).join(" - ")} />
+                ))}
+                {(clientes || []).filter((c) => c.alias_interno).map((c) => (
+                  <option key={`alq-alias-${c.id}`} value={c.alias_interno} label={c.razon_social} />
                 ))}
               </datalist>
             )}

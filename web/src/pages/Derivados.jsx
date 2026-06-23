@@ -3,6 +3,7 @@ import api, { postDerivacionDevuelto } from "../lib/api";
 import { ingresoIdOf, formatOS, formatDateOnly } from "../lib/ui-helpers";
 import { catalogEquipmentLabel } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 export default function Derivados() {
   const [rows, setRows] = useState([]);
@@ -60,7 +61,36 @@ export default function Derivados() {
       ) : sorted.length === 0 ? (
         <div className="text-sm text-gray-500">No hay equipos derivados.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {sorted.map((row) => (
+              <MobileDataCard key={ingresoIdOf(row)} className="space-y-3">
+                <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                  <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                  <MobileDataField label="Proveedor" value={row?.proveedor ?? "-"} />
+                  <MobileDataField label="Equipo" value={catalogEquipmentLabel(row)} />
+                  <MobileDataField label="Serie">
+                    <DeviceIdentifier row={row} />
+                  </MobileDataField>
+                  <MobileDataField label="Fecha derivación" value={row?.fecha_deriv ? formatDateOnly(row.fecha_deriv) : "-"} />
+                </div>
+                <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-[1fr_auto]">
+                  <input
+                    type="date"
+                    value={fechaMap[ingresoIdOf(row)] || ""}
+                    onChange={(e) => setFechaMap((m) => ({ ...m, [ingresoIdOf(row)]: e.target.value }))}
+                    className="h-10 rounded border px-2"
+                    aria-label="Fecha devolución"
+                  />
+                  <button className="btn justify-center" onClick={() => onDevuelto(row)}>
+                    Devuelto
+                  </button>
+                </div>
+              </MobileDataCard>
+            ))}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -69,7 +99,7 @@ export default function Derivados() {
                 <th className="p-2">Proveedor</th>
                 <th className="p-2">Equipo</th>
                 <th className="p-2">Serie</th>
-                <th className="p-2">Fecha derivacin</th>
+                <th className="p-2">Fecha derivación</th>
                 <th className="p-2 text-right">Acciones</th>
               </tr>
             </thead>
@@ -89,7 +119,7 @@ export default function Derivados() {
                         value={fechaMap[ingresoIdOf(row)] || ''}
                         onChange={(e) => setFechaMap((m) => ({ ...m, [ingresoIdOf(row)]: e.target.value }))}
                         className="border rounded p-1"
-                        aria-label="Fecha devolucin"
+                        aria-label="Fecha devolución"
                       />
                       <button className="btn" onClick={() => onDevuelto(row)}>
                         Devuelto
@@ -100,6 +130,7 @@ export default function Derivados() {
               ))}
             </tbody>
           </table>
+          </DesktopTableWrap>
         </div>
       )}
     </div>

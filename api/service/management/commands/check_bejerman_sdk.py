@@ -36,7 +36,7 @@ class Command(BaseCommand):
             return
 
         try:
-            client = BejermanSDKClient(company_key=company.key)
+            client = BejermanSDKClient(company_key=company.key, allow_system_credentials=True)
             article_search = (options["article_search"] or "").strip()
             articles = build_articles_result(
                 client.list_articulos(build_article_filters(article_search), 1),

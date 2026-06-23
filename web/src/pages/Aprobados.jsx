@@ -1,8 +1,9 @@
 // web/src/pages/Aprobados.jsx
 import { useEffect, useMemo, useState } from "react";
-import api, { getBlob } from "../lib/api";
+import api from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
+import { isJefe } from "../lib/authz";
 import { useNavigate } from "react-router-dom";
 import {
   ingresoIdOf,
@@ -14,7 +15,9 @@ import {
 } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import ReleaseOrderModal from "../components/ReleaseOrderModal.jsx";
 import useQueryState from "../hooks/useQueryState";
+import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
 // Endpoint combinado del backend
 const ENDPOINT = "/api/ingresos/aprobados/";
@@ -24,6 +27,7 @@ export default function Aprobados() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
+  const [releaseRow, setReleaseRow] = useState(null);
   const navigate = useNavigate();
   const { user } = useAuth();
   const release = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
@@ -57,6 +61,7 @@ export default function Aprobados() {
         catalogEquipmentLabel(row),
         tipoEquipoOf(row),
         row?.estado,
+        row?.resolucion,
         row?.numero_serie,
         row?.numero_interno,
       ];
@@ -79,6 +84,13 @@ export default function Aprobados() {
 
   return (
     <div className="card">
+      <ReleaseOrderModal
+        open={Boolean(releaseRow)}
+        row={releaseRow}
+        canManageResolution={isJefe(user)}
+        onClose={() => setReleaseRow(null)}
+        onReleased={load}
+      />
       <div className="h1 mb-3">Aprobados</div>
 
       {err && (
@@ -87,7 +99,7 @@ export default function Aprobados() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value={q}
@@ -106,7 +118,56 @@ export default function Aprobados() {
       ) : filtered.length === 0 ? (
         <div className="text-sm text-gray-500">No hay aprobados que coincidan con el filtro.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <div>
+          <MobileDataList>
+            {filtered.map((row) => (
+              <MobileDataCard
+                key={ingresoIdOf(row)}
+                onClick={() => go(row)}
+                onKeyDown={(e) => onRowKeyDown(e, row)}
+                className="cursor-pointer hover:bg-gray-50"
+                role="link"
+                tabIndex={0}
+                aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
+                data-testid={`row-mobile-${ingresoIdOf(row)}`}
+              >
+                <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                  <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                  <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
+                  <MobileDataField label="Estado">
+                    <StatusChip value={row?.estado} />
+                  </MobileDataField>
+                  <MobileDataField label="Serie">
+                    <DeviceIdentifier row={row} />
+                  </MobileDataField>
+                  <MobileDataField label="Fecha aprob.">
+                    {formatDateOnly(
+                      row?.fecha_aprobado ||
+                        row?.presupuesto_fecha_aprobacion ||
+                        row?.fecha_reparado ||
+                        row?.fecha_reparacion
+                    )}
+                  </MobileDataField>
+                </div>
+                {release && (
+                  <button
+                    className="btn mt-3 inline-flex w-full items-center justify-center gap-2"
+                    type="button"
+                    title="Revisar salida"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setErr("");
+                      setReleaseRow(row);
+                    }}
+                  >
+                    Revisar salida
+                  </button>
+                )}
+              </MobileDataCard>
+            ))}
+          </MobileDataList>
+          <DesktopTableWrap>
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
@@ -145,28 +206,18 @@ export default function Aprobados() {
                     row?.fecha_reparacion
                   )}</td>
                   <td className="p-2">
-                    {release && row?.estado === "reparado" && (
+                    {release && (
                       <button
                         className="btn"
                         type="button"
-                        title="Imprimir remito"
-                        onClick={async (e) => {
+                        title="Revisar salida"
+                        onClick={(e) => {
                           e.stopPropagation();
-                          try {
-                            const id = ingresoIdOf(row);
-                            if (!id) return;
-                            const blob = await getBlob(`/api/ingresos/${id}/remito/`);
-                            if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
-                            const url = URL.createObjectURL(blob);
-                            window.open(url, "_blank", "noopener");
-                            setTimeout(() => URL.revokeObjectURL(url), 60_000);
-                            await load();
-                          } catch (e) {
-                            setErr(e?.message || "No se pudo imprimir el remito");
-                          }
+                          setErr("");
+                          setReleaseRow(row);
                         }}
                       >
-                        Imprimir remito
+                        Revisar salida
                       </button>
                     )}
                   </td>
@@ -174,6 +225,7 @@ export default function Aprobados() {
               ))}
             </tbody>
           </table>
+          </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
             Mostrando {filtered.length} de {rows.length}.
           </div>

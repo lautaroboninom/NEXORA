@@ -31,6 +31,7 @@ const STATUS_LABELS = {
   pendiente_armado: "Pendiente de armado",
   armado_pendiente_entrega: "Listo para entrega",
   entregado_pendiente_facturacion: "Pendiente de facturación",
+  entregado_no_facturable: "Entregado",
   facturado: "Facturado",
   cancelado: "Cancelado",
 };
@@ -376,7 +377,7 @@ function DeliveryOrdersSection({
   );
 }
 
-function NewDeliveryOrderModal({ open, onClose, onCreated }) {
+function NewDeliveryOrderModal({ open, onClose, onCreated, canEditItemDiscounts = false }) {
   useEffect(() => {
     if (!open) return undefined;
     const onKeyDown = (event) => {
@@ -393,7 +394,6 @@ function NewDeliveryOrderModal({ open, onClose, onCreated }) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       role="dialog"
       aria-modal="true"
-      onClick={onClose}
     >
       <div
         className="max-h-[90vh] w-full max-w-6xl overflow-hidden rounded bg-white shadow-xl"
@@ -413,6 +413,7 @@ function NewDeliveryOrderModal({ open, onClose, onCreated }) {
           <DeliveryOrderCreateForm
             compact
             submitLabel="Crear entrega"
+            canEditItemDiscounts={canEditItemDiscounts}
             onCancel={onClose}
             onCreated={(created) => {
               onCreated(created);
@@ -466,9 +467,9 @@ function JefeDashboard(props) {
         <DeliveryOrdersSection
           summary={summary}
           loading={loading}
-          title="Pedidos activos"
-          subtitle="Órdenes de entrega abiertas."
-          emptyText="No hay pedidos activos."
+          title="Pedidos sin entregar"
+          subtitle="Pendientes de armado o entrega."
+          emptyText="No hay pedidos sin entregar."
         />
         <QuickAccessSection />
         <UpdatedAt value={summary?.generated_at} />
@@ -528,22 +529,30 @@ function RecepcionDashboard({ summary, loading, onReload }) {
       <KpiGrid items={summary?.kpis} loading={loading && !summary} />
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
         <main className="space-y-5">
-          <QrScanCard
-            receptionMode
-            title="Lector de recepción"
-            subtitle="Escanee equipo u OS para ingreso RIS, etiqueta o egreso RSS."
-            onDelivered={onReload}
-          />
           <DeliveryOrdersSection
             summary={summary}
             loading={loading}
-            title="Pedidos y remitos"
-            subtitle="Pedidos activos, entregas y remitos para ubicar."
-            emptyText="No hay pedidos activos."
+            title="Órdenes de entrega"
+            subtitle="Vista reducida de pedidos pendientes, listos y con remito."
+            emptyText="No hay órdenes de entrega activas."
+            actionLabel="Abrir vista completa"
           />
         </main>
         <aside className="space-y-5">
-          <QuickAccessSection showScanner={false} />
+          <section className="rounded border bg-white p-4">
+            <h2 className="mb-3 text-lg font-semibold text-gray-900">Accesos directos</h2>
+            <div className="grid gap-2">
+              <Link to="/administracion/ordenes-entrega" className="rounded border px-3 py-2 text-sm hover:bg-gray-50">
+                Órdenes de entrega
+              </Link>
+            </div>
+          </section>
+          <QrScanCard
+            receptionMode
+            title="Escáner"
+            subtitle="Ingreso RIS, etiquetas y egresos RSS."
+            onDelivered={onReload}
+          />
           <UpdatedAt value={summary?.generated_at} />
         </aside>
       </div>
@@ -641,6 +650,7 @@ export default function WorkDashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const canCreateOrder = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_CREATE);
+  const canEditItemDiscounts = String(user?.rol || "").trim().toLowerCase() === "ventas";
 
   async function load() {
     try {
@@ -739,8 +749,8 @@ export default function WorkDashboard() {
       showPeriod: true,
     },
     recepcion: {
-      title: "Recepción",
-      subtitle: "Ingresos, pedidos y remitos activos.",
+      title: "Órdenes de entrega",
+      subtitle: "Resumen reducido para preparar pedidos, entregar y ubicar remitos.",
       showPeriod: false,
     },
     admin: {
@@ -790,6 +800,7 @@ export default function WorkDashboard() {
         open={orderModalOpen}
         onClose={() => setOrderModalOpen(false)}
         onCreated={handleOrderCreated}
+        canEditItemDiscounts={canEditItemDiscounts}
       />
     </div>
   );

@@ -49,6 +49,10 @@ services:
       done &&
       python manage.py apply_ticket_sale_states_schema &&
       python manage.py apply_delivery_orders_schema &&
+      python manage.py apply_bejerman_purchase_entries_schema &&
+      python manage.py apply_bejerman_user_credentials_schema &&
+      python manage.py apply_customer_bejerman_schema &&
+      python manage.py apply_customer_alias_schema --seed-examples &&
       python manage.py apply_notifications_schema &&
       python manage.py apply_assignment_requests_schema &&
       python manage.py seed_dev_minimo &&
@@ -61,6 +65,7 @@ services:
       - "5175:5173"
     environment:
       - VITE_API_URL=${VITE_API_URL:-http://localhost:18100}
+      - VITE_SW=${VITE_SW:-0}
     command: sh -c "npm install && npm run dev -- --host"
     depends_on:
       api:

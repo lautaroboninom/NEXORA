@@ -221,6 +221,21 @@ CREATE TABLE IF NOT EXISTS users (
   creado_en        TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS user_bejerman_credentials (
+  user_id             INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  bejerman_username   TEXT NOT NULL,
+  encrypted_password  TEXT NOT NULL,
+  is_valid            BOOLEAN NOT NULL DEFAULT FALSE,
+  validated_at        TIMESTAMPTZ NULL,
+  last_error          TEXT NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_user_bejerman_credentials_username
+    CHECK (NULLIF(TRIM(bejerman_username), '') IS NOT NULL),
+  CONSTRAINT chk_user_bejerman_credentials_password
+    CHECK (NULLIF(TRIM(encrypted_password), '') IS NOT NULL)
+);
+
 CREATE TABLE IF NOT EXISTS user_permission_overrides (
   id               INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -282,13 +297,41 @@ ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS customers (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   cod_empresa   TEXT,
+  alias_interno TEXT,
   razon_social  TEXT NOT NULL,
   cuit          TEXT,
   contacto      TEXT,
   telefono      TEXT,
   telefono_2    TEXT,
-  email         TEXT
+  email         TEXT,
+  bejerman_nombre_fantasia TEXT,
+  bejerman_tipo_documento  TEXT,
+  bejerman_domicilio       TEXT,
+  bejerman_localidad       TEXT,
+  bejerman_provincia       TEXT,
+  bejerman_codigo_postal   TEXT,
+  bejerman_pais            TEXT,
+  bejerman_condicion_iva   TEXT,
+  bejerman_numero_iibb     TEXT,
+  bejerman_condicion_venta TEXT,
+  bejerman_vendedor        TEXT,
+  bejerman_lista_precio    TEXT,
+  bejerman_contacto        TEXT,
+  bejerman_telefono        TEXT,
+  bejerman_telefono_2      TEXT,
+  bejerman_email           TEXT,
+  bejerman_synced_at       TIMESTAMPTZ,
+  bejerman_raw             JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+
+CREATE INDEX IF NOT EXISTS ix_customers_bejerman_condicion_iva
+  ON customers(bejerman_condicion_iva);
+CREATE INDEX IF NOT EXISTS ix_customers_bejerman_synced_at
+  ON customers(bejerman_synced_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_customers_alias_interno_ci
+  ON customers (LOWER(BTRIM(alias_interno)))
+  WHERE alias_interno IS NOT NULL
+    AND BTRIM(alias_interno) <> '';
 
 -- Seed minimo para flujos de equipos particulares
 INSERT INTO customers(cod_empresa, razon_social)
@@ -847,11 +890,13 @@ CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
   numero_serie      TEXT NOT NULL DEFAULT '',
   source_deposit    TEXT NOT NULL DEFAULT 'STR',
   target_deposit    TEXT NOT NULL DEFAULT 'STL',
+  company_key       TEXT NOT NULL DEFAULT 'SEPID',
   status            TEXT NOT NULL DEFAULT 'pending',
   attempts          INTEGER NOT NULL DEFAULT 0,
   next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_error        TEXT NULL,
   article_code      TEXT NULL,
+  actor_user_id     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
   response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -865,6 +910,7 @@ CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
     AND source_deposit <> target_deposit
   )
 );
+ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS company_key TEXT NOT NULL DEFAULT 'SEPID';
 
 CREATE TABLE IF NOT EXISTS bejerman_article_mappings (
   id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -888,6 +934,8 @@ CREATE TABLE IF NOT EXISTS bejerman_ingreso_remitos (
   ingreso_id             INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
   status                 TEXT NOT NULL DEFAULT 'pending',
   pdf_status             TEXT NOT NULL DEFAULT 'pending',
+  document_mode          TEXT NOT NULL DEFAULT 'emit',
+  manual_remito_number   TEXT NULL,
   attempts               INTEGER NOT NULL DEFAULT 0,
   last_error             TEXT NULL,
   request_payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -910,16 +958,37 @@ CREATE TABLE IF NOT EXISTS bejerman_ingreso_remitos (
   CONSTRAINT chk_bejerman_ingreso_remitos_status
     CHECK (status IN ('pending','running','generated','failed')),
   CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
-    CHECK (pdf_status IN ('pending','ready','failed')),
+    CHECK (pdf_status IN ('pending','ready','failed','not_applicable')),
+  CONSTRAINT chk_bejerman_ingreso_remitos_document_mode
+    CHECK (document_mode IN ('emit','register')),
   CONSTRAINT chk_bejerman_ingreso_remitos_attempts CHECK (attempts >= 0)
 );
 
 ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS company_key TEXT;
 ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS company_label TEXT;
 ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS bejerman_company TEXT;
+ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS document_mode TEXT NOT NULL DEFAULT 'emit';
+ALTER TABLE bejerman_ingreso_remitos ADD COLUMN IF NOT EXISTS manual_remito_number TEXT;
+UPDATE bejerman_ingreso_remitos
+   SET document_mode = COALESCE(NULLIF(TRIM(document_mode), ''), 'emit')
+ WHERE document_mode IS NULL OR TRIM(document_mode) = '';
+ALTER TABLE bejerman_ingreso_remitos ALTER COLUMN document_mode SET DEFAULT 'emit';
+ALTER TABLE bejerman_ingreso_remitos ALTER COLUMN document_mode SET NOT NULL;
+
+ALTER TABLE bejerman_ingreso_remitos
+  DROP CONSTRAINT IF EXISTS chk_bejerman_ingreso_remitos_pdf_status;
+ALTER TABLE bejerman_ingreso_remitos
+  ADD CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
+  CHECK (pdf_status IN ('pending','ready','failed','not_applicable'));
+ALTER TABLE bejerman_ingreso_remitos
+  DROP CONSTRAINT IF EXISTS chk_bejerman_ingreso_remitos_document_mode;
+ALTER TABLE bejerman_ingreso_remitos
+  ADD CONSTRAINT chk_bejerman_ingreso_remitos_document_mode
+  CHECK (document_mode IN ('emit','register'));
 
 -- NEXORA: órdenes de entrega, remitos Bejerman y cobranzas.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code_confirmed_at TIMESTAMPTZ NULL;
 
 CREATE TABLE IF NOT EXISTS delivery_orders (
   id                              TEXT PRIMARY KEY,
@@ -928,6 +997,7 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
   bejerman_customer_code          TEXT NULL,
   customer_name                   TEXT NOT NULL DEFAULT '',
   delivery_type                   TEXT NOT NULL DEFAULT 'sale',
+  company_key                     TEXT NULL,
   source_system                   TEXT NOT NULL DEFAULT 'nexora',
   source_external_id              TEXT NULL,
   source_reference                TEXT NULL,
@@ -948,6 +1018,7 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
   commercial_terms                TEXT NULL,
   commercial_price                TEXT NULL,
   commercial_exchange_rate        TEXT NULL,
+  price_currency                  VARCHAR(3) NOT NULL DEFAULT 'ARS',
   commercial_condition            TEXT NULL,
   commercial_deadline             TEXT NULL,
   status                          TEXT NOT NULL DEFAULT 'pendiente_armado',
@@ -975,20 +1046,55 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
   delivered_at                    TIMESTAMPTZ NULL,
   invoiced_at                     TIMESTAMPTZ NULL,
   cancelled_at                    TIMESTAMPTZ NULL,
-  CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental')),
-  CONSTRAINT chk_delivery_orders_status CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','facturado','cancelado')),
+  CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental','demo')),
+  CONSTRAINT chk_delivery_orders_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
+  CONSTRAINT chk_delivery_orders_price_currency CHECK (price_currency IN ('ARS','USD')),
+  CONSTRAINT chk_delivery_orders_status CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado')),
   CONSTRAINT chk_delivery_orders_priority CHECK (priority IN ('normal','urgente')),
   CONSTRAINT chk_delivery_orders_remito_location CHECK (remito_location IS NULL OR remito_location IN ('recepcion','oficina'))
 );
 
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS company_key TEXT NULL;
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS';
+UPDATE delivery_orders
+   SET price_currency = 'ARS'
+ WHERE price_currency IS NULL OR TRIM(price_currency) = '';
+UPDATE delivery_orders SET price_currency = UPPER(TRIM(price_currency));
+UPDATE delivery_orders SET price_currency = 'ARS' WHERE price_currency NOT IN ('ARS','USD');
+ALTER TABLE delivery_orders ALTER COLUMN price_currency SET DEFAULT 'ARS';
+ALTER TABLE delivery_orders ALTER COLUMN price_currency SET NOT NULL;
+ALTER TABLE delivery_orders DROP CONSTRAINT IF EXISTS chk_delivery_orders_price_currency;
+ALTER TABLE delivery_orders
+  ADD CONSTRAINT chk_delivery_orders_price_currency
+  CHECK (price_currency IN ('ARS','USD'));
+
+ALTER TABLE delivery_orders DROP CONSTRAINT IF EXISTS chk_delivery_orders_type;
+ALTER TABLE delivery_orders
+  ADD CONSTRAINT chk_delivery_orders_type
+  CHECK (delivery_type IN ('sale','service_release','rental','demo'));
+
+ALTER TABLE delivery_orders DROP CONSTRAINT IF EXISTS chk_delivery_orders_company_key;
+ALTER TABLE delivery_orders
+  ADD CONSTRAINT chk_delivery_orders_company_key
+  CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO'));
+
+ALTER TABLE delivery_orders DROP CONSTRAINT IF EXISTS chk_delivery_orders_status;
+ALTER TABLE delivery_orders
+  ADD CONSTRAINT chk_delivery_orders_status
+  CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado'));
+
 CREATE TABLE IF NOT EXISTS delivery_order_items (
   id                        TEXT PRIMARY KEY,
   order_id                  TEXT NOT NULL REFERENCES delivery_orders(id) ON DELETE CASCADE,
+  ingreso_id                INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL,
+  device_id                 INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL,
   article_code              TEXT NULL,
   article_name              TEXT NULL,
   description               TEXT NOT NULL DEFAULT '',
   quantity                  NUMERIC NOT NULL DEFAULT 1,
   unit_price                NUMERIC NULL,
+  price_currency            VARCHAR(3) NOT NULL DEFAULT 'ARS',
+  discount_percent          NUMERIC(6,2) NOT NULL DEFAULT 0,
   source_text               TEXT NULL,
   partida                   TEXT NULL,
   partida_expiration_date   DATE NULL,
@@ -998,8 +1104,35 @@ CREATE TABLE IF NOT EXISTS delivery_order_items (
   sort_order                INTEGER NOT NULL DEFAULT 0,
   created_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT chk_delivery_order_items_quantity CHECK (quantity > 0)
+  CONSTRAINT chk_delivery_order_items_quantity CHECK (quantity > 0),
+  CONSTRAINT chk_delivery_order_items_price_currency CHECK (price_currency IN ('ARS','USD')),
+  CONSTRAINT chk_delivery_order_items_discount_percent CHECK (discount_percent >= 0 AND discount_percent <= 100)
 );
+
+ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS ingreso_id INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL;
+ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS device_id INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL;
+ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS';
+UPDATE delivery_order_items doi
+   SET price_currency = COALESCE(NULLIF(UPPER(TRIM(o.price_currency)), ''), 'ARS')
+  FROM delivery_orders o
+ WHERE o.id = doi.order_id
+   AND (doi.price_currency IS NULL OR TRIM(doi.price_currency) = '');
+UPDATE delivery_order_items SET price_currency = UPPER(TRIM(price_currency));
+UPDATE delivery_order_items SET price_currency = 'ARS' WHERE price_currency NOT IN ('ARS','USD');
+ALTER TABLE delivery_order_items ALTER COLUMN price_currency SET DEFAULT 'ARS';
+ALTER TABLE delivery_order_items ALTER COLUMN price_currency SET NOT NULL;
+ALTER TABLE delivery_order_items DROP CONSTRAINT IF EXISTS chk_delivery_order_items_price_currency;
+ALTER TABLE delivery_order_items
+  ADD CONSTRAINT chk_delivery_order_items_price_currency
+  CHECK (price_currency IN ('ARS','USD'));
+ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(6,2) NOT NULL DEFAULT 0;
+UPDATE delivery_order_items SET discount_percent = 0 WHERE discount_percent IS NULL;
+ALTER TABLE delivery_order_items ALTER COLUMN discount_percent SET DEFAULT 0;
+ALTER TABLE delivery_order_items ALTER COLUMN discount_percent SET NOT NULL;
+ALTER TABLE delivery_order_items DROP CONSTRAINT IF EXISTS chk_delivery_order_items_discount_percent;
+ALTER TABLE delivery_order_items
+  ADD CONSTRAINT chk_delivery_order_items_discount_percent
+  CHECK (discount_percent >= 0 AND discount_percent <= 100);
 
 CREATE TABLE IF NOT EXISTS delivery_order_item_partidas (
   id                        TEXT PRIMARY KEY,
@@ -1018,6 +1151,7 @@ CREATE TABLE IF NOT EXISTS delivery_order_item_partidas (
 
 CREATE TABLE IF NOT EXISTS bejerman_remito_groups (
   id                         TEXT PRIMARY KEY,
+  company_key                TEXT NULL,
   comprobante_tipo           TEXT NOT NULL,
   comprobante_letra          TEXT NOT NULL DEFAULT 'R',
   comprobante_pto_venta      TEXT NULL,
@@ -1036,8 +1170,40 @@ CREATE TABLE IF NOT EXISTS bejerman_remito_groups (
   source_created_by_user_id  TEXT NULL,
   created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   generated_at               TIMESTAMPTZ NULL,
+  CONSTRAINT chk_bejerman_remito_groups_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
   CONSTRAINT chk_bejerman_remito_groups_status CHECK (status IN ('pending','generated','failed'))
 );
+
+ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS company_key TEXT NULL;
+ALTER TABLE bejerman_remito_groups DROP CONSTRAINT IF EXISTS chk_bejerman_remito_groups_company_key;
+ALTER TABLE bejerman_remito_groups
+  ADD CONSTRAINT chk_bejerman_remito_groups_company_key
+  CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO'));
+
+UPDATE delivery_orders AS o
+   SET status = 'entregado_no_facturable'
+  FROM bejerman_remito_groups AS g
+ WHERE o.bejerman_remito_group_id = g.id
+   AND o.status = 'entregado_pendiente_facturacion'
+   AND UPPER(COALESCE(
+         NULLIF(g.comprobante_tipo, ''),
+         NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
+         NULLIF(g.response_summary ->> 'comprobanteTipo', '')
+       )) IS DISTINCT FROM 'RT';
+
+UPDATE bejerman_remito_groups AS g
+   SET response_summary = jsonb_set(
+         COALESCE(g.response_summary, '{}'::jsonb),
+         '{billingRequired}',
+         'false'::jsonb,
+         true
+       )
+ WHERE UPPER(COALESCE(
+         NULLIF(g.comprobante_tipo, ''),
+         NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
+         NULLIF(g.response_summary ->> 'comprobanteTipo', '')
+       )) IS DISTINCT FROM 'RT'
+   AND COALESCE(g.response_summary ->> 'billingRequired', '') IS DISTINCT FROM 'false';
 
 CREATE TABLE IF NOT EXISTS delivery_order_events (
   id                    BIGSERIAL PRIMARY KEY,
@@ -1073,16 +1239,23 @@ END $$;
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_status_priority ON delivery_orders(status, priority, order_date DESC);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_customer ON delivery_orders(customer_id, status, order_date DESC);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_bejerman_customer_code ON delivery_orders(bejerman_customer_code);
+CREATE INDEX IF NOT EXISTS ix_delivery_orders_company_key ON delivery_orders(company_key, status, order_date DESC);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_delivery_type ON delivery_orders(delivery_type, status, order_date DESC);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_remito_group ON delivery_orders(bejerman_remito_group_id);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_ingreso ON delivery_orders(ingreso_id) WHERE ingreso_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_delivery_order_items_order ON delivery_order_items(order_id, sort_order);
 CREATE INDEX IF NOT EXISTS ix_delivery_order_items_article ON delivery_order_items(article_code);
+CREATE INDEX IF NOT EXISTS ix_delivery_order_items_ingreso ON delivery_order_items(ingreso_id) WHERE ingreso_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_delivery_order_items_device ON delivery_order_items(device_id) WHERE device_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_item ON delivery_order_item_partidas(order_item_id, sort_order, created_at);
 CREATE INDEX IF NOT EXISTS ix_delivery_order_events_order ON delivery_order_events(order_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_customer ON bejerman_remito_groups(customer_code, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_users_bejerman_seller_code ON users(bejerman_seller_code);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_bejerman_seller_code_ci
+  ON users ((UPPER(TRIM(bejerman_seller_code))))
+  WHERE NULLIF(TRIM(bejerman_seller_code), '') IS NOT NULL;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_orders_set_updated_at') THEN
@@ -1098,6 +1271,128 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_item_partidas_set_updated_at') THEN
     CREATE TRIGGER trg_delivery_order_item_partidas_set_updated_at
     BEFORE UPDATE ON delivery_order_item_partidas
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS bejerman_purchase_entries (
+  id                         TEXT PRIMARY KEY,
+  company_key                TEXT NOT NULL DEFAULT 'SEPID',
+  status                     TEXT NOT NULL DEFAULT 'draft',
+  comprobante_tipo           TEXT NOT NULL DEFAULT 'RT',
+  comprobante_letra          TEXT NOT NULL DEFAULT 'R',
+  comprobante_pto_venta      TEXT NOT NULL DEFAULT '',
+  comprobante_numero         TEXT NOT NULL DEFAULT '',
+  remito_number              TEXT NULL,
+  supplier_code              TEXT NOT NULL DEFAULT '',
+  supplier_code_raw          TEXT NOT NULL DEFAULT '',
+  supplier_name              TEXT NOT NULL DEFAULT '',
+  supplier_tax_id            TEXT NOT NULL DEFAULT '',
+  supplier_snapshot          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  payment_term_code          TEXT NOT NULL DEFAULT '',
+  issue_date                 DATE NOT NULL DEFAULT CURRENT_DATE,
+  accounting_date            DATE NULL,
+  ddjj_date                  DATE NULL,
+  operation_code             TEXT NOT NULL DEFAULT 'MC',
+  deposit_code               TEXT NOT NULL DEFAULT 'VAL',
+  notes                      TEXT NOT NULL DEFAULT '',
+  total_quantity             NUMERIC(14,4) NOT NULL DEFAULT 0,
+  total_value                NUMERIC(14,2) NOT NULL DEFAULT 0,
+  request_payload            JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  last_error                 TEXT NULL,
+  created_by_user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  updated_by_user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  generated_by_user_id       INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  generated_at               TIMESTAMPTZ NULL,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_purchase_entries_status CHECK (status IN ('draft','validated','running','generated','failed','cancelled')),
+  CONSTRAINT chk_bejerman_purchase_entries_company CHECK (company_key = 'SEPID'),
+  CONSTRAINT chk_bejerman_purchase_entries_type CHECK (comprobante_tipo = 'RT'),
+  CONSTRAINT chk_bejerman_purchase_entries_operation CHECK (operation_code = 'MC'),
+  CONSTRAINT chk_bejerman_purchase_entries_totals CHECK (total_quantity >= 0 AND total_value >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS bejerman_purchase_entry_lines (
+  id                         TEXT PRIMARY KEY,
+  entry_id                   TEXT NOT NULL REFERENCES bejerman_purchase_entries(id) ON DELETE CASCADE,
+  article_code               TEXT NOT NULL,
+  article_description        TEXT NOT NULL DEFAULT '',
+  default_conversion_factor  NUMERIC(14,4) NOT NULL DEFAULT 1,
+  default_unit_value         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  deposit_code               TEXT NOT NULL DEFAULT 'VAL',
+  sort_order                 INTEGER NOT NULL DEFAULT 0,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_purchase_lines_factor CHECK (default_conversion_factor > 0),
+  CONSTRAINT chk_bejerman_purchase_lines_value CHECK (default_unit_value >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS bejerman_purchase_entry_scans (
+  id                         TEXT PRIMARY KEY,
+  entry_id                   TEXT NOT NULL REFERENCES bejerman_purchase_entries(id) ON DELETE CASCADE,
+  line_id                    TEXT NOT NULL REFERENCES bejerman_purchase_entry_lines(id) ON DELETE CASCADE,
+  barcode                    TEXT NOT NULL DEFAULT '',
+  barcode_norm               TEXT NOT NULL DEFAULT '',
+  article_code               TEXT NOT NULL DEFAULT '',
+  article_description        TEXT NOT NULL DEFAULT '',
+  conversion_factor          NUMERIC(14,4) NOT NULL DEFAULT 1,
+  unit_value                 NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_value                NUMERIC(14,2) NOT NULL DEFAULT 0,
+  is_manual_quantity         BOOLEAN NOT NULL DEFAULT FALSE,
+  note                       TEXT NOT NULL DEFAULT '',
+  sort_order                 INTEGER NOT NULL DEFAULT 0,
+  scanned_by_user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_purchase_scans_factor CHECK (conversion_factor > 0),
+  CONSTRAINT chk_bejerman_purchase_scans_values CHECK (unit_value >= 0 AND total_value >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS bejerman_purchase_entry_events (
+  id                         BIGSERIAL PRIMARY KEY,
+  entry_id                   TEXT NOT NULL REFERENCES bejerman_purchase_entries(id) ON DELETE CASCADE,
+  actor_user_id              INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  event_type                 TEXT NOT NULL,
+  note                       TEXT NOT NULL DEFAULT '',
+  metadata                   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_entries_status
+  ON bejerman_purchase_entries(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_entries_document
+  ON bejerman_purchase_entries(company_key, supplier_code, comprobante_tipo, comprobante_letra, comprobante_pto_venta, comprobante_numero);
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_lines_entry
+  ON bejerman_purchase_entry_lines(entry_id, sort_order);
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_scans_entry
+  ON bejerman_purchase_entry_scans(entry_id, sort_order);
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_scans_line
+  ON bejerman_purchase_entry_scans(line_id, sort_order);
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_events_entry
+  ON bejerman_purchase_entry_events(entry_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_purchase_entry_scans_barcode
+  ON bejerman_purchase_entry_scans(entry_id, barcode_norm)
+  WHERE barcode_norm <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_purchase_entries_document_active
+  ON bejerman_purchase_entries(company_key, supplier_code, comprobante_tipo, comprobante_letra, comprobante_pto_venta, comprobante_numero)
+  WHERE status IN ('running','generated') AND supplier_code <> '' AND comprobante_numero <> '';
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_purchase_entries_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_purchase_entries_set_updated_at
+    BEFORE UPDATE ON bejerman_purchase_entries
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_purchase_lines_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_purchase_lines_set_updated_at
+    BEFORE UPDATE ON bejerman_purchase_entry_lines
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_purchase_scans_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_purchase_scans_set_updated_at
+    BEFORE UPDATE ON bejerman_purchase_entry_scans
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;
@@ -1310,6 +1605,26 @@ CREATE TABLE IF NOT EXISTS notification_user_preferences (
   CONSTRAINT uq_notification_user_preferences UNIQUE (user_id, notification_key)
 );
 
+CREATE TABLE IF NOT EXISTS notification_push_subscriptions (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint          TEXT NOT NULL,
+  p256dh            TEXT NOT NULL,
+  auth              TEXT NOT NULL,
+  content_encoding  TEXT NOT NULL DEFAULT 'aes128gcm',
+  user_agent        TEXT NOT NULL DEFAULT '',
+  disabled_at       TIMESTAMPTZ NULL,
+  failure_count     INTEGER NOT NULL DEFAULT 0,
+  last_error        TEXT NOT NULL DEFAULT '',
+  last_success_at   TIMESTAMPTZ NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_notification_push_endpoint CHECK (NULLIF(TRIM(endpoint), '') IS NOT NULL),
+  CONSTRAINT chk_notification_push_p256dh CHECK (NULLIF(TRIM(p256dh), '') IS NOT NULL),
+  CONSTRAINT chk_notification_push_auth CHECK (NULLIF(TRIM(auth), '') IS NOT NULL),
+  CONSTRAINT chk_notification_push_failure_count CHECK (failure_count >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS ix_work_alert_rules_enabled ON work_alert_rules(enabled);
 CREATE INDEX IF NOT EXISTS ix_work_objectives_active_period
   ON work_objectives(period_type, active, valid_from, valid_to);
@@ -1332,6 +1647,11 @@ CREATE INDEX IF NOT EXISTS ix_notifications_entity
   ON notifications(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS ix_notification_preferences_user
   ON notification_user_preferences(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_push_endpoint
+  ON notification_push_subscriptions(endpoint);
+CREATE INDEX IF NOT EXISTS ix_notification_push_active_user
+  ON notification_push_subscriptions(user_id, updated_at DESC)
+  WHERE disabled_at IS NULL;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_work_alert_rules_set_updated_at') THEN
@@ -1357,6 +1677,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_preferences_set_updated_at') THEN
     CREATE TRIGGER trg_notification_preferences_set_updated_at
     BEFORE UPDATE ON notification_user_preferences
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_push_subscriptions_set_updated_at') THEN
+    CREATE TRIGGER trg_notification_push_subscriptions_set_updated_at
+    BEFORE UPDATE ON notification_push_subscriptions
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;
@@ -2001,6 +2326,12 @@ CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_device
   ON bejerman_sync_jobs(device_id);
 CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_article_code
   ON bejerman_sync_jobs(article_code);
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_actor_user
+  ON bejerman_sync_jobs(actor_user_id);
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_company_key
+  ON bejerman_sync_jobs(company_key);
+CREATE INDEX IF NOT EXISTS ix_user_bejerman_credentials_valid
+  ON user_bejerman_credentials(is_valid, updated_at);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
   ON bejerman_article_mappings(model_id, variante_norm);
 CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_article_code
@@ -2101,6 +2432,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_article_mappings_set_updated_at') THEN
     CREATE TRIGGER trg_bejerman_article_mappings_set_updated_at
     BEFORE UPDATE ON bejerman_article_mappings
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_user_bejerman_credentials_set_updated_at') THEN
+    CREATE TRIGGER trg_user_bejerman_credentials_set_updated_at
+    BEFORE UPDATE ON user_bejerman_credentials
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_ingreso_remitos_set_updated_at') THEN
