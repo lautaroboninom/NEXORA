@@ -24,6 +24,7 @@ import {
   getSerialBarcodeBlob,
 } from "@/lib/api";
 import { openPdfBlob } from "@/lib/pdf";
+import { MOTIVO } from "@/lib/constants";
 import {
   openRisPrintablePdf,
   risRemitoFrom,
@@ -65,6 +66,11 @@ const DEFAULT_BEJERMAN_COMPANIES = [
   { key: "MGBIO", label: "MG BIO", brandingKey: "MGBIO", isTest: false },
   { key: "TEST", label: "Empresa de prueba", brandingKey: "TEST", isTest: true },
 ];
+const RENTAL_RETURN_MOTIVOS = new Set([
+  MOTIVO.BAJA_ALQUILER,
+  MOTIVO.REPARACION_ALQUILER,
+  MOTIVO.OTROS,
+]);
 
 function scrollPageTop() {
   try {
@@ -89,6 +95,25 @@ function clone(obj) {
 
 function cleanText(value) {
   return String(value || "").trim();
+}
+
+function rentalReturnCustomerFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const rental = payload.rental_return_customer || payload.rentalReturnCustomer || {};
+  if (!rental || typeof rental !== "object") return null;
+  const name = cleanText(
+    rental.razon_social ||
+      rental.customer_nombre ||
+      rental.name ||
+      rental.alquiler_a
+  );
+  if (!name) return null;
+  return {
+    id: rental.id || rental.customer_id || null,
+    name,
+    cod: cleanText(rental.cod_empresa || rental.customer_cod),
+    telefono: cleanText(rental.telefono || rental.customer_telefono),
+  };
 }
 
 function documentProfileFromResult(result) {
@@ -198,6 +223,7 @@ export default function NuevoIngreso() {
   // Variantes (opcional)
   const [varianteTxt, setVarianteTxt] = useState("");
   const [varianteSugeridas, setVarianteSugeridas] = useState([]);
+  const [equipoAlquiladoOrigen, setEquipoAlquiladoOrigen] = useState(false);
 
   // Form principal
   const [form, setForm] = useState({
@@ -317,11 +343,6 @@ export default function NuevoIngreso() {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "");
 
-  const isMgOwnerCustomer = (value) => {
-    const key = normalizeCustomerName(value);
-    return key.includes("mgbio");
-  };
-
   const isParticularCustomerName = (value) => normalizeCustomerName(value) === "particular";
   const isParticularCustomer = (customer) => isParticularCustomerName(customer?.razon_social);
   const isParticularIngreso = tipoIngreso === TIPO_INGRESO.PARTICULAR;
@@ -338,6 +359,17 @@ export default function NuevoIngreso() {
       ),
     [clientes, isParticularIngreso]
   );
+  const motivosIngreso = useMemo(() => {
+    const options = Array.isArray(motivos) ? motivos : [];
+    if (!equipoAlquiladoOrigen) return options;
+    return options.filter((m) => RENTAL_RETURN_MOTIVOS.has(String(m?.value || "").trim()));
+  }, [motivos, equipoAlquiladoOrigen]);
+
+  useEffect(() => {
+    if (!equipoAlquiladoOrigen || !form.motivo) return;
+    if (RENTAL_RETURN_MOTIVOS.has(String(form.motivo || "").trim())) return;
+    setForm((prev) => ({ ...prev, motivo: "" }));
+  }, [equipoAlquiladoOrigen, form.motivo]);
 
   function setClienteCatalogo(c) {
     const razonSocial = c?.razon_social || "";
@@ -399,6 +431,7 @@ export default function NuevoIngreso() {
     if (!snap) {
       setNsAutofillInfo("");
       setNsAutofillClienteWarning("");
+      setEquipoAlquiladoOrigen(false);
       return;
     }
 
@@ -446,6 +479,7 @@ export default function NuevoIngreso() {
     nsAutoDesiredModelRef.current = null;
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
+    setEquipoAlquiladoOrigen(false);
   };
 
   const triggerLookupRequest = (source, rawValue) => {
@@ -519,6 +553,7 @@ export default function NuevoIngreso() {
     nsAutofillSnapshotRef.current = null;
     nsAutoDesiredBrandRef.current = null;
     nsAutoDesiredModelRef.current = null;
+    setEquipoAlquiladoOrigen(false);
   };
 
   useEffect(() => {
@@ -557,6 +592,9 @@ export default function NuevoIngreso() {
       if (prefill.model_id) f.equipo.modelo_id = String(prefill.model_id);
       return f;
     });
+    setEquipoAlquiladoOrigen(
+      !!prefill.alquilado || String(prefill.estado || "").trim().toLowerCase() === "alquilado"
+    );
     if (prefill.marca_id) setMarcaId(prefill.marca_id);
     if (prefill.marca) setMarcaTxt(prefill.marca);
     if (prefill.tipo_equipo) {
@@ -566,7 +604,10 @@ export default function NuevoIngreso() {
     }
     const variantePrefill = prefill.variante || prefill.equipo_variante || "";
     if (variantePrefill) setVarianteTxt(variantePrefill);
-    const prefillClienteNombre = prefill.customer_nombre || prefill.alquiler_a || "";
+    const prefillRentalCustomer = rentalReturnCustomerFromPayload(prefill);
+    const prefillAlquilerA = prefill.alquilado ? cleanText(prefill.alquiler_a) : "";
+    const prefillClienteNombre = prefillRentalCustomer?.name || prefillAlquilerA || prefill.customer_nombre || "";
+    const prefillClienteCod = prefillRentalCustomer?.cod || (prefillRentalCustomer || prefillAlquilerA ? "" : prefill.customer_cod || "");
     const prefillTienePropietario = !!(
       prefill.propietario_nombre ||
       prefill.propietario_contacto ||
@@ -576,9 +617,9 @@ export default function NuevoIngreso() {
       isParticularCustomerName(prefillClienteNombre) || (!prefillClienteNombre && prefillTienePropietario);
     setTipoIngreso(prefillEsParticular ? TIPO_INGRESO.PARTICULAR : TIPO_INGRESO.CLIENTE);
 
-    if (prefill.customer_nombre || prefill.alquiler_a) {
-      setClienteRsInput(prefill.customer_nombre || prefill.alquiler_a || "");
-      setClienteCodInput(prefill.customer_cod || "");
+    if (prefillClienteNombre) {
+      setClienteRsInput(prefillClienteNombre);
+      setClienteCodInput(prefillClienteCod);
     }
     if (prefillEsParticular && prefillTienePropietario) {
       setPropietario({
@@ -621,8 +662,10 @@ export default function NuevoIngreso() {
     const prefill = prefillRef.current;
     if (!prefill) return;
     if (!clientes || clientes.length === 0) return;
-    const rsVal = (clienteRsInput || prefill.customer_nombre || prefill.alquiler_a || "").trim();
-    const codVal = (clienteCodInput || prefill.customer_cod || "").trim();
+    const prefillRentalCustomer = rentalReturnCustomerFromPayload(prefill);
+    const prefillAlquilerA = prefill.alquilado ? cleanText(prefill.alquiler_a) : "";
+    const rsVal = (clienteRsInput || prefillRentalCustomer?.name || prefillAlquilerA || prefill.customer_nombre || "").trim();
+    const codVal = (clienteCodInput || prefillRentalCustomer?.cod || (prefillRentalCustomer || prefillAlquilerA ? "" : prefill.customer_cod || "")).trim();
     if (!rsVal && !codVal) {
       prefillClienteAppliedRef.current = true;
       return;
@@ -676,23 +719,33 @@ export default function NuevoIngreso() {
         const mgFromDevice = String(device.numero_interno || "").trim();
         const mgInactiveBySale = !!flags.mg_inactivo_venta;
 
-        const alquilerA = String(ingreso.alquiler_a || "").trim();
-        const esPropietarioMg = !!flags.es_propietario_mg;
+        const ingresoAlquilado =
+          !!ingreso.alquilado || String(ingreso.estado || "").trim().toLowerCase() === "alquilado";
+        const deviceAlquilado = !!device.alquilado;
+        const alquilerOrigen = ingresoAlquilado || deviceAlquilado;
+        const alquilerA = String(ingreso.alquiler_a || device.alquiler_a || "").trim();
+        const rentalCustomer =
+          rentalReturnCustomerFromPayload(res) ||
+          ((ingresoAlquilado || deviceAlquilado) && alquilerA
+            ? { id: null, name: alquilerA, cod: "", telefono: "" }
+            : null);
         const prevAutoCliente = !!nsAutofillSnapshotRef.current?.auto_cliente;
 
         const deviceCustomerRs = String(device.customer_nombre || "").trim();
         const deviceCustomerCod = String(device.customer_cod || "").trim();
         const deviceCustomerTelefono = String(device.customer_telefono || "").trim();
-        const customerIsMgOwner = isMgOwnerCustomer(deviceCustomerRs);
-        const useAlquilerCliente = esPropietarioMg && customerIsMgOwner;
+        const useAlquilerCliente = !!rentalCustomer?.name;
 
-        const clienteRawRs = useAlquilerCliente ? alquilerA : deviceCustomerRs;
-        const clienteRawCod = useAlquilerCliente ? "" : deviceCustomerCod;
-        const clienteRawTelefono = useAlquilerCliente ? "" : deviceCustomerTelefono;
+        const clienteRawRs = useAlquilerCliente ? rentalCustomer.name : deviceCustomerRs;
+        const clienteRawCod = useAlquilerCliente ? rentalCustomer.cod : deviceCustomerCod;
+        const clienteRawTelefono = useAlquilerCliente ? rentalCustomer.telefono : deviceCustomerTelefono;
 
+        const byId = rentalCustomer?.id
+          ? (clientes || []).find((c) => Number(c.id) === Number(rentalCustomer.id))
+          : null;
         const byRs = clienteRawRs ? findClienteByRS(clienteRawRs) : null;
         const byCod = clienteRawCod ? findClienteByCod(clienteRawCod) : null;
-        let clienteMatch = byCod || byRs || null;
+        let clienteMatch = byId || byCod || byRs || null;
         if (byRs && byCod && byRs.id !== byCod.id) {
           clienteMatch = byRs;
         }
@@ -752,6 +805,7 @@ export default function NuevoIngreso() {
           }
           return next;
         });
+        setEquipoAlquiladoOrigen(alquilerOrigen);
 
         prefillSkipTipoResetRef.current = true;
         setTipoSel(tipoFromDevice || "");
@@ -1094,12 +1148,14 @@ export default function NuevoIngreso() {
   const onNumeroSerieChange = (e) => {
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
     setBejermanSuggestion(null);
+    setEquipoAlquiladoOrigen(false);
     onChange("equipo.numero_serie")(e);
   };
 
   const onNumeroInternoChange = (e) => {
     setMgInactiveInfo(null);
     setMgLookup((s) => (s.notFound ? { ...s, notFound: false } : s));
+    setEquipoAlquiladoOrigen(false);
     onChange("equipo.numero_interno")(e);
   };
 
@@ -1252,6 +1308,9 @@ export default function NuevoIngreso() {
     if (!form.equipo.marca_id) return "Seleccione una marca válida de la lista.";
     if (!form.equipo.modelo_id) return "Seleccione un modelo.";
     if (!form.motivo) return "Seleccione un motivo.";
+    if (equipoAlquiladoOrigen && !RENTAL_RETURN_MOTIVOS.has(String(form.motivo || "").trim())) {
+      return "Para equipos alquilados, seleccione Baja alquiler, Reparación alquiler u Otros.";
+    }
     return "";
   };
 
@@ -1452,6 +1511,7 @@ export default function NuevoIngreso() {
     nsAutofillSnapshotRef.current = null;
     nsAutoDesiredBrandRef.current = null;
     nsAutoDesiredModelRef.current = null;
+    setEquipoAlquiladoOrigen(false);
   };
 
   const addCurrentEquipmentToBatch = async () => {
@@ -1483,6 +1543,7 @@ export default function NuevoIngreso() {
           comentarios: form.comentarios,
           garantia_reparacion: form.garantia_reparacion,
         },
+        equipoAlquiladoOrigen,
         marcaTxt,
         marcaId,
         tipoSel,
@@ -1534,6 +1595,7 @@ export default function NuevoIngreso() {
     setAccItems((editor.accItems || []).map((it) => ({ ...it })));
     setTecnicoId(editor.tecnicoId || null);
     setBejermanSuggestion(editor.bejermanSuggestion || null);
+    setEquipoAlquiladoOrigen(!!editor.equipoAlquiladoOrigen);
     setRisPreflight(null);
     setRisPreflightError("");
     removeBatchItem(itemId);
@@ -1549,7 +1611,7 @@ export default function NuevoIngreso() {
       return;
     }
     if (isRegisterMode && !manualRemitoNumber.trim()) {
-      setErr("Cargue el número de remito manual.");
+      setErr("Cargue el número completo del remito.");
       return;
     }
     setLoading(true);
@@ -2333,7 +2395,7 @@ export default function NuevoIngreso() {
               <label className={FIELD_LABEL_CLASS}>Motivo</label>
               <Select value={form.motivo} onChange={onChange("motivo")}>
                 <option value="">Seleccione motivo</option>
-                {motivos.map((m) => (
+                {motivosIngreso.map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}
                   </option>
@@ -2478,7 +2540,7 @@ export default function NuevoIngreso() {
                 <h2 className="text-sm font-semibold text-gray-800">Remito de ingreso</h2>
                 <div className="mt-1 text-xs text-gray-600">
                   {isRegisterMode
-                    ? "Use esta opción cuando el remito manual ya fue hecho y solo debe registrarse en Bejerman."
+                    ? "Use esta opción cuando el remito ya fue hecho y solo debe asociarse al ingreso."
                     : "NEXORA emitirá el remito correspondiente en Bejerman y abrirá el PDF para imprimir."}
                 </div>
               </div>
@@ -2506,14 +2568,14 @@ export default function NuevoIngreso() {
               </div>
               {isRegisterMode && (
                 <div>
-                  <label className={FIELD_LABEL_CLASS}>Número de remito manual</label>
+                  <label className={FIELD_LABEL_CLASS}>Número completo del remito</label>
                   <Input
                     value={manualRemitoNumber}
                     onChange={(event) => updateManualRemitoNumber(event.target.value)}
-                    placeholder="Ej: 26249"
+                    placeholder="Ej: RIS R 00004-00026249"
                   />
                   <div className="mt-1 text-xs text-gray-500">
-                    Se registrará como remito manual según la configuración de ingreso.
+                    Cargá tipo, letra, punto de venta y número. Puede ser manual 00001 o digital 00004/00007.
                   </div>
                 </div>
               )}

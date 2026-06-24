@@ -24,6 +24,7 @@ SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SHEETS_BASE_URL = "https://sheets.googleapis.com/v4/spreadsheets"
 TEST_TOKENS = ("demo123", "demo456", "prueba123", "asd123")
+TEST_DUMMY_CHARS = frozenset("asd")
 DELIVERED_STATUSES = {
     "entregado_pendiente_facturacion",
     "entregado_no_facturable",
@@ -531,6 +532,8 @@ def _normalize_os_reference(value: Any) -> str:
 
 def _is_test_order(order: dict[str, Any]) -> bool:
     values: list[str] = [
+        order.get("customerName"),
+        order.get("orderNumber"),
         order.get("equipmentSerial"),
         order.get("equipmentInternalNumber"),
         order.get("rawPedido"),
@@ -549,7 +552,16 @@ def _is_test_order(order: dict[str, Any]) -> bool:
         for partida in item.get("partidas") or []:
             values.append(partida.get("partida"))
     haystack = " ".join(str(value or "").casefold() for value in values)
-    return any(token in haystack for token in TEST_TOKENS)
+    if any(token in haystack for token in TEST_TOKENS):
+        return True
+    return any(_is_dummy_test_text(value) for value in values)
+
+
+def _is_dummy_test_text(value: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
+    if len(normalized) < 3:
+        return False
+    return set(normalized).issubset(TEST_DUMMY_CHARS)
 
 
 def _existing_drive_keys(rows: list[list[Any]]) -> set[str]:

@@ -170,6 +170,24 @@ class DriveDeliverySyncHelpersTests(SimpleTestCase):
         self.assertEqual(result["alreadyInDrive"], 1)
         self.assertEqual(client.updated_values, [])
 
+    def test_sync_filters_plain_asd_dummy_orders(self):
+        orders = [
+            order(id="new", customerName="OXIDOM S.R.L.", rawPedido="Pedido real"),
+            order(id="dummy-client", customerName="asdasd", rawPedido="Pedido real"),
+            order(id="dummy-pedido", customerName="AC 24", rawPedido="asdads"),
+        ]
+        existing_rows = [
+            ["VENDEDOR", "FECHA", "CLIENTE", "EMPRESA", "PEDIDO", "ENTREGADO", "RT", "OS", "FC"],
+        ]
+        client = FakeSheetsClient(existing_rows)
+
+        with patch("service.drive_delivery_sync._load_orders_for_sync", return_value=orders):
+            result = sync_delivery_orders_to_drive(sheets_client=client, today=date(2026, 6, 23))
+
+        self.assertEqual(result["createdRows"], 1)
+        self.assertEqual(result["excludedTest"], 2)
+        self.assertEqual(client.updated_values[0][2], "OXIDOM S.R.L.")
+
     def test_apps_script_sync_posts_rows_without_service_account_credentials(self):
         orders = [
             order(id="new", rawPedido="Pedido nuevo"),
@@ -281,6 +299,17 @@ class DeliveryOrderDriveSyncViewTests(SimpleTestCase):
             return_value={"ok": True, "createdRows": 1, "alreadyInDrive": 0},
         ) as sync_mock:
             response = self.view(self._request("ventas"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["createdRows"], 1)
+        sync_mock.assert_called_once_with()
+
+    def test_jefe_can_sync(self):
+        with patch(
+            "service.views.delivery_orders_views.sync_delivery_orders_to_drive",
+            return_value={"ok": True, "createdRows": 1, "alreadyInDrive": 0},
+        ) as sync_mock:
+            response = self.view(self._request("jefe"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["createdRows"], 1)

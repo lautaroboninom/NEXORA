@@ -30,6 +30,31 @@ export function risDocumentLabelFrom(source = {}) {
   return documentType ? `remito ${documentType}` : "remito";
 }
 
+const documentReasonKey = (value) =>
+  String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+export function documentNameFromRis(source = {}, fallback = "RIS") {
+  const documentType = risDocumentTypeFrom(source);
+  if (documentType) return documentType;
+  const ris = source?.ris || source || {};
+  const previewItem = Array.isArray(ris?.preview?.items) ? ris.preview.items[0] : null;
+  const reason = documentReasonKey(
+    ris?.motivo ||
+      source?.motivo ||
+      ris?.repairReason ||
+      source?.repairReason ||
+      previewItem?.repairReason,
+  );
+  if (reason === "baja alquiler" || reason === "reparacion alquiler") return "RDA";
+  if (reason === "devolucion demo") return "RDN";
+  return String(fallback || "RIS").trim() || "RIS";
+}
+
 export function isRisRegistered(source = {}) {
   const ris = source?.ris || source || {};
   const documentMode = String(ris?.document_mode || ris?.documentMode || source?.document_mode || source?.documentMode || "").toLowerCase();

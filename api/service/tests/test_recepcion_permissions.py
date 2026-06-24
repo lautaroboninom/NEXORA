@@ -45,7 +45,9 @@ class RecepcionPermissionsAPITest(TestCase):
                     email VARCHAR(320) UNIQUE,
                     hash_pw TEXT,
                     rol TEXT,
-                    activo {bool_type} DEFAULT {bool_default}
+                    activo {bool_type} DEFAULT {bool_default},
+                    bejerman_seller_code TEXT NULL,
+                    bejerman_seller_code_confirmed_at {datetime_type} NULL
                 ){engine_suffix}
                 """
             )
@@ -334,6 +336,8 @@ class RecepcionPermissionsAPITest(TestCase):
 
         with connection.cursor() as cur:
             cur.execute("INSERT INTO customers(id, razon_social) VALUES (1, 'Cliente Test')")
+            cur.execute("INSERT INTO customers(id, razon_social, cod_empresa, telefono) VALUES (2, 'SIED', 'C-SIED', '111')")
+            cur.execute("INSERT INTO customers(id, razon_social, cod_empresa, telefono) VALUES (3, 'ALCLA', 'C-ALCLA', '222')")
             cur.execute("INSERT INTO marcas(id, nombre) VALUES (1, 'Marca Test')")
             cur.execute(
                 "INSERT INTO models(id, marca_id, nombre, tipo_equipo, tecnico_id) VALUES (1, 1, 'Modelo Test', 'CPAP', %s)",
@@ -342,6 +346,12 @@ class RecepcionPermissionsAPITest(TestCase):
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (1, 1, 1, 1, 'NS-1', 'MG 0001')")
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (2, 1, 1, 1, 'NS-HIST', 'MG 0002')")
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (3, 1, 1, 1, 'NS-ACT-OLDER', 'MG 0003')")
+            cur.execute(
+                """
+                INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno, alquilado, alquiler_a)
+                VALUES (4, 2, 1, 1, 'NS-ALQ-RETURN', 'MG 0004', TRUE, 'ALCLA')
+                """
+            )
             cur.execute("INSERT INTO locations(id, nombre) VALUES (1, 'taller')")
             cur.execute(
                 """
@@ -375,6 +385,19 @@ class RecepcionPermissionsAPITest(TestCase):
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
                 VALUES (5, 3, 'reparacion', 'entregado', 'no_aplica', 'reparado', '2026-05-15 12:00:00', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso,
+                    ubicacion_id, asignado_a, recibido_por, alquilado, alquiler_a, alquiler_remito
+                )
+                VALUES (
+                    6, 4, 'reparacion alquiler', 'alquilado', 'no_aplica', 'reparado', '2026-06-10 12:00:00',
+                    1, %s, %s, TRUE, 'ALCLA', 'RTA-ALCLA'
+                )
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
@@ -428,6 +451,17 @@ class RecepcionPermissionsAPITest(TestCase):
         self.assertEqual(resp.data["ingreso"]["id"], 3)
         self.assertFalse(resp.data["ingreso"]["ingreso_en_curso"])
         self.assertIn("2026-04-01", str(resp.data["ingreso"]["fecha_ingreso"]))
+
+    def test_scan_lookup_exposes_rental_customer_for_return(self):
+        resp = self._client().get("/api/scan/lookup/?code=NS-ALQ-RETURN")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["kind"], "device")
+        self.assertEqual(resp.data["device"]["customer_nombre"], "SIED")
+        self.assertEqual(resp.data["ingreso"]["alquiler_a"], "ALCLA")
+        self.assertEqual(resp.data["rental_return_customer"]["id"], 3)
+        self.assertEqual(resp.data["rental_return_customer"]["razon_social"], "ALCLA")
+        self.assertEqual(resp.data["rental_return_customer"]["cod_empresa"], "C-ALCLA")
 
     def test_service_sheet_principal_default_allows_non_liberado_detail(self):
         resp = self._client().get("/api/ingresos/2/")

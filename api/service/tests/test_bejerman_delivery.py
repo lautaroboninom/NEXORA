@@ -1001,13 +1001,20 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertNotEqual(sale_profile.comprobante_tipo, service_profile.comprobante_tipo)
 
     def test_delivery_remito_profile_usa_punto_por_empresa(self):
-        sepid_profile = _profile_for_order("sale", "SEPID")
-        mgbio_profile = _profile_for_order("sale", "MGBIO")
+        with override_settings(
+            BEJERMAN_REMITO_SALE_POINT_OF_SALE="00002",
+            BEJERMAN_REMITO_SALE_SEPID_POINT_OF_SALE="00003",
+            BEJERMAN_REMITO_SALE_MGBIO_POINT_OF_SALE="00008",
+        ):
+            sepid_profile = _profile_for_order("sale", "SEPID")
+            mgbio_profile = _profile_for_order("sale", "MGBIO")
 
         self.assertEqual(sepid_profile["type"], "RT")
         self.assertEqual(sepid_profile["pointOfSale"], "00004")
         self.assertEqual(mgbio_profile["type"], "RT")
         self.assertEqual(mgbio_profile["pointOfSale"], "00007")
+        self.assertEqual(delivery_remito_config(sepid_profile)["salePointOfSale"], "00004")
+        self.assertEqual(delivery_remito_config(mgbio_profile)["salePointOfSale"], "00007")
 
     def test_delivery_remito_lote_no_permite_mezclar_empresas(self):
         def order(order_id, company_label):

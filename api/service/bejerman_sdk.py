@@ -1556,6 +1556,7 @@ def _profile_for_delivery_type(delivery_type: str, config: dict[str, Any]) -> di
 
 
 def delivery_remito_config(default_profile: dict[str, Any]) -> dict[str, Any]:
+    point_of_sale = as_string(default_profile.get("pointOfSale", "00004")) or "00004"
     return {
         "letter": as_string(_setting("BEJERMAN_REMITO_LETTER", "R")) or "R",
         "priceListCode": as_string(_setting("BEJERMAN_REMITO_PRICE_LIST", "GN")) or "GN",
@@ -1567,19 +1568,19 @@ def delivery_remito_config(default_profile: dict[str, Any]) -> dict[str, Any]:
         "saleType": as_string(_setting("BEJERMAN_REMITO_SALE_TYPE", default_profile.get("type", "RT"))),
         "saleOperation": as_string(_setting("BEJERMAN_REMITO_SALE_OPERATION", default_profile.get("operation", "MC"))),
         "saleDeposit": as_string(_setting("BEJERMAN_REMITO_SALE_DEPOSIT", default_profile.get("deposit", "VAL"))),
-        "salePointOfSale": as_string(_setting("BEJERMAN_REMITO_SALE_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "salePointOfSale": point_of_sale,
         "rentalType": as_string(_setting("BEJERMAN_REMITO_RENTAL_TYPE", default_profile.get("type", "RTA"))),
         "rentalOperation": as_string(_setting("BEJERMAN_REMITO_RENTAL_OPERATION", default_profile.get("operation", "ALQ"))),
         "rentalDeposit": as_string(_setting("BEJERMAN_REMITO_RENTAL_DEPOSIT", default_profile.get("deposit", "STL"))),
-        "rentalPointOfSale": as_string(_setting("BEJERMAN_REMITO_RENTAL_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "rentalPointOfSale": point_of_sale,
         "demoType": as_string(_setting("BEJERMAN_REMITO_DEMO_TYPE", default_profile.get("type", "RTN"))),
         "demoOperation": as_string(_setting("BEJERMAN_REMITO_DEMO_OPERATION", default_profile.get("operation", "DEMO"))),
         "demoDeposit": as_string(_setting("BEJERMAN_REMITO_DEMO_DEPOSIT", default_profile.get("deposit", "VAL"))),
-        "demoPointOfSale": as_string(_setting("BEJERMAN_REMITO_DEMO_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "demoPointOfSale": point_of_sale,
         "serviceType": as_string(_setting("BEJERMAN_REMITO_SERVICE_TYPE", default_profile.get("type", "RSS"))),
         "serviceOperation": as_string(_setting("BEJERMAN_REMITO_SERVICE_OPERATION", default_profile.get("operation", "REP"))),
         "serviceDeposit": as_string(_setting("BEJERMAN_REMITO_SERVICE_DEPOSIT", default_profile.get("deposit", "STC"))),
-        "servicePointOfSale": as_string(_setting("BEJERMAN_REMITO_SERVICE_POINT_OF_SALE", default_profile.get("pointOfSale", "00004"))),
+        "servicePointOfSale": point_of_sale,
     }
 
 

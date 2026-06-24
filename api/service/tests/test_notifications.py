@@ -906,7 +906,13 @@ class NotificationsAPITest(TestCase):
             rows = cur.fetchall()
         self.assertEqual(
             rows,
-            [(self.recepcion.id, "Nueva orden de entrega OE-NOTIF-001", "/administracion/ordenes-entrega")],
+            [
+                (
+                    self.recepcion.id,
+                    "Nueva orden de entrega OE-NOTIF-001",
+                    "/administracion/ordenes-entrega?orderId=do-notif-created",
+                )
+            ],
         )
 
     @override_settings(
@@ -975,8 +981,9 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(kwargs["subscription_info"]["endpoint"], "https://push.notif.test/oe-created")
         payload = json.loads(kwargs["data"])
         self.assertEqual(payload["title"], "Nueva orden de entrega OE-PUSH-001")
-        self.assertEqual(payload["href"], "/administracion/ordenes-entrega")
+        self.assertEqual(payload["href"], "/administracion/ordenes-entrega?orderId=do-push-created")
         self.assertEqual(payload["notificationKey"], "sales_order_created")
+        self.assertEqual(payload["payload"]["orderId"], "do-push-created")
 
     @override_settings(
         WEB_PUSH_VAPID_PUBLIC_KEY="public-test-key",
@@ -2656,6 +2663,46 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(row[1], "RSS R 00004-00001234")
         self.assertIsNotNone(row[2])
         self.assertEqual(billing_notifications, 0)
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="noreply@nexora.test",
+    )
+    def test_rss_emitido_envia_pdf_por_mail_a_roles_obligatorios(self):
+        mail.outbox = []
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET estado = 'liberado',
+                       remito_salida = NULL,
+                       fecha_entrega = NULL
+                 WHERE id = %s
+                """,
+                [self.ingreso_id],
+            )
+        order = self._create_service_release_order("do-rss-mandatory-pdf-mail")
+
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient", self._fake_bejerman_remito_client()),
+            patch(
+                "service.bejerman_delivery.get_remito_group_pdf",
+                return_value=(b"%PDF-1.4\nRSS mail", "application/pdf", "remito-RSS.pdf"),
+            ) as pdf_mock,
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertEqual(result["remitoNumber"], "RSS R 00004-00001234")
+        self.assertFalse(result["billingRequired"])
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(set(message.to), {"admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"})
+        self.assertIn("RSS R 00004-00001234", message.subject)
+        self.assertIn("Se emitió un remito en Bejerman.", message.body)
+        self.assertEqual(len(message.attachments), 1)
+        self.assertTrue(message.attachments[0][1].startswith(b"%PDF-"))
+        pdf_mock.assert_called_once_with(result["groupId"], actor_user_id=self.jefe.id)
 
     def test_rss_emitido_marca_vendido_pendiente_como_vendido_entregado(self):
         with connection.cursor() as cur:

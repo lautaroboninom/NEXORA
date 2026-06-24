@@ -29,6 +29,7 @@ import {
 } from "../lib/api";
 import { openPdfBlob } from "../lib/pdf";
 import {
+  documentNameFromRis,
   isRisGenerated,
   isRisRegistered,
   openRisPrintablePdf,
@@ -450,6 +451,11 @@ export default function ServiceSheet() {
   const [err, setErr] = useState("");
   const [identifierConflict, setIdentifierConflict] = useState(null);
   const [releaseOrderRow, setReleaseOrderRow] = useState(null);
+  const ingressDocumentName = useMemo(() => documentNameFromRis(data, "RIS"), [data]);
+  const ingressDocumentNameFor = useCallback(
+    (source) => documentNameFromRis(source || data, ingressDocumentName),
+    [data, ingressDocumentName],
+  );
 
   // entrega
   const [entrega, setEntrega] = useState({ remito_salida: "", factura_numero: "", fecha_entrega: "", serial_confirm: "" });
@@ -832,11 +838,11 @@ export default function ServiceSheet() {
       const result = await postIngresoRisPreflight(id);
       setRisPreflight(result);
       if (!result?.can_emit && silent) {
-        setErr(result?.detail || "La validación previa del RIS encontró problemas.");
+        setErr(result?.detail || `La validación previa del ${ingressDocumentNameFor(result)} encontró problemas.`);
       }
       return result;
     } catch (error) {
-      const detail = error?.data?.detail || error?.message || "No se pudo validar el RIS.";
+      const detail = error?.data?.detail || error?.message || `No se pudo validar el ${ingressDocumentName}.`;
       if (Array.isArray(error?.data?.issues)) {
         setRisPreflight(error.data);
       }
@@ -893,34 +899,36 @@ export default function ServiceSheet() {
       await waitForRisProgressPaint();
       let risSource = data;
       if (!isRisGenerated(data)) {
-        setRisProgressStatus("Validando RIS...");
+        setRisProgressStatus(`Validando ${ingressDocumentName}...`);
         const preflight = await runRisPreflight({ silent: true });
         if (!preflight?.can_emit) return;
-        setRisProgressStatus("Emitiendo RIS en Bejerman...");
+        const preflightDocumentName = ingressDocumentNameFor(preflight);
+        setRisProgressStatus(`Emitiendo ${preflightDocumentName} en Bejerman...`);
         await waitForRisProgressPaint();
         risSource = await postIngresoRisEmitir(id);
         await refreshIngreso({ strong: 1 });
       }
+      const risDocumentName = ingressDocumentNameFor(risSource);
       const remito = risRemitoFrom(risSource) || risRemitoFrom(data);
       const blob = await waitForRisPdfBlob(id, risSource, {
-        onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del RIS..."),
+        onProgress: (progress) => setRisProgressStatus(progress?.status || `Preparando PDF del ${risDocumentName}...`),
       });
       setRisProgressStatus("Abriendo impresión...");
       const opened = openRisPrintablePdf(blob, risSource).opened;
       if (opened) {
-        setToastMsg(remito ? `RIS ${remito} listo para imprimir.` : "RIS listo para imprimir.");
+        setToastMsg(remito ? `${risDocumentName} ${remito} listo para imprimir.` : `${risDocumentName} listo para imprimir.`);
         setTimeout(() => setToastMsg(""), 2500);
       } else {
         setManualRisPrint({ blob, source: risSource, remito });
-        setErr("El PDF del RIS ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.");
+        setErr(`El PDF del ${risDocumentName} ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.`);
       }
     } catch (e) {
       if (Array.isArray(e?.data?.issues)) {
         setRisPreflight(e.data);
-        setErr(e?.data?.detail || "La validación previa del RIS encontró problemas.");
+        setErr(e?.data?.detail || `La validación previa del ${ingressDocumentNameFor(e.data)} encontró problemas.`);
         return;
       }
-      setErr(e?.message || "No se pudo emitir o reimprimir el RIS");
+      setErr(e?.message || `No se pudo emitir o reimprimir el ${ingressDocumentName}`);
     } finally {
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
@@ -933,9 +941,10 @@ export default function ServiceSheet() {
     const opened = openRisPrintablePdf(manualRisPrint.blob, manualRisPrint.source || data).opened;
     if (opened) {
       const remito = manualRisPrint.remito || risRemitoFrom(manualRisPrint.source) || risRemitoFrom(data);
+      const risDocumentName = ingressDocumentNameFor(manualRisPrint.source);
       setManualRisPrint(null);
       setErr("");
-      setToastMsg(remito ? `RIS ${remito} listo para imprimir.` : "RIS listo para imprimir.");
+      setToastMsg(remito ? `${risDocumentName} ${remito} listo para imprimir.` : `${risDocumentName} listo para imprimir.`);
       setTimeout(() => setToastMsg(""), 2500);
     } else {
       setErr("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
@@ -1796,11 +1805,11 @@ export default function ServiceSheet() {
   const hasGeneratedRis = Boolean(!isRegisteredRis && data?.ris?.status === "generated" && data?.ris?.remito_number);
   const showRisErrorBanner = Boolean(!isRegisteredRis && data?.ris?.available && (data?.ris?.status === "failed" || data?.ris?.pdf_status === "failed"));
   const risBannerTitle = hasGeneratedRis && data?.ris?.pdf_status === "failed"
-    ? `RIS ${data.ris.remito_number} emitido; PDF no disponible`
-    : "RIS pendiente";
+    ? `${ingressDocumentName} ${data.ris.remito_number} emitido; PDF no disponible`
+    : `${ingressDocumentName} pendiente`;
   const risBannerMessage = data?.ris?.last_error || (
     hasGeneratedRis
-      ? "El comprobante está emitido, pero no se pudo recuperar el PDF desde Bejerman. Use Ver RIS para buscar el PDF existente."
+      ? `El comprobante está emitido, pero no se pudo recuperar el PDF desde Bejerman. Use Ver ${ingressDocumentName} para buscar el PDF existente.`
       : "no se pudo completar la emisión o el PDF."
   );
   const risPreflightIssues = Array.isArray(risPreflight?.issues) ? risPreflight.issues : [];
@@ -1843,8 +1852,8 @@ export default function ServiceSheet() {
     <div className="max-w-none p-4">
       <RisProgressModal
         open={risBusy}
-        title={risProgressStatus.toLowerCase().includes("validando") ? "Validando RIS" : "Emitiendo RIS"}
-        status={risProgressStatus || "Emitiendo RIS en Bejerman..."}
+        title={risProgressStatus.toLowerCase().includes("validando") ? `Validando ${ingressDocumentName}` : `Emitiendo ${ingressDocumentName}`}
+        status={risProgressStatus || `Emitiendo ${ingressDocumentName} en Bejerman...`}
       />
       <ReleaseOrderModal
         open={Boolean(releaseOrderRow)}
@@ -1903,10 +1912,10 @@ export default function ServiceSheet() {
                       className="w-full text-left px-3 py-2 text-sm text-sky-700 hover:bg-sky-50 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       {risBusy
-                        ? "Preparando RIS..."
+                        ? `Preparando ${ingressDocumentName}...`
                         : data?.ris?.remito_number
-                          ? "Ver RIS"
-                          : "Emitir RIS"}
+                          ? `Ver ${ingressDocumentName}`
+                          : `Emitir ${ingressDocumentName}`}
                     </button>
                   )}
                   {canPrintIngresoBarcode && (
@@ -2014,6 +2023,8 @@ export default function ServiceSheet() {
             error={risPreflightError}
             onApplyCustomer={applyRisCustomerFix}
             onApplyArticle={applyRisArticleFix}
+            documentLabel={documentNameFromRis(risPreflightPanelResult || data, ingressDocumentName)}
+            actionLabel={`Emitir ${documentNameFromRis(risPreflightPanelResult || data, ingressDocumentName)}`}
           />
         </div>
       )}
@@ -2027,7 +2038,7 @@ export default function ServiceSheet() {
               onClick={abrirRisManualPendiente}
               className="mt-2 rounded bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-800"
             >
-              Abrir e imprimir RIS
+              Abrir e imprimir {ingressDocumentName}
             </button>
           )}
         </div>
@@ -2075,6 +2086,7 @@ export default function ServiceSheet() {
           canEditAlquiler={canEditAlquiler}
           canManageReleaseResolution={canResolve}
           canShowRisAction={canShowRisAction}
+          ingressDocumentName={ingressDocumentName}
           risBusy={risBusy}
           onEmitRis={emitirRisIngreso}
           onOpenReleaseModal={openReleaseOrderModal}

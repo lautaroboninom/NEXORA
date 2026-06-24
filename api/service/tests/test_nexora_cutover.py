@@ -199,7 +199,7 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
             "RSS R 00004-00001234",
             "RTN 0002-00012345",
             "RTA R 00004-00004567",
-            "RDA R 00001-00004571",
+            "RDA R 00004-00004571",
             "RDN R 00004-00004573",
         ):
             with self.subTest(remito_number=remito_number):

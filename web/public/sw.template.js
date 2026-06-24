@@ -45,6 +45,9 @@ self.addEventListener('push', (event) => {
       href: data.href || '/',
       notificationId: data.notificationId || null,
       notificationKey: data.notificationKey || '',
+      entityType: data.entityType || '',
+      entityId: data.entityId || '',
+      payload: data.payload || {},
     },
   };
 
@@ -53,17 +56,22 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const href = event.notification?.data?.href || '/';
-  const targetUrl = new URL(href, self.location.origin).href;
+  const href = event.notification && event.notification.data ? event.notification.data.href : '/';
+  const targetUrl = new URL(href || '/', self.location.origin).href;
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clientList) => {
       for (const client of clientList) {
         if ('focus' in client && new URL(client.url).origin === self.location.origin) {
-          if ('navigate' in client) {
-            return client.navigate(targetUrl).then(() => client.focus());
+          try {
+            if ('navigate' in client) {
+              const navigatedClient = await client.navigate(targetUrl);
+              return (navigatedClient || client).focus();
+            }
+            return client.focus();
+          } catch (_) {
+            break;
           }
-          return client.focus();
         }
       }
       if (self.clients.openWindow) return self.clients.openWindow(targetUrl);

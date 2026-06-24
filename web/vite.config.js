@@ -4,7 +4,17 @@ import path from "node:path";
 
 export default defineConfig(() => ({
   plugins: [react()],
-  server: { port: 5173, host: true },
+  server: {
+    port: 5173,
+    host: true,
+    allowedHosts: ["localhost", "127.0.0.1", "100.91.53.60", "nexora.tail7bb880.ts.net"],
+    proxy: {
+      "/api": {
+        target: process.env.VITE_DEV_API_PROXY || "http://localhost:18100",
+        changeOrigin: true,
+      },
+    },
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

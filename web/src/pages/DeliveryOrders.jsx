@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   deliveryOrderInvoicePdfUrl,
   getBlob,
+  getDeliveryOrder,
   getDeliveryOrders,
   getDeliveryOrderRemitoHistory,
   patchDeliveryOrderItemPartidas,
@@ -35,6 +36,7 @@ import {
   ResponsiveModalPanel,
   fullWidthButtonClass,
 } from "../components/Responsive.jsx";
+import { useLocation, useNavigate } from "react-router-dom";
 
 const STATUS_LABELS = {
   pendiente_armado: "Pendiente de armado",
@@ -101,13 +103,17 @@ function isAdminUser(user) {
   return String(user?.rol || "").trim().toLowerCase() === "admin";
 }
 
+function isJefeUser(user) {
+  return String(user?.rol || "").trim().toLowerCase() === "jefe";
+}
+
 function isVentasUser(user) {
   return String(user?.rol || "").trim().toLowerCase() === "ventas";
 }
 
 
 function canEditCommercialFields(user) {
-  return ["admin", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
+  return ["admin", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
 }
 
 function canPrintInvoiceForOrder(user, order) {
@@ -240,6 +246,8 @@ function formatPercent(value) {
 
 export default function DeliveryOrders() {
   const { user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [filters, setFilters] = useState({ status: "", q: "", deliveryType: "" });
   const [searchText, setSearchText] = useState("");
   const [orders, setOrders] = useState([]);
@@ -262,6 +270,7 @@ export default function DeliveryOrders() {
   const [remitoHistory, setRemitoHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const remitoLocationIntentRef = useRef(new Set());
+  const handledRouteOrderRef = useRef("");
 
   const canCreate = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_CREATE);
   const canPrepare = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_PREPARE);
@@ -361,6 +370,37 @@ export default function DeliveryOrders() {
   useEffect(() => {
     load();
   }, [filters.status, filters.deliveryType, filters.q, page]);
+
+  useEffect(() => {
+    if (!user) return;
+    const params = new URLSearchParams(location.search);
+    const orderId = String(params.get("orderId") || "").trim();
+    if (!orderId || handledRouteOrderRef.current === orderId) return;
+    handledRouteOrderRef.current = orderId;
+
+    getDeliveryOrder(orderId)
+      .then((order) => {
+        if (!order?.id) throw new Error("No se encontró la orden de entrega.");
+        setError("");
+        if (canPrepare && order.status === "pendiente_armado") {
+          setPreparingOrder(order);
+        } else {
+          setDetailOrder(order);
+        }
+      })
+      .catch((err) => setError(err?.message || "No se pudo abrir la orden de entrega."))
+      .finally(() => {
+        params.delete("orderId");
+        const nextSearch = params.toString();
+        navigate(
+          {
+            pathname: location.pathname,
+            search: nextSearch ? `?${nextSearch}` : "",
+          },
+          { replace: true }
+        );
+      });
+  }, [canPrepare, location.pathname, location.search, navigate, user]);
 
   const updateFilter = (field) => (event) => {
     setFilters((prev) => ({ ...prev, [field]: event.target.value }));
@@ -675,7 +715,7 @@ export default function DeliveryOrders() {
             <Printer className="h-4 w-4" aria-hidden="true" />
             Historial remitos
           </button>
-          {(isVentasUser(user) || isAdminUser(user)) && (
+          {(isJefeUser(user) || isVentasUser(user) || isAdminUser(user)) && (
             <button
               type="button"
               onClick={handleDriveSync}
@@ -958,7 +998,7 @@ export default function DeliveryOrders() {
       <NewDeliveryOrderModal
         open={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
-        formProps={{ canEditItemDiscounts: isVentasUser(user) }}
+        formProps={{ canEditItemDiscounts: isVentasUser(user) || isJefeUser(user) }}
         onCreated={() => {
           setError("");
           load();
@@ -968,7 +1008,7 @@ export default function DeliveryOrders() {
         open={Boolean(editingOrder)}
         order={editingOrder}
         onClose={() => setEditingOrder(null)}
-        formProps={{ canEditItemDiscounts: isVentasUser(user) }}
+        formProps={{ canEditItemDiscounts: isVentasUser(user) || isJefeUser(user) }}
         onCreated={() => {
           setError("");
           setEditingOrder(null);

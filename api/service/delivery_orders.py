@@ -1213,7 +1213,7 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
                 f"{DELIVERY_TYPE_LABELS.get(order.get('deliveryType'), order.get('deliveryType') or '-')}. "
                 "Pendiente de preparación."
             )
-            href = "/administracion/ordenes-entrega"
+            href = f"/administracion/ordenes-entrega?orderId={quote(str(order_id), safe='')}"
         elif kind == "remito_ready":
             notification_key = "sales_order_remito_ready"
             roles = ["cobranzas"]

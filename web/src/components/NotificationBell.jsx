@@ -36,10 +36,22 @@ function browserSupportsPush() {
   return (
     SERVICE_WORKER_ENABLED &&
     typeof window !== "undefined" &&
+    window.isSecureContext &&
     "Notification" in window &&
     "PushManager" in window &&
     "serviceWorker" in navigator
   );
+}
+
+function pushUnavailableMessage() {
+  if (!SERVICE_WORKER_ENABLED) return "Las notificaciones del teléfono no están activas en este entorno.";
+  if (typeof window === "undefined") return "Las notificaciones del teléfono no están disponibles.";
+  if (!window.isSecureContext) return "Abrí NEXORA por HTTPS para activar las notificaciones del teléfono.";
+  if (!("Notification" in window)) return "Este navegador no permite notificaciones del teléfono.";
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    return "Este navegador no permite notificaciones push.";
+  }
+  return "";
 }
 
 function urlBase64ToUint8Array(base64String) {
@@ -66,7 +78,7 @@ export default function NotificationBell() {
   const [pushMessage, setPushMessage] = useState("");
 
   const canManagePhonePush = user?.rol === "recepcion";
-  const pushAvailable = canManagePhonePush && browserSupportsPush() && pushConfig?.available && pushConfig?.publicKey;
+  const showPhonePushControl = canManagePhonePush;
 
   const badgeText = useMemo(() => {
     if (!unreadCount) return "";
@@ -90,7 +102,7 @@ export default function NotificationBell() {
   }, []);
 
   const refreshPushConfig = useCallback(async () => {
-    if (!canManagePhonePush || !browserSupportsPush()) {
+    if (!canManagePhonePush) {
       setPushConfig(null);
       return;
     }
@@ -191,16 +203,15 @@ export default function NotificationBell() {
     setPushMessage("");
     setError("");
     try {
-      if (!browserSupportsPush()) {
-        throw new Error("Las notificaciones del teléfono no están disponibles en este navegador.");
-      }
+      const unavailableMessage = pushUnavailableMessage();
+      if (unavailableMessage) throw new Error(unavailableMessage);
       const config = pushConfig?.publicKey ? pushConfig : await getPushNotificationConfig();
       if (!config?.available || !config?.publicKey) {
         throw new Error("Las notificaciones del teléfono no están configuradas en NEXORA.");
       }
       const permission = await window.Notification.requestPermission();
       if (permission !== "granted") {
-        throw new Error("El permiso de notificaciones quedó bloqueado.");
+        throw new Error("El permiso de notificaciones quedó bloqueado. Revisá los permisos del navegador.");
       }
       const registration = await ensureServiceWorkerRegistration();
       const existing = await registration.pushManager.getSubscription();
@@ -299,7 +310,7 @@ export default function NotificationBell() {
             </div>
           </div>
 
-          {pushAvailable && (
+          {showPhonePushControl && (
             <div className="border-b px-3 py-2">
               <button
                 type="button"

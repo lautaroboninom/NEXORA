@@ -26,6 +26,7 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
       - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:5175}
       - PUBLIC_WEB_URL=${PUBLIC_WEB_URL:-http://localhost:5175}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_DEV_ALLOWED_HOSTS:-localhost,127.0.0.1,100.91.53.60,nexora.tail7bb880.ts.net}
       - LOGO_PATH=${LOGO_PATH:-/app/staticfiles/branding/logo-app.png}
     depends_on:
       postgres:
@@ -64,11 +65,26 @@ services:
     ports:
       - "5175:5173"
     environment:
-      - VITE_API_URL=${VITE_API_URL:-http://localhost:18100}
+      - VITE_API_URL=${DEV_VITE_API_URL:-}
+      - VITE_DEV_API_PROXY=${VITE_DEV_API_PROXY:-http://api:8000}
       - VITE_SW=${VITE_SW:-0}
     command: sh -c "npm install && npm run dev -- --host"
     depends_on:
       api:
+        condition: service_started
+
+  dev_https:
+    build:
+      context: .
+      dockerfile: deploy/dev-https.Dockerfile
+    ports:
+      - "5176:5176"
+    volumes:
+      - ${SEPID_CERTS_DIR:-C:/sepid_certs}:/etc/nginx/certs:ro
+    depends_on:
+      api:
+        condition: service_started
+      web:
         condition: service_started
 
 volumes:

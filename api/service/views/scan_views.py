@@ -42,6 +42,82 @@ def _normalize_ingreso_summary(row: dict | None, ingreso_en_curso: bool | None =
     return row
 
 
+def _customer_match_by_name(name: str):
+    name = (name or "").strip()
+    if not name:
+        return None
+    if _has_customer_alias_column():
+        return q(
+            """
+            SELECT id, COALESCE(razon_social,'') AS razon_social,
+                   COALESCE(cod_empresa,'') AS cod_empresa,
+                   COALESCE(telefono,'') AS telefono
+              FROM customers
+             WHERE LOWER(razon_social)=LOWER(%s)
+                OR LOWER(COALESCE(alias_interno,''))=LOWER(%s)
+             ORDER BY CASE WHEN LOWER(razon_social)=LOWER(%s) THEN 0 ELSE 1 END, id
+             LIMIT 1
+            """,
+            [name, name, name],
+            one=True,
+        )
+    return q(
+        """
+        SELECT id, COALESCE(razon_social,'') AS razon_social,
+               COALESCE(cod_empresa,'') AS cod_empresa,
+               COALESCE(telefono,'') AS telefono
+          FROM customers
+         WHERE LOWER(razon_social)=LOWER(%s)
+         LIMIT 1
+        """,
+        [name],
+        one=True,
+    )
+
+
+def _has_customer_alias_column() -> bool:
+    try:
+        if connection.vendor == "postgresql":
+            row = q(
+                """
+                SELECT 1
+                  FROM information_schema.columns
+                 WHERE table_name='customers'
+                   AND column_name='alias_interno'
+                   AND table_schema = ANY(current_schemas(true))
+                 LIMIT 1
+                """,
+                one=True,
+            )
+            return bool(row)
+        with connection.cursor() as cur:
+            columns = connection.introspection.get_table_description(cur, "customers")
+        return any(getattr(col, "name", None) == "alias_interno" for col in columns)
+    except Exception:
+        return False
+
+
+def _rental_return_customer(device: dict | None, ingreso: dict | None):
+    device = device or {}
+    ingreso = ingreso or {}
+    rental_name = (ingreso.get("alquiler_a") or device.get("alquiler_a") or "").strip()
+    if not rental_name:
+        return None
+    estado = str(ingreso.get("estado") or "").strip().lower()
+    is_rented = bool(ingreso.get("alquilado")) or bool(device.get("alquilado")) or estado == "alquilado"
+    if not is_rented:
+        return None
+
+    customer = _customer_match_by_name(rental_name) or {}
+    return {
+        "id": customer.get("id"),
+        "razon_social": customer.get("razon_social") or rental_name,
+        "cod_empresa": customer.get("cod_empresa") or "",
+        "telefono": customer.get("telefono") or "",
+        "alquiler_a": rental_name,
+    }
+
+
 def _parse_ingreso_id(raw: str):
     value = (raw or "").strip()
     if not value:
@@ -404,6 +480,7 @@ class ScanLookupView(APIView):
             "normalized_key": ns_key,
             "device": device,
             "ingreso": last_ingreso,
+            "rental_return_customer": _rental_return_customer(device, last_ingreso),
             "flags": flags,
         })
 

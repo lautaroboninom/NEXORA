@@ -12,7 +12,7 @@ import {
 } from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
-import { isRisRegistered, risRemitoFrom } from "../../../lib/ris-print";
+import { documentNameFromRis, isRisRegistered, risRemitoFrom } from "../../../lib/ris-print";
 import { getReleaseFlow } from "../../../lib/release-flow";
 import { Printer } from "lucide-react";
 import {
@@ -62,6 +62,7 @@ export default function PrincipalTab(props) {
     canEditAlquiler,
     canManageReleaseResolution,
     canShowRisAction,
+    ingressDocumentName: ingressDocumentNameProp,
     risBusy,
     onEmitRis,
     onOpenReleaseModal,
@@ -98,6 +99,7 @@ export default function PrincipalTab(props) {
   const isRegisteredRis = isRisRegistered(data);
   const risRemito = risRemitoFrom(data);
   const hasRisRemito = Boolean(risRemito);
+  const ingressDocumentName = documentNameFromRis(data, ingressDocumentNameProp || "RIS");
   const releaseFlow = useMemo(
     () => getReleaseFlow(data, { canManageResolution: canManageReleaseResolution }),
     [data, canManageReleaseResolution],
@@ -707,7 +709,7 @@ export default function PrincipalTab(props) {
                     <span className="block text-xs text-gray-500">
                       {isRegisteredRis
                         ? `Remito registrado: ${risRemito || data?.ris?.status || "pendiente"}`
-                        : `RIS: ${data?.ris?.remito_number || data?.ris?.status || "pendiente"}`}
+                        : `${ingressDocumentName}: ${data?.ris?.remito_number || data?.ris?.status || "pendiente"}`}
                     </span>
                   )}
                   {!isRegisteredRis && canShowRisAction && typeof onEmitRis === "function" && (
@@ -718,7 +720,7 @@ export default function PrincipalTab(props) {
                       className="mt-1 inline-flex items-center gap-1 rounded border border-sky-200 px-2 py-1 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                      {risBusy ? "Preparando RIS..." : hasRisRemito ? "Ver RIS" : "Emitir RIS"}
+                      {risBusy ? `Preparando ${ingressDocumentName}...` : hasRisRemito ? `Ver ${ingressDocumentName}` : `Emitir ${ingressDocumentName}`}
                     </button>
                   )}
                 </span>

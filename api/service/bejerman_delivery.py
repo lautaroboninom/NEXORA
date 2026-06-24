@@ -58,6 +58,7 @@ from .delivery_orders import (
     serialize_order,
     validate_rental_delivery_items,
 )
+from .remito_pdf_notifications import notify_bejerman_remito_pdf_issued
 
 
 logger = logging.getLogger(__name__)
@@ -889,18 +890,26 @@ def _company_key_for_order(order: dict[str, Any]) -> str:
 def _profile_value(delivery_type: str, company_key: str, field: str, default: str) -> str:
     prefix = _delivery_profile_prefix(delivery_type)
     company = (company_key or "SEPID").strip().upper() or "SEPID"
-    names = [f"BEJERMAN_REMITO_{prefix}_{company}_{field}"]
     if field == "POINT_OF_SALE":
-        names.append(f"BEJERMAN_REMITO_{company}_{field}")
-    names.append(f"BEJERMAN_REMITO_{prefix}_{field}")
+        if company == "MGBIO":
+            return "00007"
+        if company == "SEPID":
+            return "00004"
+        names = [
+            f"BEJERMAN_REMITO_{prefix}_{company}_{field}",
+            f"BEJERMAN_REMITO_{company}_{field}",
+        ]
+        for name in names:
+            value = _env_override(name)
+            if value:
+                return value
+        value = _env_override(f"BEJERMAN_REMITO_{prefix}_{field}")
+        return value or default
+    names = [f"BEJERMAN_REMITO_{prefix}_{company}_{field}", f"BEJERMAN_REMITO_{prefix}_{field}"]
     for name in names:
         value = _env_override(name)
         if value:
             return value
-    if field == "POINT_OF_SALE" and company == "MGBIO":
-        return "00007"
-    if field == "POINT_OF_SALE" and company == "SEPID":
-        return "00004"
     return default
 
 
@@ -1451,6 +1460,36 @@ def _sync_rental_ingresos_after_remito(
     return synced
 
 
+def _delivery_remito_pdf_email_details(
+    orders: list[dict[str, Any]],
+    profile: dict[str, Any],
+    billing_required: bool,
+) -> list[str]:
+    order_numbers = [
+        _optional_text(order.get("orderNumber")) or _optional_text(order.get("id")) or "-"
+        for order in orders
+    ]
+    delivery_types = sorted({_optional_text(order.get("deliveryType")) or "-" for order in orders})
+    lines = [
+        f"Órdenes: {', '.join(order_numbers)}",
+        f"Tipo de entrega: {', '.join(delivery_types)}",
+        f"Punto de venta: {_optional_text(profile.get('pointOfSale')) or '-'}",
+        f"Facturable: {'Sí' if billing_required else 'No'}",
+    ]
+    if len(orders) == 1:
+        order = orders[0]
+        source = _optional_text(order.get("sourceReference"))
+        serial = _optional_text(order.get("equipmentSerial"))
+        internal_number = _optional_text(order.get("equipmentInternalNumber"))
+        if source:
+            lines.append(f"Referencia: {source}")
+        if serial:
+            lines.append(f"N/S: {serial}")
+        if internal_number:
+            lines.append(f"Número interno: {internal_number}")
+    return lines
+
+
 def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     started_at = time.monotonic()
     ids = [str(item).strip() for item in (order_ids or []) if str(item).strip()]
@@ -1633,6 +1672,19 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
             )
             if billing_required:
                 notify_delivery_order_remito_ready(order_id, actor_user_id)
+        notify_bejerman_remito_pdf_issued(
+            remito_number=remito_number,
+            document_type=response.get("comprobanteTipo") or profile.get("type") or compatibility["profile"]["type"],
+            company_key=compatibility["companyKey"],
+            customer_name=compatibility["customerName"],
+            source="Orden de entrega",
+            details=_delivery_remito_pdf_email_details(orders, profile, billing_required),
+            actor_user_id=actor_user_id,
+            pdf_loader=lambda remito_group_id=group_id, actor_id=actor_user_id: get_remito_group_pdf(
+                remito_group_id,
+                actor_user_id=actor_id,
+            ),
+        )
 
     updated = list_delivery_orders({"limit": len(ids)})["items"]
     updated_by_id = {order["id"]: order for order in updated if order["id"] in ids}

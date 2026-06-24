@@ -242,6 +242,11 @@ export default function RisPreflightPanel({
 }) {
   const issues = Array.isArray(result?.issues) ? result.issues : [];
   const preview = result?.preview || {};
+  const profile = preview?.documentProfile || preview?.document_profile || result?.documentProfile || result?.document_profile || {};
+  const profileType = String(profile?.type || "").trim().toUpperCase();
+  const profileDeposit = String(profile?.deposit || "").trim();
+  const updatesStock = Boolean(profile?.updateStock);
+  const partidaLabel = updatesStock && profileType === "RDA" ? "N° serie del equipo" : "identificador del equipo";
   const hasResult = !!result;
   const normalizedDocumentLabel = documentLabel || "RIS";
   const titleDocumentLabel = normalizedDocumentLabel === "remito" ? "del remito" : normalizedDocumentLabel;
@@ -258,6 +263,13 @@ export default function RisPreflightPanel({
                 : result?.detail || "La validación encontró problemas."
               : `Valide los datos antes de crear o ${actionText}.`}
           </div>
+          {profileType && (
+            <div className="mt-1 text-xs font-medium text-gray-700">
+              Comprobante: {profileType}
+              {profileDeposit ? ` · Depósito: ${profileDeposit}` : ""}
+              {updatesStock ? ` · Partida: ${partidaLabel}` : " · Sin movimiento de stock"}
+            </div>
+          )}
         </div>
         {onValidate && (
           <button

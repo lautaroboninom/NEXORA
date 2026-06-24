@@ -31,9 +31,9 @@ const SCAN_MIN_LEN = 3;
 
 const MODE_CONFIG = {
   ingreso: {
-    label: "Ingreso / RIS",
+    label: "Ingreso / Remito",
     title: "Ingreso con lector",
-    subtitle: "Escanee N/S, interno u OS para abrir el ingreso, emitir RIS o imprimir etiqueta.",
+    subtitle: "Escanee N/S, interno u OS para abrir el ingreso, emitir Remito o imprimir etiqueta.",
     input: "Escanear serie, interno u OS",
   },
   egreso: {
@@ -45,6 +45,22 @@ const MODE_CONFIG = {
 };
 
 const safeText = (value, fallback = "-") => (value == null || value === "" ? fallback : String(value));
+const cleanText = (value) => String(value || "").trim();
+
+const rentalReturnCustomerFromResult = (payload) => {
+  if (!payload || typeof payload !== "object") return null;
+  const rental = payload.rental_return_customer || payload.rentalReturnCustomer || {};
+  if (!rental || typeof rental !== "object") return null;
+  const name = cleanText(rental.razon_social || rental.customer_nombre || rental.name || rental.alquiler_a);
+  if (!name) return null;
+  return {
+    id: rental.id || rental.customer_id || null,
+    name,
+    cod: cleanText(rental.cod_empresa || rental.customer_cod),
+    telefono: cleanText(rental.telefono || rental.customer_telefono),
+    alquiler_a: cleanText(rental.alquiler_a) || name,
+  };
+};
 
 const estadoLabel = (value) => {
   const raw = String(value || "").trim();
@@ -125,7 +141,7 @@ export default function QrScanCard({
   const cardTitle = title || (receptionMode ? "Lector de recepción" : "Lectura de QR");
   const cardSubtitle = subtitle || (
     receptionMode
-      ? "Ingreso RIS y egreso RSS con lector de código de barras."
+      ? "Ingreso RIS/RDA y egreso RSS con lector de código de barras."
       : "Escanear código QR o de barras."
   );
 
@@ -425,9 +441,12 @@ export default function QrScanCard({
     return "Cliente";
   };
 
+  const rentalReturnCustomer = rentalReturnCustomerFromResult(result);
   const alquilerCliente = (() => {
-    const name = (ingreso?.alquiler_a || "").trim();
-    return ingreso?.alquilado && name ? name : "";
+    if (rentalReturnCustomer?.name) return rentalReturnCustomer.name;
+    const name = cleanText(ingreso?.alquiler_a || device?.alquiler_a);
+    const estadoIngreso = cleanText(ingreso?.estado).toLowerCase();
+    return (ingreso?.alquilado || device?.alquilado || estadoIngreso === "alquilado") && name ? name : "";
   })();
 
   const goNuevoIngreso = (prefill) => {
@@ -502,24 +521,24 @@ export default function QrScanCard({
     }
     const progressStartedAt = Date.now();
     setRisBusy(true);
-    setRisProgressStatus(isRisGenerated(ingreso) ? "Buscando PDF del RIS..." : "Emitiendo RIS en Bejerman...");
+    setRisProgressStatus(isRisGenerated(ingreso) ? "Buscando PDF del Remito..." : "Emitiendo Remito en Bejerman...");
     try {
       await waitForRisProgressPaint();
       const risSource = isRisGenerated(ingreso) ? ingreso : await postIngresoRisEmitir(ingreso.id);
       const remito = risRemitoFrom(risSource);
       const blob = await waitForRisPdfBlob(ingreso.id, risSource, {
-        onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del RIS..."),
+        onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del Remito..."),
       });
       setRisProgressStatus("Abriendo impresión...");
       const opened = openRisPrintablePdf(blob, risSource).opened;
       if (opened) {
-        setActionOk(remito ? `RIS ${remito} listo para imprimir.` : "RIS listo para imprimir.");
+        setActionOk(remito ? `Remito ${remito} listo para imprimir.` : "Remito listo para imprimir.");
       } else {
         setManualRisPrint({ blob, source: risSource, remito });
-        setErr("El PDF del RIS ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.");
+        setErr("El PDF del Remito ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.");
       }
     } catch (e2) {
-      setErr(e2?.message || "No se pudo emitir o reimprimir el RIS.");
+      setErr(e2?.message || "No se pudo emitir o reimprimir el Remito.");
     } finally {
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
@@ -534,7 +553,7 @@ export default function QrScanCard({
     if (opened) {
       setManualRisPrint(null);
       setErr("");
-      setActionOk(manualRisPrint.remito ? `RIS ${manualRisPrint.remito} listo para imprimir.` : "RIS listo para imprimir.");
+      setActionOk(manualRisPrint.remito ? `RIS ${manualRisPrint.remito} listo para imprimir.` : "Remito listo para imprimir.");
     } else {
       setErr("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
     }
@@ -562,8 +581,8 @@ export default function QrScanCard({
     <div className="rounded border bg-white p-4">
       <RisProgressModal
         open={risBusy}
-        title="Emitiendo RIS"
-        status={risProgressStatus || "Emitiendo RIS en Bejerman..."}
+        title="Emitiendo Remito"
+        status={risProgressStatus || "Emitiendo Remito en Bejerman..."}
       />
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>
@@ -577,7 +596,7 @@ export default function QrScanCard({
               className="rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700"
               onClick={() => openModal("ingreso")}
             >
-              Ingreso / RIS
+              Ingreso / Remito
             </button>
             <button
               type="button"
@@ -708,13 +727,13 @@ export default function QrScanCard({
             {err && <div className="bg-red-100 text-red-800 border border-red-300 rounded p-2 mt-3">{err}</div>}
             {manualRisPrint?.blob && (
               <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900">
-                <div>El PDF del RIS está listo. Si no se abrió automáticamente, imprímalo desde este botón.</div>
+                <div>El PDF del Remito está listo. Si no se abrió automáticamente, imprímalo desde este botón.</div>
                 <button
                   type="button"
                   onClick={abrirRisManualPendiente}
                   className="mt-2 rounded bg-amber-700 px-3 py-1.5 font-medium text-white hover:bg-amber-800"
                 >
-                  Abrir e imprimir RIS
+                  Abrir e imprimir Remito
                 </button>
               </div>
             )}
@@ -775,12 +794,12 @@ export default function QrScanCard({
                           disabled={risBusy}
                         >
                           {risBusy
-                            ? "Preparando RIS..."
+                            ? "Preparando Remito..."
                             : isRisRegistered(ingreso)
                               ? "Remito registrado"
                               : isRisGenerated(ingreso)
-                                ? "Ver RIS"
-                                : "Emitir RIS"}
+                                ? "Ver Remito"
+                                : "Emitir Remito"}
                         </button>
                       )}
                     </div>
@@ -896,7 +915,7 @@ export default function QrScanCard({
                     </div>
                     {ingresoEnCurso && (
                       <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-800">
-                        Para continuar, abrí la hoja de servicio existente o reimprimí RIS/etiqueta desde este resultado.
+                        Para continuar, abrí la hoja de servicio existente o reimprimí Remito/etiqueta desde este resultado.
                       </div>
                     )}
                     {(canViewLastIngresoFromDevice || canCreateFromDevice) && (
@@ -931,10 +950,10 @@ export default function QrScanCard({
                             variante: device.variante || ingreso?.equipo_variante || "",
                             ...(alquilerCliente
                               ? {
-                                  customer_id: null,
+                                  customer_id: rentalReturnCustomer?.id || null,
                                   customer_nombre: alquilerCliente,
-                                  customer_cod: "",
-                                  customer_telefono: "",
+                                  customer_cod: rentalReturnCustomer?.cod || "",
+                                  customer_telefono: rentalReturnCustomer?.telefono || "",
                                 }
                               : {
                                   customer_id: device.customer_id,
@@ -942,11 +961,12 @@ export default function QrScanCard({
                                   customer_cod: device.customer_cod,
                                   customer_telefono: device.customer_telefono,
                                 }),
+                            rental_return_customer: rentalReturnCustomer,
                             propietario_nombre: device.propietario_nombre,
                             propietario_contacto: device.propietario_contacto,
                             propietario_doc: device.propietario_doc,
-                            alquilado: device.alquilado,
-                            alquiler_a: device.alquiler_a,
+                            alquilado: ingreso?.alquilado || device.alquilado || !!alquilerCliente,
+                            alquiler_a: rentalReturnCustomer?.alquiler_a || ingreso?.alquiler_a || device.alquiler_a,
                             es_propietario_mg: flags?.es_propietario_mg,
                             vendido: flags?.vendido,
                             mg_estado: flags?.mg_estado,
@@ -957,7 +977,7 @@ export default function QrScanCard({
                               })
                             }
                           >
-                            Crear ingreso RIS con datos
+                            Crear ingreso Remito con datos
                           </button>
                         )}
                       </div>
