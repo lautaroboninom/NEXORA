@@ -304,6 +304,8 @@ CREATE TABLE IF NOT EXISTS customers (
   telefono      TEXT,
   telefono_2    TEXT,
   email         TEXT,
+  bejerman_cod_empresa    TEXT,
+  bejerman_company_key    TEXT,
   bejerman_nombre_fantasia TEXT,
   bejerman_tipo_documento  TEXT,
   bejerman_domicilio       TEXT,
@@ -324,10 +326,14 @@ CREATE TABLE IF NOT EXISTS customers (
   bejerman_raw             JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bejerman_cod_empresa TEXT;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bejerman_company_key TEXT;
 CREATE INDEX IF NOT EXISTS ix_customers_bejerman_condicion_iva
   ON customers(bejerman_condicion_iva);
 CREATE INDEX IF NOT EXISTS ix_customers_bejerman_synced_at
   ON customers(bejerman_synced_at);
+CREATE INDEX IF NOT EXISTS ix_customers_bejerman_code_company
+  ON customers(bejerman_company_key, bejerman_cod_empresa);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_customers_alias_interno_ci
   ON customers (LOWER(BTRIM(alias_interno)))
   WHERE alias_interno IS NOT NULL
@@ -1584,6 +1590,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   entity_type       TEXT NULL,
   entity_id         TEXT NULL,
   payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  bell_enabled      BOOLEAN NOT NULL DEFAULT TRUE,
   read_at           TIMESTAMPTZ NULL,
   clicked_at        TIMESTAMPTZ NULL,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1598,11 +1605,26 @@ CREATE TABLE IF NOT EXISTS notification_user_preferences (
   user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   notification_key  TEXT NOT NULL,
   enabled           BOOLEAN NULL,
+  bell_enabled      BOOLEAN NULL,
+  email_enabled     BOOLEAN NULL,
+  push_enabled      BOOLEAN NULL,
   updated_by        INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT chk_notification_preferences_key CHECK (NULLIF(TRIM(notification_key), '') IS NOT NULL),
   CONSTRAINT uq_notification_user_preferences UNIQUE (user_id, notification_key)
+);
+
+CREATE TABLE IF NOT EXISTS notification_email_addresses (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email             TEXT NOT NULL,
+  label             TEXT NOT NULL DEFAULT '',
+  active            BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by        INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_notification_email_address_email CHECK (NULLIF(TRIM(email), '') IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS notification_push_subscriptions (
@@ -1647,6 +1669,11 @@ CREATE INDEX IF NOT EXISTS ix_notifications_entity
   ON notifications(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS ix_notification_preferences_user
   ON notification_user_preferences(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_email_addresses_user_email
+  ON notification_email_addresses(user_id, LOWER(TRIM(email)));
+CREATE INDEX IF NOT EXISTS ix_notification_email_addresses_active_user
+  ON notification_email_addresses(user_id, updated_at DESC)
+  WHERE active = TRUE;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_push_endpoint
   ON notification_push_subscriptions(endpoint);
 CREATE INDEX IF NOT EXISTS ix_notification_push_active_user
@@ -1682,6 +1709,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_push_subscriptions_set_updated_at') THEN
     CREATE TRIGGER trg_notification_push_subscriptions_set_updated_at
     BEFORE UPDATE ON notification_push_subscriptions
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_email_addresses_set_updated_at') THEN
+    CREATE TRIGGER trg_notification_email_addresses_set_updated_at
+    BEFORE UPDATE ON notification_email_addresses
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;

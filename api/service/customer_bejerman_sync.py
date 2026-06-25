@@ -9,9 +9,14 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .bejerman_sdk import BejermanSDKClient, as_string, first_value, normalize_search, records_from_response
+from .bejerman_companies import company_for_key
 
+
+BEJERMAN_COMPANY_CONTEXT_KEY = "__nexora_bejerman_company_key"
 
 BEJERMAN_CUSTOMER_TEXT_COLUMNS = (
+    "bejerman_cod_empresa",
+    "bejerman_company_key",
     "bejerman_nombre_fantasia",
     "bejerman_tipo_documento",
     "bejerman_domicilio",
@@ -38,15 +43,23 @@ BEJERMAN_CUSTOMER_COLUMNS = (
 
 BEJERMAN_CUSTOMER_FIELD_ALIASES = {
     "cod_empresa": ("Cliente_Codigo", "ClienteCodigo", "CodigoCliente", "Codigo", "CodCliente"),
+    "bejerman_cod_empresa": ("Cliente_Codigo", "ClienteCodigo", "CodigoCliente", "Codigo", "CodCliente"),
+    "bejerman_company_key": ("CompanyKey", "EmpresaKey", "Empresa_Bejerman_Key"),
     "razon_social": ("Cliente_RazonSocial", "Cliente_Nombre", "RazonSocial", "Nombre", "Cliente"),
     "cuit": ("Cliente_NroDocumento", "Cliente_CUIT", "Cliente_Cuit", "CUIT", "Cuit", "TaxId"),
     "bejerman_nombre_fantasia": ("Cliente_NombreFantasia", "NombreFantasia", "Fantasia", "NombreComercial"),
-    "bejerman_tipo_documento": ("Cliente_TipoDocumento", "Cliente_TipoDoc", "TipoDocumento", "TipoDoc"),
+    "bejerman_tipo_documento": (
+        "Cliente_TipoDocumento",
+        "Cliente_TipoDocumentoCodigo",
+        "Cliente_TipoDoc",
+        "TipoDocumento",
+        "TipoDoc",
+    ),
     "bejerman_domicilio": ("Cliente_Domicilio", "Cliente_Direccion", "Domicilio", "Direccion", "Dirección"),
     "bejerman_localidad": ("Cliente_Localidad", "Localidad", "Ciudad"),
     "bejerman_provincia": ("Cliente_Provincia", "Cliente_CodigoProvincia", "Provincia", "CodigoProvincia"),
     "bejerman_codigo_postal": ("Cliente_CodigoPostal", "Cliente_CP", "CodigoPostal", "CodPostal", "CP"),
-    "bejerman_pais": ("Cliente_Pais", "País", "Pais", "CodigoPais"),
+    "bejerman_pais": ("Cliente_Pais", "Cliente_PaisCodigo", "País", "Pais", "CodigoPais"),
     "bejerman_condicion_iva": (
         "Cliente_SitIVA",
         "Cliente_SituacionIVA",
@@ -67,6 +80,7 @@ BEJERMAN_CUSTOMER_FIELD_ALIASES = {
     ),
     "bejerman_condicion_venta": (
         "Cliente_CondVenta",
+        "Cliente_CondicionVentaCodigo",
         "Cliente_CondicionVenta",
         "CondVenta",
         "CondicionVenta",
@@ -74,11 +88,17 @@ BEJERMAN_CUSTOMER_FIELD_ALIASES = {
         "Comprobante_CondVenta",
     ),
     "bejerman_vendedor": ("Cliente_Vendedor", "Cliente_VendedorCodigo", "Vendedor", "Vendedor_Codigo"),
-    "bejerman_lista_precio": ("Cliente_ListaPrecio", "Cliente_ListaPrecios", "ListaPrecio", "ListaPrecios"),
+    "bejerman_lista_precio": (
+        "Cliente_ListaPrecio",
+        "Cliente_ListaPreciosCodigo",
+        "Cliente_ListaPrecios",
+        "ListaPrecio",
+        "ListaPrecios",
+    ),
     "bejerman_contacto": ("Cliente_Contacto", "Contacto", "NombreContacto"),
     "bejerman_telefono": ("Cliente_Telefono", "Cliente_Teléfono", "Telefono", "Teléfono", "Telefono1", "Tel"),
     "bejerman_telefono_2": ("Cliente_Telefono2", "Cliente_Celular", "Telefono2", "Celular"),
-    "bejerman_email": ("Cliente_Email", "Cliente_Mail", "Email", "E-Mail", "Mail"),
+    "bejerman_email": ("Cliente_Email", "Cliente_EMail", "Cliente_Mail", "Email", "E-Mail", "Mail"),
 }
 
 CUSTOMER_NAME_MATCH_THRESHOLD = 0.82
@@ -131,13 +151,37 @@ def table_columns(table_name: str) -> set[str]:
         return set()
 
 
+def _client_company_key(client: BejermanSDKClient) -> str:
+    marker = clean(getattr(client, "company_key", "")) or clean(getattr(client, "company", ""))
+    company = company_for_key(marker, default=None)
+    if company:
+        return company.key
+    return clean_upper(marker)
+
+
+def _with_company_context(record: dict[str, Any], company_key: str) -> dict[str, Any]:
+    if not company_key:
+        return dict(record)
+    return {**record, BEJERMAN_COMPANY_CONTEXT_KEY: company_key}
+
+
+def _raw_bejerman_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in (record or {}).items() if not str(key).startswith("__nexora_")}
+
+
 def load_bejerman_customer_records(
     *,
     user_id: int | None = None,
     allow_system_credentials: bool = False,
+    company_key: str | None = None,
 ) -> list[dict[str, Any]]:
-    client = BejermanSDKClient(actor_user_id=user_id, allow_system_credentials=allow_system_credentials)
-    return records_from_response(client.list_clientes())
+    client = BejermanSDKClient(
+        company_key=company_key,
+        actor_user_id=user_id,
+        allow_system_credentials=allow_system_credentials,
+    )
+    resolved_company_key = _client_company_key(client)
+    return [_with_company_context(record, resolved_company_key) for record in records_from_response(client.list_clientes())]
 
 
 def bejerman_customer_details_from_record(record: dict[str, Any]) -> dict[str, str]:
@@ -146,6 +190,10 @@ def bejerman_customer_details_from_record(record: dict[str, Any]) -> dict[str, s
         for key, aliases in BEJERMAN_CUSTOMER_FIELD_ALIASES.items()
     }
     details["cod_empresa"] = clean(details.get("cod_empresa"))
+    details["bejerman_cod_empresa"] = clean(details.get("bejerman_cod_empresa") or details.get("cod_empresa"))
+    details["bejerman_company_key"] = clean_upper(
+        record.get(BEJERMAN_COMPANY_CONTEXT_KEY) or details.get("bejerman_company_key")
+    )
     details["razon_social"] = clean(details.get("razon_social"))
     details["cuit"] = digits_only(details.get("cuit"))
     return details
@@ -160,6 +208,8 @@ def customer_bejerman_detail_payload(row: dict[str, Any] | None) -> dict[str, An
         except Exception:
             raw = {}
     return {
+        "codigoEmpresa": row.get("bejerman_cod_empresa") or "",
+        "companyKey": row.get("bejerman_company_key") or "",
         "nombreFantasia": row.get("bejerman_nombre_fantasia") or "",
         "tipoDocumento": row.get("bejerman_tipo_documento") or "",
         "domicilio": row.get("bejerman_domicilio") or "",
@@ -251,7 +301,7 @@ def _sync_values(details: dict[str, str], record: dict[str, Any], existing: dict
     for column in BEJERMAN_CUSTOMER_TEXT_COLUMNS:
         values[column] = details.get(column) or None
     values["bejerman_synced_at"] = timezone.now()
-    values["bejerman_raw"] = record or {}
+    values["bejerman_raw"] = _raw_bejerman_record(record)
     return values
 
 

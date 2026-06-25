@@ -460,15 +460,15 @@ export default function PrincipalTab(props) {
                   <input
                     className="border rounded p-1 w-64"
                     list={clientesPerm ? "service_clientes_rs" : undefined}
+                    autoComplete="off"
                     value={clienteRsInput}
                     onChange={(e) => {
                       const v = e.target.value;
                       const selected = (clientes || []).find((c) => normClient(c?.razon_social) === normClient(v) || normClient(c?.alias_interno) === normClient(v));
-                      const nextRs = selected?.razon_social || v;
-                      setClienteRsInput(nextRs);
+                      setClienteRsInput(v);
                       const nextCod = selected?.cod_empresa || "";
                       setClienteCodInput(nextCod);
-                      syncClienteFromInputs(nextRs, nextCod);
+                      syncClienteFromInputs(v, nextCod);
                     }}
                     placeholder="Elija de la lista"
                   />

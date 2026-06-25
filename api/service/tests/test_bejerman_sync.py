@@ -28,6 +28,7 @@ from service.bejerman_sync import (
     restore_target_stock_from_jobs,
 )
 from service.bejerman_sdk import BejermanPdfPendingError, BejermanSdkResponseError, BejermanSdkUnavailable
+from service.bejerman_ris import BejermanRisError, register_ris_batch
 from service.models import User
 
 
@@ -1517,6 +1518,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "ALQ")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-RDA-001"])
 
@@ -1566,6 +1569,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "ALQ")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-RIS-ALQ-001"])
 
@@ -1648,6 +1653,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "DEMO")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
 
     def test_nuevo_ingreso_lote_mixto_bloquea_sin_crear_ingresos(self):
@@ -1802,6 +1809,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(len(article_lines), 2)
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1, 1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [1, 1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-LOTE-REG-001", "SN-LOTE-REG-002"])
         with connection.cursor() as cur:
@@ -2051,7 +2060,7 @@ class BejermanSyncTest(TestCase):
             )
             self.assertEqual(cur.fetchone(), ("register", "RIS R 00004-00026249", "not_applicable", "RIS R 00004-00026249"))
 
-    def test_nuevo_ingreso_lote_registrar_bloquea_duplicado_local(self):
+    def test_nuevo_ingreso_lote_registrar_asocia_remito_local_a_otro_equipo(self):
         existing_id = self._insert_ingreso(serial="SN-LOTE-REG-DUP-LOCAL-OLD")
         with connection.cursor() as cur:
             cur.execute(
@@ -2088,19 +2097,69 @@ class BejermanSyncTest(TestCase):
         ):
             response = self.client.post("/api/ingresos/nuevo/lote/", payload, format="json")
 
-        self.assertEqual(response.status_code, 409, response.data)
-        self.assertTrue(any(issue["code"] == "MANUAL_REMITO_DUPLICATE_LOCAL" for issue in response.data["issues"]))
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["document_mode"], "register")
+        self.assertEqual(response.data["remito_number"], "RIS R 00004-00026249")
         self.assertEqual(fake.ingresar_calls, 0)
+        ingreso_ids = response.data["ingreso_ids"]
+        self.assertEqual(len(ingreso_ids), 1)
         with connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(*)
+                SELECT d.numero_serie, r.document_mode, r.manual_remito_number, r.pdf_status, t.remito_ingreso
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
-                 WHERE d.numero_serie = 'SN-LOTE-REG-DUP-LOCAL'
-                """
+                 JOIN bejerman_ingreso_remitos r ON r.ingreso_id = t.id
+                 WHERE t.id IN (%s, %s)
+                 ORDER BY d.numero_serie
+                """,
+                [existing_id, ingreso_ids[0]],
             )
-            self.assertEqual(cur.fetchone()[0], 0)
+            rows = cur.fetchall()
+        self.assertEqual(
+            rows,
+            [
+                ("SN-LOTE-REG-DUP-LOCAL", "register", "RIS R 00004-00026249", "not_applicable", "RIS R 00004-00026249"),
+                ("SN-LOTE-REG-DUP-LOCAL-OLD", "register", "RIS R 00004-00026249", "not_applicable", None),
+            ],
+        )
+
+    def test_register_ris_batch_rechaza_cambiar_remito_de_ingreso_generado(self):
+        ingreso_id = self._insert_ingreso(serial="SN-LOTE-REG-DIFF-LOCAL")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bejerman_ingreso_remitos (
+                    ingreso_id,
+                    status,
+                    pdf_status,
+                    document_mode,
+                    manual_remito_number,
+                    comprobante_tipo,
+                    comprobante_letra,
+                    comprobante_pto_venta,
+                    comprobante_numero,
+                    remito_number,
+                    company_key
+                )
+                VALUES (%s, 'generated', 'not_applicable', 'register', %s, 'RIS', 'R', '00004', '00026249', %s, 'SEPID')
+                """,
+                [ingreso_id, "RIS R 00004-00026249", "RIS R 00004-00026249"],
+            )
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(FakeRisClient()),
+            self.assertRaisesRegex(BejermanRisError, "ya tiene un RIS/remito generado"),
+        ):
+            register_ris_batch([ingreso_id], "RIS R 00004-00026250", user_id=self.admin.id)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT remito_number, manual_remito_number FROM bejerman_ingreso_remitos WHERE ingreso_id = %s",
+                [ingreso_id],
+            )
+            self.assertEqual(cur.fetchone(), ("RIS R 00004-00026249", "RIS R 00004-00026249"))
 
     def test_nuevo_ingreso_lote_duplicado_no_crea_parciales(self):
         existing_id = self._insert_ingreso(serial="SN-LOTE-DUP")
@@ -3010,13 +3069,6 @@ class BejermanSyncTest(TestCase):
         self.assertIn("Parece repuesto o accesorio", response.data["items"][1]["warnings"])
 
     def test_busqueda_y_mapeo_por_modelo_variante_usa_permiso_preflight(self):
-        recepcion = User.objects.create(
-            nombre="Recepción Bejerman",
-            email="recepcion@bejerman.test",
-            hash_pw="",
-            rol="recepcion",
-            activo=True,
-        )
         fake = FakeBejermanClient(
             articles=[
                 {
@@ -3029,7 +3081,7 @@ class BejermanSyncTest(TestCase):
             ]
         )
 
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(recepcion)}")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.recepcion)}")
         with _bejerman_settings(), patch("service.views.bejerman_views.BejermanSDKClient", return_value=fake):
             response = self.client.get(f"/api/bejerman/articles/?model_id={self.model_id}&variante=G2&q=AirSense")
 

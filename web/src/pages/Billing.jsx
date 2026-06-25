@@ -4,6 +4,8 @@ import {
   getBillingCustomers,
   getBillingDocumentPdfBlob,
   getBillingDocuments,
+  getBillingRemitoPdfBlob,
+  getBillingRemitos,
   getDeliveryOrder,
   getDeliveryOrders,
   getServiceOrderBillingPdfBlob,
@@ -46,6 +48,28 @@ const EMPTY_PAGINATION = {
   hasNextPage: false,
   hasPreviousPage: false,
 };
+const BEJERMAN_COMPANY_OPTIONS = [
+  { value: "SEPID", label: "SEPID SA" },
+  { value: "MGBIO", label: "MG BIO" },
+  { value: "TEST", label: "Empresa de prueba" },
+];
+const REMITO_TYPE_OPTIONS = [
+  { value: "RT", label: "RT - Venta" },
+  { value: "RTA", label: "RTA - Alquiler" },
+  { value: "RTN", label: "RTN - Demo" },
+  { value: "RSS", label: "RSS - Servicio técnico" },
+  { value: "RIS", label: "RIS - Ingreso servicio" },
+  { value: "RDA", label: "RDA - Retorno alquiler" },
+  { value: "RDN", label: "RDN - Retorno demo" },
+];
+const REMITO_OPERATION_OPTIONS = [
+  { value: "MC", label: "MC - Mercadería" },
+  { value: "REP", label: "REP - Reparación" },
+  { value: "ALQ", label: "ALQ - Alquiler" },
+  { value: "DEMO", label: "DEMO - Demostración" },
+  { value: "BUSO", label: "BUSO - Venta bien de uso" },
+  { value: "FAB", label: "FAB - Fabricación" },
+];
 const REMITO_LOCATION_LABELS = {
   recepcion: "Recepción",
   oficina: "Oficina",
@@ -111,6 +135,35 @@ function formatDateTime(value) {
   });
 }
 
+function pendingRemitoEmissionRaw(order) {
+  return (
+    clean(order?.bejermanRemitoGroup?.generatedAt) ||
+    clean(order?.orderDate) ||
+    clean(order?.bejermanRemitoGroup?.createdAt) ||
+    clean(order?.deliveredAt) ||
+    clean(order?.createdAt)
+  );
+}
+
+function pendingRemitoEmissionTime(order) {
+  const raw = pendingRemitoEmissionRaw(order);
+  if (!raw) return Number.POSITIVE_INFINITY;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? Number.POSITIVE_INFINITY : date.getTime();
+}
+
+function normalizePendingBillingOrders(items) {
+  return [...items]
+    .filter((order) => !clean(order?.invoiceNumber))
+    .sort((a, b) => {
+      const byDate = pendingRemitoEmissionTime(a) - pendingRemitoEmissionTime(b);
+      if (byDate) return byDate;
+      const byOrder = clean(a?.orderNumber).localeCompare(clean(b?.orderNumber), "es-AR", { numeric: true });
+      if (byOrder) return byOrder;
+      return clean(a?.id).localeCompare(clean(b?.id), "es-AR", { numeric: true });
+    });
+}
+
 function orderSubtitle(order) {
   return [
     clean(order?.orderNumber),
@@ -137,6 +190,21 @@ function remitoLocationLabel(value) {
 
 function remitoPrintUrl(order) {
   return clean(order?.bejermanRemitoGroup?.printUrl);
+}
+
+function safeFilenamePart(value, fallback = "documento") {
+  return clean(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || fallback;
+}
+
+function remitoDocumentNumber(item) {
+  return valueOf(item, ["documentNumber", "numero", "number", "comprobanteNumero"]) || "-";
+}
+
+function remitoOperationLabel(item) {
+  const code = valueOf(item, ["operationCode", "tipoOperacion"]);
+  const label = valueOf(item, ["operationLabel", "origin"]);
+  if (code && label && !String(label).startsWith(code)) return `${code} - ${label}`;
+  return label || code || "-";
 }
 
 function DetailItem({ label, value, children }) {
@@ -343,11 +411,24 @@ export default function Billing() {
   const [documents, setDocuments] = useState([]);
   const [pagination, setPagination] = useState(EMPTY_PAGINATION);
   const [page, setPage] = useState(1);
+  const [selectedRemitoCode, setSelectedRemitoCode] = useState("");
+  const [remitoFilters, setRemitoFilters] = useState({
+    companyKey: "SEPID",
+    dateFrom: "",
+    dateTo: "",
+    remitoType: "",
+    operationType: "",
+    search: "",
+  });
+  const [remitos, setRemitos] = useState([]);
+  const [remitosPagination, setRemitosPagination] = useState(EMPTY_PAGINATION);
+  const [remitoPage, setRemitoPage] = useState(1);
   const [pendingOrders, setPendingOrders] = useState([]);
   const [selectedPendingOrderId, setSelectedPendingOrderId] = useState("");
   const [serviceOrders, setServiceOrders] = useState([]);
   const [selectedServiceOrderId, setSelectedServiceOrderId] = useState("");
   const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [remitosLoading, setRemitosLoading] = useState(false);
   const [pendingLoading, setPendingLoading] = useState(false);
   const [serviceOrdersLoading, setServiceOrdersLoading] = useState(false);
   const [savingInvoice, setSavingInvoice] = useState(false);
@@ -359,20 +440,12 @@ export default function Billing() {
   const [invoiceError, setInvoiceError] = useState("");
   const [serviceInvoiceError, setServiceInvoiceError] = useState("");
   const [error, setError] = useState("");
+  const [remitoError, setRemitoError] = useState("");
   const [serviceError, setServiceError] = useState("");
 
   const selectedPendingOrder = useMemo(
     () => pendingOrders.find((order) => order.id === selectedPendingOrderId) || null,
     [pendingOrders, selectedPendingOrderId]
-  );
-
-  const selectedSummary = useMemo(
-    () => (selectedPendingOrder ? deliveryOrderItemsSummary(selectedPendingOrder) : null),
-    [selectedPendingOrder]
-  );
-  const selectedTotals = useMemo(
-    () => (selectedPendingOrder ? deliveryOrderItemsTotals(selectedPendingOrder) : null),
-    [selectedPendingOrder]
   );
 
   const selectedServiceOrder = useMemo(
@@ -397,6 +470,11 @@ export default function Billing() {
     return extra ? [extra, ...filteredCustomers] : filteredCustomers;
   }, [customers, filteredCustomers, selectedCode, selectedPendingOrder]);
 
+  const remitoCustomerOptions = useMemo(
+    () => customers.filter((customer) => clean(customer.bejermanCustomerCode)),
+    [customers]
+  );
+
   const loadDocuments = async (customerCode = selectedCode, pageNumber = page) => {
     const code = clean(customerCode);
     setDocumentsLoading(true);
@@ -418,6 +496,30 @@ export default function Billing() {
       setPagination(EMPTY_PAGINATION);
     } finally {
       setDocumentsLoading(false);
+    }
+  };
+
+  const loadRemitos = async (customerCode = selectedRemitoCode, pageNumber = remitoPage) => {
+    const code = clean(customerCode);
+    setRemitosLoading(true);
+    try {
+      const params = {
+        ...remitoFilters,
+        page: pageNumber,
+        pageSize: BILLING_PAGE_SIZE,
+      };
+      if (code) params.customerCode = code;
+      const data = await getBillingRemitos(params);
+      setRemitos(Array.isArray(data?.items) ? data.items : []);
+      setRemitosPagination(data?.pagination || EMPTY_PAGINATION);
+      setRemitoPage(data?.pagination?.page || pageNumber);
+      setRemitoError("");
+    } catch (err) {
+      setRemitoError(err?.message || "No se pudieron consultar los remitos.");
+      setRemitos([]);
+      setRemitosPagination(EMPTY_PAGINATION);
+    } finally {
+      setRemitosLoading(false);
     }
   };
 
@@ -444,7 +546,7 @@ export default function Billing() {
       if (allowRequestedSelection && requestedOrderId && !items.some((order) => order.id === requestedOrderId)) {
         try {
           const requestedOrder = await getDeliveryOrder(requestedOrderId);
-          if (requestedOrder?.status === PENDING_BILLING_STATUS) {
+          if (requestedOrder?.status === PENDING_BILLING_STATUS && !clean(requestedOrder?.invoiceNumber)) {
             items = [requestedOrder, ...items];
           }
         } catch {
@@ -452,6 +554,7 @@ export default function Billing() {
         }
       }
 
+      items = normalizePendingBillingOrders(items);
       setPendingOrders(items);
       const preferredExists = preferredSelectedId && items.some((order) => order.id === preferredSelectedId);
       const requestedExists = allowRequestedSelection && requestedOrderId && items.some((order) => order.id === requestedOrderId);
@@ -602,6 +705,21 @@ export default function Billing() {
     }
   };
 
+  const openRemitoPdf = async (item) => {
+    const documentId = valueOf(item, ["documentId", "id"]);
+    const customerCode = valueOf(item, ["bejermanCustomerCode", "customerCode"]) || selectedRemitoCode;
+    if (!documentId) return;
+    try {
+      const blob = await getBillingRemitoPdfBlob(documentId, {
+        customerCode,
+        companyKey: remitoFilters.companyKey,
+      });
+      openBlob(blob, `remito-${safeFilenamePart(remitoDocumentNumber(item), documentId)}.pdf`);
+    } catch (err) {
+      setRemitoError(err?.message || "No se pudo abrir el PDF del remito.");
+    }
+  };
+
   const openServicePdf = async (item) => {
     const ingresoId = item?.ingresoId || item?.id;
     if (!ingresoId) return;
@@ -617,6 +735,9 @@ export default function Billing() {
   const currentPage = pagination?.page || page || 1;
   const totalPages = pagination?.totalPages || 1;
   const totalDocuments = pagination?.total || documents.length;
+  const currentRemitoPage = remitosPagination?.page || remitoPage || 1;
+  const totalRemitoPages = remitosPagination?.totalPages || 1;
+  const totalRemitos = remitosPagination?.total || remitos.length;
 
   const runSearch = () => {
     setPage(1);
@@ -630,8 +751,20 @@ export default function Billing() {
     loadDocuments(selectedCode, safePage);
   };
 
+  const runRemitoSearch = () => {
+    setRemitoPage(1);
+    loadRemitos(selectedRemitoCode, 1);
+  };
+
+  const goToRemitoPage = (nextPage) => {
+    const safePage = Math.max(1, Math.min(totalRemitoPages, nextPage));
+    if (safePage === currentRemitoPage || remitosLoading) return;
+    setRemitoPage(safePage);
+    loadRemitos(selectedRemitoCode, safePage);
+  };
+
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Cobranzas</h1>
@@ -639,7 +772,7 @@ export default function Billing() {
         </div>
       </div>
 
-      <section className="border">
+      <section className="order-4 border">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
           <div>
             <div className="text-sm font-semibold">OS a facturar</div>
@@ -803,11 +936,11 @@ export default function Billing() {
         </DesktopTableWrap>
       </section>
 
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="contents">
         <section className="border">
           <div className="border-b px-3 py-2 text-sm font-semibold">Consulta de facturación</div>
 
-          {selectedPendingOrder ? (
+          {false && selectedPendingOrder ? (
             <div className="border-b bg-gray-50 px-3 py-3">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -848,9 +981,7 @@ export default function Billing() {
                 </div>
               )}
             </div>
-          ) : (
-            <div className="border-b px-3 py-3 text-sm text-gray-500">Sin remito seleccionado.</div>
-          )}
+          ) : null}
 
           <div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_150px_150px_minmax(180px,1fr)_auto] xl:items-end">
             <label className="text-sm sm:col-span-2 xl:col-span-1">
@@ -1100,6 +1231,257 @@ export default function Billing() {
           </div>
         </section>
       </div>
+
+      <section className="border">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
+          <div>
+            <div className="text-sm font-semibold">Consulta de remitos Bejerman</div>
+            <div className="text-xs text-gray-500">Remitos emitidos en Bejerman por empresa, tipo, operación, cliente y fecha.</div>
+          </div>
+          <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700">{totalRemitos}</span>
+        </div>
+
+        <div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-[150px_170px_150px_150px_minmax(150px,1fr)_minmax(180px,1fr)_auto] xl:items-end">
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Empresa</span>
+            <select
+              value={remitoFilters.companyKey}
+              onChange={(event) => {
+                setRemitoPage(1);
+                setRemitoFilters((prev) => ({ ...prev, companyKey: event.target.value }));
+              }}
+              className="h-9 w-full rounded border px-2"
+            >
+              {BEJERMAN_COMPANY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Cliente</span>
+            <input
+              value={selectedRemitoCode}
+              onChange={(event) => {
+                setRemitoPage(1);
+                setSelectedRemitoCode(event.target.value);
+              }}
+              list="billing-remito-customers"
+              className="h-9 w-full rounded border px-2"
+              placeholder="Código Bejerman"
+              autoComplete="off"
+            />
+            <datalist id="billing-remito-customers">
+              {remitoCustomerOptions.map((customer) => (
+                <option key={customer.id} value={customer.bejermanCustomerCode}>
+                  {customer.name}
+                </option>
+              ))}
+            </datalist>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Desde</span>
+            <input
+              type="date"
+              value={remitoFilters.dateFrom}
+              onChange={(event) => setRemitoFilters((prev) => ({ ...prev, dateFrom: event.target.value }))}
+              className="h-9 w-full rounded border px-2"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Hasta</span>
+            <input
+              type="date"
+              value={remitoFilters.dateTo}
+              onChange={(event) => setRemitoFilters((prev) => ({ ...prev, dateTo: event.target.value }))}
+              className="h-9 w-full rounded border px-2"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Tipo remito</span>
+            <select
+              value={remitoFilters.remitoType}
+              onChange={(event) => {
+                setRemitoPage(1);
+                setRemitoFilters((prev) => ({ ...prev, remitoType: event.target.value }));
+              }}
+              className="h-9 w-full rounded border px-2"
+            >
+              <option value="">Todos</option>
+              {REMITO_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Operación</span>
+            <select
+              value={remitoFilters.operationType}
+              onChange={(event) => {
+                setRemitoPage(1);
+                setRemitoFilters((prev) => ({ ...prev, operationType: event.target.value }));
+              }}
+              className="h-9 w-full rounded border px-2"
+            >
+              <option value="">Todas</option>
+              {REMITO_OPERATION_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={runRemitoSearch}
+            disabled={remitosLoading}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded border px-3 text-sm hover:bg-gray-50 disabled:opacity-50 sm:col-span-2 xl:col-span-1"
+          >
+            {remitosLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Search className="h-4 w-4" aria-hidden="true" />
+            )}
+            Consultar
+          </button>
+          <label className="text-sm sm:col-span-2 xl:col-span-7">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Buscar</span>
+            <input
+              value={remitoFilters.search}
+              onChange={(event) => setRemitoFilters((prev) => ({ ...prev, search: event.target.value }))}
+              className="h-9 w-full rounded border px-2"
+              placeholder="Número, cliente, código u operación"
+            />
+          </label>
+        </div>
+
+        {remitoError && <div className="border-t px-3 py-2 text-sm text-red-700">{remitoError}</div>}
+
+        <MobileDataList className="p-3">
+          {remitosLoading && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
+          {!remitosLoading &&
+            remitos.map((item, index) => {
+              const documentId = valueOf(item, ["documentId", "id"]);
+              return (
+                <MobileDataCard key={documentId || index} className="space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold text-gray-900">{remitoDocumentNumber(item)}</div>
+                      <div className="text-xs text-gray-500">{valueOf(item, ["type", "comprobanteTipo"]) || "-"}</div>
+                    </div>
+                    <div className="text-right text-sm font-semibold text-gray-900">
+                      {formatAmount(valueOf(item, ["totalAmount", "total", "importeTotal", "amount"]))}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+                    <MobileDataField label="Fecha" value={valueOf(item, ["date", "issueDate"]) || "-"} />
+                    <MobileDataField label="Cliente" value={valueOf(item, ["customerName", "cliente", "razonSocial"]) || "-"} />
+                    <MobileDataField label="Código" value={valueOf(item, ["bejermanCustomerCode", "customerCode"]) || "-"} />
+                    <MobileDataField label="Operación" value={remitoOperationLabel(item)} />
+                  </div>
+                  {documentId && (
+                    <button
+                      type="button"
+                      onClick={() => openRemitoPdf(item)}
+                      className="inline-flex h-9 w-full items-center justify-center gap-1 rounded border px-2 text-xs hover:bg-gray-50"
+                    >
+                      <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                      PDF
+                    </button>
+                  )}
+                </MobileDataCard>
+              );
+            })}
+          {!remitosLoading && !remitos.length && <MobileDataCard className="text-center text-gray-500">Sin remitos.</MobileDataCard>}
+        </MobileDataList>
+
+        <DesktopTableWrap>
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
+              <tr>
+                <th className="px-2 py-2">Fecha</th>
+                <th className="px-2 py-2">Cliente</th>
+                <th className="px-2 py-2">Código</th>
+                <th className="px-2 py-2">Tipo</th>
+                <th className="px-2 py-2">Operación</th>
+                <th className="px-2 py-2">Número</th>
+                <th className="px-2 py-2 text-right">Total</th>
+                <th className="px-2 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {remitosLoading ? (
+                <tr>
+                  <td colSpan={8} className="px-3 py-8 text-center text-gray-500">
+                    Cargando...
+                  </td>
+                </tr>
+              ) : (
+                remitos.map((item, index) => {
+                  const documentId = valueOf(item, ["documentId", "id"]);
+                  const total = valueOf(item, ["totalAmount", "total", "importeTotal", "amount"]);
+                  return (
+                    <tr key={documentId || index} className="border-t">
+                      <td className="px-2 py-2">{valueOf(item, ["date", "issueDate"]) || "-"}</td>
+                      <td className="px-2 py-2">{valueOf(item, ["customerName", "cliente", "razonSocial"]) || "-"}</td>
+                      <td className="px-2 py-2">{valueOf(item, ["bejermanCustomerCode", "customerCode"]) || "-"}</td>
+                      <td className="px-2 py-2">{valueOf(item, ["type", "comprobanteTipo"]) || "-"}</td>
+                      <td className="px-2 py-2">{remitoOperationLabel(item)}</td>
+                      <td className="px-2 py-2">{remitoDocumentNumber(item)}</td>
+                      <td className="px-2 py-2 text-right">{formatAmount(total)}</td>
+                      <td className="px-2 py-2 text-right">
+                        {documentId && (
+                          <button
+                            type="button"
+                            onClick={() => openRemitoPdf(item)}
+                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+                          >
+                            <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                            PDF
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+              {!remitosLoading && !remitos.length && (
+                <tr>
+                  <td colSpan={8} className="px-3 py-8 text-center text-gray-500">
+                    Sin remitos.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </DesktopTableWrap>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2 text-sm text-gray-600">
+          <span>
+            {totalRemitos ? `${totalRemitos} remitos · página ${currentRemitoPage} de ${totalRemitoPages}` : "Sin remitos"}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => goToRemitoPage(currentRemitoPage - 1)}
+              disabled={!remitosPagination?.hasPreviousPage || remitosLoading}
+              className="rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+            >
+              Anterior
+            </button>
+            <button
+              type="button"
+              onClick={() => goToRemitoPage(currentRemitoPage + 1)}
+              disabled={!remitosPagination?.hasNextPage || remitosLoading}
+              className="rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+            >
+              Siguiente
+            </button>
+          </div>
+        </div>
+      </section>
 
       {invoiceOrder && (
         <ResponsiveModalOverlay className="bg-black/35">

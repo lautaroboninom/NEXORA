@@ -15,7 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from .notifications import active_users_for_notification, emit_notification
+from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
 
 logger = logging.getLogger(__name__)
 
@@ -586,7 +586,7 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
     if not item:
         return {"notifications": 0, "emails": 0, "recipients": []}
 
-    users = active_users_for_notification(NOTIFICATION_KEY, roles=["cobranzas"])
+    users = active_users_for_notification(NOTIFICATION_KEY, roles=["cobranzas"], channel="any")
     if not users:
         return {"notifications": 0, "emails": 0, "recipients": []}
 
@@ -615,9 +615,9 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
             payload={"ingreso_id": ingreso_id, "os": item.get("os"), "rss": item.get("rss")},
         )
         inserted_total += inserted
-        email = _clean(user.get("email"))
-        if inserted and email:
-            email_recipients.append(email)
+    if inserted_total:
+        email_users = active_users_for_notification(NOTIFICATION_KEY, roles=["cobranzas"], channel="email", require_email=True)
+        email_recipients = notification_email_recipients_for_users(email_users)
 
     def _send_notice():
         if not email_recipients:

@@ -12,6 +12,7 @@ from ..customer_bejerman_sync import (
     bejerman_customer_detail_payload_from_record,
     bejerman_customer_details_from_record,
     customer_bejerman_detail_payload,
+    load_bejerman_customer_records,
     sync_customers_from_bejerman_records,
 )
 from ..permissions import require_any_permission
@@ -208,8 +209,7 @@ def _candidate_payload(record, local=None, query=""):
 
 
 def _load_bejerman_records(user_id: int | None = None):
-    client = BejermanSDKClient(actor_user_id=user_id)
-    return records_from_response(client.list_clientes())
+    return load_bejerman_customer_records(user_id=user_id)
 
 
 def _candidate_score(candidate):

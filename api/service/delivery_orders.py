@@ -15,7 +15,7 @@ from django.core.mail import send_mail
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.utils import timezone
 
-from .notifications import active_users_for_notification, emit_notification
+from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
 
 
 logger = logging.getLogger(__name__)
@@ -1171,7 +1171,7 @@ def _delivery_order_email_lines(order: dict[str, Any], *, max_items: int = 8) ->
 
 
 def _send_delivery_order_billing_email(order: dict[str, Any], users: list[dict[str, Any]]) -> int:
-    recipients = [str(user.get("email") or "").strip() for user in users if str(user.get("email") or "").strip()]
+    recipients = notification_email_recipients_for_users(users)
     if not recipients:
         return 0
     subject = f"Remito pendiente de facturación {order.get('remitoNumber') or order.get('orderNumber') or ''}".strip()
@@ -1227,7 +1227,7 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
         else:
             return 0
 
-        recipient_users = active_users_for_notification(notification_key, roles=roles)
+        recipient_users = active_users_for_notification(notification_key, roles=roles, channel="any")
         recipients = [int(row["id"]) for row in recipient_users]
         if not recipient_users:
             create_event(
@@ -1263,7 +1263,8 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
         )
         email_sent = 0
         if inserted and kind == "remito_ready":
-            email_sent = _send_delivery_order_billing_email(order, recipient_users)
+            email_users = active_users_for_notification(notification_key, roles=roles, channel="email", require_email=True)
+            email_sent = _send_delivery_order_billing_email(order, email_users)
         create_event(
             order_id,
             actor_user_id,
@@ -1299,10 +1300,11 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
     params: list[Any] = []
 
     statuses = [s.strip() for s in _clean_text(filters.get("status")).split(",") if s.strip()]
+    normalized_statuses: list[str] = []
     if statuses:
-        normalized = [normalize_status(s) for s in statuses]
+        normalized_statuses = [normalize_status(s) for s in statuses]
         where.append("o.status = ANY(%s)")
-        params.append(normalized)
+        params.append(normalized_statuses)
     elif str(filters.get("include_cancelled") or filters.get("includeCancelled") or "").lower() not in ("1", "true", "yes"):
         where.append("o.status <> 'cancelado'")
 
@@ -1386,18 +1388,39 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
         )
         params.extend([like] * (len(order_search_expressions) + len(item_search_expressions)))
 
+    pending_billing_requested = (
+        normalized_statuses == ["entregado_pendiente_facturacion"]
+        or str(filters.get("pending_billing") or filters.get("pendingBilling") or "").lower() in ("1", "true", "yes")
+    )
     if str(filters.get("pending_billing") or filters.get("pendingBilling") or "").lower() in ("1", "true", "yes"):
         where.append("o.status = 'entregado_pendiente_facturacion'")
+    if pending_billing_requested:
+        where.append("NULLIF(BTRIM(COALESCE(o.invoice_number, '')), '') IS NULL")
 
     limit = max(1, min(200, int(filters.get("limit") or 80)))
     offset = max(0, int(filters.get("offset") or 0))
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    order_sql = (
+        """
+              COALESCE(g.generated_at, o.order_date::timestamptz, g.created_at, o.delivered_at, o.created_at) ASC,
+              o.order_date ASC NULLS LAST,
+              o.created_at ASC,
+              o.id ASC
+        """
+        if pending_billing_requested
+        else """
+              o.created_at DESC,
+              o.id DESC
+        """
+    )
+    join_sql = "LEFT JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id" if pending_billing_requested else ""
 
     with connection.cursor() as cur:
         cur.execute(
             f"""
             SELECT COUNT(*)
             FROM delivery_orders o
+            {join_sql}
             {where_sql}
             """,
             params,
@@ -1407,10 +1430,10 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
             f"""
             SELECT o.*
             FROM delivery_orders o
+            {join_sql}
             {where_sql}
             ORDER BY
-              o.created_at DESC,
-              o.id DESC
+              {order_sql}
             LIMIT %s OFFSET %s
             """,
             [*params, limit, offset],
@@ -1746,7 +1769,6 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
             """
             UPDATE delivery_orders
                SET customer_id = %s,
-                   order_number = %s,
                    bejerman_customer_code = %s,
                    customer_name = %s,
                    delivery_type = %s,

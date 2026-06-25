@@ -33,6 +33,7 @@ from service.notifications import (
     notify_ingreso_asignado,
     notify_ingreso_liberado,
 )
+from service.remito_pdf_notifications import notify_bejerman_remito_pdf_issued
 from service.repair_ready_notifications import notify_repair_ready_for_remito
 from service.service_order_billing import (
     list_service_orders_to_bill,
@@ -187,6 +188,7 @@ class NotificationsAPITest(TestCase):
         with connection.cursor() as cur:
             cur.execute("DELETE FROM notifications")
             cur.execute("DELETE FROM notification_user_preferences")
+            cur.execute("DELETE FROM notification_email_addresses")
             cur.execute("DELETE FROM notification_push_subscriptions")
             cur.execute("DELETE FROM ingresos")
             cur.execute("DELETE FROM devices")
@@ -298,9 +300,11 @@ class NotificationsAPITest(TestCase):
             cur.execute("DELETE FROM delivery_order_item_partidas")
             cur.execute("DELETE FROM delivery_order_items")
             cur.execute("DELETE FROM delivery_orders")
+            cur.execute("DELETE FROM bejerman_remito_groups")
             cur.execute("DELETE FROM ingreso_events")
             cur.execute("DELETE FROM notifications")
             cur.execute("DELETE FROM notification_user_preferences")
+            cur.execute("DELETE FROM notification_email_addresses")
             cur.execute("DELETE FROM notification_push_subscriptions")
 
     def _auth_as_jefe(self):
@@ -878,6 +882,155 @@ class NotificationsAPITest(TestCase):
         reset_items = {item["key"]: item for item in reset_resp.data["items"]}
         self.assertIsNone(reset_items["ingreso_liberado"]["override_enabled"])
         self.assertFalse(reset_items["ingreso_liberado"]["effective_enabled"])
+
+    def test_configuracion_publica_guarda_canales_y_emails_extra(self):
+        self.client.force_authenticate(user=self.cobranzas)
+
+        resp = self.client.get("/api/notificaciones/configuracion/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["primary_email"], "cobranzas@notif.test")
+        self.assertTrue(resp.data["capabilities"]["canManageExtraEmails"])
+        items = {item["key"]: item for item in resp.data["items"]}
+        self.assertTrue(items["sales_order_remito_ready"]["effective_channels"]["email"])
+
+        put_resp = self.client.put(
+            "/api/notificaciones/configuracion/",
+            {
+                "preferences": {
+                    "sales_order_remito_ready": {
+                        "bell": False,
+                        "email": True,
+                        "push": False,
+                    }
+                }
+            },
+            format="json",
+        )
+        self.assertEqual(put_resp.status_code, 200)
+        updated = {item["key"]: item for item in put_resp.data["items"]}
+        channels = updated["sales_order_remito_ready"]["effective_channels"]
+        self.assertFalse(channels["bell"])
+        self.assertTrue(channels["email"])
+        self.assertFalse(channels["push"])
+
+        email_resp = self.client.post(
+            "/api/notificaciones/configuracion/emails/",
+            {"email": "cobranzas.extra@notif.test"},
+            format="json",
+        )
+        self.assertEqual(email_resp.status_code, 201)
+        config_resp = self.client.get("/api/notificaciones/configuracion/")
+        self.assertEqual(
+            [row["email"] for row in config_resp.data["extra_emails"]],
+            ["cobranzas.extra@notif.test"],
+        )
+
+    def test_emails_extra_solo_admin_y_cobranzas(self):
+        self.client.force_authenticate(user=self.tecnico)
+        resp = self.client.post(
+            "/api/notificaciones/configuracion/emails/",
+            {"email": "tecnico.extra@notif.test"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    @override_settings(
+        WEB_PUSH_VAPID_PUBLIC_KEY="public-test-key",
+        WEB_PUSH_VAPID_PRIVATE_KEY="private-test-key",
+        WEB_PUSH_VAPID_SUBJECT="mailto:notificaciones@sepid.com.ar",
+    )
+    def test_push_respeta_canal_push_independiente_de_campana(self):
+        self.client.force_authenticate(user=self.recepcion)
+        self.client.put(
+            "/api/notificaciones/configuracion/",
+            {
+                "preferences": {
+                    "sales_order_created": {
+                        "bell": True,
+                        "email": True,
+                        "push": False,
+                    }
+                }
+            },
+            format="json",
+        )
+        self._insert_push_subscription(self.recepcion, endpoint="https://push.notif.test/channel-off")
+
+        with patch("service.notifications.webpush", return_value=None) as webpush_mock:
+            create_delivery_order(
+                {
+                    "id": "do-push-channel-off",
+                    "orderNumber": "OE-PUSH-CH-001",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "sellerName": "Ventas",
+                    "operationCompanyLabel": "RESPIFLOW",
+                    "items": [{"description": "Equipo de prueba", "quantity": 1}],
+                },
+                self.jefe.id,
+            )
+
+        webpush_mock.assert_not_called()
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'sales_order_created'
+                   AND user_id = %s
+                   AND COALESCE(bell_enabled, TRUE) = TRUE
+                """,
+                [self.recepcion.id],
+            )
+            self.assertEqual(cur.fetchone()[0], 1)
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="noreply@nexora.test",
+    )
+    def test_remito_pdf_obligatorio_ignora_optout_y_usa_emails_extra(self):
+        mail.outbox = []
+        self.client.force_authenticate(user=self.cobranzas)
+        self.client.put(
+            "/api/notificaciones/configuracion/",
+            {
+                "preferences": {
+                    "sales_order_remito_ready": {
+                        "bell": False,
+                        "email": False,
+                        "push": False,
+                    }
+                }
+            },
+            format="json",
+        )
+        self.client.post(
+            "/api/notificaciones/configuracion/emails/",
+            {"email": "cobranzas.extra@notif.test"},
+            format="json",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RDA 0001-00000001",
+                document_type="RDA",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+
+        self.assertEqual(result["emails"], 4)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(
+            set(mail.outbox[0].to),
+            {
+                "admin@notif.test",
+                "cobranzas@notif.test",
+                "cobranzas.extra@notif.test",
+                "recepcion@notif.test",
+            },
+        )
 
     def test_orden_entrega_creada_notifica_recepcion(self):
         order = create_delivery_order(
@@ -2507,6 +2660,115 @@ class NotificationsAPITest(TestCase):
         result = list_delivery_orders({"limit": 10})
 
         self.assertEqual([item["id"] for item in result["items"][:2]], [release["id"], sale["id"]])
+
+    def test_remitos_pendientes_ordenan_por_emision_y_excluyen_facturados(self):
+        imported = create_delivery_order(
+            {
+                "id": "do-pending-imported",
+                "orderNumber": "OE-PEND-001",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "orderDate": "2026-05-05",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "SEPID",
+                "remitoNumber": "RT 0002-00000001",
+                "items": [{"description": "Remito importado", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+        older_generated = create_delivery_order(
+            {
+                "id": "do-pending-generated-old",
+                "orderNumber": "OE-PEND-002",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "orderDate": "2026-06-20",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "SEPID",
+                "remitoNumber": "RT 0002-00000002",
+                "items": [{"description": "Remito generado viejo", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+        newer_generated = create_delivery_order(
+            {
+                "id": "do-pending-generated-new",
+                "orderNumber": "OE-PEND-003",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "orderDate": "2026-04-01",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "SEPID",
+                "remitoNumber": "RT 0002-00000003",
+                "items": [{"description": "Remito generado nuevo", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+        already_invoiced = create_delivery_order(
+            {
+                "id": "do-pending-with-invoice",
+                "orderNumber": "OE-PEND-004",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "orderDate": "2026-04-01",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "SEPID",
+                "remitoNumber": "RT 0002-00000004",
+                "invoiceNumber": "FC A 0001-00001234",
+                "items": [{"description": "Remito ya facturado", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+        with connection.cursor() as cur:
+            for group_id, order, generated_at in (
+                ("brg-pending-old", older_generated, "2026-05-10 09:00:00-03"),
+                ("brg-pending-new", newer_generated, "2026-06-10 09:00:00-03"),
+            ):
+                cur.execute(
+                    """
+                    INSERT INTO bejerman_remito_groups(
+                        id, company_key, comprobante_tipo, customer_code, customer_name,
+                        seller_code, payment_term_code, operation_code, deposit_code,
+                        order_ids, status, generated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+                    """,
+                    [
+                        group_id,
+                        "SEPID",
+                        "RT",
+                        "CLI-NOTIF",
+                        "Clínica Notificaciones",
+                        "ADM",
+                        "30",
+                        "MC",
+                        "VAL",
+                        json.dumps([order["id"]]),
+                        "generated",
+                        generated_at,
+                    ],
+                )
+                cur.execute(
+                    "UPDATE delivery_orders SET bejerman_remito_group_id = %s WHERE id = %s",
+                    [group_id, order["id"]],
+                )
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET delivered_at = %s::timestamptz, created_at = %s::timestamptz
+                 WHERE id = %s
+                """,
+                ["2026-06-20 10:00:00-03", "2026-06-20 10:00:00-03", imported["id"]],
+            )
+
+        result = list_delivery_orders({"status": "entregado_pendiente_facturacion", "limit": 10})
+
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            [imported["id"], older_generated["id"], newer_generated["id"]],
+        )
+        self.assertNotIn(already_invoiced["id"], [item["id"] for item in result["items"]])
 
     def test_facturacion_requiere_numero_de_factura(self):
         order = create_delivery_order(

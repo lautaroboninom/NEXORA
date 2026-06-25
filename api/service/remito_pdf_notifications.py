@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict
 from typing import Any, Callable
 
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from django.db import connection, transaction
 from django.utils import timezone
+
+from .notifications import notification_email_recipients_for_users
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +31,10 @@ def _mandatory_remito_pdf_recipients() -> list[str]:
         with connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT email
+                SELECT id, nombre, email, rol
                   FROM users
                  WHERE COALESCE(activo, TRUE) = TRUE
                    AND LOWER(TRIM(COALESCE(rol, ''))) = ANY(%s)
-                   AND NULLIF(TRIM(COALESCE(email, '')), '') IS NOT NULL
                  ORDER BY CASE LOWER(TRIM(COALESCE(rol, '')))
                             WHEN 'admin' THEN 1
                             WHEN 'cobranzas' THEN 2
@@ -50,12 +50,11 @@ def _mandatory_remito_pdf_recipients() -> list[str]:
         logger.exception("remito_pdf_email_recipients_failed")
         return []
 
-    recipients: OrderedDict[str, str] = OrderedDict()
-    for (email,) in rows:
-        value = _clean(email)
-        if value:
-            recipients.setdefault(value.lower(), value)
-    return list(recipients.values())
+    users = [
+        {"id": row[0], "nombre": row[1], "email": row[2], "rol": row[3]}
+        for row in rows
+    ]
+    return notification_email_recipients_for_users(users)
 
 
 def _actor_label(actor_user_id: int | None) -> str:

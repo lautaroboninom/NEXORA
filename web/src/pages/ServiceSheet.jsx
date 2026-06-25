@@ -1109,6 +1109,7 @@ export default function ServiceSheet() {
 
   // Activar edicion basica
   function startEditBasics() {
+    const remitoIngresoActual = risRemitoFrom(data) || data?.remito_ingreso || "";
     setFormBasics({
       razon_social: data?.razon_social || "",
       cod_empresa: data?.cod_empresa || "",
@@ -1118,7 +1119,7 @@ export default function ServiceSheet() {
       propietario_doc: data?.propietario_doc || "",
       numero_serie: data?.numero_serie || "",
       numero_interno: data?.numero_interno || "",
-      remito_ingreso: data?.remito_ingreso || "",
+      remito_ingreso: remitoIngresoActual,
       informe_preliminar: data?.informe_preliminar || "",
       comentarios: data?.comentarios || "",
       motivo: data?.motivo || "",
@@ -1241,7 +1242,7 @@ export default function ServiceSheet() {
     if (cmp(formBasics.numero_serie, data?.numero_serie)) diff.numero_serie = formBasics.numero_serie;
     if (cmp(formBasics.numero_interno, data?.numero_interno)) diff.numero_interno = formBasics.numero_interno;
     const remitoNuevo = (formBasics.remito_ingreso || "").trim();
-    const remitoActual = (data?.remito_ingreso || "").trim();
+    const remitoActual = (risRemitoFrom(data) || data?.remito_ingreso || "").trim();
     if (remitoNuevo !== remitoActual) diff.remito_ingreso = remitoNuevo;
     if (cmp(formBasics.informe_preliminar, data?.informe_preliminar)) diff.informe_preliminar = formBasics.informe_preliminar;
     if (cmp(formBasics.comentarios, data?.comentarios)) diff.comentarios = formBasics.comentarios;

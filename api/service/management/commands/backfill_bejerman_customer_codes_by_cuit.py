@@ -10,6 +10,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
 
+from service.bejerman_companies import company_for_key
 from service.bejerman_sdk import BejermanSDKClient, BejermanSdkError, as_string, first_value, normalize_search, records_from_response
 
 
@@ -67,6 +68,14 @@ def _fetch_dicts(sql: str, params: list[Any] | None = None) -> list[dict[str, An
         cur.execute(sql, params or [])
         columns = [column[0] for column in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def _resolved_company_key(client: BejermanSDKClient, fallback: str) -> str:
+    marker = _clean(getattr(client, "company_key", "")) or _clean(getattr(client, "company", "")) or fallback
+    company = company_for_key(marker, default=None)
+    if company:
+        return company.key
+    return _clean_upper(marker)
 
 
 def _customer_rows() -> list[dict[str, Any]]:
@@ -175,6 +184,7 @@ class Command(BaseCommand):
 
         try:
             client = BejermanSDKClient(company_key=sdk_company_key, allow_system_credentials=True)
+            resolved_company_key = _resolved_company_key(client, company_key)
             bejerman_records = records_from_response(client.list_clientes())
         except BejermanSdkError as exc:
             raise CommandError(str(exc)) from exc
@@ -266,7 +276,14 @@ class Command(BaseCommand):
                 add_report(row, "skipped", "El cliente Bejerman no tiene CUIT válido.", candidate)
                 return True
             if apply_changes:
-                updates.append({"customer_id": int(row["id"]), "cuit": candidate["cuit"]})
+                updates.append(
+                    {
+                        "customer_id": int(row["id"]),
+                        "cuit": candidate["cuit"],
+                        "bejerman_cod_empresa": candidate["code"],
+                        "bejerman_company_key": resolved_company_key,
+                    }
+                )
                 summary["cuit_filled"] += 1
                 add_report(row, "cuit_filled", reason, candidate)
             else:
@@ -333,7 +350,14 @@ class Command(BaseCommand):
                 continue
 
             if apply_changes:
-                updates.append({"customer_id": int(row["id"]), "cod_empresa": target_code})
+                updates.append(
+                    {
+                        "customer_id": int(row["id"]),
+                        "cod_empresa": target_code,
+                        "bejerman_cod_empresa": target_code,
+                        "bejerman_company_key": resolved_company_key,
+                    }
+                )
                 summary["updated"] += 1
                 add_report(row, "updated", "cod_empresa actualizado por CUIT exacto.", candidate)
             else:
@@ -341,6 +365,7 @@ class Command(BaseCommand):
                 add_report(row, "would_update", "Se actualizaría cod_empresa por CUIT exacto.", candidate)
 
         if apply_changes and updates:
+            columns = _table_columns("customers")
             with transaction.atomic():
                 with connection.cursor() as cur:
                     for update in updates:
@@ -352,6 +377,12 @@ class Command(BaseCommand):
                         if "cuit" in update:
                             sets.append("cuit = %s")
                             params.append(update["cuit"])
+                        if "bejerman_cod_empresa" in update and "bejerman_cod_empresa" in columns:
+                            sets.append("bejerman_cod_empresa = %s")
+                            params.append(update["bejerman_cod_empresa"])
+                        if "bejerman_company_key" in update and "bejerman_company_key" in columns:
+                            sets.append("bejerman_company_key = %s")
+                            params.append(update["bejerman_company_key"])
                         if not sets:
                             continue
                         params.append(update["customer_id"])

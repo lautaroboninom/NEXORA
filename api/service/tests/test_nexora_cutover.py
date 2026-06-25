@@ -14,6 +14,8 @@ from service.views.delivery_orders_views import (
     DeliveryOrderBejermanRemitoPrintView,
     DeliveryOrderBejermanRemitoView,
     DeliveryOrderInvoicePdfView,
+    CobranzasRemitoPdfView,
+    CobranzasRemitosView,
     FacturacionCompanyOptionsView,
     ServiceOrderBillingInvoiceView,
     ServiceOrderBillingListView,
@@ -145,6 +147,8 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         stock_match = resolve("/api/ordenes-entrega/bejerman-articulos-stock/")
         print_match = resolve("/api/ordenes-entrega/remito-bejerman/brg-test/print/")
         invoice_match = resolve("/api/ordenes-entrega/do-test/factura/pdf/")
+        remitos_match = resolve("/api/cobranzas/remitos/")
+        remito_pdf_match = resolve("/api/cobranzas/remitos/doc-test/pdf/")
         os_billing_match = resolve("/api/cobranzas/os-a-facturar/")
         os_billing_pdf_match = resolve("/api/cobranzas/os-a-facturar/123/pdf/")
 
@@ -153,6 +157,8 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         self.assertEqual(stock_match.func.view_class.__name__, "DeliveryOrderBejermanArticleStockView")
         self.assertEqual(print_match.func.view_class.__name__, "DeliveryOrderBejermanRemitoPrintView")
         self.assertEqual(invoice_match.func.view_class.__name__, "DeliveryOrderInvoicePdfView")
+        self.assertEqual(remitos_match.func.view_class.__name__, "CobranzasRemitosView")
+        self.assertEqual(remito_pdf_match.func.view_class.__name__, "CobranzasRemitoPdfView")
         self.assertEqual(os_billing_match.func.view_class.__name__, "ServiceOrderBillingListView")
         self.assertEqual(os_billing_pdf_match.func.view_class.__name__, "ServiceOrderBillingPdfView")
 
@@ -163,6 +169,8 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanArticleStockView.permission_classes)
         self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanRemitoPrintView.permission_classes)
         self.assertIn(MappedPermissionGuard, DeliveryOrderInvoicePdfView.permission_classes)
+        self.assertIn(MappedPermissionGuard, CobranzasRemitosView.permission_classes)
+        self.assertIn(MappedPermissionGuard, CobranzasRemitoPdfView.permission_classes)
         self.assertIn(MappedPermissionGuard, FacturacionCompanyOptionsView.permission_classes)
         self.assertIn(MappedPermissionGuard, ServiceOrderBillingListView.permission_classes)
         self.assertIn(MappedPermissionGuard, ServiceOrderBillingInvoiceView.permission_classes)
@@ -178,6 +186,14 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["DeliveryOrderInvoicePdfView"]["GET"],
             "page.delivery_orders",
+        )
+        self.assertEqual(
+            VIEW_PERMISSION_MATRIX["CobranzasRemitosView"]["GET"],
+            "action.billing.view",
+        )
+        self.assertEqual(
+            VIEW_PERMISSION_MATRIX["CobranzasRemitoPdfView"]["GET"],
+            "action.billing.view",
         )
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["ServiceOrderBillingListView"]["GET"],

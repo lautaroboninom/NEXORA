@@ -35,6 +35,7 @@ from .bejerman_sdk import (
     parse_remito_response,
     records_from_response,
     resolve_customer_document_fields,
+    service_ingress_sdk_article_quantity,
 )
 from .bejerman_sync import (
     BejermanBlockedError,
@@ -2310,10 +2311,11 @@ def preflight_ris_for_request_payload(data: dict[str, Any], user_id: int | None 
             duplicate = _local_registered_ris_duplicate(manual_document, company_key, [])
             if duplicate:
                 duplicate_issue = _issue(
-                    "MANUAL_REMITO_DUPLICATE_LOCAL",
-                    f"NEXORA ya registra el remito {manual_document['remitoNumber']}.",
+                    "MANUAL_REMITO_ALREADY_ASSOCIATED_LOCAL",
+                    f"NEXORA ya registra el remito {manual_document['remitoNumber']}; se asociará este ingreso al mismo remito.",
                     scope="remito",
                     field="manual_remito_number",
+                    severity="warning",
                 )
             elif not _is_digital_registered_document(
                 manual_document,
@@ -2343,7 +2345,8 @@ def preflight_ris_for_request_payload(data: dict[str, Any], user_id: int | None 
                             field="manual_remito_number",
                         )
         if duplicate_issue:
-            result["can_emit"] = False
+            if (duplicate_issue.get("severity") or "error") == "error":
+                result["can_emit"] = False
             result.setdefault("issues", []).append(duplicate_issue)
             result["detail"] = "La validación previa del remito encontró problemas."
         result["manual_remito_number"] = manual_document["remitoNumber"]
@@ -2593,9 +2596,11 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
                 partida = _clean((equipment or {}).get("serial")) or " "
             else:
                 partida = _clean((equipment or {}).get("serial")) or _clean((equipment or {}).get("internalNumber")) or " "
+            quantity = service_ingress_sdk_article_quantity(document["type"])
             next_item["Item_Deposito"] = deposit
             next_item["Item_Partida"] = partida or " "
-            next_item["Item_CantidadUM2"] = next_item.get("Item_CantidadUM1") or 1
+            next_item["Item_CantidadUM1"] = quantity
+            next_item["Item_CantidadUM2"] = quantity
             article_index += 1
         items.append(next_item)
     out["Comprobante_Items"] = items
@@ -2723,7 +2728,11 @@ def _register_payload_to_bejerman(
     try:
         duplicate = _local_registered_ris_duplicate(document, payload["companyKey"], ingreso_ids)
         if duplicate:
-            raise BejermanSdkResponseError(f"NEXORA ya registra el remito {document['remitoNumber']}")
+            return _registered_document_association_response(
+                payload,
+                document,
+                raw={"source": "local", "existing": duplicate},
+            )
         if _is_digital_registered_document(document, payload):
             return _registered_document_association_response(payload, document)
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
@@ -2973,14 +2982,25 @@ def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_i
     for ingreso_id in clean_ids:
         _ensure_ris_row(ingreso_id, user_id)
     rows = [_row_for_ingreso(ingreso_id) or {} for ingreso_id in clean_ids]
+
+    def is_same_registered_document(row: dict[str, Any]) -> bool:
+        return (
+            row.get("status") == "generated"
+            and (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER
+            and _clean(row.get("remito_number")) == document["remitoNumber"]
+        )
+
     if all(
-        row.get("status") == "generated"
-        and (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER
-        and _clean(row.get("remito_number")) == document["remitoNumber"]
+        is_same_registered_document(row)
         for row in rows
     ):
         return rows[0]
-    if any(row.get("status") == "generated" and _clean(row.get("remito_number")) for row in rows):
+    if any(
+        row.get("status") == "generated"
+        and _clean(row.get("remito_number"))
+        and not is_same_registered_document(row)
+        for row in rows
+    ):
         raise BejermanRisError("El ingreso ya tiene un RIS/remito generado")
 
     ensure_ris_preflight_ok(

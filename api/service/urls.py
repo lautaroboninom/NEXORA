@@ -50,7 +50,9 @@ from .views import (
     UsuariosView, UsuarioActivoView, UsuarioResetPassView, UsuarioRolePermView, UsuarioDeleteView,
     CatalogoRolesView, CatalogoPermisosView, UsuarioPermisosView, UsuarioPermisosResetView, CerrarReparacionView,
     NotificacionesView, NotificacionClickView, NotificacionesReadAllView,
-    NotificacionesPushConfigView, NotificacionesPushSubscriptionView, UsuarioNotificacionesView,
+    NotificacionesPushConfigView, NotificacionesPushSubscriptionView,
+    NotificacionesConfiguracionView, NotificacionesConfiguracionEmailsView,
+    NotificacionesConfiguracionEmailDetailView, UsuarioNotificacionesView,
 
     # clientes / marcas-modelos / proveedores externos
     ClientesView, ClienteBejermanCandidatesView, ClientesBejermanSyncView, ClienteDeleteView, ClienteMergeView,
@@ -91,6 +93,7 @@ from .views import (
     DeliveryOrderBejermanRemitoHistoryView, DeliveryOrderBejermanRemitoPdfView, DeliveryOrderBejermanRemitoPrintView,
     DeliveryOrderInvoicePdfView,
     FacturacionCompanyOptionsView, FacturacionClienteDocumentosView, FacturacionDocumentoPdfView,
+    CobranzasRemitosView, CobranzasRemitoPdfView,
     ServiceOrderBillingListView, ServiceOrderBillingInvoiceView, ServiceOrderBillingPdfView,
 )
 
@@ -234,6 +237,8 @@ urlpatterns = [
     path("cobranzas/facturacion/clientes/", FacturacionCompanyOptionsView.as_view()),
     path("cobranzas/facturacion/documentos/", FacturacionClienteDocumentosView.as_view()),
     path("cobranzas/facturacion/documentos/<str:document_id>/pdf/", FacturacionDocumentoPdfView.as_view()),
+    path("cobranzas/remitos/", CobranzasRemitosView.as_view()),
+    path("cobranzas/remitos/<str:document_id>/pdf/", CobranzasRemitoPdfView.as_view()),
     path("cobranzas/os-a-facturar/", ServiceOrderBillingListView.as_view()),
     path("cobranzas/os-a-facturar/<int:ingreso_id>/factura/", ServiceOrderBillingInvoiceView.as_view()),
     path("cobranzas/os-a-facturar/<int:ingreso_id>/pdf/", ServiceOrderBillingPdfView.as_view()),
@@ -268,6 +273,9 @@ urlpatterns = [
     path("trabajo/reglas-alerta/", WorkAlertRulesView.as_view()),
     path("notificaciones/", NotificacionesView.as_view()),
     path("notificaciones/read-all/", NotificacionesReadAllView.as_view()),
+    path("notificaciones/configuracion/", NotificacionesConfiguracionView.as_view()),
+    path("notificaciones/configuracion/emails/", NotificacionesConfiguracionEmailsView.as_view()),
+    path("notificaciones/configuracion/emails/<int:email_id>/", NotificacionesConfiguracionEmailDetailView.as_view()),
     path("notificaciones/push/config/", NotificacionesPushConfigView.as_view()),
     path("notificaciones/push/subscription/", NotificacionesPushSubscriptionView.as_view()),
     path("notificaciones/<int:notification_id>/click/", NotificacionClickView.as_view()),

@@ -176,6 +176,8 @@ VIEW_PERMISSION_MATRIX = {
     "FacturacionCompanyOptionsView": {"GET": "action.billing.view"},
     "FacturacionClienteDocumentosView": {"GET": "action.billing.view"},
     "FacturacionDocumentoPdfView": {"GET": "action.billing.view"},
+    "CobranzasRemitosView": {"GET": "action.billing.view"},
+    "CobranzasRemitoPdfView": {"GET": "action.billing.view"},
     "ServiceOrderBillingListView": {"GET": "action.billing.view"},
     "ServiceOrderBillingInvoiceView": {"POST": "action.billing.register_os_invoice"},
     "ServiceOrderBillingPdfView": {"GET": "action.billing.view"},

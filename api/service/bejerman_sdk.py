@@ -3,12 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 import time
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
@@ -17,7 +19,7 @@ import requests
 from django.conf import settings
 from django.utils import timezone
 
-from .bejerman_companies import require_company
+from .bejerman_companies import company_for_key, require_company
 from .bejerman_user_credentials import (
     BEJERMAN_CREDENTIALS_REQUIRED,
     BejermanUserCredentialsError,
@@ -32,6 +34,7 @@ REGISTRO_ACTION = "http://localhost:57213/IEFlexSDK_Service/EFlexSDK_WSRegistro"
 EJECUTAR_ACTION = "http://localhost:57213/IEFlexSDK_Service/EFlexSDK_WSEjecutar"
 
 BILLING_COMPROBANTE_TYPES = {"FC", "NC", "ND"}
+REMITO_COMPROBANTE_TYPES = {"RT", "RD", "RTA", "RTN", "RSS", "RIS", "RDA", "RDN"}
 TIPO_OPERACION_LABELS = {
     "ALQ": "Alquiler",
     "BUSO": "Vta Bien de uso",
@@ -40,6 +43,14 @@ TIPO_OPERACION_LABELS = {
     "MC": "Mercadería",
     "REP": "Reparación",
 }
+TIPO_OPERACION_LABELS.update(
+    {
+        "DEMO": "Demostración",
+        "FAB": "Fabricación",
+        "MC": "Mercadería",
+        "REP": "Reparación",
+    }
+)
 
 
 class BejermanSdkError(RuntimeError):
@@ -534,6 +545,7 @@ def build_sales_filters(
     date_from: str | None = None,
     date_to: str | None = None,
     comprobante_type: str | None = None,
+    operation_type: str | None = None,
 ) -> list[dict[str, Any]]:
     code = "" if customer_code is None else str(customer_code)
     filters = []
@@ -542,6 +554,9 @@ def build_sales_filters(
     tipo = _clean(comprobante_type).upper()
     if tipo:
         filters.append(bejerman_filter("Comprobante_Tipo", "IGUAL", tipo))
+    operation = _clean(operation_type).upper()
+    if operation:
+        filters.append(bejerman_filter("Comprobante_TipoOperacion", "IGUAL", operation))
     if date_from:
         filters.append(bejerman_filter("Comprobante_FechaEmision", "MAYOR O IGUAL", date_from))
     if date_to:
@@ -822,14 +837,23 @@ def decode_document_id(document_id: str) -> dict[str, Any]:
     }
 
 
+def operation_code(record: dict[str, Any]) -> str:
+    return as_string(first_value(record, ("Comprobante_TipoOperacion", "TipoOperacion", "Tipo_Operacion"))).upper()
+
+
 def operation_label(record: dict[str, Any]) -> str:
-    code = as_string(first_value(record, ("Comprobante_TipoOperacion", "TipoOperacion", "Tipo_Operacion"))).upper()
+    code = operation_code(record)
     return TIPO_OPERACION_LABELS.get(code, "Sin tipo de operación")
 
 
 def is_billing_record(record: dict[str, Any]) -> bool:
     tipo = as_string(first_value(record, ("Comprobante_Tipo", "TipoComprobante", "Tipo"))).upper()
     return tipo in BILLING_COMPROBANTE_TYPES
+
+
+def is_remito_record(record: dict[str, Any]) -> bool:
+    tipo = as_string(first_value(record, ("Comprobante_Tipo", "TipoComprobante", "Tipo"))).upper()
+    return tipo in REMITO_COMPROBANTE_TYPES
 
 
 def map_facturacion_item(record: dict[str, Any], fallback_customer_code: str) -> dict[str, Any]:
@@ -868,6 +892,53 @@ def map_facturacion_item(record: dict[str, Any], fallback_customer_code: str) ->
         "totalAmount": as_number(first_value(record, ("Comprobante_ImporteTotal", "Comprobante_Total", "ImporteTotal", "Total"))),
         "amount": as_number(first_value(record, ("Comprobante_ImporteTotal", "Comprobante_Total", "ImporteTotal", "Total"))),
         "balance": as_number(first_value(record, ("Comprobante_Saldo", "Saldo", "ImportePendiente"))),
+        "raw": record,
+    }
+
+
+def map_remito_item(record: dict[str, Any], fallback_customer_code: str) -> dict[str, Any]:
+    tipo = as_string(first_value(record, ("Comprobante_Tipo", "TipoComprobante", "Tipo"))).upper()
+    letter = as_string(first_value(record, ("Comprobante_Letra", "Letra")))
+    point = as_string(first_value(record, ("Comprobante_PtoVenta", "PuntoVenta", "PtoVenta")))
+    number = as_string(first_value(record, ("Comprobante_Numero", "Numero", "NroComprobante")))
+    raw_customer_code = first_value(record, ("Cliente_Codigo", "ClienteCodigo", "CodCliente"))
+    preserved_customer_code = "" if raw_customer_code is None else str(raw_customer_code)
+    customer_code = preserved_customer_code if preserved_customer_code.strip() else fallback_customer_code
+    display_customer_code = as_string(customer_code)
+    issue_date = normalize_date(first_value(record, ("Comprobante_FechaEmision", "Comprobante_FEmision", "FechaEmision")))
+    due_date = normalize_date(first_value(record, ("Comprobante_FechaVencimiento", "FechaVencimiento", "Vencimiento")))
+    document_number = (
+        as_string(first_value(record, ("Comprobante_NumeroCompleto", "NumeroCompleto", "Documento")))
+        or format_remito_number(tipo, letter, point, number)
+    )
+    document_id = build_document_id({"t": tipo, "n": number, "l": letter, "p": point, "f": issue_date, "c": customer_code})
+    op_code = operation_code(record)
+    op_label = operation_label(record)
+    return {
+        "id": document_id,
+        "documentId": document_id,
+        "type": tipo,
+        "comprobanteTipo": tipo,
+        "letter": letter,
+        "pointOfSale": point,
+        "number": number,
+        "comprobanteNumero": number,
+        "documentNumber": document_number,
+        "numero": document_number,
+        "issueDate": issue_date,
+        "date": issue_date,
+        "dueDate": due_date,
+        "customerCode": display_customer_code,
+        "bejermanCustomerCode": customer_code,
+        "customerName": as_string(first_value(record, ("Cliente_RazonSocial", "Cliente_Nombre", "RazonSocial"))),
+        "operationCode": op_code,
+        "tipoOperacion": op_code,
+        "operationLabel": op_label,
+        "origin": op_label,
+        "subtotal": as_number(first_value(record, ("Comprobante_ImporteNeto", "Comprobante_Subtotal", "Subtotal"))),
+        "taxes": as_number(first_value(record, ("Comprobante_ImporteIVA", "Comprobante_Impuestos", "Impuestos", "IVA"))),
+        "totalAmount": as_number(first_value(record, ("Comprobante_ImporteTotal", "Comprobante_Total", "ImporteTotal", "Total"))),
+        "amount": as_number(first_value(record, ("Comprobante_ImporteTotal", "Comprobante_Total", "ImporteTotal", "Total"))),
         "raw": record,
     }
 
@@ -912,6 +983,47 @@ def build_facturacion_result(
             items = [item for item in items if as_string(item.get("type")).upper() == origin_type]
         else:
             items = [item for item in items if item.get("origin") == origin]
+    if search:
+        items = [item for item in items if search in normalize_search(flatten_text(item))]
+    items.sort(key=lambda item: (item.get("issueDate") or "", item.get("documentNumber") or ""), reverse=True)
+    try:
+        page = int(query.get("page") or 1)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(query.get("pageSize") or 25)
+    except (TypeError, ValueError):
+        page_size = 25
+    page_size = max(1, min(100, page_size))
+    pagination = create_pagination(len(items), page, page_size)
+    offset = pagination["offset"]
+    return {"items": items[offset : offset + pagination["pageSize"]], "pagination": pagination}
+
+
+def build_remitos_result(
+    response: dict[str, Any] | list[dict[str, Any]],
+    customer_code: str,
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    query = query or {}
+    response_list = response if isinstance(response, list) else [response]
+    mapped = [
+        map_remito_item(record, customer_code)
+        for item in response_list
+        for record in records_from_response(item)
+        if is_remito_record(record)
+    ]
+    unique: dict[str, dict[str, Any]] = {}
+    for item in mapped:
+        unique.setdefault(item["documentId"], item)
+    items = list(unique.values())
+    remito_type = as_string(query.get("remitoType") or query.get("type")).upper()
+    operation_type = as_string(query.get("operationType") or query.get("operation")).upper()
+    search = normalize_search(query.get("search"))
+    if remito_type:
+        items = [item for item in items if as_string(item.get("type")).upper() == remito_type]
+    if operation_type:
+        items = [item for item in items if as_string(item.get("operationCode")).upper() == operation_type]
     if search:
         items = [item for item in items if search in normalize_search(flatten_text(item))]
     items.sort(key=lambda item: (item.get("issueDate") or "", item.get("documentNumber") or ""), reverse=True)
@@ -999,6 +1111,109 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
+def _pdf_folder_kind(reference: BejermanPdfReference) -> str:
+    tipo = as_string(reference.type).upper()
+    if tipo in REMITO_COMPROBANTE_TYPES:
+        return "REMITOS"
+    if tipo in BILLING_COMPROBANTE_TYPES:
+        return "FACTURAS"
+    return ""
+
+
+def _pdf_company_key(client: BejermanSDKClient) -> str:
+    marker = as_string(getattr(client, "company_key", "")) or as_string(getattr(client, "company", ""))
+    company = company_for_key(marker, default="SEPID")
+    if company:
+        return company.key
+    return marker.upper() or "SEPID"
+
+
+def _configured_pdf_output_dir(client: BejermanSDKClient, reference: BejermanPdfReference) -> str:
+    folder = _pdf_folder_kind(reference)
+    if not folder:
+        return ""
+    company_key = _pdf_company_key(client)
+    return (
+        as_string(_setting(f"BEJERMAN_PDF_{company_key}_{folder}_DIR"))
+        or as_string(_setting(f"BEJERMAN_PDF_{folder}_DIR"))
+    )
+
+
+def _safe_pdf_filename_part(value: Any, fallback: str = "") -> str:
+    text = as_string(value).upper()
+    if not text:
+        return fallback
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", text).strip(". ")
+    return text or fallback
+
+
+def _numeric_pdf_filename_part(value: Any, width: int) -> str:
+    text = _safe_pdf_filename_part(value)
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return digits.zfill(width) if digits else text
+
+
+def _comprobante_pdf_filename(reference: BejermanPdfReference) -> str:
+    tipo = _safe_pdf_filename_part(reference.type, "COMP")
+    letter = _safe_pdf_filename_part(reference.letter)
+    point = _numeric_pdf_filename_part(reference.point_of_sale, 5)
+    number = _numeric_pdf_filename_part(reference.number, 8)
+    customer = _safe_pdf_filename_part(reference.customer_code)
+    stem = f"{tipo}{letter}{point}-{number}" if point or number else tipo
+    if customer:
+        stem = f"{stem}-{customer}"
+    return f"{stem}.pdf"
+
+
+def _unique_pdf_destination(folder: Path, filename: str, pdf: bytes) -> Path:
+    destination = folder / filename
+    if not destination.exists():
+        return destination
+    try:
+        if destination.read_bytes() == pdf:
+            return destination
+    except OSError:
+        pass
+    for index in range(1, 100):
+        candidate = folder / f"{destination.stem}_{index:02d}{destination.suffix}"
+        if not candidate.exists():
+            return candidate
+        try:
+            if candidate.read_bytes() == pdf:
+                return candidate
+        except OSError:
+            pass
+    return folder / f"{destination.stem}_{int(time.time())}{destination.suffix}"
+
+
+def _store_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdfReference, pdf: bytes) -> None:
+    output_dir = _configured_pdf_output_dir(client, reference)
+    if not output_dir or not pdf:
+        return
+    if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", output_dir):
+        logger.warning(
+            "bejerman_pdf_copy_skipped_windows_path",
+            extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_output_dir": output_dir},
+        )
+        return
+    try:
+        folder = Path(output_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        destination = _unique_pdf_destination(folder, _comprobante_pdf_filename(reference), pdf)
+        if not destination.exists():
+            destination.write_bytes(pdf)
+        logger.info(
+            "bejerman_pdf_copy_saved",
+            extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_path": str(destination)},
+        )
+    except OSError as exc:
+        logger.warning(
+            "bejerman_pdf_copy_failed",
+            extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_output_dir": output_dir, "error": str(exc)},
+        )
+
 def _pdf_log_context(reference: BejermanPdfReference, *, interactive: bool) -> dict[str, Any]:
     return {
         "bejerman_pdf_tipo": reference.type,
@@ -1054,6 +1269,7 @@ def fetch_comprobante_pdf(
                 extra={**log_context, "duration_ms": _elapsed_ms(started_at), "pdf_ready": bool(pdf)},
             )
             if pdf:
+                _store_comprobante_pdf_copy(client, reference, pdf)
                 logger.info("bejerman_pdf_ready", extra={**log_context, "duration_ms": _elapsed_ms(total_started_at)})
                 return pdf, "application/pdf"
         except (BejermanSdkResponseError, BejermanSdkUnavailable):
@@ -1087,6 +1303,7 @@ def fetch_comprobante_pdf(
                 extra={**log_context, "attempt": attempt + 1, "duration_ms": _elapsed_ms(started_at), "pdf_ready": bool(pdf)},
             )
             if pdf:
+                _store_comprobante_pdf_copy(client, reference, pdf)
                 logger.info("bejerman_pdf_ready", extra={**log_context, "duration_ms": _elapsed_ms(total_started_at)})
                 return pdf, "application/pdf"
     pending_retry_ms = max(retry_after_ms, delay_ms, 1000)
@@ -1237,6 +1454,26 @@ def item_separator_line(common: dict[str, Any]) -> dict[str, Any]:
     return legend_line(common, REMITO_ITEM_SEPARATOR)
 
 
+def accessory_legend_lines(accessories: Any) -> list[str]:
+    text = as_string(accessories)
+    if not text:
+        return []
+    parts = [part.strip() for part in re.split(r"\s*[;,]\s*", text) if part.strip()]
+    if not parts:
+        parts = [text]
+    return [f"Accesorios: {part}" for part in parts]
+
+
+def _negative_sdk_quantity_types() -> set[str]:
+    raw = as_string(_setting("BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES", "RDA,RDN"))
+    return {part.strip().upper() for part in raw.split(",") if part.strip()}
+
+
+def service_ingress_sdk_article_quantity(document_type: Any) -> int:
+    # RDA/RDN are RD-like sales documents: sending -1 makes Bejerman's entry UI show +1.
+    return -1 if as_string(document_type).upper() in _negative_sdk_quantity_types() else 1
+
+
 def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: dict[str, str] | None = None) -> dict[str, Any]:
     customer_fields = customer_fields or {}
     equipment = payload.get("equipment") or {}
@@ -1261,6 +1498,7 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
         else as_bool(_setting("BEJERMAN_RIS_UPDATE_STOCK", False))
     )
     serial = as_string(equipment.get("serial"))
+    article_quantity = service_ingress_sdk_article_quantity(tipo)
     legend = " - ".join(
         part
         for part in (
@@ -1279,8 +1517,8 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             **item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 3),
             "Item_Tipo": "A",
             "Item_CodigoArticulo": article_code,
-            "Item_CantidadUM1": 1,
-            "Item_CantidadUM2": 1 if update_stock and serial else 0,
+            "Item_CantidadUM1": article_quantity,
+            "Item_CantidadUM2": article_quantity if update_stock and serial else 0,
             "Item_DescripArticulo": equipment_article_description(
                 equipment,
                 as_string(_setting("BEJERMAN_RIS_GENERIC_ARTICLE_NAME", "Equipo recibido para servicio técnico")),
@@ -1320,12 +1558,13 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             item_article_code = as_string(equipment_item.get("articleCode")) or article_code
             if not item_article_code:
                 raise BejermanSdkResponseError("SERVICE_INGRESS_ARTICLE_REQUIRED")
+            line_quantity = service_ingress_sdk_article_quantity(tipo)
             return {
                 **common,
                 "Item_Tipo": "A",
                 "Item_CodigoArticulo": item_article_code,
-                "Item_CantidadUM1": 1,
-                "Item_CantidadUM2": 1 if update_stock and item_serial else 0,
+                "Item_CantidadUM1": line_quantity,
+                "Item_CantidadUM2": line_quantity if update_stock and item_serial else 0,
                 "Item_DescripArticulo": equipment_article_description(equipment_item, generic_article_name)[:250],
                 "Item_PrecioUnitario": 0,
                 "Item_TasaIVAInscrip": 0,
@@ -1381,16 +1620,12 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             if detail:
                 items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), detail))
                 sort_order += 1
-            extra = " - ".join(
-                part
-                for part in (
-                    f"Motivo: {as_string(equipment_item.get('repairReason'))}" if as_string(equipment_item.get("repairReason")) else "",
-                    f"Accesorios: {as_string(equipment_item.get('accessories'))}" if as_string(equipment_item.get("accessories")) else "",
-                )
-                if part
-            )
-            if extra:
-                items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), extra))
+            reason = as_string(equipment_item.get("repairReason"))
+            if reason:
+                items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), f"Motivo: {reason}"))
+                sort_order += 1
+            for accessory_line in accessory_legend_lines(equipment_item.get("accessories")):
+                items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), accessory_line))
                 sort_order += 1
             comments = as_string(equipment_item.get("comments"))
             if comments:

@@ -27,6 +27,7 @@ from .bejerman_sdk import (
     build_partida_rows,
     build_delivery_remito_comprobante,
     build_facturacion_result,
+    build_remitos_result,
     build_sales_filters,
     build_stock_rows,
     decode_document_id,
@@ -38,6 +39,7 @@ from .bejerman_sdk import (
     records_from_response,
     resolve_customer_document_fields,
 )
+from .bejerman_companies import company_for_key
 from .delivery_orders import (
     DeliveryOrderError,
     RENTAL_STOCK_DEPOSIT,
@@ -73,6 +75,8 @@ class BillingError(RuntimeError):
 
 
 FACTURACION_COMPROBANTE_TYPES = ("FC", "NC", "ND")
+REMITO_COMPROBANTE_TYPES = ("RT", "RD", "RTA", "RTN", "RSS", "RIS", "RDA", "RDN")
+REMITO_OPERATION_TYPES = ("MC", "REP", "ALQ", "DEMO", "BUSO", "FAB")
 DELIVERY_ORDER_STOCK_DEPOSIT = "VAL"
 DELIVERY_ORDER_FALLBACK_DEPOSITS = ("VAL", "STL")
 
@@ -569,6 +573,101 @@ def _facturacion_comprobante_types(params: dict[str, Any]) -> tuple[str, ...]:
     if origin_type in FACTURACION_COMPROBANTE_TYPES:
         return (origin_type,)
     return FACTURACION_COMPROBANTE_TYPES
+
+
+def _normalize_remito_company_key(value: Any) -> str:
+    company = company_for_key(value, default="SEPID")
+    if not company:
+        raise BillingError("INVALID_COMPANY_KEY", "Empresa Bejerman no válida", status_code=400)
+    return company.key
+
+
+def _normalize_remito_filter(value: Any, allowed: tuple[str, ...], code: str, label: str) -> str:
+    text = (_optional_text(value) or "").upper()
+    if not text:
+        return ""
+    if text not in allowed:
+        raise BillingError(code, f"{label} no válido", status_code=400)
+    return text
+
+
+def _remitos_params(raw_filters: dict[str, Any]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    for source_keys, target_key in (
+        (("dateFrom", "desde"), "dateFrom"),
+        (("dateTo", "hasta"), "dateTo"),
+        (("remitoType", "tipoRemito", "comprobanteTipo", "tipo"), "remitoType"),
+        (("operationType", "tipoOperacion", "operacion", "operation"), "operationType"),
+        (("page",), "page"),
+        (("pageSize",), "pageSize"),
+        (("search", "q"), "search"),
+    ):
+        for source_key in source_keys:
+            value = raw_filters.get(source_key)
+            if value not in (None, ""):
+                params[target_key] = value
+                break
+    params["remitoType"] = _normalize_remito_filter(
+        params.get("remitoType"),
+        REMITO_COMPROBANTE_TYPES,
+        "INVALID_REMITO_TYPE",
+        "Tipo de remito",
+    )
+    params["operationType"] = _normalize_remito_filter(
+        params.get("operationType"),
+        REMITO_OPERATION_TYPES,
+        "INVALID_OPERATION_TYPE",
+        "Tipo de operación",
+    )
+    return params
+
+
+def _remito_comprobante_types(params: dict[str, Any]) -> tuple[str, ...]:
+    remito_type = _optional_text(params.get("remitoType"))
+    if remito_type:
+        return (remito_type.upper(),)
+    return REMITO_COMPROBANTE_TYPES
+
+
+def list_remitos_from_bejerman(
+    customer_code: str | None,
+    filters: dict[str, Any] | None = None,
+    actor_user_id: int | None = None,
+    company_key: str | None = None,
+) -> dict[str, Any]:
+    code = _optional_text(customer_code)
+    raw_filters = filters or {}
+    params = _remitos_params(raw_filters)
+    normalized_company = _normalize_remito_company_key(
+        company_key or raw_filters.get("companyKey") or raw_filters.get("company_key") or raw_filters.get("empresa")
+    )
+    try:
+        client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
+        effective_code = _resolve_facturacion_customer_code(client, code) if code else ""
+        _default_facturacion_dates(params)
+        responses = [
+            client.list_comprobantes_ventas(
+                build_sales_filters(
+                    effective_code,
+                    params.get("dateFrom"),
+                    params.get("dateTo"),
+                    comprobante_type,
+                    params.get("operationType"),
+                )
+            )
+            for comprobante_type in _remito_comprobante_types(params)
+        ]
+        data = build_remitos_result(responses, effective_code, params)
+        data["requestedCustomerCode"] = code
+        data["effectiveCustomerCode"] = as_string(effective_code)
+        data["bejermanCustomerCode"] = effective_code
+        data["companyKey"] = normalized_company
+        data["scope"] = "customer" if code else "company"
+    except BillingError:
+        raise
+    except Exception as exc:
+        raise _sdk_error(exc) from exc
+    return data or {"items": [], "pagination": {"page": 1, "pageSize": 25, "total": 0}}
 
 
 def list_facturacion_from_bejerman(

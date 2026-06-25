@@ -24,6 +24,7 @@ from ..bejerman_delivery import (
     list_bejerman_depositos,
     list_facturacion_company_options,
     list_facturacion_from_bejerman,
+    list_remitos_from_bejerman,
     list_rental_available_equipment,
 )
 from ..delivery_orders import (
@@ -546,6 +547,43 @@ class FacturacionDocumentoPdfView(DeliveryOrderPermissionMixin, APIView):
         return response
 
 
+class CobranzasRemitosView(DeliveryOrderPermissionMixin, APIView):
+
+    def get(self, request):
+        customer_code = request.query_params.get("customerCode") or request.query_params.get("clienteCodigo")
+        company_key = request.query_params.get("companyKey") or request.query_params.get("company_key")
+        try:
+            return Response(
+                list_remitos_from_bejerman(
+                    customer_code,
+                    request.query_params,
+                    actor_user_id=_actor_id(request),
+                    company_key=company_key,
+                )
+            )
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class CobranzasRemitoPdfView(DeliveryOrderPermissionMixin, APIView):
+
+    def get(self, request, document_id):
+        customer_code = request.query_params.get("customerCode") or request.query_params.get("clienteCodigo")
+        company_key = request.query_params.get("companyKey") or request.query_params.get("company_key")
+        try:
+            bytes_, content_type = get_facturacion_pdf(
+                customer_code,
+                document_id,
+                actor_user_id=_actor_id(request),
+                company_key=company_key,
+            )
+        except Exception as exc:
+            return _error_response(exc)
+        response = HttpResponse(bytes_, content_type=content_type or "application/pdf")
+        response["Content-Disposition"] = f'inline; filename="remito-{document_id}.pdf"'
+        return response
+
+
 class DeliveryOrderInvoicePdfView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, order_id):
@@ -614,6 +652,8 @@ __all__ = [
     "FacturacionCompanyOptionsView",
     "FacturacionClienteDocumentosView",
     "FacturacionDocumentoPdfView",
+    "CobranzasRemitosView",
+    "CobranzasRemitoPdfView",
     "ServiceOrderBillingListView",
     "ServiceOrderBillingInvoiceView",
     "ServiceOrderBillingPdfView",

@@ -4,6 +4,8 @@ from collections import OrderedDict
 from email.utils import parseaddr
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from django.db import connection, transaction
 from django.utils import timezone
 
@@ -155,6 +157,8 @@ NOTIFICATION_CATALOG = [
 CATALOG_BY_KEY = {item["key"]: item for item in NOTIFICATION_CATALOG}
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 50
+NOTIFICATION_CHANNELS = ("bell", "email", "push")
+EXTRA_EMAIL_ROLES = {"admin", "cobranzas"}
 
 
 def q(sql, params=None, one=False):
@@ -202,12 +206,38 @@ def _table_exists(name):
         return False
 
 
+def _table_columns(name):
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                  FROM information_schema.columns
+                 WHERE table_schema = ANY(current_schemas(true))
+                   AND table_name = %s
+                """,
+                [name],
+            )
+            return {str(row[0]) for row in cur.fetchall()}
+    except Exception:
+        _safe_set_rollback_false()
+        return set()
+
+
+def _table_has_column(name, column):
+    return column in _table_columns(name)
+
+
 def notifications_schema_ready():
     return _table_exists("notifications") and _table_exists("notification_user_preferences")
 
 
 def push_schema_ready():
     return _table_exists("notification_push_subscriptions")
+
+
+def notification_email_schema_ready():
+    return _table_exists("notification_email_addresses")
 
 
 def _web_push_settings():
@@ -449,8 +479,24 @@ def _as_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "si", "sí", "on"}
 
 
+def _clean_email(value):
+    _name, email = parseaddr(str(value or "").strip())
+    email = str(email or "").strip()
+    if not email:
+        raise ValueError("El email es obligatorio.")
+    try:
+        validate_email(email)
+    except DjangoValidationError:
+        raise ValueError("El email no es válido.")
+    return email
+
+
 def _normalize_role(role):
     return (role or "").strip().lower()
+
+
+def _can_manage_extra_emails_for_role(role):
+    return _normalize_role(role) in EXTRA_EMAIL_ROLES
 
 
 def _role_default_enabled(notification_key, role):
@@ -495,23 +541,89 @@ def _load_overrides(notification_key, user_ids):
     ids = sorted({int(uid) for uid in user_ids if uid is not None})
     if not ids or not _table_exists("notification_user_preferences"):
         return {}
+    columns = _table_columns("notification_user_preferences")
+    select_parts = ["user_id"]
+    select_parts.append("enabled" if "enabled" in columns else "NULL AS enabled")
+    select_parts.append("bell_enabled" if "bell_enabled" in columns else "NULL AS bell_enabled")
+    select_parts.append("email_enabled" if "email_enabled" in columns else "NULL AS email_enabled")
+    select_parts.append("push_enabled" if "push_enabled" in columns else "NULL AS push_enabled")
     rows = q(
-        """
-        SELECT user_id, enabled
+        f"""
+        SELECT {', '.join(select_parts)}
           FROM notification_user_preferences
          WHERE notification_key = %s
            AND user_id = ANY(%s)
         """,
         [notification_key, ids],
     ) or []
-    return {int(row["user_id"]): _as_bool(row.get("enabled")) for row in rows}
+    overrides = {}
+    for row in rows:
+        legacy = _as_bool(row.get("enabled"))
+        bell = _as_bool(row.get("bell_enabled"))
+        overrides[int(row["user_id"])] = {
+            "legacy": legacy,
+            "bell": legacy if bell is None else bell,
+            "email": _as_bool(row.get("email_enabled")),
+            "push": _as_bool(row.get("push_enabled")),
+        }
+    return overrides
 
 
-def _effective_enabled(user_row, notification_key, overrides):
+def _effective_enabled(user_row, notification_key, overrides, channel="bell"):
     uid = int(user_row.get("id"))
-    if uid in overrides and overrides[uid] is not None:
-        return bool(overrides[uid])
+    channel_key = channel if channel in NOTIFICATION_CHANNELS else "bell"
+    override = overrides.get(uid) or {}
+    value = override.get(channel_key)
+    if value is not None:
+        return bool(value)
+    legacy = override.get("legacy")
+    if channel_key != "bell" and legacy is not None:
+        return bool(legacy)
     return _role_default_enabled(notification_key, user_row.get("rol"))
+
+
+def _effective_any_enabled(user_row, notification_key, overrides):
+    return any(_effective_enabled(user_row, notification_key, overrides, channel) for channel in NOTIFICATION_CHANNELS)
+
+
+def _load_notification_email_addresses(user_ids):
+    ids = sorted({int(uid) for uid in user_ids if uid is not None})
+    if not ids or not notification_email_schema_ready():
+        return {}
+    rows = q(
+        """
+        SELECT id, user_id, email, label, active, created_at, updated_at
+          FROM notification_email_addresses
+         WHERE user_id = ANY(%s)
+           AND COALESCE(active, TRUE) = TRUE
+         ORDER BY user_id, LOWER(TRIM(email)), id
+        """,
+        [ids],
+    ) or []
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(int(row["user_id"]), []).append(row)
+    return grouped
+
+
+def notification_email_recipients_for_users(users, *, include_primary=True, include_extra=True):
+    rows = [row for row in users or [] if row]
+    extras_by_user = _load_notification_email_addresses([row.get("id") for row in rows]) if include_extra else {}
+    recipients = OrderedDict()
+    for row in rows:
+        primary = str(row.get("email") or "").strip()
+        if include_primary and primary:
+            recipients.setdefault(primary.lower(), primary)
+        if include_extra and _can_manage_extra_emails_for_role(row.get("rol")):
+            for extra in extras_by_user.get(int(row.get("id")), []):
+                email = str(extra.get("email") or "").strip()
+                if email:
+                    recipients.setdefault(email.lower(), email)
+    return list(recipients.values())
+
+
+def _user_has_notification_email(user_row):
+    return bool(notification_email_recipients_for_users([user_row]))
 
 
 def _candidate_users(notification_key, user_ids=None, roles=None, emails=None):
@@ -529,7 +641,11 @@ def active_user_ids_for_roles(roles):
     return [int(row["id"]) for row in _load_active_users(roles=roles)]
 
 
-def active_users_for_notification(notification_key, *, user_ids=None, roles=None, emails=None, require_email=False):
+def active_users_for_roles(roles):
+    return _load_active_users(roles=roles)
+
+
+def active_users_for_notification(notification_key, *, user_ids=None, roles=None, emails=None, require_email=False, channel=None):
     candidates = OrderedDict()
     if user_ids:
         for row in _load_active_users(user_ids=user_ids):
@@ -543,9 +659,17 @@ def active_users_for_notification(notification_key, *, user_ids=None, roles=None
     if not candidates:
         return []
     overrides = _load_overrides(notification_key, list(candidates))
-    recipients = [row for row in candidates.values() if _effective_enabled(row, notification_key, overrides)]
+    channel_key = channel or ("email" if require_email else "bell")
+    if channel_key == "any":
+        recipients = [row for row in candidates.values() if _effective_any_enabled(row, notification_key, overrides)]
+    else:
+        recipients = [
+            row
+            for row in candidates.values()
+            if _effective_enabled(row, notification_key, overrides, channel_key)
+        ]
     if require_email:
-        recipients = [row for row in recipients if str(row.get("email") or "").strip()]
+        recipients = [row for row in recipients if _user_has_notification_email(row)]
     return recipients
 
 
@@ -575,44 +699,72 @@ def emit_notification(
     if not candidates:
         return 0
     overrides = _load_overrides(notification_key, [row.get("id") for row in candidates])
-    recipients = [row for row in candidates if _effective_enabled(row, notification_key, overrides)]
+    recipients = [row for row in candidates if _effective_any_enabled(row, notification_key, overrides)]
     if not recipients:
         return 0
 
     key = (dedupe_key or f"{notification_key}:{entity_type or 'general'}:{entity_id or title}").strip()
     severity_value = severity if severity in {"info", "warning", "critical"} else "info"
     payload_text = json.dumps(payload or {}, ensure_ascii=False, default=str)
+    has_bell_enabled_column = _table_has_column("notifications", "bell_enabled")
     inserted = 0
     push_targets = []
     for user in recipients:
+        bell_enabled = _effective_enabled(user, notification_key, overrides, "bell")
+        push_enabled = bool(push and _effective_enabled(user, notification_key, overrides, "push"))
         try:
             with connection.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO notifications(
-                      user_id, notification_key, dedupe_key, title, body, href,
-                      severity, entity_type, entity_id, payload
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
-                    ON CONFLICT (user_id, notification_key, dedupe_key) DO NOTHING
-                    RETURNING id
-                    """,
-                    [
-                        user.get("id"),
-                        notification_key,
-                        key,
-                        str(title or "").strip(),
-                        str(body or "").strip(),
-                        str(href or "").strip(),
-                        severity_value,
-                        entity_type,
-                        str(entity_id) if entity_id is not None else None,
-                        payload_text,
-                    ],
-                )
+                if has_bell_enabled_column:
+                    cur.execute(
+                        """
+                        INSERT INTO notifications(
+                          user_id, notification_key, dedupe_key, title, body, href,
+                          severity, entity_type, entity_id, payload, bell_enabled
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                        ON CONFLICT (user_id, notification_key, dedupe_key) DO NOTHING
+                        RETURNING id
+                        """,
+                        [
+                            user.get("id"),
+                            notification_key,
+                            key,
+                            str(title or "").strip(),
+                            str(body or "").strip(),
+                            str(href or "").strip(),
+                            severity_value,
+                            entity_type,
+                            str(entity_id) if entity_id is not None else None,
+                            payload_text,
+                            bool(bell_enabled),
+                        ],
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO notifications(
+                          user_id, notification_key, dedupe_key, title, body, href,
+                          severity, entity_type, entity_id, payload
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                        ON CONFLICT (user_id, notification_key, dedupe_key) DO NOTHING
+                        RETURNING id
+                        """,
+                        [
+                            user.get("id"),
+                            notification_key,
+                            key,
+                            str(title or "").strip(),
+                            str(body or "").strip(),
+                            str(href or "").strip(),
+                            severity_value,
+                            entity_type,
+                            str(entity_id) if entity_id is not None else None,
+                            payload_text,
+                        ],
+                    )
                 row = cur.fetchone()
                 if row:
                     inserted += 1
-                    if push:
+                    if push_enabled:
                         push_targets.append((int(user.get("id")), int(row[0])))
         except Exception:
             logger.exception(
@@ -843,22 +995,25 @@ def list_notifications_for_user(user_id, limit=DEFAULT_LIMIT):
         limit_value = max(1, min(MAX_LIMIT, int(limit or DEFAULT_LIMIT)))
     except Exception:
         limit_value = DEFAULT_LIMIT
+    bell_filter = "AND COALESCE(bell_enabled, TRUE) = TRUE" if _table_has_column("notifications", "bell_enabled") else ""
     unread = q(
-        """
+        f"""
         SELECT COUNT(*) AS total
           FROM notifications
          WHERE user_id = %s
            AND read_at IS NULL
+           {bell_filter}
         """,
         [user_id],
         one=True,
     ) or {}
     rows = q(
-        """
+        f"""
         SELECT id, notification_key, title, body, href, severity, entity_type,
                entity_id, payload, created_at, read_at, clicked_at
           FROM notifications
          WHERE user_id = %s
+           {bell_filter}
          ORDER BY created_at DESC, id DESC
          LIMIT %s
         """,
@@ -889,14 +1044,16 @@ def mark_notification_clicked(user_id, notification_id):
 def mark_all_notifications_read(user_id):
     if not _table_exists("notifications"):
         return 0
+    bell_filter = "AND COALESCE(bell_enabled, TRUE) = TRUE" if _table_has_column("notifications", "bell_enabled") else ""
     row = q(
-        """
+        f"""
         WITH updated AS (
             UPDATE notifications
                SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
                    updated_at = CURRENT_TIMESTAMP
              WHERE user_id = %s
                AND read_at IS NULL
+               {bell_filter}
              RETURNING id
         )
         SELECT COUNT(*) AS total FROM updated
@@ -907,6 +1064,77 @@ def mark_all_notifications_read(user_id):
     return int(row.get("total") or 0)
 
 
+def _load_user_overrides_by_key(user_id):
+    if not _table_exists("notification_user_preferences"):
+        return {}
+    columns = _table_columns("notification_user_preferences")
+    select_parts = ["notification_key"]
+    select_parts.append("enabled" if "enabled" in columns else "NULL AS enabled")
+    select_parts.append("bell_enabled" if "bell_enabled" in columns else "NULL AS bell_enabled")
+    select_parts.append("email_enabled" if "email_enabled" in columns else "NULL AS email_enabled")
+    select_parts.append("push_enabled" if "push_enabled" in columns else "NULL AS push_enabled")
+    rows = q(
+        f"""
+        SELECT {', '.join(select_parts)}
+          FROM notification_user_preferences
+         WHERE user_id = %s
+        """,
+        [user_id],
+    ) or []
+    overrides = {}
+    for row in rows:
+        legacy = _as_bool(row.get("enabled"))
+        bell = _as_bool(row.get("bell_enabled"))
+        overrides[row.get("notification_key")] = {
+            "legacy": legacy,
+            "bell": legacy if bell is None else bell,
+            "email": _as_bool(row.get("email_enabled")),
+            "push": _as_bool(row.get("push_enabled")),
+        }
+    return overrides
+
+
+def _notification_settings_items_for_user(user):
+    overrides = _load_user_overrides_by_key(user.get("id"))
+    items = []
+    for item in NOTIFICATION_CATALOG:
+        key = item["key"]
+        override = overrides.get(key) or {}
+        default_enabled = _role_default_enabled(key, user.get("rol"))
+        override_channels = {channel: override.get(channel) for channel in NOTIFICATION_CHANNELS}
+        effective_channels = {
+            channel: _effective_enabled(user, key, {int(user["id"]): override}, channel)
+            for channel in NOTIFICATION_CHANNELS
+        }
+        items.append(
+            {
+                **item,
+                "default_enabled": bool(default_enabled),
+                "override_enabled": override_channels["bell"],
+                "effective_enabled": bool(effective_channels["bell"]),
+                "default_channels": {channel: bool(default_enabled) for channel in NOTIFICATION_CHANNELS},
+                "override_channels": override_channels,
+                "effective_channels": {channel: bool(value) for channel, value in effective_channels.items()},
+            }
+        )
+    return items
+
+
+def list_notification_email_addresses(user_id):
+    if not notification_email_schema_ready():
+        return []
+    return q(
+        """
+        SELECT id, email, label, active, created_at, updated_at
+          FROM notification_email_addresses
+         WHERE user_id = %s
+           AND COALESCE(active, TRUE) = TRUE
+         ORDER BY LOWER(TRIM(email)), id
+        """,
+        [user_id],
+    ) or []
+
+
 def get_user_notification_settings(user_id):
     user = q(
         "SELECT id, nombre, email, rol, activo FROM users WHERE id = %s",
@@ -915,32 +1143,105 @@ def get_user_notification_settings(user_id):
     )
     if not user:
         return None
-    overrides = {}
-    if _table_exists("notification_user_preferences"):
-        rows = q(
-            """
-            SELECT notification_key, enabled
-              FROM notification_user_preferences
-             WHERE user_id = %s
-            """,
-            [user_id],
-        ) or []
-        overrides = {row.get("notification_key"): _as_bool(row.get("enabled")) for row in rows}
-    items = []
-    for item in NOTIFICATION_CATALOG:
-        key = item["key"]
-        override = overrides.get(key)
-        default_enabled = _role_default_enabled(key, user.get("rol"))
-        effective = override if override is not None else default_enabled
-        items.append(
-            {
-                **item,
-                "default_enabled": bool(default_enabled),
-                "override_enabled": override,
-                "effective_enabled": bool(effective),
+    return {"user": user, "items": _notification_settings_items_for_user(user)}
+
+
+def get_current_user_notification_configuration(user_id):
+    data = get_user_notification_settings(user_id)
+    if not data:
+        return None
+    user = data["user"]
+    return {
+        **data,
+        "capabilities": {
+            "canManageExtraEmails": _can_manage_extra_emails_for_role(user.get("rol")),
+        },
+        "primary_email": str(user.get("email") or "").strip(),
+        "extra_emails": list_notification_email_addresses(user_id),
+        "push": get_push_config_for_user(user_id),
+        "mandatory": {
+            "bejermanRemitoPdf": {
+                "enabled": _normalize_role(user.get("rol")) in {"admin", "cobranzas", "recepcion"},
+                "label": "PDF de remitos Bejerman",
+                "description": "Se envía siempre por mail a Administración, Cobranzas y Recepción.",
             }
+        },
+    }
+
+
+def _payload_channel_values(raw_value):
+    if not isinstance(raw_value, dict):
+        return {"bell": _as_bool(raw_value)}, True
+    aliases = {
+        "bell": "bell",
+        "campana": "bell",
+        "enabled": "bell",
+        "bell_enabled": "bell",
+        "email": "email",
+        "mail": "email",
+        "email_enabled": "email",
+        "push": "push",
+        "phone": "push",
+        "telefono": "push",
+        "teléfono": "push",
+        "push_enabled": "push",
+    }
+    values = {}
+    for raw_key, value in raw_value.items():
+        channel = aliases.get(str(raw_key or "").strip().lower())
+        if channel:
+            values[channel] = _as_bool(value)
+    if not values:
+        raise ValueError("Cada preferencia debe incluir al menos un canal válido.")
+    return values, False
+
+
+def _delete_user_notification_preference(user_id, notification_key):
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM notification_user_preferences
+             WHERE user_id = %s
+               AND notification_key = %s
+            """,
+            [user_id, notification_key],
         )
-    return {"user": user, "items": items}
+
+
+def _upsert_user_notification_preference(user_id, notification_key, values, updated_by=None):
+    columns = _table_columns("notification_user_preferences")
+    bell = values.get("bell")
+    if {"bell_enabled", "email_enabled", "push_enabled"}.issubset(columns):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notification_user_preferences(
+                  user_id, notification_key, enabled, bell_enabled, email_enabled, push_enabled, updated_by
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (user_id, notification_key) DO UPDATE SET
+                  enabled = EXCLUDED.enabled,
+                  bell_enabled = EXCLUDED.bell_enabled,
+                  email_enabled = EXCLUDED.email_enabled,
+                  push_enabled = EXCLUDED.push_enabled,
+                  updated_by = EXCLUDED.updated_by,
+                  updated_at = CURRENT_TIMESTAMP
+                """,
+                [user_id, notification_key, bell, bell, values.get("email"), values.get("push"), updated_by],
+            )
+        return
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO notification_user_preferences(
+              user_id, notification_key, enabled, updated_by
+            ) VALUES (%s,%s,%s,%s)
+            ON CONFLICT (user_id, notification_key) DO UPDATE SET
+              enabled = EXCLUDED.enabled,
+              updated_by = EXCLUDED.updated_by,
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            [user_id, notification_key, bell, updated_by],
+        )
 
 
 def save_user_notification_settings(user_id, preferences, updated_by=None):
@@ -954,29 +1255,129 @@ def save_user_notification_settings(user_id, preferences, updated_by=None):
             clean_key = (key or "").strip()
             if clean_key not in valid_keys:
                 raise ValueError(f"Tipo de notificación inválido: {clean_key}")
-            value = _as_bool(raw_value)
-            if value is None:
-                with connection.cursor() as cur:
-                    cur.execute(
-                        """
-                        DELETE FROM notification_user_preferences
-                         WHERE user_id = %s
-                           AND notification_key = %s
-                        """,
-                        [user_id, clean_key],
-                    )
+            incoming_values, legacy_payload = _payload_channel_values(raw_value)
+            if legacy_payload and incoming_values.get("bell") is None:
+                _delete_user_notification_preference(user_id, clean_key)
                 continue
-            with connection.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO notification_user_preferences(
-                      user_id, notification_key, enabled, updated_by
-                    ) VALUES (%s,%s,%s,%s)
-                    ON CONFLICT (user_id, notification_key) DO UPDATE SET
-                      enabled = EXCLUDED.enabled,
-                      updated_by = EXCLUDED.updated_by,
-                      updated_at = CURRENT_TIMESTAMP
-                    """,
-                    [user_id, clean_key, value, updated_by],
-                )
+            current = (_load_overrides(clean_key, [user_id]).get(int(user_id)) or {})
+            next_values = {channel: current.get(channel) for channel in NOTIFICATION_CHANNELS}
+            for channel, value in incoming_values.items():
+                next_values[channel] = value
+            if all(next_values.get(channel) is None for channel in NOTIFICATION_CHANNELS):
+                _delete_user_notification_preference(user_id, clean_key)
+                continue
+            _upsert_user_notification_preference(user_id, clean_key, next_values, updated_by=updated_by)
     return get_user_notification_settings(user_id)
+
+
+def add_notification_email_address(user_id, email, label="", updated_by=None):
+    if not notification_email_schema_ready():
+        raise RuntimeError("El esquema de emails de notificaciones no está aplicado.")
+    clean_email = _clean_email(email)
+    clean_label = str(label or "").strip()[:120]
+    existing = q(
+        """
+        SELECT id
+          FROM notification_email_addresses
+         WHERE user_id = %s
+           AND LOWER(TRIM(email)) = LOWER(TRIM(%s))
+         LIMIT 1
+        """,
+        [user_id, clean_email],
+        one=True,
+    )
+    with connection.cursor() as cur:
+        if existing:
+            cur.execute(
+                """
+                UPDATE notification_email_addresses
+                   SET email = %s,
+                       label = %s,
+                       active = TRUE,
+                       updated_by = %s,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE id = %s
+                   AND user_id = %s
+                RETURNING id, email, label, active, created_at, updated_at
+                """,
+                [clean_email, clean_label, updated_by, existing["id"], user_id],
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO notification_email_addresses(user_id, email, label, active, updated_by)
+                VALUES (%s,%s,%s,TRUE,%s)
+                RETURNING id, email, label, active, created_at, updated_at
+                """,
+                [user_id, clean_email, clean_label, updated_by],
+            )
+        cols = [col[0] for col in cur.description]
+        return dict(zip(cols, cur.fetchone()))
+
+
+def update_notification_email_address(user_id, email_id, payload, updated_by=None):
+    if not notification_email_schema_ready():
+        raise RuntimeError("El esquema de emails de notificaciones no está aplicado.")
+    current = q(
+        """
+        SELECT id, email, label, active
+          FROM notification_email_addresses
+         WHERE id = %s
+           AND user_id = %s
+        """,
+        [email_id, user_id],
+        one=True,
+    )
+    if not current:
+        return None
+    data = payload if isinstance(payload, dict) else {}
+    next_email = _clean_email(data.get("email")) if "email" in data else current["email"]
+    next_label = str(data.get("label", current.get("label") or "") or "").strip()[:120]
+    next_active = _as_bool(data.get("active")) if "active" in data else bool(current.get("active"))
+    duplicate = q(
+        """
+        SELECT id
+          FROM notification_email_addresses
+         WHERE user_id = %s
+           AND id <> %s
+           AND LOWER(TRIM(email)) = LOWER(TRIM(%s))
+         LIMIT 1
+        """,
+        [user_id, email_id, next_email],
+        one=True,
+    )
+    if duplicate:
+        raise ValueError("Ese email ya está cargado.")
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE notification_email_addresses
+               SET email = %s,
+                   label = %s,
+                   active = %s,
+                   updated_by = %s,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+               AND user_id = %s
+            RETURNING id, email, label, active, created_at, updated_at
+            """,
+            [next_email, next_label, bool(next_active), updated_by, email_id, user_id],
+        )
+        row = cur.fetchone()
+        cols = [col[0] for col in cur.description]
+    return dict(zip(cols, row))
+
+
+def delete_notification_email_address(user_id, email_id):
+    if not notification_email_schema_ready():
+        return 0
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM notification_email_addresses
+             WHERE id = %s
+               AND user_id = %s
+            """,
+            [email_id, user_id],
+        )
+        return int(cur.rowcount or 0)

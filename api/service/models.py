@@ -33,6 +33,8 @@ class Customer(models.Model):
     telefono = models.TextField(null=True)
     telefono_2 = models.TextField(null=True)
     email = models.TextField(null=True)
+    bejerman_cod_empresa = models.TextField(null=True)
+    bejerman_company_key = models.TextField(null=True)
     bejerman_nombre_fantasia = models.TextField(null=True)
     bejerman_tipo_documento = models.TextField(null=True)
     bejerman_domicilio = models.TextField(null=True)

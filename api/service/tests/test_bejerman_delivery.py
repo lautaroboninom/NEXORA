@@ -1,5 +1,7 @@
 import base64
 import json
+import tempfile
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
@@ -18,11 +20,12 @@ from service.bejerman_delivery import (
     list_bejerman_articles,
     list_bejerman_depositos,
     list_facturacion_from_bejerman,
+    list_remitos_from_bejerman,
     resolve_delivery_order_invoice_document,
 )
 from service.delivery_orders import DeliveryOrderError, _service_release_equipment_detail, insert_item_partidas, remito_profile_for_type
-from service.views.delivery_orders_views import _remito_print_wait_page
-from service.bejerman_ris import _build_payload
+from service.views.delivery_orders_views import CobranzasRemitoPdfView, _remito_print_wait_page
+from service.bejerman_ris import _apply_registered_document, _build_payload
 from service.bejerman_sdk import (
     BejermanSDKClient,
     BejermanPdfPendingError,
@@ -44,7 +47,7 @@ from service.bejerman_sdk import (
 
 
 class FakeSDKClient:
-    def __init__(self, customer_records=None):
+    def __init__(self, customer_records=None, sales_records=None):
         self.calls = []
         self.customer_records = customer_records or [
             {
@@ -53,6 +56,7 @@ class FakeSDKClient:
                 "Cliente_NroDocumento": "30711111111",
             }
         ]
+        self.sales_records = sales_records
 
     def list_clientes(self):
         self.calls.append(("list_clientes", []))
@@ -61,6 +65,17 @@ class FakeSDKClient:
     def list_comprobantes_ventas(self, filters):
         self.calls.append(("list_comprobantes_ventas", filters))
         values = {item.get("Campo"): item.get("Valor") for item in filters}
+        if self.sales_records is not None:
+            records = []
+            for record in self.sales_records:
+                if values.get("Comprobante_Tipo") and record.get("Comprobante_Tipo") != values.get("Comprobante_Tipo"):
+                    continue
+                if values.get("Cliente_Codigo") and record.get("Cliente_Codigo") != values.get("Cliente_Codigo"):
+                    continue
+                if values.get("Comprobante_TipoOperacion") and record.get("Comprobante_TipoOperacion") != values.get("Comprobante_TipoOperacion"):
+                    continue
+                records.append(record)
+            return {"DatosJSON": records}
         if values.get("Comprobante_Tipo") != "FC":
             return {"DatosJSON": []}
         customer_code = values.get("Cliente_Codigo") or ""
@@ -244,6 +259,56 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
         self.assertEqual(client.generate_calls, 1)
         self.assertEqual(client.consult_calls, 3)
+
+    def test_fetch_comprobante_pdf_copia_remito_en_carpeta_sepid_configurada(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakePdfClient([_pdf_response()])
+            client.company_key = "SEPID"
+
+            with override_settings(BEJERMAN_PDF_SEPID_REMITOS_DIR=tmp):
+                pdf_bytes, content_type = fetch_comprobante_pdf(
+                    client,
+                    BejermanPdfReference(
+                        type="RDA",
+                        number="00004680",
+                        letter="R",
+                        point_of_sale="00004",
+                        issue_date="2026-06-24",
+                        customer_code="NATIVA",
+                    ),
+                    retry_attempts=1,
+                    retry_delay_ms=0,
+                )
+
+            destination = Path(tmp) / "RDAR00004-00004680-NATIVA.pdf"
+            self.assertEqual(content_type, "application/pdf")
+            self.assertEqual(destination.read_bytes(), pdf_bytes)
+
+    def test_fetch_comprobante_pdf_copia_remito_en_carpeta_mgbio_configurada(self):
+        with tempfile.TemporaryDirectory() as sepid_tmp, tempfile.TemporaryDirectory() as mgbio_tmp:
+            client = FakePdfClient([_pdf_response()])
+            client.company_key = "MGBIO"
+
+            with override_settings(
+                BEJERMAN_PDF_SEPID_REMITOS_DIR=sepid_tmp,
+                BEJERMAN_PDF_MGBIO_REMITOS_DIR=mgbio_tmp,
+            ):
+                fetch_comprobante_pdf(
+                    client,
+                    BejermanPdfReference(
+                        type="RT",
+                        number="00000042",
+                        letter="R",
+                        point_of_sale="00007",
+                        issue_date="2026-06-24",
+                        customer_code="OXIHC",
+                    ),
+                    retry_attempts=1,
+                    retry_delay_ms=0,
+                )
+
+            self.assertEqual(list(Path(sepid_tmp).iterdir()), [])
+            self.assertTrue((Path(mgbio_tmp) / "RTR00007-00000042-OXIHC.pdf").exists())
 
     def test_fetch_comprobante_pdf_no_devuelve_200_con_bytes_no_pdf(self):
         client = FakePdfClient([_non_pdf_response(), _non_pdf_response()])
@@ -429,6 +494,137 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         self.assertEqual(result["scope"], "company")
         self.assertEqual(result["pagination"]["pageSize"], 25)
 
+    def test_remitos_usa_filtros_de_tipo_operacion_cliente_y_empresa(self):
+        client = FakeSDKClient(
+            sales_records=[
+                {
+                    "Comprobante_Tipo": "RSS",
+                    "Comprobante_Letra": "R",
+                    "Comprobante_PtoVenta": "00004",
+                    "Comprobante_Numero": "00004567",
+                    "Comprobante_FechaEmision": "2026-06-20",
+                    "Cliente_Codigo": "ACU",
+                    "Cliente_RazonSocial": "ACUMAR",
+                    "Comprobante_TipoOperacion": "REP",
+                    "Comprobante_ImporteTotal": 0,
+                }
+            ]
+        )
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client) as client_cls:
+            result = list_remitos_from_bejerman(
+                "ACU",
+                {
+                    "dateFrom": "2026-01-01",
+                    "dateTo": "2026-12-31",
+                    "remitoType": "RSS",
+                    "operationType": "REP",
+                    "pageSize": "10",
+                },
+                actor_user_id=1152,
+                company_key="MGBIO",
+            )
+
+        client_cls.assert_called_once_with(company_key="MGBIO", actor_user_id=1152)
+        self.assertEqual(client.calls[0][0], "list_clientes")
+        self.assertEqual(client.calls[1][0], "list_comprobantes_ventas")
+        self.assertEqual(
+            client.calls[1][1],
+            [
+                {"Campo": "Cliente_Codigo", "Accion": "IGUAL", "Valor": "ACU", "Operacion": "Y", "Enlazada": False},
+                {"Campo": "Comprobante_Tipo", "Accion": "IGUAL", "Valor": "RSS", "Operacion": "Y", "Enlazada": False},
+                {"Campo": "Comprobante_TipoOperacion", "Accion": "IGUAL", "Valor": "REP", "Operacion": "Y", "Enlazada": False},
+                {
+                    "Campo": "Comprobante_FechaEmision",
+                    "Accion": "MAYOR O IGUAL",
+                    "Valor": "2026-01-01",
+                    "Operacion": "Y",
+                    "Enlazada": False,
+                },
+                {
+                    "Campo": "Comprobante_FechaEmision",
+                    "Accion": "MENOR O IGUAL",
+                    "Valor": "2026-12-31",
+                    "Operacion": "Y",
+                    "Enlazada": False,
+                },
+            ],
+        )
+        self.assertEqual(result["companyKey"], "MGBIO")
+        self.assertEqual(result["pagination"]["total"], 1)
+        self.assertEqual(result["items"][0]["documentNumber"], "RSS R 00004-00004567")
+        self.assertEqual(result["items"][0]["operationCode"], "REP")
+
+    def test_remitos_acepta_tipo_rd(self):
+        client = FakeSDKClient(
+            sales_records=[
+                {
+                    "Comprobante_Tipo": "RD",
+                    "Comprobante_Letra": "R",
+                    "Comprobante_PtoVenta": "00004",
+                    "Comprobante_Numero": "00004682",
+                    "Comprobante_FechaEmision": "2026-06-24",
+                    "Cliente_Codigo": "EHOSP",
+                    "Cliente_RazonSocial": "EQUIPO HOSPITALARIO",
+                    "Comprobante_TipoOperacion": "REP",
+                }
+            ]
+        )
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client):
+            result = list_remitos_from_bejerman("", {"remitoType": "RD"})
+
+        self.assertEqual(result["pagination"]["total"], 1)
+        self.assertEqual(result["items"][0]["documentNumber"], "RD R 00004-00004682")
+        sales_calls = [call for call in client.calls if call[0] == "list_comprobantes_ventas"]
+        self.assertEqual(sales_calls[0][1][0]["Valor"], "RD")
+
+    def test_remitos_general_consulta_tipos_soportados_y_filtra_busqueda(self):
+        client = FakeSDKClient(
+            sales_records=[
+                {
+                    "Comprobante_Tipo": "RT",
+                    "Comprobante_Letra": "R",
+                    "Comprobante_PtoVenta": "00004",
+                    "Comprobante_Numero": "00000001",
+                    "Comprobante_FechaEmision": "2026-06-20",
+                    "Cliente_Codigo": "GEN",
+                    "Cliente_RazonSocial": "CLIENTE UNO",
+                    "Comprobante_TipoOperacion": "MC",
+                },
+                {
+                    "Comprobante_Tipo": "RDA",
+                    "Comprobante_Letra": "R",
+                    "Comprobante_PtoVenta": "00004",
+                    "Comprobante_Numero": "00000002",
+                    "Comprobante_FechaEmision": "2026-06-21",
+                    "Cliente_Codigo": "GEN",
+                    "Cliente_RazonSocial": "CLIENTE DOS",
+                    "Comprobante_TipoOperacion": "ALQ",
+                },
+            ]
+        )
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client):
+            result = list_remitos_from_bejerman(
+                "",
+                {"dateFrom": "2026-01-01", "dateTo": "2026-12-31", "search": "00000002", "pageSize": "25"},
+            )
+
+        sales_calls = [call for call in client.calls if call[0] == "list_comprobantes_ventas"]
+        self.assertEqual(len(sales_calls), 8)
+        self.assertFalse(any(item["Campo"] == "Cliente_Codigo" for item in sales_calls[0][1]))
+        self.assertEqual(result["scope"], "company")
+        self.assertEqual(result["companyKey"], "SEPID")
+        self.assertEqual(result["pagination"]["total"], 1)
+        self.assertEqual(result["items"][0]["type"], "RDA")
+
+    def test_remitos_rechaza_tipo_o_operacion_invalidos(self):
+        with self.assertRaises(BillingError) as remito_ctx:
+            list_remitos_from_bejerman("", {"remitoType": "FC"})
+        self.assertEqual(remito_ctx.exception.code, "INVALID_REMITO_TYPE")
+
+        with self.assertRaises(BillingError) as operation_ctx:
+            list_remitos_from_bejerman("", {"operationType": "XXX"})
+        self.assertEqual(operation_ctx.exception.code, "INVALID_OPERATION_TYPE")
+
     def test_build_sales_filters_preserves_padded_customer_code(self):
         filters = build_sales_filters("   NOV", "2024-01-01", "2024-12-31", "FC")
 
@@ -467,6 +663,26 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
                 get_facturacion_pdf("ACU", document_id, actor_user_id=1152, company_key="MGBIO")
 
         client_cls.assert_called_once_with(company_key="MGBIO", actor_user_id=1152)
+
+    def test_endpoint_pdf_remito_cobranzas_usa_cliente_y_empresa(self):
+        request = type(
+            "Request",
+            (),
+            {
+                "query_params": {"customerCode": "ACU", "companyKey": "MGBIO"},
+                "user": type("User", (), {"id": 1152})(),
+            },
+        )()
+        with patch(
+            "service.views.delivery_orders_views.get_facturacion_pdf",
+            return_value=(b"%PDF-1.4", "application/pdf"),
+        ) as pdf_mock:
+            response = CobranzasRemitoPdfView().get(request, "doc-remito")
+
+        pdf_mock.assert_called_once_with("ACU", "doc-remito", actor_user_id=1152, company_key="MGBIO")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("remito-doc-remito.pdf", response["Content-Disposition"])
 
     def test_resuelve_factura_de_orden_por_punto_y_numero_y_empresa(self):
         document_id = build_document_id(
@@ -773,6 +989,8 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(comprobante["Cliente_RazonSocial"], "ALCLA SRL")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM2"], 0)
         self.assertEqual(article_lines[0]["Item_Partida"], " ")
 
     @override_settings(BEJERMAN_RIS_UPDATE_STOCK="0")
@@ -833,7 +1051,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
                         "brand": "BMC",
                         "model": "G3",
                         "repairReason": "No enciende",
-                        "accessories": "Bolso (ref: B-1)",
+                        "accessories": "Bolso (ref: B-1), batería (ref: 2046-01)",
                         "osLabel": "00001",
                     },
                     {
@@ -860,11 +1078,65 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(legend_lines[0], "Se recibe para servicio técnico:")
         self.assertEqual(legend_lines.count("------------------------------"), 2)
         self.assertTrue(any("SN-1" in line for line in legend_lines))
-        self.assertTrue(any("Motivo: No enciende - Accesorios: Bolso (ref: B-1)" in line for line in legend_lines))
+        self.assertIn("Motivo: No enciende", legend_lines)
+        self.assertIn("Accesorios: Bolso (ref: B-1)", legend_lines)
+        self.assertIn("Accesorios: batería (ref: 2046-01)", legend_lines)
+        self.assertFalse(any("Motivo: No enciende - Accesorios:" in line for line in legend_lines))
         self.assertEqual(article_lines[0]["Item_DescripArticulo"], "CPAP | BMC | G3")
         self.assertEqual(article_lines[1]["Item_DescripArticulo"], "ResMed | AirSense 10")
         self.assertEqual(len(article_lines), 2)
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1, 1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [0, 0])
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
+
+    def test_registered_rda_uses_sdk_sign_compensation(self):
+        payload = {
+            "requestId": "reparaciones-ingreso-rda-1",
+            "ingresoId": 1,
+            "issueDate": "2026-06-24",
+            "customerCode": "SIMPLE",
+            "customerName": "SIMPLE SALUD SA",
+            "sellerCode": "ADM",
+            "paymentTermCode": "30",
+            "documentProfile": {
+                "key": "rda",
+                "type": "RDA",
+                "label": "RDA",
+                "letter": "R",
+                "reason": "Ingreso de equipo MG activo desde alquiler.",
+                "deposit": "STR",
+                "operation": "ALQ",
+                "pointOfSale": "00004",
+                "updateStock": True,
+            },
+            "equipment": {
+                "articleCode": "1115007",
+                "articleName": "Concentrador de oxigeno",
+                "serial": "5151340",
+                "internalNumber": "MG 1234",
+            },
+        }
+        built = build_service_ingress_comprobante(payload, {"Cliente_RazonSocial": "SIMPLE SALUD SA"})
+
+        comprobante = _apply_registered_document(
+            built["comprobante"],
+            payload,
+            {
+                "type": "RDA",
+                "letter": "R",
+                "point": "00004",
+                "number": "00004684",
+                "remitoNumber": "RDA R 00004-00004684",
+            },
+        )
+
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RDA")
+        self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM2"], -1)
+        self.assertEqual(article_lines[0]["Item_Deposito"], "STR")
+        self.assertEqual(article_lines[0]["Item_Partida"], "5151340")
 
 
 class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):

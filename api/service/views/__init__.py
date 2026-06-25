@@ -181,6 +181,9 @@ from .notifications_views import (
     NotificacionesReadAllView,
     NotificacionesPushConfigView,
     NotificacionesPushSubscriptionView,
+    NotificacionesConfiguracionView,
+    NotificacionesConfiguracionEmailsView,
+    NotificacionesConfiguracionEmailDetailView,
     UsuarioNotificacionesView,
 )
 
@@ -303,6 +306,8 @@ from .delivery_orders_views import (
     FacturacionCompanyOptionsView,
     FacturacionClienteDocumentosView,
     FacturacionDocumentoPdfView,
+    CobranzasRemitosView,
+    CobranzasRemitoPdfView,
     ServiceOrderBillingListView,
     ServiceOrderBillingInvoiceView,
     ServiceOrderBillingPdfView,
@@ -448,6 +453,9 @@ __all__ = [
     "NotificacionesReadAllView",
     "NotificacionesPushConfigView",
     "NotificacionesPushSubscriptionView",
+    "NotificacionesConfiguracionView",
+    "NotificacionesConfiguracionEmailsView",
+    "NotificacionesConfiguracionEmailDetailView",
     "UsuarioNotificacionesView",
     # derivaciones
     "DerivarIngresoView",
@@ -550,6 +558,8 @@ __all__ = [
     "FacturacionCompanyOptionsView",
     "FacturacionClienteDocumentosView",
     "FacturacionDocumentoPdfView",
+    "CobranzasRemitosView",
+    "CobranzasRemitoPdfView",
     "ServiceOrderBillingListView",
     "ServiceOrderBillingInvoiceView",
     "ServiceOrderBillingPdfView",

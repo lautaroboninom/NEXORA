@@ -9,6 +9,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--user-id", type=int, default=None, help="ID del usuario Nexora con credenciales Bejerman")
         parser.add_argument("--system-credentials", action="store_true", help="Usa credenciales globales Bejerman explícitamente")
+        parser.add_argument("--company-key", default="", help="Empresa Bejerman a consultar, por ejemplo SEPID o MGBIO")
         parser.add_argument("--dry-run", action="store_true", help="Calcula altas/actualizaciones sin escribir")
 
     def handle(self, *args, **opts):
@@ -17,7 +18,12 @@ class Command(BaseCommand):
         if not user_id and not use_system:
             raise CommandError("Indique --user-id o use --system-credentials explícitamente.")
 
-        records = load_bejerman_customer_records(user_id=user_id, allow_system_credentials=use_system)
+        company_key = (opts.get("company_key") or "").strip() or None
+        records = load_bejerman_customer_records(
+            user_id=user_id,
+            allow_system_credentials=use_system,
+            company_key=company_key,
+        )
         summary = sync_customers_from_bejerman_records(records, dry_run=bool(opts.get("dry_run")))
         self.stdout.write(
             "OK clientes Bejerman: "

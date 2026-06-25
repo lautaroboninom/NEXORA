@@ -3,6 +3,8 @@ from django.db import connection, transaction
 
 
 TEXT_COLUMNS = (
+    "bejerman_cod_empresa",
+    "bejerman_company_key",
     "bejerman_nombre_fantasia",
     "bejerman_tipo_documento",
     "bejerman_domicilio",
@@ -50,6 +52,12 @@ class Command(BaseCommand):
                         """
                         CREATE INDEX IF NOT EXISTS ix_customers_bejerman_synced_at
                           ON customers(bejerman_synced_at)
+                        """
+                    )
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS ix_customers_bejerman_code_company
+                          ON customers(bejerman_company_key, bejerman_cod_empresa)
                         """
                     )
                 else:

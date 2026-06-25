@@ -176,6 +176,16 @@ import { MOTIVO_OPTIONS } from "./constants";
     api.post("/api/notificaciones/push/subscription/", payload);
   export const deletePushNotificationSubscription = (payload = {}) =>
     api.delete("/api/notificaciones/push/subscription/", { body: payload });
+  export const getNotificationSettings = () =>
+    api.get("/api/notificaciones/configuracion/");
+  export const putNotificationSettings = (payload) =>
+    api.put("/api/notificaciones/configuracion/", payload);
+  export const postNotificationEmail = (payload) =>
+    api.post("/api/notificaciones/configuracion/emails/", payload);
+  export const patchNotificationEmail = (id, payload) =>
+    api.patch(`/api/notificaciones/configuracion/emails/${id}/`, payload);
+  export const deleteNotificationEmail = (id) =>
+    api.delete(`/api/notificaciones/configuracion/emails/${id}/`);
 
   /* =============== catalogos =============== */
 
@@ -860,6 +870,16 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const getBillingDocumentPdfBlob = (documentId, customerCode) => {
     const qs = buildQuery({ customerCode });
     return getBlob(`/api/cobranzas/facturacion/documentos/${encodeURIComponent(documentId)}/pdf/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getBillingRemitos = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/cobranzas/remitos/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const getBillingRemitoPdfBlob = (documentId, params = {}) => {
+    const qs = buildQuery(params);
+    return getBlob(`/api/cobranzas/remitos/${encodeURIComponent(documentId)}/pdf/${qs ? `?${qs}` : ""}`);
   };
 
   export const getServiceOrdersToBill = (params = {}) => {

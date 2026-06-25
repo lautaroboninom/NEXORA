@@ -249,6 +249,7 @@ export default function NuevoIngreso() {
   const [nuevoAcc, setNuevoAcc] = useState({ descripcion: "", referencia: "" });
   const [accItems, setAccItems] = useState([]);
   const [batchItems, setBatchItems] = useState([]);
+  const [editingBatchItemId, setEditingBatchItemId] = useState(null);
 
   // Propietario y técnico
   const [propietario, setPropietario] = useState(PROPIETARIO_VACIO);
@@ -536,6 +537,7 @@ export default function NuevoIngreso() {
     });
     setAccItems([]);
     setBatchItems([]);
+    setEditingBatchItemId(null);
     setTipoIngreso(TIPO_INGRESO.CLIENTE);
     setPropietario(PROPIETARIO_VACIO);
     setTecnicoId(null);
@@ -1486,9 +1488,13 @@ export default function NuevoIngreso() {
   };
 
   const clearCurrentEquipmentFields = () => {
+    mgLookupSeqRef.current += 1;
+    lookupRequestSeqRef.current += 1;
     setMarcaTxt("");
     setMarcaId(null);
     setModelos([]);
+    setVarianteSugeridas([]);
+    setLookupRequest({ nonce: 0, source: autofillBy, code: "" });
     setForm((prev) => ({
       ...prev,
       etiq_garantia_ok: false,
@@ -1514,24 +1520,53 @@ export default function NuevoIngreso() {
     setEquipoAlquiladoOrigen(false);
   };
 
-  const addCurrentEquipmentToBatch = async () => {
-    if (loading || risPreflightLoading) return;
-    scrollPageTop();
+  const hasCurrentEquipmentDraft = () => {
+    const equipment = form.equipo || {};
+    const textValues = [
+      equipment.numero_serie,
+      equipment.numero_interno,
+      equipment.marca_id,
+      equipment.modelo_id,
+      tipoSel,
+      marcaTxt,
+      varianteTxt,
+      form.motivo,
+      form.informe_preliminar,
+      form.comentarios,
+    ];
+    return (
+      textValues.some((value) => String(value || "").trim()) ||
+      !!equipment.garantia ||
+      !!form.etiq_garantia_ok ||
+      !!form.garantia_reparacion ||
+      !!tecnicoId ||
+      accItems.length > 0 ||
+      !!bejermanSuggestion ||
+      !!equipoAlquiladoOrigen
+    );
+  };
+
+  const stageCurrentEquipment = async ({
+    silent = false,
+    commitOnPreflightIssues = true,
+    successNotice,
+  } = {}) => {
     setErr("");
     const equipmentError = validateCurrentEquipmentForSubmit();
     if (equipmentError) {
       setErr(equipmentError);
-      return;
+      return { ok: false, error: equipmentError, items: batchItems, preflight: null };
     }
     const shared = validateSharedForSubmit();
     if (!shared.ok) {
       setErr(shared.error);
-      return;
+      return { ok: false, error: shared.error, items: batchItems, preflight: null };
     }
     const payload = buildIngresoPayload(shared.c, shared.propietarioPayload, { includeShared: false });
     const display = currentEquipmentDisplay();
+    const editingItem = batchItems.find((entry) => entry.id === editingBatchItemId) || null;
     const nextItem = {
-      id: `${Date.now()}-${batchItems.length}`,
+      id: editingItem?.id || `${Date.now()}-${batchItems.length}`,
       payload,
       display,
       editor: {
@@ -1553,28 +1588,57 @@ export default function NuevoIngreso() {
         bejermanSuggestion,
       },
     };
-    const nextItems = [...batchItems, nextItem];
+    const nextItems = editingItem
+      ? batchItems.map((item) => (item.id === editingItem.id ? nextItem : item))
+      : [...batchItems, nextItem];
     setRisPreflightError("");
-    const nextPreflight = await runRisPreflight({ silent: false, items: nextItems });
+    const nextPreflight = await runRisPreflight({ silent, items: nextItems });
     if (hasDocumentProfileMismatch(nextPreflight)) {
-      setErr(nextPreflight?.detail || "El lote mezcla comprobantes de ingreso incompatibles.");
-      return;
+      const error = nextPreflight?.detail || "El lote mezcla comprobantes de ingreso incompatibles.";
+      setErr(error);
+      return { ok: false, error, items: batchItems, preflight: nextPreflight };
+    }
+    if (!commitOnPreflightIssues && nextPreflight?.can_emit !== true) {
+      const error = nextPreflight?.detail || "Revise la validación del remito antes de emitir.";
+      setErr(error);
+      return { ok: false, error, items: batchItems, preflight: nextPreflight };
     }
     setBatchItems(nextItems);
+    setEditingBatchItemId(null);
     clearCurrentEquipmentFields();
     const nextDocumentType = documentTypeFromResult(nextPreflight, risMode === "register" ? "remito" : "RIS");
-    setNotice(risMode === "register" ? "Equipo agregado al remito." : `Equipo agregado al ${documentDisplayName(nextDocumentType)}.`);
+    if (successNotice !== null) {
+      setNotice(
+        successNotice ||
+          (editingItem
+            ? "Equipo actualizado en la lista."
+            : risMode === "register"
+              ? "Equipo agregado al remito."
+              : `Equipo agregado al ${documentDisplayName(nextDocumentType)}.`)
+      );
+    }
     if (risMode === "register" && !manualRemitoNumber.trim()) {
       setRisPreflight(null);
-      return;
+      return { ok: true, items: nextItems, preflight: nextPreflight };
     }
     if (!nextPreflight) await runRisPreflight({ silent: true, items: nextItems });
+    return { ok: true, items: nextItems, preflight: nextPreflight };
+  };
+
+  const addCurrentEquipmentToBatch = async () => {
+    if (loading || risPreflightLoading) return;
+    scrollPageTop();
+    await stageCurrentEquipment();
   };
 
   const removeBatchItem = (itemId) => {
     setRisPreflight(null);
     setRisPreflightError("");
     setBatchItems((items) => items.filter((item) => item.id !== itemId));
+    if (editingBatchItemId === itemId) {
+      setEditingBatchItemId(null);
+      clearCurrentEquipmentFields();
+    }
   };
 
   const editBatchItem = (itemId) => {
@@ -1596,17 +1660,31 @@ export default function NuevoIngreso() {
     setTecnicoId(editor.tecnicoId || null);
     setBejermanSuggestion(editor.bejermanSuggestion || null);
     setEquipoAlquiladoOrigen(!!editor.equipoAlquiladoOrigen);
+    setEditingBatchItemId(itemId);
     setRisPreflight(null);
     setRisPreflightError("");
-    removeBatchItem(itemId);
+    setNotice("Editando equipo de la lista. Guarde los cambios para actualizarlo.");
+  };
+
+  const cancelBatchItemEdit = () => {
+    setEditingBatchItemId(null);
+    clearCurrentEquipmentFields();
+    setRisPreflight(null);
+    setRisPreflightError("");
+    setNotice("");
   };
 
   const submit = async (e) => {
     e.preventDefault();
     scrollPageTop();
+    const hasDraft = hasCurrentEquipmentDraft();
     const hasBatchItems = batchItems.length > 0;
     const isRegisterMode = risMode === "register";
-    if (!hasBatchItems) {
+    if (editingBatchItemId) {
+      setErr("Guarde los cambios del equipo en edición antes de emitir el remito.");
+      return;
+    }
+    if (!hasBatchItems && !hasDraft) {
       setErr(isRegisterMode ? "Agregue el equipo a la lista antes de registrar el remito." : "Agregue el equipo a la lista antes de emitir el remito.");
       return;
     }
@@ -1653,8 +1731,30 @@ export default function NuevoIngreso() {
       return;
     }
 
+    let effectiveBatchItems = batchItems;
+    if (hasDraft) {
+      setSubmitStage("Agregando equipo pendiente...");
+      const staged = await stageCurrentEquipment({
+        silent: true,
+        commitOnPreflightIssues: false,
+        successNotice: null,
+      });
+      if (!staged.ok) {
+        setLoading(false);
+        setSubmitStage("");
+        return;
+      }
+      effectiveBatchItems = staged.items;
+    }
+    if (!effectiveBatchItems.length) {
+      setLoading(false);
+      setSubmitStage("");
+      setErr(isRegisterMode ? "Agregue el equipo a la lista antes de registrar el remito." : "Agregue el equipo a la lista antes de emitir el remito.");
+      return;
+    }
+
     setSubmitStage("Validando remito...");
-    const preflight = await runRisPreflight({ silent: true });
+    const preflight = await runRisPreflight({ silent: true, items: effectiveBatchItems });
     if (!preflight?.can_emit) {
       setLoading(false);
       setSubmitStage("");
@@ -1662,7 +1762,7 @@ export default function NuevoIngreso() {
     }
 
     try {
-      if (hasBatchItems) {
+      if (effectiveBatchItems.length) {
         const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
         const lotePayload = {
           cliente: { id: c.id },
@@ -1672,7 +1772,7 @@ export default function NuevoIngreso() {
           ris_mode: risMode,
           manual_remito_number: isRegisterMode ? manualRemitoNumber.trim() : "",
           ...(fechaIngresoNorm ? { fecha_ingreso: fechaIngresoNorm } : {}),
-          items: batchItems.map((item) => item.payload),
+          items: effectiveBatchItems.map((item) => item.payload),
         };
         const risProgressStartedAt = Date.now();
         setSubmitStage(isRegisterMode ? "Creando ingresos y registrando remito..." : "Creando ingresos...");
@@ -1682,7 +1782,7 @@ export default function NuevoIngreso() {
         const remito = risRemitoFrom(r);
         const responseMode = r?.document_mode || r?.ris?.document_mode || risMode;
         const isRegisteredResponse = responseMode === "register";
-        const count = Array.isArray(r?.ingresos) ? r.ingresos.length : batchItems.length;
+        const count = Array.isArray(r?.ingresos) ? r.ingresos.length : effectiveBatchItems.length;
         const firstIngresoId = r?.ingreso_ids?.[0] || r?.ingresos?.[0]?.ingreso_id || r?.ingresos?.[0]?.id;
         let risNotice = isRegisteredResponse
           ? (
@@ -1860,19 +1960,30 @@ export default function NuevoIngreso() {
       ? "Creando ingreso"
       : "Emitiendo remito";
   const isRegisterMode = risMode === "register";
+  const editingBatchItem = batchItems.find((item) => item.id === editingBatchItemId) || null;
+  const currentEquipmentDraft = hasCurrentEquipmentDraft();
   const resolvedDocumentType = documentTypeFromResult(risPreflight, isRegisterMode ? "remito" : "RIS");
   const documentActionLabel = isRegisterMode ? "Registrar remito" : "Emitir remito";
   const documentLabel = resolvedDocumentType;
   const manualRemitoReady = !isRegisterMode || manualRemitoNumber.trim().length > 0;
   const canEmitRisBatch = batchItems.length > 0 && risPreflight?.can_emit === true;
+  const canSubmitWithDraft = currentEquipmentDraft && !editingBatchItem;
+  const canSubmitRemito = canEmitRisBatch || canSubmitWithDraft;
   const submitDisabled =
     loading ||
     risPreflightLoading ||
     !canSubmitCliente ||
+    !!editingBatchItem ||
     !manualRemitoReady ||
-    !canEmitRisBatch;
+    !canSubmitRemito;
   const submitButtonText = loading
     ? submitStage || "Guardando..."
+    : editingBatchItem
+      ? "Guarde los cambios del equipo"
+    : currentEquipmentDraft
+      ? isRegisterMode
+        ? "Agregar equipo y registrar remito"
+        : "Agregar equipo y emitir remito"
     : batchItems.length > 0
       ? documentActionLabel
       : `Agregue equipos para ${isRegisterMode ? "registrar remito" : "emitir remito"}`;
@@ -2462,22 +2573,46 @@ export default function NuevoIngreso() {
 
         <div className="flex flex-col gap-3 border-t pt-4 md:flex-row md:items-center md:justify-between">
           <div className="text-sm text-gray-600">
-            {batchItems.length > 0
+            {editingBatchItem
+              ? "Editando un equipo ya cargado. Los demás equipos se mantienen en la lista."
+              : currentEquipmentDraft
+              ? "Hay datos de un equipo sin agregar. Si emite ahora, se agregará automáticamente a la lista."
+              : batchItems.length > 0
               ? `${batchItems.length} ${batchItems.length === 1 ? "equipo cargado" : "equipos cargados"} para ${isRegisterMode ? "registrar en un solo remito" : `emitir en un solo ${documentLabel}`}.`
               : `Puede cargar varios equipos antes de ${isRegisterMode ? "registrar el remito" : `emitir el ${documentLabel}`}.`}
           </div>
-          <button
-            type="button"
-            disabled={loading || risPreflightLoading || !canSubmitCliente}
-            className={`px-4 py-2 rounded border text-sm font-semibold ${
-              loading || risPreflightLoading || !canSubmitCliente
-                ? "border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed"
-                : "border-blue-600 text-blue-700 hover:bg-blue-50"
-            }`}
-            onClick={addCurrentEquipmentToBatch}
-          >
-            {risPreflightLoading ? `Validando ${documentLabel}...` : "Agregar equipo"}
-          </button>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {editingBatchItem && (
+              <button
+                type="button"
+                disabled={loading || risPreflightLoading}
+                className={`px-4 py-2 rounded border text-sm font-semibold ${
+                  loading || risPreflightLoading
+                    ? "border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed"
+                    : "border-gray-300 text-gray-700 hover:bg-gray-50"
+                }`}
+                onClick={cancelBatchItemEdit}
+              >
+                Cancelar edición
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={loading || risPreflightLoading || !canSubmitCliente}
+              className={`px-4 py-2 rounded border text-sm font-semibold ${
+                loading || risPreflightLoading || !canSubmitCliente
+                  ? "border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed"
+                  : "border-blue-600 text-blue-700 hover:bg-blue-50"
+              }`}
+              onClick={addCurrentEquipmentToBatch}
+            >
+              {risPreflightLoading
+                ? `Validando ${documentLabel}...`
+                : editingBatchItem
+                  ? "Guardar cambios"
+                  : "Agregar equipo"}
+            </button>
+          </div>
         </div>
         </div>
 
@@ -2498,11 +2633,21 @@ export default function NuevoIngreso() {
             ) : (
               <div className="max-h-[420px] divide-y divide-gray-100 overflow-y-auto">
                 {batchItems.map((item, index) => (
-                  <div key={item.id} className="grid grid-cols-1 gap-3 px-3 py-3">
+                  <div
+                    key={item.id}
+                    className={`grid grid-cols-1 gap-3 px-3 py-3 ${
+                      editingBatchItemId === item.id ? "bg-blue-50" : ""
+                    }`}
+                  >
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-semibold text-gray-500">#{index + 1}</span>
                         <span className="font-semibold text-gray-900">{item.display.serial}</span>
+                        {editingBatchItemId === item.id && (
+                          <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">
+                            En edición
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 text-sm text-gray-700">{item.display.equipo}</div>
                       <div className="mt-1 text-sm text-gray-600">

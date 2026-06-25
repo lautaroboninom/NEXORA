@@ -6,6 +6,7 @@ TABLES = [
     "notifications",
     "notification_user_preferences",
     "notification_push_subscriptions",
+    "notification_email_addresses",
 ]
 
 
@@ -42,6 +43,7 @@ class Command(BaseCommand):
                       entity_type       TEXT NULL,
                       entity_id         TEXT NULL,
                       payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      bell_enabled      BOOLEAN NOT NULL DEFAULT TRUE,
                       read_at           TIMESTAMPTZ NULL,
                       clicked_at        TIMESTAMPTZ NULL,
                       created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -59,12 +61,50 @@ class Command(BaseCommand):
                       user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                       notification_key  TEXT NOT NULL,
                       enabled           BOOLEAN NULL,
+                      bell_enabled      BOOLEAN NULL,
+                      email_enabled     BOOLEAN NULL,
+                      push_enabled      BOOLEAN NULL,
                       updated_by        INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                       created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       CONSTRAINT chk_notification_preferences_key CHECK (NULLIF(TRIM(notification_key), '') IS NOT NULL),
                       CONSTRAINT uq_notification_user_preferences UNIQUE (user_id, notification_key)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS notification_email_addresses (
+                      id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                      user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                      email             TEXT NOT NULL,
+                      label             TEXT NOT NULL DEFAULT '',
+                      active            BOOLEAN NOT NULL DEFAULT TRUE,
+                      updated_by        INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                      created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_notification_email_address_email CHECK (NULLIF(TRIM(email), '') IS NOT NULL)
+                    )
+                    """
+                )
+                for _column, statement in (
+                    ("bell_enabled", "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS bell_enabled BOOLEAN NOT NULL DEFAULT TRUE"),
+                ):
+                    cur.execute(statement)
+                for _column, statement in (
+                    ("bell_enabled", "ALTER TABLE notification_user_preferences ADD COLUMN IF NOT EXISTS bell_enabled BOOLEAN NULL"),
+                    ("email_enabled", "ALTER TABLE notification_user_preferences ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NULL"),
+                    ("push_enabled", "ALTER TABLE notification_user_preferences ADD COLUMN IF NOT EXISTS push_enabled BOOLEAN NULL"),
+                ):
+                    cur.execute(statement)
+                cur.execute(
+                    """
+                    UPDATE notification_user_preferences
+                       SET bell_enabled = COALESCE(bell_enabled, enabled),
+                           email_enabled = COALESCE(email_enabled, enabled),
+                           push_enabled = COALESCE(push_enabled, enabled)
+                     WHERE enabled IS NOT NULL
+                       AND (bell_enabled IS NULL OR email_enabled IS NULL OR push_enabled IS NULL)
                     """
                 )
                 cur.execute(
@@ -133,6 +173,19 @@ class Command(BaseCommand):
                 )
                 cur.execute(
                     """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_email_addresses_user_email
+                      ON notification_email_addresses(user_id, LOWER(TRIM(email)))
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_notification_email_addresses_active_user
+                      ON notification_email_addresses(user_id, updated_at DESC)
+                      WHERE active = TRUE
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_push_endpoint
                       ON notification_push_subscriptions(endpoint)
                     """
@@ -162,6 +215,11 @@ class Command(BaseCommand):
                           IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_push_subscriptions_set_updated_at') THEN
                             CREATE TRIGGER trg_notification_push_subscriptions_set_updated_at
                             BEFORE UPDATE ON notification_push_subscriptions
+                            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                          END IF;
+                          IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_email_addresses_set_updated_at') THEN
+                            CREATE TRIGGER trg_notification_email_addresses_set_updated_at
+                            BEFORE UPDATE ON notification_email_addresses
                             FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                           END IF;
                         END $$;
