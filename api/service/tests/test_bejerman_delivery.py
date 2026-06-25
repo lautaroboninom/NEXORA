@@ -43,6 +43,7 @@ from service.bejerman_sdk import (
     delivery_remito_config,
     extract_pdf_bytes,
     fetch_comprobante_pdf,
+    sdk_emission_article_quantity,
 )
 
 
@@ -930,6 +931,45 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertIn('"N"', body)
         self.assertNotIn("<b:string>", body)
 
+    @override_settings(
+        BEJERMAN_EMISSION_NEGATIVE_QUANTITY_TYPES="",
+        BEJERMAN_NEGATIVE_SDK_QUANTITY_TYPES="",
+        BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RT,RTN,RTA,RSS",
+    )
+    def test_sdk_emission_article_quantity_sign_by_document_type(self):
+        expected = {
+            "RD": 1,
+            "RDN": 1,
+            "RDA": 1,
+            "RIS": 1,
+            "RT": -1,
+            "RTN": -1,
+            "RTA": -1,
+            "RSS": -1,
+        }
+        for document_type, quantity in expected.items():
+            with self.subTest(document_type=document_type):
+                self.assertEqual(sdk_emission_article_quantity(document_type, 1), quantity)
+                self.assertEqual(sdk_emission_article_quantity(document_type, -1), quantity)
+
+    @override_settings(
+        BEJERMAN_EMISSION_NEGATIVE_QUANTITY_TYPES="RDA",
+        BEJERMAN_NEGATIVE_SDK_QUANTITY_TYPES="",
+        BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RT,RTN,RTA,RSS",
+    )
+    def test_sdk_emission_article_quantity_respects_override(self):
+        self.assertEqual(sdk_emission_article_quantity("RDA", 1), -1)
+        self.assertEqual(sdk_emission_article_quantity("RT", 1), 1)
+
+    @override_settings(
+        BEJERMAN_EMISSION_NEGATIVE_QUANTITY_TYPES="",
+        BEJERMAN_NEGATIVE_SDK_QUANTITY_TYPES="",
+        BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RIS",
+    )
+    def test_legacy_sdk_quantity_setting_remains_supported(self):
+        self.assertEqual(sdk_emission_article_quantity("RIS", 1), -1)
+        self.assertEqual(sdk_emission_article_quantity("RT", 1), 1)
+
     def test_ris_payload_includes_company_key(self):
         payload = _build_payload(
             {
@@ -1117,6 +1157,13 @@ class BejermanIngressCompanyTests(SimpleTestCase):
             },
         }
         built = build_service_ingress_comprobante(payload, {"Cliente_RazonSocial": "SIMPLE SALUD SA"})
+        emitted_article_lines = [
+            item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A"
+        ]
+        self.assertEqual(emitted_article_lines[0]["Item_CantidadUM1"], 1)
+        self.assertEqual(emitted_article_lines[0]["Item_CantidadUM2"], 1)
+        self.assertEqual(emitted_article_lines[0]["Item_Deposito"], "STR")
+        self.assertEqual(emitted_article_lines[0]["Item_Partida"], "5151340")
 
         comprobante = _apply_registered_document(
             built["comprobante"],
@@ -1428,6 +1475,7 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(comprobante["Comprobante_PtoVenta"], "00004")
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "DEMO")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
         self.assertEqual(article_lines[0]["Item_Deposito"], "VAL")
 
     def test_delivery_comprobante_uses_bejerman_customer_fiscal_fields(self):
@@ -1469,6 +1517,10 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(comprobante["Cliente_Provincia"], "02")
         self.assertEqual(comprobante["Cliente_SitIVA"], "1")
         legend_lines = [item["Item_DescripArticulo"] for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "L"]
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
+        self.assertEqual(article_lines[0]["Item_Deposito"], "VAL")
+        self.assertEqual(article_lines[0]["Item_Partida"], "S225DC14018")
         self.assertIn("------------------------------", legend_lines)
 
     def test_delivery_comprobante_expands_multiple_partidas(self):
@@ -1503,6 +1555,7 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         )
 
         article_lines = [item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1, -1])
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["P1", "P2"])
         self.assertEqual([item["Item_Deposito"] for item in article_lines], ["STL", "VAL"])
         self.assertEqual(built["comprobante"]["Comprobante_ImporteTotal"], 6)
@@ -1538,7 +1591,7 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         )
 
         article_lines = [item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 10)
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -10)
         self.assertEqual(article_lines[0]["Item_CantidadUM2"], 0)
         self.assertEqual(article_lines[0]["Item_Deposito"], "VAL")
         self.assertEqual(article_lines[0]["Item_Partida"], "24G0424FAX")
@@ -1767,6 +1820,7 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         )
 
         article_lines = [item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
         self.assertEqual(article_lines[0]["Item_DescripArticulo"], equipment_detail)
         self.assertNotIn("Liberación", article_lines[0]["Item_DescripArticulo"])
         self.assertNotIn("G0588065", article_lines[0]["Item_DescripArticulo"])

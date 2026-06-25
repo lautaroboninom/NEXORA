@@ -1518,8 +1518,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "ALQ")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1])
-        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-RDA-001"])
 
@@ -1569,8 +1569,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "ALQ")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1])
-        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-RIS-ALQ-001"])
 
@@ -1653,8 +1653,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(comprobante["Comprobante_TipoOperacion"], "DEMO")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1])
-        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1])
+        self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
 
     def test_nuevo_ingreso_lote_mixto_bloquea_sin_crear_ingresos(self):

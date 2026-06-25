@@ -503,9 +503,25 @@ class NotificationsAPITest(TestCase):
 
     def _ensure_rental_location_ids(self):
         with connection.cursor() as cur:
-            cur.execute("INSERT INTO locations(nombre) VALUES (%s) RETURNING id", ["Estantería de Alquiler"])
+            cur.execute(
+                """
+                INSERT INTO locations(nombre)
+                VALUES (%s)
+                ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
+                RETURNING id
+                """,
+                ["Estantería de Alquiler"],
+            )
             rental_id = int(cur.fetchone()[0])
-            cur.execute("INSERT INTO locations(nombre) VALUES (%s) RETURNING id", ["-"])
+            cur.execute(
+                """
+                INSERT INTO locations(nombre)
+                VALUES (%s)
+                ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
+                RETURNING id
+                """,
+                ["-"],
+            )
             dash_id = int(cur.fetchone()[0])
         return rental_id, dash_id
 
@@ -1761,6 +1777,7 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(sent_comprobantes[0]["Comprobante_TipoOperacion"], "ALQ")
         self.assertEqual(sent_comprobantes[0]["Vendedor_Codigo"], "ADM")
         article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual([line["Item_CantidadUM1"] for line in article_lines], [-1, -1])
         self.assertEqual([line["Item_Deposito"] for line in article_lines], ["STL", "STL"])
         self.assertEqual([line["Item_Partida"] for line in article_lines], ["NS-NOTIF-001", "NS-NOTIF-002"])
         with connection.cursor() as cur:

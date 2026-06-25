@@ -1464,14 +1464,45 @@ def accessory_legend_lines(accessories: Any) -> list[str]:
     return [f"Accesorios: {part}" for part in parts]
 
 
-def _negative_sdk_quantity_types() -> set[str]:
-    raw = as_string(_setting("BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES", "RDA,RDN"))
-    return {part.strip().upper() for part in raw.split(",") if part.strip()}
+DEFAULT_EMISSION_NEGATIVE_QUANTITY_TYPES = "RT,RTN,RTA,RSS"
 
 
-def service_ingress_sdk_article_quantity(document_type: Any) -> int:
-    # RDA/RDN are RD-like sales documents: sending -1 makes Bejerman's entry UI show +1.
-    return -1 if as_string(document_type).upper() in _negative_sdk_quantity_types() else 1
+def _sdk_quantity_type_set(raw: Any) -> set[str]:
+    return {part.strip().upper() for part in as_string(raw).split(",") if part.strip()}
+
+
+def _emission_negative_quantity_types() -> set[str]:
+    for setting_name in (
+        "BEJERMAN_EMISSION_NEGATIVE_QUANTITY_TYPES",
+        "BEJERMAN_NEGATIVE_SDK_QUANTITY_TYPES",
+        "BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES",
+    ):
+        default = DEFAULT_EMISSION_NEGATIVE_QUANTITY_TYPES if setting_name == "BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES" else ""
+        raw = as_string(_setting(setting_name, default))
+        if raw:
+            return _sdk_quantity_type_set(raw)
+    return _sdk_quantity_type_set(DEFAULT_EMISSION_NEGATIVE_QUANTITY_TYPES)
+
+
+def _quantity_magnitude(value: Any) -> float:
+    parsed = as_number(value)
+    if parsed is None or parsed == 0:
+        parsed = 1
+    return abs(parsed)
+
+
+def _quantity_value(value: float) -> int | float:
+    return int(value) if float(value).is_integer() else value
+
+
+def sdk_emission_article_quantity(document_type: Any, quantity: Any = 1) -> int | float:
+    magnitude = _quantity_magnitude(quantity)
+    signed = -magnitude if as_string(document_type).upper() in _emission_negative_quantity_types() else magnitude
+    return _quantity_value(signed)
+
+
+def service_ingress_sdk_article_quantity(document_type: Any, quantity: Any = 1) -> int | float:
+    return sdk_emission_article_quantity(document_type, quantity)
 
 
 def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: dict[str, str] | None = None) -> dict[str, Any]:
@@ -1695,9 +1726,8 @@ def parse_remito_response(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _positive_quantity(value: Any) -> float:
-    parsed = as_number(value)
-    return parsed if parsed and parsed > 0 else 1
+def _positive_quantity(value: Any) -> int | float:
+    return _quantity_value(_quantity_magnitude(value))
 
 
 def _amount(value: Any) -> float:
@@ -1905,6 +1935,7 @@ def build_delivery_remito_comprobante(
             if not line_defs:
                 line_defs = [(quantity, partida, item_deposit)]
             for line_quantity, line_partida, line_deposit in line_defs:
+                signed_line_quantity = sdk_emission_article_quantity(profile["type"], line_quantity)
                 gross_amount = line_quantity * unit_price
                 discount_amount = gross_amount * discount_percent / 100
                 amount = gross_amount - discount_amount
@@ -1915,7 +1946,7 @@ def build_delivery_remito_comprobante(
                         **item_common(profile["type"], config["letter"], profile["pointOfSale"], issue_date, request.get("customerCode"), sort_order),
                         "Item_Tipo": "A" if article_code else "L",
                         "Item_CodigoArticulo": article_code or None,
-                        "Item_CantidadUM1": line_quantity if article_code else 0,
+                        "Item_CantidadUM1": signed_line_quantity if article_code else 0,
                         "Item_CantidadUM2": 0,
                         "Item_DescripArticulo": article_name[:250],
                         "Item_PrecioUnitario": unit_price,

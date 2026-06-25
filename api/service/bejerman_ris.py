@@ -35,7 +35,6 @@ from .bejerman_sdk import (
     parse_remito_response,
     records_from_response,
     resolve_customer_document_fields,
-    service_ingress_sdk_article_quantity,
 )
 from .bejerman_sync import (
     BejermanBlockedError,
@@ -2596,7 +2595,7 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
                 partida = _clean((equipment or {}).get("serial")) or " "
             else:
                 partida = _clean((equipment or {}).get("serial")) or _clean((equipment or {}).get("internalNumber")) or " "
-            quantity = service_ingress_sdk_article_quantity(document["type"])
+            quantity = _registered_document_article_quantity(document["type"])
             next_item["Item_Deposito"] = deposit
             next_item["Item_Partida"] = partida or " "
             next_item["Item_CantidadUM1"] = quantity
@@ -2605,6 +2604,10 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
         items.append(next_item)
     out["Comprobante_Items"] = items
     return out
+
+
+def _registered_document_article_quantity(document_type: Any) -> int:
+    return -1 if _clean_upper(document_type) in {"RDA", "RDN"} else 1
 
 
 def _document_key_from_parts(parts: dict[str, Any]) -> tuple[str, str, str, str, str]:
