@@ -17,11 +17,11 @@ from .helpers import (
     require_roles,
     os_label,
 )
-from ..delivery_orders import delivery_source_reference, load_items_by_order
+from ..delivery_orders import BILLABLE_REMITO_TYPES, delivery_source_reference, load_items_by_order
 
 
-VIEW_ROLES = ["jefe", "admin", "ventas", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
-MANAGE_ROLES = ["jefe", "admin", "jefe_veedor"]
+VIEW_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
+MANAGE_ROLES = ["jefe", "admin", "supervisor", "jefe_veedor"]
 TERMINAL_STATES = ("entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado")
 TALLER_LOCATION = "taller"
 
@@ -108,6 +108,7 @@ DASHBOARD_KPIS = {
     ),
     "tecnico": ("en_taller", "wip_critico", "derivados_en_espera"),
     "recepcion": (
+        "pedidos_pendientes_stock",
         "pedidos_pendientes_armado",
         "pedidos_listos_entrega",
         "remitos_pendientes_facturacion",
@@ -117,6 +118,7 @@ DASHBOARD_KPIS = {
         "derivados_en_espera",
         "preventivos_vencidos",
         "preventivos_proximos",
+        "pedidos_pendientes_stock",
         "pedidos_pendientes_armado",
         "pedidos_listos_entrega",
     ),
@@ -239,7 +241,7 @@ def _dashboard_variant(request):
     role = _normalize_role_value(_rol(request))
     if role in {"jefe", "jefe_veedor"}:
         return "jefe"
-    if role == "ventas":
+    if role in {"supervisor", "ventas"}:
         return "admin"
     if role in {"tecnico", "recepcion", "admin", "cobranzas"}:
         return role
@@ -398,7 +400,7 @@ def _metric_progress(metric_key, start, end, obj):
               JOIN ingresos t ON t.id = ev.ingreso_id
              WHERE ev.ts >= %s
                AND ev.ts < %s
-               AND ev.a_estado IN ('reparado','controlado_sin_defecto','liberado')
+               AND ev.a_estado IN ('reparado','controlado_sin_defecto','no_se_repara','liberado')
                {scope_sql}
             """,
             [start, end, *scope_params],
@@ -473,7 +475,7 @@ def _fetch_objectives(period_type, request=None):
         return []
     role = _normalize_role_value(_rol(request)) if request is not None else "jefe"
     user_id = _current_user_id(request) if request is not None else None
-    if role in {"admin", "ventas", "recepcion", "cobranzas"}:
+    if role in {"admin", "supervisor", "ventas", "recepcion", "cobranzas"}:
         return []
     where = [
         "wo.active = TRUE",
@@ -819,13 +821,43 @@ def _active_work_count(request):
 
 
 DELIVERY_OPEN_STATUSES = (
+    "pendiente_stock",
     "pendiente_armado",
     "armado_pendiente_entrega",
 )
 
 
+def _delivery_pending_billing_sql(alias=""):
+    prefix = f"{alias}." if alias else "delivery_orders."
+    event_order_id = f"{prefix}id"
+    billable_types = ", ".join("'" + tipo.replace("'", "''") + "'" for tipo in sorted(BILLABLE_REMITO_TYPES))
+    if not billable_types:
+        billable_types = "''"
+    return f"""
+        NULLIF(BTRIM(COALESCE({prefix}remito_number, '')), '') IS NOT NULL
+        AND NULLIF(BTRIM(COALESCE({prefix}invoice_number, '')), '') IS NULL
+        AND {prefix}status NOT IN ('facturado', 'cancelado', 'entregado_no_facturable')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM delivery_order_events e
+           WHERE e.order_id = {event_order_id}
+             AND e.event_type = 'delivery_order_not_billable'
+        )
+        AND (
+          EXISTS (
+            SELECT 1
+              FROM bejerman_remito_groups g
+             WHERE g.id = {prefix}bejerman_remito_group_id
+               AND COALESCE(g.response_summary ->> 'billingRequired', '') = 'true'
+          )
+          OR UPPER(SPLIT_PART(BTRIM(COALESCE({prefix}remito_number, '')), ' ', 1)) IN ({billable_types})
+        )
+    """
+
+
 def _empty_delivery_counts():
     return {
+        "pendiente_stock": 0,
         "pendiente_armado": 0,
         "armado_pendiente_entrega": 0,
         "entregado_pendiente_facturacion": 0,
@@ -863,6 +895,14 @@ def _delivery_order_counts():
             [status],
         )
         counts[status] = int(row.get("total") or 0)
+    row = _safe_one(
+        f"""
+        SELECT COUNT(*) AS total
+          FROM delivery_orders
+         WHERE {_delivery_pending_billing_sql()}
+        """
+    )
+    counts["entregado_pendiente_facturacion"] = int(row.get("total") or 0)
     counts["active"] = sum(int(counts.get(status) or 0) for status in DELIVERY_OPEN_STATUSES)
     return counts
 
@@ -880,7 +920,7 @@ def _pending_billing_customer_count():
     if not _table_exists("delivery_orders"):
         return 0
     row = _safe_one(
-        """
+        f"""
         SELECT COUNT(*) AS total
           FROM (
                 SELECT COALESCE(
@@ -890,7 +930,7 @@ def _pending_billing_customer_count():
                          id
                        ) AS customer_ref
                   FROM delivery_orders
-                 WHERE status = 'entregado_pendiente_facturacion'
+                 WHERE {_delivery_pending_billing_sql()}
                  GROUP BY COALESCE(
                             NULLIF(bejerman_customer_code, ''),
                             CAST(customer_id AS TEXT),
@@ -941,9 +981,9 @@ def _format_delivery_order(row):
 
 def _delivery_statuses_for_variant(variant):
     if variant == "cobranzas":
-        return ("entregado_pendiente_facturacion",)
+        return ()
     if variant == "admin":
-        return ("pendiente_armado", "armado_pendiente_entrega")
+        return DELIVERY_OPEN_STATUSES
     if variant in {"jefe", "recepcion"}:
         return DELIVERY_OPEN_STATUSES
     return ()
@@ -952,13 +992,20 @@ def _delivery_statuses_for_variant(variant):
 def _delivery_order_items(variant, limit=8):
     if not _table_exists("delivery_orders"):
         return []
+    pending_billing_only = variant == "cobranzas"
     statuses = _delivery_statuses_for_variant(variant)
-    if not statuses:
+    if not statuses and not pending_billing_only:
         return []
-    placeholders = ",".join(["%s"] * len(statuses))
+    placeholders = ",".join(["%s"] * len(statuses)) if statuses else ""
     open_only_condition = ""
     if set(statuses).issubset(set(DELIVERY_OPEN_STATUSES)):
         open_only_condition = f"AND {_delivery_not_imported_delivered_sql()}"
+    where_sql = (
+        _delivery_pending_billing_sql("o")
+        if pending_billing_only
+        else f"o.status IN ({placeholders}) {open_only_condition}"
+    )
+    params = [] if pending_billing_only else [*statuses]
 
     def order_column(name, default="''"):
         return name if _has_table_column("delivery_orders", name) else f"{default} AS {name}"
@@ -977,16 +1024,15 @@ def _delivery_order_items(variant, limit=8):
                {order_column("source_reference")}, {order_column("source_sheet")},
                {order_column("source_row", "NULL")}, {order_column("source_color")},
                remito_number, remito_location, invoice_number, created_at
-          FROM delivery_orders
-         WHERE status IN ({placeholders})
-           {open_only_condition}
+          FROM delivery_orders o
+         WHERE {where_sql}
          ORDER BY
            CASE priority WHEN 'urgente' THEN 0 ELSE 1 END,
            order_date DESC,
            created_at DESC
          LIMIT %s
         """,
-        [*statuses, limit],
+        [*params, limit],
     )
     items_by_order = load_items_by_order([row["id"] for row in rows]) if _table_exists("delivery_order_items") else {}
     for row in rows:
@@ -1013,6 +1059,7 @@ def _build_kpis(request, raw):
         "preventivos_vencidos": {"key": "preventivos_vencidos", "label": "Preventivos vencidos", "value": len(raw.get("preventivo_vencido") or []), "severity": "critical"},
         "preventivos_proximos": {"key": "preventivos_proximos", "label": "Preventivos próximos", "value": len(raw.get("preventivo_proximo") or []), "severity": "warning"},
         "pedidos_abiertos": {"key": "pedidos_abiertos", "label": "Pedidos sin entregar", "value": int(delivery_counts.get("active") or 0), "severity": "info"},
+        "pedidos_pendientes_stock": {"key": "pedidos_pendientes_stock", "label": "Pendientes de stock", "value": int(delivery_counts.get("pendiente_stock") or 0), "severity": "warning"},
         "pedidos_pendientes_armado": {"key": "pedidos_pendientes_armado", "label": "Pedidos a armar", "value": int(delivery_counts.get("pendiente_armado") or 0), "severity": "warning"},
         "pedidos_listos_entrega": {"key": "pedidos_listos_entrega", "label": "Listos para entrega", "value": int(delivery_counts.get("armado_pendiente_entrega") or 0), "severity": "info"},
         "remitos_pendientes_facturacion": {"key": "remitos_pendientes_facturacion", "label": "Remitos a facturar", "value": int(delivery_counts.get("entregado_pendiente_facturacion") or 0), "severity": "warning"},

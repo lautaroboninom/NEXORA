@@ -7,15 +7,8 @@ from rest_framework.views import APIView
 
 from .helpers import q, require_roles, _set_audit_user
 from .mg_state import resolve_mg_flags
-from ..bejerman_ris import equipment_suggestion_from_bejerman_article, find_customer_suggestion
-from ..bejerman_sdk import (
-    BejermanSDKClient,
-    BejermanSdkConfigError,
-    BejermanSdkResponseError,
-    BejermanSdkUnavailable,
-    lookup_sale_by_serial,
-)
-from ..warranty import compute_warranty_from_sale_date
+from ..bejerman_sales import bejerman_sale_response, find_latest_sale_by_serial, lookup_and_cache_sale_by_serial
+from ..bejerman_sdk import BejermanSDKClient
 
 
 INGRESO_ESTADOS_NO_BLOQUEAN_ALTA = {
@@ -325,74 +318,18 @@ def _fetch_last_ingreso(device_id: int):
     ))
 
 
-def _lookup_bejerman_sale_by_serial(serial: str, user_id: int | None = None):
+def _find_sale_for_new_device(serial: str, user_id: int | None = None):
+    sale_payload = find_latest_sale_by_serial(serial)
+    if sale_payload.get("found"):
+        return sale_payload
     try:
-        return lookup_sale_by_serial(BejermanSDKClient(actor_user_id=user_id), serial)
-    except BejermanSdkConfigError as exc:
-        return {"found": False, "lookup_error": str(exc)}
-    except (BejermanSdkResponseError, BejermanSdkUnavailable) as exc:
-        return {"found": False, "lookup_error": str(exc)}
+        return lookup_and_cache_sale_by_serial(BejermanSDKClient(actor_user_id=user_id), serial)
     except Exception as exc:
-        return {"found": False, "lookup_error": f"No se pudo consultar Bejerman: {exc}"}
-
-
-def _bejerman_sale_response(code: str, ns_key: str | None, sale_payload: dict):
-    if not sale_payload or not sale_payload.get("found"):
-        return None
-    article_code = sale_payload.get("articleCode") or ""
-    article_description = sale_payload.get("articleDescription") or ""
-    equipment = equipment_suggestion_from_bejerman_article(article_code, article_description)
-    customer = find_customer_suggestion(
-        sale_payload.get("customerCode") or "",
-        sale_payload.get("customerName") or "",
-    )
-    warranty = compute_warranty_from_sale_date(
-        sale_payload.get("issueDate"),
-        numero_serie=sale_payload.get("serial") or code,
-        brand_id=equipment.get("marca_id"),
-        model_id=equipment.get("modelo_id"),
-        source="bejerman_sale",
-    )
-    return {
-        "kind": "bejerman_sale",
-        "source": "bejerman_sale",
-        "raw": code,
-        "normalized": code,
-        "normalized_key": ns_key,
-        "suggestion": {
-            "serial": sale_payload.get("serial") or code,
-            "normalizedSerial": sale_payload.get("normalizedSerial") or ns_key,
-            "article": {
-                "code": article_code,
-                "description": article_description,
-                "itemPartida": sale_payload.get("itemPartida") or "",
-                "itemQuantity": sale_payload.get("itemQuantity"),
-            },
-            "document": {
-                "type": sale_payload.get("documentType") or "",
-                "letter": sale_payload.get("documentLetter") or "",
-                "pointOfSale": sale_payload.get("documentPointOfSale") or "",
-                "number": sale_payload.get("documentNumber") or "",
-                "label": sale_payload.get("documentLabel") or "",
-                "documentId": sale_payload.get("documentId"),
-                "issueDate": sale_payload.get("issueDate"),
-            },
-            "customer": {
-                "code": sale_payload.get("customerCode") or "",
-                "name": sale_payload.get("customerName") or "",
-                "local_customer": customer,
-            },
-            "equipment": equipment,
-            "warranty": {
-                "garantia": warranty.get("garantia"),
-                "vence_el": warranty.get("vence_el").isoformat() if warranty.get("vence_el") else None,
-                "fecha_venta": warranty.get("fecha_venta").isoformat() if warranty.get("fecha_venta") else None,
-                "days": warranty.get("days"),
-                "meta": warranty.get("meta") or {},
-            },
-            "checkedComprobantes": sale_payload.get("checkedComprobantes"),
-        },
-    }
+        return {
+            "found": False,
+            "source": "bejerman_sale_live",
+            "lookup_error": f"No se pudo consultar Bejerman: {exc}",
+        }
 
 
 class ScanLookupView(APIView):
@@ -448,8 +385,8 @@ class ScanLookupView(APIView):
         device, ns_key = _fetch_device_by_code(code, mg_select_sql)
         if not device:
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-            sale_payload = _lookup_bejerman_sale_by_serial(code, user_id=user_id)
-            sale_response = _bejerman_sale_response(code, ns_key, sale_payload or {})
+            sale_payload = _find_sale_for_new_device(code, user_id=user_id)
+            sale_response = bejerman_sale_response(code, ns_key, sale_payload or {}, create_customer=True)
             if sale_response:
                 return Response(sale_response)
             return Response({
@@ -472,6 +409,14 @@ class ScanLookupView(APIView):
         mg_owner_id = mg_owner["id"] if mg_owner else None
         flags = resolve_mg_flags(device, mg_owner_id)
 
+        sale_payload = find_latest_sale_by_serial(device.get("numero_serie") or code)
+        sale_response = bejerman_sale_response(
+            device.get("numero_serie") or code,
+            ns_key,
+            sale_payload or {},
+            create_customer=False,
+        )
+
         return Response({
             "kind": "device",
             "source": source or "serial",
@@ -482,6 +427,7 @@ class ScanLookupView(APIView):
             "ingreso": last_ingreso,
             "rental_return_customer": _rental_return_customer(device, last_ingreso),
             "flags": flags,
+            "bejerman_sale": (sale_response or {}).get("suggestion"),
         })
 
 

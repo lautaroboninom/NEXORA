@@ -526,6 +526,10 @@ export default function QrScanCard({
       await waitForRisProgressPaint();
       const risSource = isRisGenerated(ingreso) ? ingreso : await postIngresoRisEmitir(ingreso.id);
       const remito = risRemitoFrom(risSource);
+      if (isRisRegistered(risSource)) {
+        setActionOk(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
+        return;
+      }
       const blob = await waitForRisPdfBlob(ingreso.id, risSource, {
         onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del Remito..."),
       });

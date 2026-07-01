@@ -8,11 +8,24 @@ from django.core.mail import EmailMessage, get_connection
 from django.db import connection, transaction
 from django.utils import timezone
 
-from .notifications import notification_email_recipients_for_users
+from .notifications import (
+    active_users_for_notification,
+    notification_allowed_roles,
+    notification_email_recipients_for_users,
+)
 
 logger = logging.getLogger(__name__)
 
-MANDATORY_REMITO_PDF_EMAIL_ROLES = ("admin", "cobranzas", "recepcion")
+REMITO_PDF_NOTIFICATION_KEYS = {
+    "RT": "remito_pdf_rt",
+    "RD": "remito_pdf_rd",
+    "RTA": "remito_pdf_rta",
+    "RTN": "remito_pdf_rtn",
+    "RSS": "remito_pdf_rss",
+    "RIS": "remito_pdf_ris",
+    "RDA": "remito_pdf_rda",
+    "RDN": "remito_pdf_rdn",
+}
 PdfLoader = Callable[[], tuple[bytes, str] | tuple[bytes, str, str]]
 
 
@@ -26,34 +39,22 @@ def _append_footer(body: str) -> str:
     return f"{base}\n\n{footer}" if footer else base
 
 
-def _mandatory_remito_pdf_recipients() -> list[str]:
-    try:
-        with connection.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, nombre, email, rol
-                  FROM users
-                 WHERE COALESCE(activo, TRUE) = TRUE
-                   AND LOWER(TRIM(COALESCE(rol, ''))) = ANY(%s)
-                 ORDER BY CASE LOWER(TRIM(COALESCE(rol, '')))
-                            WHEN 'admin' THEN 1
-                            WHEN 'cobranzas' THEN 2
-                            WHEN 'recepcion' THEN 3
-                            ELSE 9
-                          END,
-                          LOWER(TRIM(email))
-                """,
-                [list(MANDATORY_REMITO_PDF_EMAIL_ROLES)],
-            )
-            rows = cur.fetchall()
-    except Exception:
-        logger.exception("remito_pdf_email_recipients_failed")
-        return []
+def remito_pdf_notification_key(document_type: str, remito_number: str = "") -> str:
+    clean_type = _clean(document_type).upper()
+    if not clean_type:
+        clean_type = (_clean(remito_number).split(" ") or [""])[0].upper()
+    return REMITO_PDF_NOTIFICATION_KEYS.get(clean_type, "")
 
-    users = [
-        {"id": row[0], "nombre": row[1], "email": row[2], "rol": row[3]}
-        for row in rows
-    ]
+
+def _remito_pdf_recipients(notification_key: str) -> list[str]:
+    if not notification_key:
+        return []
+    users = active_users_for_notification(
+        notification_key,
+        roles=notification_allowed_roles(notification_key),
+        channel="email",
+        require_email=True,
+    )
     return notification_email_recipients_for_users(users)
 
 
@@ -179,10 +180,14 @@ def notify_bejerman_remito_pdf_issued(
     if not remito or pdf_loader is None:
         return {"emails": 0, "recipients": []}
 
-    recipients = _mandatory_remito_pdf_recipients()
+    notification_key = remito_pdf_notification_key(document_type, remito)
+    recipients = _remito_pdf_recipients(notification_key)
     if not recipients:
-        logger.warning("remito_pdf_email no recipients", extra={"remito_number": remito})
-        return {"emails": 0, "recipients": []}
+        logger.warning(
+            "remito_pdf_email no recipients",
+            extra={"remito_number": remito, "notification_key": notification_key},
+        )
+        return {"emails": 0, "recipients": [], "notificationKey": notification_key}
 
     subject_parts = ["Remito Bejerman", _clean(document_type), remito, _clean(customer_name)]
     subject = " - ".join(part for part in subject_parts if part)
@@ -220,4 +225,4 @@ def notify_bejerman_remito_pdf_issued(
     except Exception:
         _send_notice()
 
-    return {"emails": len(recipients), "recipients": recipients}
+    return {"emails": len(recipients), "recipients": recipients, "notificationKey": notification_key}

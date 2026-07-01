@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 from collections import defaultdict
 from django.core.cache import cache
 from django.db import connection
@@ -245,6 +246,7 @@ ACTIVITY_STATE_LABELS = {
     "presupuestado": "Presupuestado",
     "reparar": "Reparar",
     "controlado_sin_defecto": "Controlado sin defecto",
+    "no_se_repara": "No se repara",
     "reparado": "Reparado",
     "liberado": "Liberado",
     "entregado": "Entregado",
@@ -394,6 +396,43 @@ def _truncate_text(value, max_len=180):
 def _display_value(value):
     text = _clean_text(value)
     return text or "-"
+
+
+def _activity_remito_parts(value):
+    text = _clean_text(value)
+    if not text:
+        return None, ""
+    point_and_number = re.search(r"(\d{1,5})\s*[-/ ]\s*(\d{1,8})\s*$", text)
+    if point_and_number:
+        return point_and_number.group(1).zfill(5), point_and_number.group(2).zfill(8)
+    number = re.search(r"(\d{1,8})\s*$", text)
+    return None, number.group(1).zfill(8) if number else ""
+
+
+def _is_legacy_remito_format_normalization(row):
+    table_name = _clean_text(row.get("table_name")).lower()
+    column_name = _clean_text(row.get("column_name")).lower()
+    if table_name != "ingresos" or column_name != "remito_ingreso":
+        return False
+
+    old_value = _clean_text(row.get("old_value"))
+    new_value = _clean_text(row.get("new_value"))
+    if not old_value or not new_value:
+        return False
+    if re.search(r"[A-Za-z]", old_value) or not re.search(r"[A-Za-z]", new_value):
+        return False
+
+    old_point, old_number = _activity_remito_parts(old_value)
+    new_point, new_number = _activity_remito_parts(new_value)
+    if not old_number or old_number != new_number:
+        return False
+    return old_point is None or new_point is None or old_point == new_point
+
+
+def _drop_legacy_remito_format_rows(rows):
+    if not rows:
+        return rows
+    return [row for row in rows if not _is_legacy_remito_format_normalization(row)]
 
 
 def _humanize_key(value):
@@ -1056,6 +1095,7 @@ def _load_change_log_activity_rows(since, until, tecnico_id=None):
     ) or []
 
     transforms = _load_activity_history_transforms()
+    rows = _drop_legacy_remito_format_rows(rows)
     rows = transforms["compact"](rows)
     rows = transforms["drop_mirrored"](rows)
     rows = transforms["resolve_location"](rows)
@@ -2192,7 +2232,7 @@ class MetricasResumenView(APIView):
             f"{join_dm}\n"
             "JOIN locations loc ON loc.id=i.ubicacion_id\n"
             "LEFT JOIN users u ON u.id=i.asignado_a\n"
-            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
+            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','no_se_repara','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
             "  AND LOWER(loc.nombre) = LOWER(%s)"
             f"{(' AND ' + where_i[5:]) if where_i else ''}\n"
             "GROUP BY i.asignado_a, tecnico_nombre\n"
@@ -2206,7 +2246,7 @@ class MetricasResumenView(APIView):
             "FROM ingresos i\n"
             f"{join_dm}\n"
             "JOIN locations loc ON loc.id=i.ubicacion_id\n"
-            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
+            "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','no_se_repara','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
             "  AND LOWER(loc.nombre) = LOWER(%s)"
             f"{where_i}\n"
         ), ["taller", *where_params]) or []

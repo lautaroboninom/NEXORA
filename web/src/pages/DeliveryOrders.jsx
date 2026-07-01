@@ -4,7 +4,6 @@ import {
   getBlob,
   getDeliveryOrder,
   getDeliveryOrders,
-  getDeliveryOrderRemitoHistory,
   patchDeliveryOrderItemPartidas,
   patchDeliveryOrderRemitoLocation,
   postDeliveryOrderCancel,
@@ -21,11 +20,15 @@ import DeliveryOrderRemitoModal from "../components/DeliveryOrderRemitoModal.jsx
 import {
   deliveryOrderCompanyLabel,
   deliveryOrderCommercialLabel,
+  deliveryOrderItemCanOmitPartida,
   deliveryOrderItemsSummary,
   deliveryOrderItemPriceCurrency,
   deliveryOrderPriceCurrency,
+  deliveryOrderServiceReleaseIngresoIds,
+  deliveryOrderServiceReleaseReferences,
+  formatServiceOrderReference,
 } from "../lib/delivery-orders";
-import { CloudUpload, Pencil, Plus, Printer, X } from "lucide-react";
+import { CloudUpload, MapPinned, Pencil, Plus, Printer, X } from "lucide-react";
 import {
   DesktopTableWrap,
   MobileDataCard,
@@ -39,8 +42,9 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 
 const STATUS_LABELS = {
+  pendiente_stock: "Pendiente de stock",
   pendiente_armado: "Pendiente de armado",
-  armado_pendiente_entrega: "Listo para retiro",
+  armado_pendiente_entrega: "Pendiente de entrega",
   entregado_pendiente_facturacion: "Pendiente de facturación",
   entregado_no_facturable: "Entregado",
   facturado: "Facturado",
@@ -54,6 +58,7 @@ const STATUS_CHIP_LABELS = {
 };
 
 const STATUS_CHIP_CLASSES = {
+  pendiente_stock: "border-sky-200 bg-sky-50 text-sky-800",
   pendiente_armado: "border-amber-300 bg-amber-100 text-amber-900",
   armado_pendiente_entrega: "border-emerald-200 bg-emerald-50 text-emerald-800",
   entregado_pendiente_facturacion: "border-gray-200 bg-gray-100 text-gray-600",
@@ -64,6 +69,7 @@ const STATUS_CHIP_CLASSES = {
 
 const PENDING_ARMADO_ROW_CLASS = "bg-amber-100/90";
 const URGENT_PENDING_ARMADO_ROW_CLASS = "bg-orange-200/75";
+const PENDING_STOCK_ROW_CLASS = "bg-sky-50/90";
 
 const TYPE_LABELS = {
   sale: "Venta",
@@ -73,14 +79,12 @@ const TYPE_LABELS = {
 };
 
 const PAGE_SIZE = 25;
+const PENDING_DELIVERY_STATUS_FILTER = "pendiente_stock,pendiente_armado,armado_pendiente_entrega";
+const ORDER_HISTORY_STATUS_FILTER = "entregado_pendiente_facturacion,entregado_no_facturable,facturado";
+const PENDING_DELIVERY_STATUSES = new Set(["pendiente_armado", "armado_pendiente_entrega"]);
 const NON_CANCELABLE_STATUSES = new Set(["entregado_pendiente_facturacion", "entregado_no_facturable", "facturado", "cancelado"]);
-const EDITABLE_STATUSES = new Set(["pendiente_armado", "armado_pendiente_entrega"]);
+const EDITABLE_STATUSES = new Set(["pendiente_stock", "pendiente_armado", "armado_pendiente_entrega"]);
 const REMITO_LOCATIONS = new Set(["recepcion", "oficina"]);
-const PREPARE_PARTIDAS_ERROR_CODES = new Set([
-  "DELIVERY_ORDER_PARTIDAS_REQUIRED",
-  "DELIVERY_ORDER_PARTIDAS_DUPLICATED",
-  "DELIVERY_ORDER_PARTIDAS_QUANTITY_MISMATCH",
-]);
 
 function normalizeRemitoLocation(value) {
   const location = String(value || "").trim().toLowerCase();
@@ -88,7 +92,7 @@ function normalizeRemitoLocation(value) {
 }
 
 function isCancelableOrder(order) {
-  return !NON_CANCELABLE_STATUSES.has(order?.status);
+  return !NON_CANCELABLE_STATUSES.has(order?.status) && !order?.remitoNumber;
 }
 
 function isEditableOrder(order) {
@@ -99,34 +103,24 @@ function isEditableOrder(order) {
   );
 }
 
-function isAdminUser(user) {
-  return String(user?.rol || "").trim().toLowerCase() === "admin";
+function canSyncDrive(user) {
+  return ["admin", "supervisor", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
 }
 
-function isJefeUser(user) {
-  return String(user?.rol || "").trim().toLowerCase() === "jefe";
+function canEditItemDiscounts(user) {
+  return ["admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
 }
-
-function isVentasUser(user) {
-  return String(user?.rol || "").trim().toLowerCase() === "ventas";
-}
-
 
 function canEditCommercialFields(user) {
-  return ["admin", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
+  return ["admin", "supervisor", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
 }
 
 function canPrintInvoiceForOrder(user, order) {
-  const role = String(user?.rol || "").trim().toLowerCase();
-  return Boolean(String(order?.invoiceNumber || "").trim()) && ["admin", "cobranzas", "recepcion"].includes(role);
+  return Boolean(String(order?.invoiceNumber || "").trim()) && can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS);
 }
 
 function invoiceDocumentLabel(order) {
   return String(order?.invoiceNumber || order?.orderNumber || "factura").trim() || "factura";
-}
-
-function apiErrorCode(err) {
-  return err?.data?.code || err?.code || "";
 }
 
 function isUrgentOrder(order) {
@@ -134,10 +128,25 @@ function isUrgentOrder(order) {
 }
 
 function pendingArmadoRowClass(order) {
-  if (order?.status !== "pendiente_armado") {
+  if (order?.status === "pendiente_stock" && !order?.remitoNumber) {
+    return PENDING_STOCK_ROW_CLASS;
+  }
+  if (order?.status !== "pendiente_armado" || order?.remitoNumber) {
     return "";
   }
   return isUrgentOrder(order) ? URGENT_PENDING_ARMADO_ROW_CLASS : PENDING_ARMADO_ROW_CLASS;
+}
+
+function canSelectForRemito(order) {
+  return PENDING_DELIVERY_STATUSES.has(order?.status) && !order?.remitoNumber && !NON_CANCELABLE_STATUSES.has(order?.status);
+}
+
+function canConfirmDelivery(order) {
+  return PENDING_DELIVERY_STATUSES.has(order?.status) && Boolean(order?.remitoNumber);
+}
+
+function canLoadManualRemito(order) {
+  return PENDING_DELIVERY_STATUSES.has(order?.status) && !order?.remitoNumber && !order?.bejermanRemitoGroupId;
 }
 
 function UrgentChip() {
@@ -197,6 +206,8 @@ const remitoPrintUrlFromGroupId = (groupId) =>
   `/api/ordenes-entrega/remito-bejerman/${encodeURIComponent(groupId)}/print/`;
 
 function remitoPrintUrl(order) {
+  const directUrl = String(order?.remitoPrintUrl || "").trim();
+  if (directUrl) return directUrl;
   return order?.remitoNumber && order?.bejermanRemitoGroupId
     ? remitoPrintUrlFromGroupId(order.bejermanRemitoGroupId)
     : "";
@@ -204,10 +215,8 @@ function remitoPrintUrl(order) {
 
 function exitRemitoIngresoId(order) {
   if (order?.deliveryType !== "service_release") return "";
-  if (order?.ingresoId) return String(order.ingresoId);
-  const reference = String(order?.sourceReference || "").trim();
-  const match = reference.match(/\d+/);
-  return match ? match[0] : "";
+  const ingresoIds = deliveryOrderServiceReleaseIngresoIds(order);
+  return ingresoIds.length === 1 ? ingresoIds[0] : "";
 }
 
 function formatDateTime(value) {
@@ -248,7 +257,7 @@ export default function DeliveryOrders() {
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-  const [filters, setFilters] = useState({ status: "", q: "", deliveryType: "" });
+  const [filters, setFilters] = useState({ status: PENDING_DELIVERY_STATUS_FILTER, q: "", deliveryType: "" });
   const [searchText, setSearchText] = useState("");
   const [orders, setOrders] = useState([]);
   const [page, setPage] = useState(0);
@@ -263,11 +272,10 @@ export default function DeliveryOrders() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
   const [detailOrder, setDetailOrder] = useState(null);
-  const [preparingOrder, setPreparingOrder] = useState(null);
   const [partidasOrder, setPartidasOrder] = useState(null);
   const [remitoModalOpen, setRemitoModalOpen] = useState(false);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
-  const [remitoHistory, setRemitoHistory] = useState([]);
+  const [orderHistory, setOrderHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const remitoLocationIntentRef = useRef(new Set());
   const handledRouteOrderRef = useRef("");
@@ -280,16 +288,20 @@ export default function DeliveryOrders() {
   const canMoveRemito = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_UPDATE_REMITO_LOCATION);
   const canGenerateRemito = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_GENERATE_BEJERMAN_REMITO);
   const canAssignArticles = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_ASSIGN_ARTICLES);
+  const canManageRouteSheet = can(user, PERMISSION_CODES.ACTION_ROUTE_SHEET_MANAGE);
 
-  const openExitRemito = async (order) => {
-    const ingresoId = exitRemitoIngresoId(order);
+  const openExitRemito = async (target) => {
+    const ingresoId =
+      typeof target === "object" && target !== null
+        ? exitRemitoIngresoId(target)
+        : String(target || "").trim();
     if (!ingresoId) {
       setError("La orden no tiene una OS vinculada para imprimir.");
       return;
     }
     setSaving(true);
     try {
-      const blob = await getBlob(`/api/ordenes-entrega/${encodeURIComponent(order.id)}/remito-salida/`);
+      const blob = await getBlob(`/api/ingresos/${encodeURIComponent(ingresoId)}/remito/`);
       if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank", "noopener");
@@ -307,14 +319,14 @@ export default function DeliveryOrders() {
     [orders, selected]
   );
 
-  const loadRemitoHistory = async () => {
+  const loadOrderHistory = async () => {
     setHistoryLoading(true);
     try {
-      const data = await getDeliveryOrderRemitoHistory({ limit: 20 });
-      setRemitoHistory(Array.isArray(data?.items) ? data.items : []);
+      const data = await getDeliveryOrders({ status: ORDER_HISTORY_STATUS_FILTER, limit: 50 });
+      setOrderHistory(Array.isArray(data?.items) ? data.items : []);
       setError("");
     } catch (err) {
-      setError(err?.message || "No se pudo cargar el historial de remitos.");
+      setError(err?.message || "No se pudo cargar el historial de pedidos.");
     } finally {
       setHistoryLoading(false);
     }
@@ -367,6 +379,33 @@ export default function DeliveryOrders() {
       .finally(() => setLoading(false));
   };
 
+  const mergeRefreshedOrders = (refreshedOrders) => {
+    const byId = new Map((refreshedOrders || []).filter((order) => order?.id).map((order) => [order.id, order]));
+    if (!byId.size) return;
+    setOrders((current) => current.map((order) => byId.get(order.id) || order));
+  };
+
+  const refreshOrderForDisplay = async (order) => {
+    if (!order?.id) return order;
+    const refreshed = await getDeliveryOrder(order.id);
+    mergeRefreshedOrders([refreshed]);
+    return refreshed;
+  };
+
+  const openDetailOrder = async (order) => {
+    if (!order?.id) return;
+    setSaving(true);
+    try {
+      const refreshed = await refreshOrderForDisplay(order);
+      setDetailOrder(refreshed);
+      setError("");
+    } catch (err) {
+      setError(err?.message || "No se pudo abrir la orden de entrega.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   useEffect(() => {
     load();
   }, [filters.status, filters.deliveryType, filters.q, page]);
@@ -382,11 +421,7 @@ export default function DeliveryOrders() {
       .then((order) => {
         if (!order?.id) throw new Error("No se encontró la orden de entrega.");
         setError("");
-        if (canPrepare && order.status === "pendiente_armado") {
-          setPreparingOrder(order);
-        } else {
-          setDetailOrder(order);
-        }
+        setDetailOrder(order);
       })
       .catch((err) => setError(err?.message || "No se pudo abrir la orden de entrega."))
       .finally(() => {
@@ -400,7 +435,7 @@ export default function DeliveryOrders() {
           { replace: true }
         );
       });
-  }, [canPrepare, location.pathname, location.search, navigate, user]);
+  }, [location.pathname, location.search, navigate, user]);
 
   const updateFilter = (field) => (event) => {
     setFilters((prev) => ({ ...prev, [field]: event.target.value }));
@@ -458,23 +493,20 @@ export default function DeliveryOrders() {
     runAction(() => postDeliveryOrderCancel(order.id));
   };
 
-  const handlePrepareOrder = async (order) => {
+  const handleDeliverOrder = (order) => {
+    if (!order?.id || !order?.remitoNumber) return;
+    const orderLabel = order.orderNumber ? ` ${order.orderNumber}` : "";
+    const remitoLabel = order.remitoNumber ? ` con remito ${order.remitoNumber}` : "";
+    if (!window.confirm(`¿Confirmás que la orden de entrega${orderLabel}${remitoLabel} ya fue entregada?`)) return;
+    runAction(() => postDeliveryOrderDelivered(order.id));
+  };
+
+  const handleLoadManualRemito = (order) => {
     if (!order?.id) return;
-    setSaving(true);
-    try {
-      await postDeliveryOrderPrepared(order.id);
-      setError("");
-      load();
-    } catch (err) {
-      if (err?.status === 409 && PREPARE_PARTIDAS_ERROR_CODES.has(apiErrorCode(err))) {
-        setPreparingOrder(order);
-        setError("");
-      } else {
-        setError(err?.message || "No se pudo completar la acción.");
-      }
-    } finally {
-      setSaving(false);
-    }
+    const remitoNumber = window.prompt("Número de remito", "");
+    const cleanRemitoNumber = String(remitoNumber || "").trim();
+    if (!cleanRemitoNumber) return;
+    runAction(() => postDeliveryOrderPrepared(order.id, { remitoNumber: cleanRemitoNumber }));
   };
 
   const openInvoiceBlob = (blob, order) =>
@@ -517,16 +549,6 @@ export default function DeliveryOrders() {
     setError("El navegador sigue bloqueando la ventana de impresión de la factura.");
   };
 
-  const savePreparationPartidas = async (itemsPayload) => {
-    if (!preparingOrder?.id) return null;
-    let saved = preparingOrder;
-    for (const item of itemsPayload || []) {
-      saved = await patchDeliveryOrderItemPartidas(preparingOrder.id, item.itemId, item.partidas || []);
-    }
-    saved = await postDeliveryOrderPrepared(preparingOrder.id);
-    return saved;
-  };
-
   const saveDetailPartidas = async (itemsPayload) => {
     if (!partidasOrder?.id) return null;
     let saved = partidasOrder;
@@ -541,20 +563,47 @@ export default function DeliveryOrders() {
     setEditingOrder(order);
   };
 
+  const openRouteSheetForOrder = (order) => {
+    if (!order?.id) return;
+    const today = new Date().toISOString().slice(0, 10);
+    navigate(`/hoja-de-ruta?date=${encodeURIComponent(today)}&orderId=${encodeURIComponent(order.id)}`);
+  };
+
   const toggleSelected = (orderId) => {
+    const order = orders.find((item) => item.id === orderId);
+    if (order && !canSelectForRemito(order)) return;
     setSelected((current) =>
       current.includes(orderId) ? current.filter((id) => id !== orderId) : [...current, orderId]
     );
   };
 
-  const openRemitoModal = () => {
+  const openRemitoModal = async () => {
     if (!selectedOrders.length) return;
-    setRemitoModalOpen(true);
+    if (selectedOrders.some((order) => !canSelectForRemito(order))) {
+      setError("Solo se pueden generar remitos para pedidos pendientes de armado o entrega.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const refreshed = await Promise.all(selectedOrders.map((order) => refreshOrderForDisplay(order)));
+      mergeRefreshedOrders(refreshed);
+      if (refreshed.some((order) => !canSelectForRemito(order))) {
+        setSelected((current) => current.filter((orderId) => refreshed.some((order) => order.id === orderId && canSelectForRemito(order))));
+        setError("Solo se pueden generar remitos para pedidos pendientes de armado o entrega.");
+        return;
+      }
+      setError("");
+      setRemitoModalOpen(true);
+    } catch (err) {
+      setError(err?.message || "No se pudieron verificar las órdenes seleccionadas.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const openHistoryModal = () => {
     setHistoryModalOpen(true);
-    loadRemitoHistory();
+    loadOrderHistory();
   };
 
   const markRemitoLocationIntent = (orderId) => {
@@ -580,15 +629,28 @@ export default function DeliveryOrders() {
 
   const renderOrderNumber = (order) => {
     const ingresoId = exitRemitoIngresoId(order);
+    const serviceReferences = deliveryOrderServiceReleaseReferences(order);
+    const serviceCount = Math.max(
+      serviceReferences.length,
+      Number.parseInt(String(order?.serviceReleaseCount || ""), 10) || 0
+    );
+    const isGroupedServiceRelease = order?.deliveryType === "service_release" && serviceCount > 1;
     return (
       <div>
-        <OrderNumberCell value={order.orderNumber} />
+        {isGroupedServiceRelease ? (
+          <div className="w-[116px] leading-tight">
+            <div className="font-semibold text-gray-900">{serviceReferences[0] || order.orderNumber}</div>
+            <div className="mt-0.5 text-xs font-semibold text-sky-700">+ {serviceCount - 1} OS</div>
+          </div>
+        ) : (
+          <OrderNumberCell value={serviceReferences[0] || order.orderNumber} />
+        )}
         {ingresoId && (
           <button
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              openExitRemito(order);
+              openExitRemito(ingresoId);
             }}
             disabled={saving}
             className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:underline disabled:opacity-50"
@@ -603,25 +665,32 @@ export default function DeliveryOrders() {
 
   const renderOrderActions = (order) => (
     <div className="flex flex-wrap gap-1" onClick={(event) => event.stopPropagation()}>
-      {canPrepare && order.status === "pendiente_armado" && (
+      {canDeliver && canConfirmDelivery(order) && (
         <button
           type="button"
-          onClick={() => handlePrepareOrder(order)}
+          onClick={() => handleDeliverOrder(order)}
           className="rounded border px-2 py-1 text-xs hover:bg-gray-50"
         >
-          Preparado
+          Entregado
         </button>
       )}
-      {canDeliver && !NON_CANCELABLE_STATUSES.has(order.status) && !order.remitoNumber && (
+      {canPrepare && canLoadManualRemito(order) && (
         <button
           type="button"
-          onClick={() => {
-            const remitoNumber = window.prompt("Número de remito", "");
-            if (remitoNumber) runAction(() => postDeliveryOrderDelivered(order.id, { remitoNumber }));
-          }}
+          onClick={() => handleLoadManualRemito(order)}
           className="rounded border px-2 py-1 text-xs hover:bg-gray-50"
         >
           Cargar remito
+        </button>
+      )}
+      {canManageRouteSheet && PENDING_DELIVERY_STATUSES.has(order.status) && (
+        <button
+          type="button"
+          onClick={() => openRouteSheetForOrder(order)}
+          className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+        >
+          <MapPinned className="h-3.5 w-3.5" aria-hidden="true" />
+          Hoja de ruta
         </button>
       )}
       {canInvoice && order.status === "entregado_pendiente_facturacion" && (
@@ -634,17 +703,6 @@ export default function DeliveryOrders() {
           className="rounded border px-2 py-1 text-xs hover:bg-gray-50"
         >
           Facturar
-        </button>
-      )}
-      {canPrintInvoiceForOrder(user, order) && (
-        <button
-          type="button"
-          onClick={() => handlePrintInvoice(order)}
-          disabled={saving}
-          className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
-        >
-          <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-          Imprimir factura
         </button>
       )}
       {canCancel && isCancelableOrder(order) && (
@@ -699,12 +757,29 @@ export default function DeliveryOrders() {
     );
   };
 
+  const renderOrderInvoice = (order) => (
+    <div onClick={(event) => event.stopPropagation()}>
+      <div>{order.invoiceNumber || "-"}</div>
+      {canPrintInvoiceForOrder(user, order) && (
+        <button
+          type="button"
+          onClick={() => handlePrintInvoice(order)}
+          disabled={saving}
+          className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:underline disabled:opacity-50"
+        >
+          <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+          Imprimir factura
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Órdenes de entrega</h1>
-          <p className="text-sm text-gray-600">Artículos, preparación, remitos y cierre administrativo.</p>
+          <p className="text-sm text-gray-600">Pedidos pendientes de entrega, remitos y cierre administrativo.</p>
         </div>
         <ResponsiveActionBar>
           <button
@@ -713,9 +788,9 @@ export default function DeliveryOrders() {
             className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-sm hover:bg-gray-50 ${fullWidthButtonClass}`}
           >
             <Printer className="h-4 w-4" aria-hidden="true" />
-            Historial remitos
+            Historial de pedidos
           </button>
-          {(isJefeUser(user) || isVentasUser(user) || isAdminUser(user)) && (
+          {canSyncDrive(user) && (
             <button
               type="button"
               onClick={handleDriveSync}
@@ -757,6 +832,7 @@ export default function DeliveryOrders() {
             onChange={updateFilter("status")}
             className="h-9 w-full rounded border px-2"
           >
+            <option value={PENDING_DELIVERY_STATUS_FILTER}>Pedidos pendientes</option>
             <option value="">Todos</option>
             {Object.entries(STATUS_LABELS).map(([value, label]) => (
               <option key={value} value={value}>
@@ -824,7 +900,7 @@ export default function DeliveryOrders() {
               <MobileDataCard
                 key={order.id}
                 className={`${pendingArmadoRowClass(order)} cursor-pointer`}
-                onClick={() => setDetailOrder(order)}
+                onClick={() => openDetailOrder(order)}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -836,7 +912,7 @@ export default function DeliveryOrders() {
                     checked={selected.includes(order.id)}
                     onClick={(event) => event.stopPropagation()}
                     onChange={() => toggleSelected(order.id)}
-                    disabled={order.remitoNumber || NON_CANCELABLE_STATUSES.has(order.status)}
+                    disabled={!canSelectForRemito(order)}
                     className="h-5 w-5 shrink-0 cursor-pointer rounded border-gray-300 accent-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
                     aria-label={`Seleccionar ${order.orderNumber || "orden"}`}
                   />
@@ -852,7 +928,9 @@ export default function DeliveryOrders() {
                     {articles.secondary && <div className="text-xs text-gray-500">{articles.secondary}</div>}
                   </MobileDataField>
                   <MobileDataField label="Comercial" value={deliveryOrderCommercialLabel(order) || "-"} />
-                  <MobileDataField label="Factura" value={order.invoiceNumber || "-"} />
+                  <MobileDataField label="Factura">
+                    {renderOrderInvoice(order)}
+                  </MobileDataField>
                   <MobileDataField label="Remito" className="min-[420px]:col-span-2">
                     {renderOrderRemito(order)}
                   </MobileDataField>
@@ -892,7 +970,7 @@ export default function DeliveryOrders() {
                 return (
                 <tr
                   key={order.id}
-                  onClick={() => setDetailOrder(order)}
+                  onClick={() => openDetailOrder(order)}
                   className={`cursor-pointer border-t align-top hover:bg-gray-50 ${pendingArmadoRowClass(order)}`}
                 >
                   <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
@@ -900,7 +978,7 @@ export default function DeliveryOrders() {
                       type="checkbox"
                       checked={selected.includes(order.id)}
                       onChange={() => toggleSelected(order.id)}
-                      disabled={order.remitoNumber || NON_CANCELABLE_STATUSES.has(order.status)}
+                      disabled={!canSelectForRemito(order)}
                       className="h-5 w-5 cursor-pointer rounded border-gray-300 align-middle accent-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
                     />
                   </td>
@@ -920,7 +998,9 @@ export default function DeliveryOrders() {
                   <td className="px-2 py-2">
                     {renderOrderRemito(order)}
                   </td>
-                  <td className="px-2 py-2">{order.invoiceNumber || "-"}</td>
+                  <td className="px-2 py-2">
+                    {renderOrderInvoice(order)}
+                  </td>
                   <td className="px-2 py-2">
                     {renderOrderActions(order)}
                   </td>
@@ -978,10 +1058,10 @@ export default function DeliveryOrders() {
           load();
         }}
       />
-      <RemitoHistoryModal
+      <OrderHistoryModal
         open={historyModalOpen}
         loading={historyLoading}
-        items={remitoHistory}
+        items={orderHistory}
         onClose={() => setHistoryModalOpen(false)}
       />
       <DeliveryOrderDetailModal
@@ -993,12 +1073,13 @@ export default function DeliveryOrders() {
         onEdit={() => openEditOrder(detailOrder)}
         onEditPartidas={() => setPartidasOrder(detailOrder)}
         onPrintInvoice={() => handlePrintInvoice(detailOrder)}
+        onPrintExitOrder={openExitRemito}
         onClose={() => setDetailOrder(null)}
       />
       <NewDeliveryOrderModal
         open={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
-        formProps={{ canEditItemDiscounts: isVentasUser(user) || isJefeUser(user) }}
+        formProps={{ canEditItemDiscounts: canEditItemDiscounts(user) }}
         onCreated={() => {
           setError("");
           load();
@@ -1008,29 +1089,10 @@ export default function DeliveryOrders() {
         open={Boolean(editingOrder)}
         order={editingOrder}
         onClose={() => setEditingOrder(null)}
-        formProps={{ canEditItemDiscounts: isVentasUser(user) || isJefeUser(user) }}
+        formProps={{ canEditItemDiscounts: canEditItemDiscounts(user) }}
         onCreated={() => {
           setError("");
           setEditingOrder(null);
-          load();
-        }}
-      />
-      <NewDeliveryOrderModal
-        open={Boolean(preparingOrder)}
-        order={preparingOrder}
-        title="Completar partidas"
-        description="Complete las partidas faltantes para marcar la orden como preparada. Los datos comerciales y los artículos no se editan en este paso."
-        submitLabel="Guardar partidas y preparar"
-        formProps={{
-          readOnlyHeader: true,
-          readOnlyItems: true,
-          partidasRequired: true,
-          onPartidasSubmit: savePreparationPartidas,
-        }}
-        onClose={() => setPreparingOrder(null)}
-        onCreated={() => {
-          setError("");
-          setPreparingOrder(null);
           load();
         }}
       />
@@ -1077,6 +1139,7 @@ function DeliveryOrderDetailModal({
   onEdit,
   onEditPartidas,
   onPrintInvoice,
+  onPrintExitOrder,
   onClose,
 }) {
   useEffect(() => {
@@ -1091,6 +1154,7 @@ function DeliveryOrderDetailModal({
   if (!open || !order) return null;
 
   const items = Array.isArray(order.items) ? order.items : [];
+  const isServiceRelease = order.deliveryType === "service_release";
   const currency = deliveryOrderPriceCurrency(order);
   const timeline = [
     ["Creada", order.createdAt],
@@ -1163,6 +1227,7 @@ function DeliveryOrderDetailModal({
               <table className="min-w-full text-left text-sm">
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
+                    {isServiceRelease && <th className="px-3 py-2 font-medium">OS</th>}
                     <th className="px-3 py-2 font-medium">Código</th>
                     <th className="px-3 py-2 font-medium">Detalle</th>
                     <th className="px-3 py-2 font-medium">Cantidad</th>
@@ -1173,13 +1238,31 @@ function DeliveryOrderDetailModal({
                 <tbody className="divide-y bg-white">
                   {items.map((item) => {
                     const itemCurrency = deliveryOrderItemPriceCurrency(item, order);
+                    const canOmitPartida = deliveryOrderItemCanOmitPartida(order, item);
                     const partidas = Array.isArray(item.partidas) && item.partidas.length
                       ? item.partidas
                       : item.partida
                         ? [{ partida: item.partida, assignedQuantity: item.quantity, partidaExpirationDate: item.partidaExpirationDate }]
                         : [];
+                    const itemIngresoId = item.ingresoId || (items.length === 1 ? order.ingresoId : "");
+                    const itemServiceReference = formatServiceOrderReference(itemIngresoId);
                     return (
                       <tr key={item.id || `${item.articleCode}-${item.description}`} className="align-top">
+                        {isServiceRelease && (
+                          <td className="whitespace-nowrap px-3 py-2">
+                            <div className="font-mono text-xs font-semibold text-gray-900">{itemServiceReference || "-"}</div>
+                            {itemIngresoId && (
+                              <button
+                                type="button"
+                                onClick={() => onPrintExitOrder?.(itemIngresoId)}
+                                className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:underline"
+                              >
+                                <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                                Imprimir
+                              </button>
+                            )}
+                          </td>
+                        )}
                         <td className="px-3 py-2 font-mono text-xs text-sky-700">{item.articleCode || "-"}</td>
                         <td className="px-3 py-2">
                           <div className="font-medium text-gray-900">{item.articleName || item.description || "-"}</div>
@@ -1219,8 +1302,10 @@ function DeliveryOrderDetailModal({
                             </div>
                           ) : (
                             <div className="space-y-1">
-                              <span className="block text-xs text-amber-700">Sin partidas indicadas</span>
-                              {canEditPartidas && (
+                              <span className={`block text-xs ${canOmitPartida ? "text-emerald-700" : "text-amber-700"}`}>
+                                {canOmitPartida ? "No requiere partida en Bejerman" : "Sin partidas indicadas"}
+                              </span>
+                              {canEditPartidas && !canOmitPartida && (
                                 <button
                                   type="button"
                                   onClick={onEditPartidas}
@@ -1237,7 +1322,7 @@ function DeliveryOrderDetailModal({
                   })}
                   {!items.length && (
                     <tr>
-                      <td colSpan={5} className="px-3 py-8 text-center text-gray-500">
+                      <td colSpan={isServiceRelease ? 6 : 5} className="px-3 py-8 text-center text-gray-500">
                         Sin artículos.
                       </td>
                     </tr>
@@ -1274,7 +1359,7 @@ function DeliveryOrderDetailModal({
   );
 }
 
-function RemitoHistoryModal({ open, loading, items, onClose }) {
+function OrderHistoryModal({ open, loading, items, onClose }) {
   useEffect(() => {
     if (!open) return undefined;
     const onKeyDown = (event) => {
@@ -1294,8 +1379,8 @@ function RemitoHistoryModal({ open, loading, items, onClose }) {
       >
         <div className="flex items-center justify-between gap-3 border-b px-4 py-3 sm:px-5 sm:py-4">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Historial de remitos Bejerman</h2>
-            <p className="text-sm text-gray-600">Últimos remitos emitidos y órdenes agrupadas.</p>
+            <h2 className="text-lg font-semibold text-gray-900">Historial de pedidos</h2>
+            <p className="text-sm text-gray-600">Pedidos entregados o cerrados con remito.</p>
           </div>
           <button type="button" className="rounded p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-900" onClick={onClose} aria-label="Cerrar">
             <X className="h-5 w-5" aria-hidden="true" />
@@ -1306,51 +1391,59 @@ function RemitoHistoryModal({ open, loading, items, onClose }) {
           <table className="min-w-full text-left text-xs">
             <thead className="bg-gray-50 text-gray-500">
               <tr>
-                <th className="px-4 py-2 font-medium">Remito</th>
+                <th className="px-4 py-2 font-medium">Orden</th>
                 <th className="px-4 py-2 font-medium">Cliente</th>
-                <th className="px-4 py-2 font-medium">Órdenes</th>
-                <th className="px-4 py-2 font-medium">Fecha</th>
+                <th className="px-4 py-2 font-medium">Remito</th>
+                <th className="px-4 py-2 font-medium">Estado</th>
+                <th className="px-4 py-2 font-medium">Fechas</th>
+                <th className="px-4 py-2 font-medium">Artículos</th>
                 <th className="px-4 py-2 text-right font-medium">PDF</th>
               </tr>
             </thead>
             <tbody className="divide-y">
               {loading && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-gray-500">
+                  <td colSpan={7} className="px-4 py-10 text-center text-gray-500">
                     Cargando...
                   </td>
                 </tr>
               )}
               {!loading &&
-                items.map((group) => (
-                  <tr key={group.id} className="align-top hover:bg-gray-50">
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <div className="font-medium text-gray-900">{group.remitoNumber || group.id}</div>
+                items.map((order) => {
+                  const articles = deliveryOrderItemsSummary(order);
+                  const group = order.bejermanRemitoGroup || {};
+                  const printUrl = remitoPrintUrl(order);
+                  return (
+                  <tr key={order.id} className="align-top hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <OrderNumberCell value={order.orderNumber} />
+                      {order.sourceReference && <div className="mt-1 text-[11px] text-gray-500">{order.sourceReference}</div>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>{order.customerName || "-"}</div>
+                      {order.bejermanCustomerCode && <div className="text-[11px] text-gray-500">{order.bejermanCustomerCode}</div>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-gray-900">{order.remitoNumber || "-"}</div>
                       <div className="text-[11px] text-gray-500">
                         {[group.comprobanteTipo, group.operationCode, group.depositCode].filter(Boolean).join(" / ") || "-"}
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <div>{group.customerName || "-"}</div>
-                      {group.customerCode && <div className="text-[11px] text-gray-500">{group.customerCode}</div>}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div>{group.orderCount || 0} órdenes</div>
-                      <div className="mt-1 max-w-md text-[11px] text-gray-500">
-                        {(group.orders || [])
-                          .slice(0, 4)
-                          .map((order) => order.sourceReference || order.orderNumber)
-                          .filter(Boolean)
-                          .join(", ") || "-"}
-                      </div>
+                      <StatusChip status={order.status} />
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-gray-600">
-                      {formatDateTime(group.generatedAt || group.createdAt)}
+                      <div>Remito: {formatDateTime(group.generatedAt || order.preparedAt)}</div>
+                      <div className="mt-1">Entrega: {formatDateTime(order.deliveredAt)}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-gray-900">{articles.primary}</div>
+                      {articles.secondary && <div className="mt-1 max-w-sm text-[11px] text-gray-500">{articles.secondary}</div>}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-right">
-                      {group.printUrl ? (
+                      {printUrl ? (
                         <a
-                          href={group.printUrl}
+                          href={printUrl}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 text-blue-700 hover:underline"
@@ -1363,11 +1456,12 @@ function RemitoHistoryModal({ open, loading, items, onClose }) {
                       )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               {!loading && !items.length && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-gray-500">
-                    Todavía no hay remitos Bejerman emitidos.
+                  <td colSpan={7} className="px-4 py-10 text-center text-gray-500">
+                    Todavía no hay pedidos entregados.
                   </td>
                 </tr>
               )}

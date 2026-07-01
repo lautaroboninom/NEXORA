@@ -1,6 +1,6 @@
 // Minimal service worker for installability + basic offline fallback
-// El valor 0.1.0-24e00aa-dirty-20260612183516708 será reemplazado en prebuild por scripts/build-sw.mjs
-const CACHE_NAME = 'nexora-app-cache-0.1.0-24e00aa-dirty-20260612183516708';
+// El valor 0.1.0-ddd4e32-dirty-20260701133523831 será reemplazado en prebuild por scripts/build-sw.mjs
+const CACHE_NAME = 'nexora-app-cache-0.1.0-ddd4e32-dirty-20260701133523831';
 const URLS_TO_CACHE = ['/', '/index.html'];
 
 self.addEventListener('install', (event) => {
@@ -22,6 +22,11 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
+  const url = new URL(request.url);
+  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
+    event.respondWith(fetch(request));
+    return;
+  }
   event.respondWith(
     fetch(request).catch(() => caches.match(request))
   );

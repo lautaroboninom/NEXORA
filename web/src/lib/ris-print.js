@@ -58,7 +58,8 @@ export function documentNameFromRis(source = {}, fallback = "RIS") {
 export function isRisRegistered(source = {}) {
   const ris = source?.ris || source || {};
   const documentMode = String(ris?.document_mode || ris?.documentMode || source?.document_mode || source?.documentMode || "").toLowerCase();
-  return documentMode === "register";
+  const status = String(ris?.status || source?.status || "").toLowerCase();
+  return documentMode === "register" && (!status || status === "generated");
 }
 
 export function isRisGenerated(source = {}) {

@@ -495,10 +495,11 @@ class WorkUpgradeAPITest(TestCase):
                     ],
                 )
 
+            delivery_order("do-work-0", "OE-0", "pendiente_stock")
             delivery_order("do-work-1", "OE-1", "pendiente_armado", priority="urgente")
             delivery_order("do-work-2", "OE-2", "armado_pendiente_entrega")
-            delivery_order("do-work-3", "OE-3", "entregado_pendiente_facturacion", remito_number="R 0001-00000001")
-            delivery_order("do-work-4", "OE-4", "facturado", remito_number="R 0001-00000002", invoice_number="F 0001-00000002")
+            delivery_order("do-work-3", "OE-3", "entregado_pendiente_facturacion", remito_number="RT 0001-00000001")
+            delivery_order("do-work-4", "OE-4", "facturado", remito_number="RT 0001-00000002", invoice_number="F 0001-00000002")
             delivery_order("do-work-5", "OE-5", "armado_pendiente_entrega", imported_delivered_flag=True)
 
             cur.execute(
@@ -552,8 +553,8 @@ class WorkUpgradeAPITest(TestCase):
                 "pedidos_abiertos",
             },
         )
-        self.assertEqual(resp.data["delivery_orders"]["counts"]["active"], 2)
-        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 2)
+        self.assertEqual(resp.data["delivery_orders"]["counts"]["active"], 3)
+        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
         self.assertNotIn("OE-5", {row["orderNumber"] for row in resp.data["delivery_orders"]["items"]})
 
     def test_resumen_deduplica_ingresos_que_caen_en_multiples_alertas(self):
@@ -610,13 +611,14 @@ class WorkUpgradeAPITest(TestCase):
             {row["key"] for row in resp.data["kpis"]},
             {
                 "pedidos_pendientes_armado",
+                "pedidos_pendientes_stock",
                 "pedidos_listos_entrega",
                 "remitos_pendientes_facturacion",
             },
         )
         self.assertEqual(resp.data["alerts"], [])
         self.assertEqual(resp.data["objetivos"], [])
-        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 2)
+        self.assertEqual(len(resp.data["delivery_orders"]["items"]), 3)
         self.assertNotIn("OE-5", {row["orderNumber"] for row in resp.data["delivery_orders"]["items"]})
         self.assertEqual(resp.data["prioridades"], [])
 
@@ -633,13 +635,14 @@ class WorkUpgradeAPITest(TestCase):
                 "derivados_en_espera",
                 "preventivos_vencidos",
                 "preventivos_proximos",
+                "pedidos_pendientes_stock",
                 "pedidos_pendientes_armado",
                 "pedidos_listos_entrega",
             },
         )
         self.assertEqual(
             {row["status"] for row in resp.data["delivery_orders"]["items"]},
-            {"pendiente_armado", "armado_pendiente_entrega"},
+            {"pendiente_stock", "pendiente_armado", "armado_pendiente_entrega"},
         )
         alert_keys = {row["key"] for row in resp.data["alerts"]}
         self.assertIn("liberado_sin_entregar", alert_keys)

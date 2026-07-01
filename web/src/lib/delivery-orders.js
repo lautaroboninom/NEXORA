@@ -34,6 +34,20 @@ export function deliveryOrderItemPriceCurrency(item, orderOrCurrency = "ARS") {
   return clean(item?.priceCurrency).toUpperCase() === "USD" ? "USD" : fallback === "USD" ? "USD" : "ARS";
 }
 
+export function deliveryOrderItemRequiresPartida(item) {
+  const value = item?.articleRequiresPartida ?? item?.requiresPartida;
+  if (value === true || value === false) return value;
+  const text = clean(value).toLowerCase();
+  if (["1", "s", "si", "sí", "true", "yes", "y", "on"].includes(text)) return true;
+  if (["0", "n", "no", "false", "off"].includes(text)) return false;
+  return null;
+}
+
+export function deliveryOrderItemCanOmitPartida(order, item) {
+  const deliveryType = clean(order?.deliveryType).toLowerCase() || "sale";
+  return ["sale", "demo"].includes(deliveryType) && deliveryOrderItemRequiresPartida(item) === false;
+}
+
 export function formatOrderMoney(value, currency = "ARS") {
   const parsed = parseNumber(value);
   if (parsed === null) return "-";
@@ -52,6 +66,69 @@ export function deliveryOrderItemLabel(item) {
   return `${formatOrderQuantity(item?.quantity)} x ${label}`;
 }
 
+export function formatServiceOrderReference(value) {
+  const text = clean(value);
+  if (!text) return "";
+  const match = text.match(/OS[\s-]*(\d+)/i) || text.match(/^(\d+)$/);
+  if (!match) return text.toUpperCase().startsWith("OS-") ? text.toUpperCase() : text;
+  const number = Number.parseInt(match[1], 10);
+  return Number.isFinite(number) ? `OS-${String(number).padStart(5, "0")}` : `OS-${match[1]}`;
+}
+
+export function serviceOrderReferenceIngresoId(value) {
+  const reference = formatServiceOrderReference(value);
+  const match = reference.match(/^OS-(\d+)$/i);
+  return match ? String(Number.parseInt(match[1], 10)) : "";
+}
+
+function appendUniqueServiceReference(references, value) {
+  const reference = formatServiceOrderReference(value);
+  if (reference && !references.includes(reference)) references.push(reference);
+}
+
+function appendUniqueServiceIngresoId(ids, value) {
+  const text = clean(value);
+  if (!text) return;
+  const parsed = serviceOrderReferenceIngresoId(text) || (/^\d+$/.test(text) ? String(Number.parseInt(text, 10)) : "");
+  if (parsed && !ids.includes(parsed)) ids.push(parsed);
+}
+
+export function deliveryOrderServiceReleaseReferences(order) {
+  if (clean(order?.deliveryType).toLowerCase() !== "service_release") return [];
+  const references = [];
+  const explicit = Array.isArray(order?.serviceReleaseReferences) ? order.serviceReleaseReferences : [];
+  explicit.forEach((reference) => appendUniqueServiceReference(references, reference));
+  appendUniqueServiceReference(references, order?.ingresoId);
+  if (clean(order?.sourceSystem).toLowerCase() === "nexora") {
+    appendUniqueServiceReference(references, order?.sourceExternalId);
+  }
+  const items = Array.isArray(order?.items) ? order.items : [];
+  items.forEach((item) => {
+    appendUniqueServiceReference(references, item?.ingresoId);
+    const partidas = Array.isArray(item?.partidas) ? item.partidas : [];
+    partidas.forEach((partida) => appendUniqueServiceReference(references, partida?.ingresoId));
+  });
+  return references;
+}
+
+export function deliveryOrderServiceReleaseIngresoIds(order) {
+  if (clean(order?.deliveryType).toLowerCase() !== "service_release") return [];
+  const ids = [];
+  const explicit = Array.isArray(order?.serviceReleaseReferences) ? order.serviceReleaseReferences : [];
+  explicit.forEach((reference) => appendUniqueServiceIngresoId(ids, reference));
+  appendUniqueServiceIngresoId(ids, order?.ingresoId);
+  if (clean(order?.sourceSystem).toLowerCase() === "nexora") {
+    appendUniqueServiceIngresoId(ids, order?.sourceExternalId);
+  }
+  const items = Array.isArray(order?.items) ? order.items : [];
+  items.forEach((item) => {
+    appendUniqueServiceIngresoId(ids, item?.ingresoId);
+    const partidas = Array.isArray(item?.partidas) ? item.partidas : [];
+    partidas.forEach((partida) => appendUniqueServiceIngresoId(ids, partida?.ingresoId));
+  });
+  return ids;
+}
+
 export function deliveryOrderItemEffectivePartida(item, order) {
   const explicit = clean(item?.partida);
   if (explicit) return explicit;
@@ -67,7 +144,8 @@ export function deliveryOrderItemEffectivePartida(item, order) {
   return clean(order?.equipmentSerial);
 }
 
-export function deliveryOrderItemPartidaLabel(item, order) {
+export function deliveryOrderItemPartidaLabel(item, order, options = {}) {
+  const includePartidaLabel = options?.includePartidaLabel !== false;
   const partidas = Array.isArray(item?.partidas) ? item.partidas : [];
   const partidaText =
     deliveryOrderItemEffectivePartida(item, order) ||
@@ -76,7 +154,7 @@ export function deliveryOrderItemPartidaLabel(item, order) {
       .filter(Boolean)
       .join(", ");
   const deposit = clean(item?.stockDepositCode) || clean(partidas.find((partida) => clean(partida?.stockDepositCode))?.stockDepositCode);
-  return [partidaText ? `Partida ${partidaText}` : "", deposit ? `Depósito ${deposit}` : ""].filter(Boolean).join(" - ");
+  return [partidaText ? `${includePartidaLabel ? "Partida " : ""}${partidaText}` : "", deposit ? `Depósito ${deposit}` : ""].filter(Boolean).join(" - ");
 }
 
 export function deliveryOrderItemUnitPrice(item) {
@@ -180,6 +258,31 @@ export function deliveryOrderItemsSummary(order, maxItems = 2) {
     return {
       primary: deliveryOrderEquipmentContext(order) || "-",
       secondary: "Sin renglones cargados",
+    };
+  }
+  const serviceReleaseReferences = deliveryOrderServiceReleaseReferences(order);
+  const serviceReleaseCount = Math.max(
+    items.length,
+    serviceReleaseReferences.length,
+    Number.parseInt(clean(order?.serviceReleaseCount), 10) || 0
+  );
+  if (order?.deliveryType === "service_release" && serviceReleaseCount > 1) {
+    const shownReferences = serviceReleaseReferences.slice(0, 3);
+    const remainingReferences = serviceReleaseReferences.length - shownReferences.length;
+    const referencesLabel = shownReferences.length
+      ? `${shownReferences.join(", ")}${remainingReferences > 0 ? ` +${remainingReferences} OS` : ""}`
+      : "";
+    const shownEquipment = items
+      .slice(0, maxItems)
+      .map((item) => clean(item?.articleName) || clean(item?.description) || clean(item?.sourceText) || clean(item?.articleCode))
+      .filter(Boolean);
+    const remainingItems = items.length - shownEquipment.length;
+    const equipmentLabel = shownEquipment.length
+      ? `${shownEquipment.join(" | ")}${remainingItems > 0 ? ` +${remainingItems}` : ""}`
+      : "";
+    return {
+      primary: `${serviceReleaseCount} equipos`,
+      secondary: [referencesLabel, equipmentLabel].filter(Boolean).join(" - "),
     };
   }
   const shown = items.slice(0, maxItems).map(deliveryOrderItemLabel);

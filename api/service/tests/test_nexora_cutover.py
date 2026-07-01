@@ -3,7 +3,7 @@ from django.urls import resolve
 
 from service.delivery_orders import normalize_delivery_type, normalize_priority, remito_status
 from service.management.commands.import_portal_delivery_orders import _delivery_type, _priority, _status
-from service.permission_catalog import get_role_defaults
+from service.permission_catalog import PERMISSION_CODES, get_role_defaults
 from service.permission_policy import VIEW_PERMISSION_MATRIX
 from service.permissions import MappedPermissionGuard
 from service.views.devices_views import DeviceDirectCreateView, DevicesListView
@@ -14,12 +14,24 @@ from service.views.delivery_orders_views import (
     DeliveryOrderBejermanRemitoPrintView,
     DeliveryOrderBejermanRemitoView,
     DeliveryOrderInvoicePdfView,
+    DeliveryOrderNotBillableView,
     CobranzasRemitoPdfView,
+    CobranzasRemitoPrintView,
     CobranzasRemitosView,
     FacturacionCompanyOptionsView,
     ServiceOrderBillingInvoiceView,
     ServiceOrderBillingListView,
     ServiceOrderBillingPdfView,
+)
+from service.views.route_sheet_views import (
+    RouteSheetCompleteView,
+    RouteSheetDetailView,
+    RouteSheetLocationDetailView,
+    RouteSheetLocationsView,
+    RouteSheetPostponeView,
+    RouteSheetReorderView,
+    RouteSheetSuggestedDeliveryOrdersView,
+    RouteSheetView,
 )
 
 
@@ -89,6 +101,45 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         self.assertTrue(permissions["action.delivery_order.update_remito_location"])
         self.assertFalse(permissions["page.billing"])
 
+    def test_supervisor_fusiona_permisos_de_admin_ventas_y_recepcion(self):
+        permissions = get_role_defaults("supervisor")
+        admin = get_role_defaults("admin")
+        ventas = get_role_defaults("ventas")
+        recepcion = get_role_defaults("recepcion")
+        supervisor_explicit_permissions = {"action.route_sheet.postpone"}
+
+        for code in PERMISSION_CODES:
+            self.assertEqual(
+                permissions[code],
+                admin[code] or ventas[code] or recepcion[code] or code in supervisor_explicit_permissions,
+                code,
+            )
+        self.assertTrue(permissions["page.delivery_orders"])
+        self.assertTrue(permissions["page.bejerman_purchase_entries"])
+        self.assertTrue(permissions["action.ingreso.fix_ris_preflight"])
+        self.assertTrue(permissions["page.catalogs"])
+        self.assertTrue(permissions["page.warranty"])
+        self.assertTrue(permissions["page.devices_preventivos"])
+        self.assertTrue(permissions["action.devices_preventivos.manage"])
+        self.assertFalse(permissions["page.billing"])
+        self.assertFalse(permissions["action.billing.view"])
+        self.assertFalse(permissions["action.delivery_order.invoice"])
+        self.assertFalse(permissions["page.users"])
+        self.assertFalse(permissions["action.users.manage_permissions"])
+
+    def test_logistica_solo_ve_y_ejecuta_hoja_de_ruta(self):
+        permissions = get_role_defaults("logistica")
+
+        self.assertTrue(permissions["page.route_sheet"])
+        self.assertTrue(permissions["action.route_sheet.complete"])
+        self.assertTrue(permissions["action.route_sheet.postpone"])
+        self.assertTrue(permissions["action.delivery_order.deliver"])
+        self.assertFalse(permissions["page.delivery_orders"])
+        self.assertFalse(permissions["action.route_sheet.manage"])
+        self.assertFalse(permissions["action.delivery_order.create"])
+        self.assertFalse(permissions["action.delivery_order.cancel"])
+        self.assertFalse(permissions["page.recepcion"])
+
     def test_admin_can_view_devices_and_create_direct_devices_by_default(self):
         permissions = get_role_defaults("admin")
 
@@ -146,9 +197,13 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         deposits_match = resolve("/api/ordenes-entrega/bejerman-depositos/")
         stock_match = resolve("/api/ordenes-entrega/bejerman-articulos-stock/")
         print_match = resolve("/api/ordenes-entrega/remito-bejerman/brg-test/print/")
+        order_remito_pdf_match = resolve("/api/ordenes-entrega/do-test/remito/pdf/")
+        order_remito_print_match = resolve("/api/ordenes-entrega/do-test/remito/print/")
         invoice_match = resolve("/api/ordenes-entrega/do-test/factura/pdf/")
+        not_billable_match = resolve("/api/ordenes-entrega/do-test/no-facturar/")
         remitos_match = resolve("/api/cobranzas/remitos/")
         remito_pdf_match = resolve("/api/cobranzas/remitos/doc-test/pdf/")
+        remito_print_match = resolve("/api/cobranzas/remitos/doc-test/print/")
         os_billing_match = resolve("/api/cobranzas/os-a-facturar/")
         os_billing_pdf_match = resolve("/api/cobranzas/os-a-facturar/123/pdf/")
 
@@ -156,11 +211,28 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         self.assertEqual(deposits_match.func.view_class.__name__, "DeliveryOrderBejermanDepositsView")
         self.assertEqual(stock_match.func.view_class.__name__, "DeliveryOrderBejermanArticleStockView")
         self.assertEqual(print_match.func.view_class.__name__, "DeliveryOrderBejermanRemitoPrintView")
+        self.assertEqual(order_remito_pdf_match.func.view_class.__name__, "DeliveryOrderRemitoPdfView")
+        self.assertEqual(order_remito_print_match.func.view_class.__name__, "DeliveryOrderRemitoPrintView")
         self.assertEqual(invoice_match.func.view_class.__name__, "DeliveryOrderInvoicePdfView")
+        self.assertEqual(not_billable_match.func.view_class.__name__, "DeliveryOrderNotBillableView")
         self.assertEqual(remitos_match.func.view_class.__name__, "CobranzasRemitosView")
         self.assertEqual(remito_pdf_match.func.view_class.__name__, "CobranzasRemitoPdfView")
+        self.assertEqual(remito_print_match.func.view_class.__name__, "CobranzasRemitoPrintView")
         self.assertEqual(os_billing_match.func.view_class.__name__, "ServiceOrderBillingListView")
         self.assertEqual(os_billing_pdf_match.func.view_class.__name__, "ServiceOrderBillingPdfView")
+
+    def test_hoja_de_ruta_routes_resolve(self):
+        self.assertEqual(resolve("/api/hoja-ruta/").func.view_class.__name__, "RouteSheetView")
+        self.assertEqual(resolve("/api/hoja-ruta/reordenar/").func.view_class.__name__, "RouteSheetReorderView")
+        self.assertEqual(resolve("/api/hoja-ruta/lugares/").func.view_class.__name__, "RouteSheetLocationsView")
+        self.assertEqual(resolve("/api/hoja-ruta/lugares/1/").func.view_class.__name__, "RouteSheetLocationDetailView")
+        self.assertEqual(
+            resolve("/api/hoja-ruta/ordenes-sugeridas/").func.view_class.__name__,
+            "RouteSheetSuggestedDeliveryOrdersView",
+        )
+        self.assertEqual(resolve("/api/hoja-ruta/rs-test/").func.view_class.__name__, "RouteSheetDetailView")
+        self.assertEqual(resolve("/api/hoja-ruta/rs-test/completar/").func.view_class.__name__, "RouteSheetCompleteView")
+        self.assertEqual(resolve("/api/hoja-ruta/rs-test/posponer/").func.view_class.__name__, "RouteSheetPostponeView")
 
     def test_migrated_bejerman_views_use_mapped_permissions(self):
         self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanRemitoView.permission_classes)
@@ -169,8 +241,10 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanArticleStockView.permission_classes)
         self.assertIn(MappedPermissionGuard, DeliveryOrderBejermanRemitoPrintView.permission_classes)
         self.assertIn(MappedPermissionGuard, DeliveryOrderInvoicePdfView.permission_classes)
+        self.assertIn(MappedPermissionGuard, DeliveryOrderNotBillableView.permission_classes)
         self.assertIn(MappedPermissionGuard, CobranzasRemitosView.permission_classes)
         self.assertIn(MappedPermissionGuard, CobranzasRemitoPdfView.permission_classes)
+        self.assertIn(MappedPermissionGuard, CobranzasRemitoPrintView.permission_classes)
         self.assertIn(MappedPermissionGuard, FacturacionCompanyOptionsView.permission_classes)
         self.assertIn(MappedPermissionGuard, ServiceOrderBillingListView.permission_classes)
         self.assertIn(MappedPermissionGuard, ServiceOrderBillingInvoiceView.permission_classes)
@@ -188,11 +262,31 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
             "page.delivery_orders",
         )
         self.assertEqual(
+            VIEW_PERMISSION_MATRIX["DeliveryOrderNotBillableView"]["POST"],
+            "action.delivery_order.invoice",
+        )
+        self.assertIn(MappedPermissionGuard, RouteSheetView.permission_classes)
+        self.assertIn(MappedPermissionGuard, RouteSheetDetailView.permission_classes)
+        self.assertIn(MappedPermissionGuard, RouteSheetCompleteView.permission_classes)
+        self.assertIn(MappedPermissionGuard, RouteSheetPostponeView.permission_classes)
+        self.assertIn(MappedPermissionGuard, RouteSheetLocationDetailView.permission_classes)
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetView"]["GET"], "page.route_sheet")
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetView"]["POST"], "action.route_sheet.manage")
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetCompleteView"]["POST"], "action.route_sheet.complete")
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetPostponeView"]["POST"], "action.route_sheet.postpone")
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetReorderView"]["POST"], "action.route_sheet.manage")
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetLocationsView"]["POST"], "action.route_sheet.manage")
+        self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetLocationDetailView"]["PATCH"], "action.route_sheet.manage")
+        self.assertEqual(
             VIEW_PERMISSION_MATRIX["CobranzasRemitosView"]["GET"],
             "action.billing.view",
         )
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["CobranzasRemitoPdfView"]["GET"],
+            "action.billing.view",
+        )
+        self.assertEqual(
+            VIEW_PERMISSION_MATRIX["CobranzasRemitoPrintView"]["GET"],
             "action.billing.view",
         )
         self.assertEqual(

@@ -1,3 +1,4 @@
+from datetime import date
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
@@ -19,10 +20,7 @@ class GarantiaFabricaCheckViewTests(SimpleTestCase):
     def test_preserva_indeterminado_cuando_no_hay_fecha_de_venta(self):
         with (
             patch("service.views.ingresos_views.q", return_value=None),
-            patch(
-                "service.views.ingresos_views.compute_warranty",
-                return_value={"garantia": None, "fecha_venta": None, "vence_el": None, "meta": {"source": "excel_general"}},
-            ),
+            patch("service.views.ingresos_views.find_latest_sale_by_serial", return_value={"found": False}),
         ):
             response = self._request()
 
@@ -35,11 +33,28 @@ class GarantiaFabricaCheckViewTests(SimpleTestCase):
         with (
             patch("service.views.ingresos_views.q", return_value=None),
             patch(
-                "service.views.ingresos_views.compute_warranty",
-                return_value={"garantia": False, "fecha_venta": None, "vence_el": None, "meta": {"source": "excel_general"}},
+                "service.views.ingresos_views.find_latest_sale_by_serial",
+                return_value={
+                    "found": True,
+                    "source": "bejerman_sale_cache",
+                    "serial": "SN-001",
+                    "issueDate": "2024-01-01",
+                    "documentLabel": "FC A 0001-00000001",
+                },
+            ),
+            patch(
+                "service.views.ingresos_views.compute_warranty_from_sale_date",
+                return_value={
+                    "garantia": False,
+                    "fecha_venta": date(2024, 1, 1),
+                    "vence_el": date(2024, 12, 31),
+                    "meta": {"source": "bejerman_sale"},
+                },
             ),
         ):
             response = self._request()
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["within_365_days"])
+        self.assertTrue(response.data["found"])
+        self.assertEqual(response.data["source"], "bejerman_sale")

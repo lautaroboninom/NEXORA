@@ -4,21 +4,10 @@ import api, { getClientesBasico, downloadAuth } from "../lib/api";
 import { useNavigate } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion, catalogEquipmentLabel } from "../lib/ui-helpers";
 import useQueryState from "../hooks/useQueryState";
+import DataChip from "../components/DataChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import StatusChip from "../components/StatusChip.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
-
-function presupuestoLabel(row) {
-  const v = row?.presupuesto_estado;
-  if (!v) return "-";
-  if (v === "presupuestado") return "Presupuestado";
-  if (v === "no_aplica") return "No aplica";
-  try {
-    const s = String(v);
-    return s.charAt(0).toUpperCase() + s.slice(1);
-  } catch {
-    return String(v);
-  }
-}
 
 export default function GeneralPorCliente() {
   const [clientes, setClientes] = useState([]);
@@ -158,6 +147,8 @@ export default function GeneralPorCliente() {
     }
   };
 
+  const ubicacionLabel = (row) => row?.ubicacion_nombre ?? row?.ubicacion_id ?? "-";
+
   return (
     <div className="card">
       <div className="h1 mb-3">General por cliente</div>
@@ -272,9 +263,15 @@ export default function GeneralPorCliente() {
                     <MobileDataField label="Serie">
                       <DeviceIdentifier row={row} />
                     </MobileDataField>
-                    <MobileDataField label="Estado" value={row?.estado ?? "-"} />
-                    <MobileDataField label="Presupuesto" value={presupuestoLabel(row)} />
-                    <MobileDataField label="Ubicación" value={row?.ubicacion_nombre ?? row?.ubicacion_id ?? "-"} />
+                    <MobileDataField label="Estado">
+                      <StatusChip value={row?.estado} title="Estado del equipo" />
+                    </MobileDataField>
+                    <MobileDataField label="Presupuesto">
+                      <StatusChip value={row?.presupuesto_estado} title="Estado del presupuesto" />
+                    </MobileDataField>
+                    <MobileDataField label="Ubicación">
+                      <DataChip value={ubicacionLabel(row)} tone="slate" />
+                    </MobileDataField>
                     <MobileDataField label="Fecha ingreso" value={formatDateOnly(resolveFechaIngreso(row))} />
                     <MobileDataField label="Fecha presupuestado" value={formatDateOnly(row?.presupuesto_fecha_emision || row?.presupuesto_fecha_envio)} />
                   </div>
@@ -327,9 +324,9 @@ export default function GeneralPorCliente() {
                   <td className="p-2 underline">{formatOS(row)}</td>
                   <td className="p-2">{catalogEquipmentLabel(row)}</td>
                   <td className="p-2"><DeviceIdentifier row={row} /></td>
-                  <td className="p-2">{row?.estado ?? "-"}</td>
-                  <td className="p-2">{presupuestoLabel(row)}</td>
-                  <td className="p-2">{row?.ubicacion_nombre ?? row?.ubicacion_id ?? "-"}</td>
+                  <td className="p-2"><StatusChip value={row?.estado} title="Estado del equipo" /></td>
+                  <td className="p-2"><StatusChip value={row?.presupuesto_estado} title="Estado del presupuesto" /></td>
+                  <td className="p-2"><DataChip value={ubicacionLabel(row)} tone="slate" /></td>
                   <td className="p-2 whitespace-nowrap">{formatDateOnly(resolveFechaIngreso(row))}</td>
                   <td className="p-2 whitespace-nowrap">
                 {formatDateOnly(row?.presupuesto_fecha_emision || row?.presupuesto_fecha_envio)}

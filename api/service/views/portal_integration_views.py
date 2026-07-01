@@ -213,6 +213,7 @@ def _label(value):
         "detenido - repuesto": "Detenido - Repuesto",
         "reparado": "Listo para Entrega",
         "controlado sin defecto": "Listo para Entrega",
+        "no se repara": "Listo para Entrega",
         "listo para entrega": "Listo para Entrega",
         "liberado": "Listo para Entrega",
         "emitido": "Emitido",
@@ -587,7 +588,7 @@ def _state_candidates(value):
         "en reparacion": ["para reparar", "reparacion", "reparación", "en reparacion", "en reparación"],
         "en reparación": ["para reparar", "reparacion", "reparación", "en reparacion", "en reparación"],
         "detenido - repuesto": ["detenido repuesto", "detenido - repuesto"],
-        "listo para entrega": ["reparado", "controlado sin defecto", "liberado", "listo para entrega"],
+        "listo para entrega": ["reparado", "controlado sin defecto", "no se repara", "liberado", "listo para entrega"],
     }
     return candidates.get(key, [key])
 

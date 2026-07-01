@@ -21,6 +21,7 @@ const CHANNELS = [
   { key: "email", label: "Mail", Icon: Mail },
   { key: "push", label: "Teléfono", Icon: Smartphone },
 ];
+const CHANNEL_BY_KEY = new Map(CHANNELS.map((channel) => [channel.key, channel]));
 
 function formatDate(value) {
   if (!value) return "";
@@ -82,6 +83,23 @@ function groupSettingsItems(items) {
     byName.get(group).items.push(item);
   }
   return groups;
+}
+
+function channelsForItem(item) {
+  const raw = Array.isArray(item?.allowed_channels)
+    ? item.allowed_channels
+    : Array.isArray(item?.channels)
+      ? item.channels
+      : CHANNELS.map((channel) => channel.key);
+  const seen = new Set();
+  const out = [];
+  for (const key of raw) {
+    const channel = CHANNEL_BY_KEY.get(String(key || "").trim());
+    if (!channel || seen.has(channel.key)) continue;
+    seen.add(channel.key);
+    out.push(channel);
+  }
+  return out.length ? out : CHANNELS;
 }
 
 function ToggleButton({ checked, disabled, label, title, onClick, Icon }) {
@@ -333,11 +351,9 @@ export default function NotificationBell() {
 
   async function handleToggleChannel(item, channel) {
     if (!item?.key || settingsSaving) return;
-    const currentChannels = {
-      bell: Boolean(item.effective_channels?.bell),
-      email: Boolean(item.effective_channels?.email),
-      push: Boolean(item.effective_channels?.push),
-    };
+    const currentChannels = Object.fromEntries(
+      channelsForItem(item).map(({ key }) => [key, Boolean(item.effective_channels?.[key])])
+    );
     const nextChannels = { ...currentChannels, [channel]: !currentChannels[channel] };
     setSettingsSaving(`${item.key}:${channel}`);
     setSettingsError("");
@@ -498,11 +514,6 @@ export default function NotificationBell() {
                     ))}
                   </div>
                 ) : null}
-                {settings?.mandatory?.bejermanRemitoPdf?.enabled && (
-                  <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    Los PDF de remitos Bejerman se envían siempre por mail para tu rol.
-                  </div>
-                )}
               </section>
 
               <section className="space-y-3">
@@ -525,7 +536,7 @@ export default function NotificationBell() {
                             <div className="line-clamp-2 text-xs text-gray-500">{item.description}</div>
                           </div>
                           <div className="flex items-center gap-1">
-                            {CHANNELS.map(({ key, label, Icon }) => (
+                            {channelsForItem(item).map(({ key, label, Icon }) => (
                               <ToggleButton
                                 key={key}
                                 Icon={Icon}

@@ -16,6 +16,7 @@ DEV_ROLE_USERS = [
     {"email": "recepcion@nexora.dev", "nombre": "Recepción NEXORA", "rol": "recepcion"},
     {"email": "admin@nexora.dev", "nombre": "Administración NEXORA", "rol": "admin"},
     {"email": "cobranzas@nexora.dev", "nombre": "Cobranzas NEXORA", "rol": "cobranzas"},
+    {"email": "logistica@nexora.dev", "nombre": "Logística NEXORA", "rol": "logistica"},
     {"email": "tecnico@nexora.dev", "nombre": "Técnico NEXORA", "rol": "tecnico"},
 ]
 

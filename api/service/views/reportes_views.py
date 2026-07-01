@@ -77,17 +77,22 @@ class RemitoSalidaPdfView(APIView):
             return Response(status=404)
         estado_actual = (cur_row["estado"] or "").lower()
         es_venta_pendiente = estado_actual == "vendido_pendiente_entrega"
-        # Autocompletar resolución si está 'reparado' y aún sin resolución
-        if not cur_row["resolucion"] and estado_actual == 'reparado':
+        resolution_by_state = {
+            "reparado": "reparado",
+            "controlado_sin_defecto": "no_se_encontro_falla",
+            "no_se_repara": "no_reparado",
+        }
+        auto_resolution = resolution_by_state.get(estado_actual)
+        if not cur_row["resolucion"] and auto_resolution:
             exec_void(
                 """
                 UPDATE ingresos
-                   SET resolucion = 'reparado'
+                   SET resolucion = %s
                  WHERE id=%s AND (resolucion IS NULL OR btrim(resolucion)='')
                 """,
-                [ingreso_id],
+                [auto_resolution, ingreso_id],
             )
-            cur_row["resolucion"] = 'reparado'
+            cur_row["resolucion"] = auto_resolution
         if not cur_row["resolucion"] and cur_row["estado"] != 'liberado' and not es_venta_pendiente:
             return Response({"detail": "No se puede liberar sin resolución"}, status=409)
 

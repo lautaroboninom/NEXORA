@@ -24,7 +24,7 @@ function PasswordInput({ id, label, value, onChange, visible, onToggle, autoFocu
         <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden="true" />
         <input
           id={id}
-          className="input pl-10 pr-11"
+          className="w-full rounded border py-2 pl-10 pr-11"
           type={visible ? "text" : "password"}
           value={value}
           onChange={(event) => onChange(event.target.value)}

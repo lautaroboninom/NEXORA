@@ -18,9 +18,11 @@ from service.delivery_orders import (
     cancel_order,
     create_delivery_order,
     delivery_order_billing_totals,
+    ensure_service_release_order_for_ingreso,
     list_delivery_orders,
     mark_delivered,
     mark_invoiced,
+    mark_not_billable,
     mark_prepared,
     notify_delivery_order_created,
     update_delivery_order,
@@ -38,6 +40,7 @@ from service.repair_ready_notifications import notify_repair_ready_for_remito
 from service.service_order_billing import (
     list_service_orders_to_bill,
     notify_service_order_ready_to_bill,
+    register_service_order_invoice,
 )
 
 
@@ -212,6 +215,13 @@ class NotificationsAPITest(TestCase):
             activo=True,
             bejerman_seller_code="EZE",
             bejerman_seller_code_confirmed_at=timezone.now(),
+        )
+        cls.supervisor = User.objects.create(
+            nombre="Supervisor Notificaciones",
+            email="supervisor@notif.test",
+            hash_pw="",
+            rol="supervisor",
+            activo=True,
         )
         cls.jefe = User.objects.create(
             nombre="Jefe Notificaciones",
@@ -468,6 +478,211 @@ class NotificationsAPITest(TestCase):
             self.jefe.id,
         )
 
+    def _create_service_release_ingreso(
+        self,
+        serial: str,
+        internal: str,
+        *,
+        customer_id: int | None = None,
+        resolucion: str = "reparado",
+    ) -> tuple[int, int]:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.marca_id, d.model_id
+                  FROM ingresos t
+                  JOIN devices d ON d.id = t.device_id
+                 WHERE t.id = %s
+                """,
+                [self.ingreso_id],
+            )
+            marca_id, model_id = cur.fetchone()
+            cur.execute(
+                "INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, numero_interno, variante) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                [customer_id or self.customer_id, marca_id, model_id, serial, internal, ""],
+            )
+            device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    device_id, estado, motivo, fecha_ingreso, fecha_creacion,
+                    presupuesto_estado, equipo_variante, asignado_a, resolucion,
+                    remito_salida, factura_numero, fecha_entrega
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,NULL,NULL)
+                RETURNING id
+                """,
+                [
+                    device_id,
+                    "liberado",
+                    "reparación",
+                    timezone.now(),
+                    timezone.now(),
+                    "no_aplica",
+                    "",
+                    self.tecnico.id,
+                    resolucion,
+                ],
+            )
+            return int(cur.fetchone()[0]), device_id
+
+    def test_liberaciones_rss_compatibles_se_agrupan_en_una_orden(self):
+        self._ensure_rental_article_mapping("1111003")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET estado = 'liberado',
+                       resolucion = 'reparado',
+                       remito_salida = NULL,
+                       factura_numero = NULL,
+                       fecha_entrega = NULL
+                 WHERE id = %s
+                """,
+                [self.ingreso_id],
+            )
+        second_ingreso_id, _second_device_id = self._create_service_release_ingreso("NS-RSS-GRP-002", "MG 9002")
+
+        first_order = ensure_service_release_order_for_ingreso(self.ingreso_id, self.jefe.id)
+        grouped_order = ensure_service_release_order_for_ingreso(second_ingreso_id, self.jefe.id)
+
+        self.assertIsNotNone(first_order)
+        self.assertEqual(grouped_order["id"], first_order["id"])
+        self.assertEqual(grouped_order["serviceReleaseCount"], 2)
+        self.assertEqual(grouped_order["orderNumber"], f"OS-{self.ingreso_id:05d} + 1 OS")
+        self.assertEqual(
+            {item["ingresoId"] for item in grouped_order["items"]},
+            {self.ingreso_id, second_ingreso_id},
+        )
+        with connection.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM delivery_orders WHERE delivery_type = 'service_release'")
+            self.assertEqual(int(cur.fetchone()[0]), 1)
+            cur.execute(
+                "SELECT ingreso_id FROM delivery_order_items WHERE order_id = %s ORDER BY sort_order",
+                [grouped_order["id"]],
+            )
+            self.assertEqual({row[0] for row in cur.fetchall()}, {self.ingreso_id, second_ingreso_id})
+
+    def test_liberacion_rss_incompatible_por_motivo_o_cliente_abre_otra_orden(self):
+        self._ensure_rental_article_mapping("1111003")
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET estado = 'liberado', resolucion = 'reparado' WHERE id = %s", [self.ingreso_id])
+            cur.execute(
+                "INSERT INTO customers(cod_empresa, razon_social, telefono, email) VALUES (%s,%s,%s,%s) RETURNING id",
+                ["CLI-OTRO", "Cliente Otro", "", ""],
+            )
+            other_customer_id = int(cur.fetchone()[0])
+        different_reason_id, _ = self._create_service_release_ingreso("NS-RSS-MOT-003", "MG 9003", resolucion="sin_reparacion")
+        different_customer_id, _ = self._create_service_release_ingreso(
+            "NS-RSS-CLI-004",
+            "MG 9004",
+            customer_id=other_customer_id,
+        )
+
+        first_order = ensure_service_release_order_for_ingreso(self.ingreso_id, self.jefe.id)
+        reason_order = ensure_service_release_order_for_ingreso(different_reason_id, self.jefe.id)
+        customer_order = ensure_service_release_order_for_ingreso(different_customer_id, self.jefe.id)
+
+        self.assertNotEqual(reason_order["id"], first_order["id"])
+        self.assertNotEqual(customer_order["id"], first_order["id"])
+        self.assertNotEqual(customer_order["id"], reason_order["id"])
+        with connection.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM delivery_orders WHERE delivery_type = 'service_release'")
+            self.assertEqual(int(cur.fetchone()[0]), 3)
+
+    def test_rss_emitido_completa_entrega_de_todas_las_os_del_grupo(self):
+        self._ensure_rental_article_mapping("1111003")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET estado = 'liberado',
+                       resolucion = 'reparado',
+                       remito_salida = NULL,
+                       fecha_entrega = NULL,
+                       factura_numero = NULL
+                 WHERE id = %s
+                """,
+                [self.ingreso_id],
+            )
+        second_ingreso_id, _ = self._create_service_release_ingreso("NS-RSS-EMI-002", "MG 9012")
+        order = ensure_service_release_order_for_ingreso(self.ingreso_id, self.jefe.id)
+        ensure_service_release_order_for_ingreso(second_ingreso_id, self.jefe.id)
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", self._fake_bejerman_remito_client()):
+            result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertEqual(result["remitoNumber"], "RSS R 00004-00001234")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, estado, remito_salida, fecha_entrega
+                  FROM ingresos
+                 WHERE id = ANY(%s)
+                 ORDER BY id
+                """,
+                [[self.ingreso_id, second_ingreso_id]],
+            )
+            rows = cur.fetchall()
+        self.assertEqual({row[0] for row in rows}, {self.ingreso_id, second_ingreso_id})
+        self.assertEqual({row[1] for row in rows}, {"entregado"})
+        self.assertEqual({row[2] for row in rows}, {"RSS R 00004-00001234"})
+        self.assertTrue(all(row[3] is not None for row in rows))
+
+    def test_cobranzas_factura_sincroniza_todas_las_os_del_grupo(self):
+        self._ensure_rental_article_mapping("1111003")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET estado = 'liberado',
+                       resolucion = 'reparado',
+                       remito_salida = NULL,
+                       factura_numero = NULL,
+                       fecha_entrega = NULL
+                 WHERE id = %s
+                """,
+                [self.ingreso_id],
+            )
+        second_ingreso_id, _ = self._create_service_release_ingreso("NS-RSS-FAC-002", "MG 9022")
+        order = ensure_service_release_order_for_ingreso(self.ingreso_id, self.jefe.id)
+        ensure_service_release_order_for_ingreso(second_ingreso_id, self.jefe.id)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET estado = 'entregado',
+                       remito_salida = 'RSS R 00004-00001234',
+                       fecha_entrega = CURRENT_TIMESTAMP,
+                       factura_numero = NULL
+                 WHERE id = ANY(%s)
+                """,
+                [[self.ingreso_id, second_ingreso_id]],
+            )
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET remito_number = 'RSS R 00004-00001234',
+                       status = 'entregado_pendiente_facturacion',
+                       remito_location = 'recepcion'
+                 WHERE id = %s
+                """,
+                [order["id"]],
+            )
+
+        billed = register_service_order_invoice(second_ingreso_id, "FC A 0001-00016666", self.cobranzas.id)
+
+        self.assertEqual(billed["facturaNumero"], "FC A 0001-00016666")
+        self.assertEqual(billed["serviceOrderId"], order["id"])
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT factura_numero FROM ingresos WHERE id = ANY(%s) ORDER BY id",
+                [[self.ingreso_id, second_ingreso_id]],
+            )
+            self.assertEqual([row[0] for row in cur.fetchall()], ["FC A 0001-00016666", "FC A 0001-00016666"])
+            cur.execute("SELECT invoice_number FROM delivery_orders WHERE id = %s", [order["id"]])
+            self.assertEqual(cur.fetchone()[0], "FC A 0001-00016666")
+
     def _fake_bejerman_remito_client(self):
         class FakeBejermanRemitoClient:
             def __init__(self, *args, **kwargs):
@@ -503,26 +718,16 @@ class NotificationsAPITest(TestCase):
 
     def _ensure_rental_location_ids(self):
         with connection.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO locations(nombre)
-                VALUES (%s)
-                ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
-                RETURNING id
-                """,
-                ["Estantería de Alquiler"],
-            )
-            rental_id = int(cur.fetchone()[0])
-            cur.execute(
-                """
-                INSERT INTO locations(nombre)
-                VALUES (%s)
-                ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
-                RETURNING id
-                """,
-                ["-"],
-            )
-            dash_id = int(cur.fetchone()[0])
+            def ensure_location_id(nombre):
+                cur.execute("SELECT id FROM locations WHERE nombre = %s ORDER BY id ASC LIMIT 1", [nombre])
+                row = cur.fetchone()
+                if row:
+                    return int(row[0])
+                cur.execute("INSERT INTO locations(nombre) VALUES (%s) RETURNING id", [nombre])
+                return int(cur.fetchone()[0])
+
+            rental_id = ensure_location_id("Estantería de Alquiler")
+            dash_id = ensure_location_id("-")
         return rental_id, dash_id
 
     def _ensure_rental_article_mapping(self, article_code="ART-ALQ"):
@@ -677,6 +882,141 @@ class NotificationsAPITest(TestCase):
             ]
 
         return patch("service.delivery_orders._delivery_partida_stock_lots", side_effect=fake_lots)
+
+    def _create_sale_order_ready_for_manual_remito(self, order_id: str, company_key: str = "SEPID") -> dict:
+        partida = f"P-{order_id}"
+        with self._delivery_partida_stock_patch(
+            [{"articleCode": "ART-MANUAL", "depositCode": "VAL", "partida": partida, "availableQuantity": 1}]
+        ):
+            return create_delivery_order(
+                {
+                    "id": order_id,
+                    "orderNumber": f"OE-{order_id.upper()}",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": company_key,
+                    "sellerName": "Ventas",
+                    "sellerCode": "MAX",
+                    "status": "armado_pendiente_entrega",
+                    "items": [
+                        {
+                            "articleCode": "ART-MANUAL",
+                            "articleName": "Artículo manual",
+                            "articleRequiresPartida": True,
+                            "description": "Artículo manual",
+                            "quantity": 1,
+                            "unitPrice": "0",
+                            "partida": partida,
+                        }
+                    ],
+                },
+                self.jefe.id,
+            )
+
+    def test_cargar_remito_bejerman_directo_no_registra_movimiento_stock(self):
+        cases = [
+            ("do-manual-digital-sep", "SEPID", "00004"),
+            ("do-manual-digital-mg", "MGBIO", "00007"),
+        ]
+
+        with patch("service.bejerman_delivery.BejermanSDKClient") as sdk_cls:
+            for order_id, company_key, point in cases:
+                order = self._create_sale_order_ready_for_manual_remito(order_id, company_key)
+                prepared = mark_prepared(order["id"], self.recepcion.id, f"RT R {point}-00012345")
+
+                self.assertEqual(prepared["remitoNumber"], f"RT R {point}-00012345")
+                self.assertTrue(prepared["bejermanRemitoGroupId"])
+                with connection.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT g.company_key, g.comprobante_tipo, g.comprobante_pto_venta,
+                               g.comprobante_numero, g.status, g.response_summary
+                          FROM delivery_orders o
+                          JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id
+                         WHERE o.id = %s
+                        """,
+                        [order["id"]],
+                    )
+                    row = cur.fetchone()
+                summary = row[5] if isinstance(row[5], dict) else json.loads(row[5])
+                self.assertEqual(row[:5], (company_key, "RT", point, "00012345", "generated"))
+                self.assertEqual(summary["documentMode"], "existing")
+                self.assertTrue(summary["existingBejermanRemito"])
+                self.assertFalse(summary["stockMovementGenerated"])
+                self.assertEqual(summary["stockMovementSource"], "bejerman_direct")
+                self.assertNotIn("manualRemitoNumber", summary)
+
+        sdk_cls.assert_not_called()
+
+    def test_cargar_remito_pv1_registra_movimiento_stock_en_bejerman(self):
+        order = self._create_sale_order_ready_for_manual_remito("do-manual-pv1")
+        sent_comprobantes = []
+        sent_kwargs = []
+        init_kwargs = []
+
+        class FakeManualRemitoClient:
+            def __init__(self, *args, **kwargs):
+                init_kwargs.append(kwargs)
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clinica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                sent_comprobantes.append(comprobante)
+                sent_kwargs.append(kwargs)
+                return {
+                    "Resultado": "OK",
+                    "DatosJSON": json.dumps(
+                        {
+                            "Comprobante_Tipo": "RT",
+                            "Comprobante_Letra": "R",
+                            "Comprobante_PtoVenta": "00001",
+                            "Comprobante_Numero": "00022345",
+                        }
+                    ),
+                }
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", FakeManualRemitoClient):
+            prepared = mark_prepared(order["id"], self.recepcion.id, "RT R 00001-00022345")
+
+        self.assertEqual(prepared["remitoNumber"], "RT R 00001-00022345")
+        self.assertEqual(init_kwargs[0]["company_key"], "SEPID")
+        self.assertEqual(sent_kwargs[0]["numera_flex"], "N")
+        self.assertEqual(sent_kwargs[0]["emite_reg"], "R")
+        self.assertEqual(sent_comprobantes[0]["Comprobante_PtoVenta"], "00001")
+        self.assertEqual(sent_comprobantes[0]["Comprobante_Numero"], "00022345")
+        self.assertEqual(sent_comprobantes[0]["Comprobante_ActualizaStock"], "S")
+        article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_Deposito"], "VAL")
+        self.assertEqual(article_lines[0]["Item_Partida"], "P-do-manual-pv1")
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT g.comprobante_pto_venta, g.comprobante_numero, g.status, g.response_summary
+                  FROM delivery_orders o
+                  JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id
+                 WHERE o.id = %s
+                """,
+                [order["id"]],
+            )
+            row = cur.fetchone()
+        summary = row[3] if isinstance(row[3], dict) else json.loads(row[3])
+        self.assertEqual(row[:3], ("00001", "00022345", "generated"))
+        self.assertEqual(summary["documentMode"], "register")
+        self.assertEqual(summary["manualRemitoNumber"], "RT R 00001-00022345")
+        self.assertTrue(summary["stockMovementGenerated"])
+        self.assertEqual(summary["stockMovementSource"], "nexora_manual_pv1")
 
     def test_ingreso_liberado_respeta_preferencia_y_no_duplica(self):
         self._enable_liberado_for_tecnico()
@@ -941,6 +1281,90 @@ class NotificationsAPITest(TestCase):
             ["cobranzas.extra@notif.test"],
         )
 
+    def test_configuracion_tecnico_excluye_claves_protegidas_y_rechaza_guardado(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notification_user_preferences(
+                  user_id, notification_key, enabled, bell_enabled, email_enabled, push_enabled
+                )
+                VALUES (%s, 'remito_pdf_rt', TRUE, TRUE, TRUE, TRUE)
+                ON CONFLICT (user_id, notification_key) DO UPDATE SET
+                  enabled = EXCLUDED.enabled,
+                  bell_enabled = EXCLUDED.bell_enabled,
+                  email_enabled = EXCLUDED.email_enabled,
+                  push_enabled = EXCLUDED.push_enabled
+                """,
+                [self.tecnico.id],
+            )
+
+        self.client.force_authenticate(user=self.tecnico)
+        resp = self.client.get("/api/notificaciones/configuracion/")
+        self.assertEqual(resp.status_code, 200)
+        keys = {item["key"] for item in resp.data["items"]}
+        self.assertIn("ingreso_asignado", keys)
+        self.assertNotIn("sales_order_remito_ready", keys)
+        self.assertNotIn("billing_pending_summary", keys)
+        self.assertFalse(any(key.startswith("remito_pdf_") for key in keys))
+
+        put_resp = self.client.put(
+            "/api/notificaciones/configuracion/",
+            {"preferences": {"remito_pdf_rt": {"email": True}}},
+            format="json",
+        )
+        self.assertEqual(put_resp.status_code, 400)
+
+    def test_configuracion_cobranzas_solo_muestra_cobranzas_y_todos_los_pdf_remitos(self):
+        self.client.force_authenticate(user=self.cobranzas)
+
+        resp = self.client.get("/api/notificaciones/configuracion/")
+        self.assertEqual(resp.status_code, 200)
+        items = {item["key"]: item for item in resp.data["items"]}
+        expected_keys = {
+            "sales_order_remito_ready",
+            "billing_pending_summary",
+            "service_order_ready_to_bill",
+            "remito_pdf_rt",
+            "remito_pdf_rd",
+            "remito_pdf_rta",
+            "remito_pdf_rtn",
+            "remito_pdf_rss",
+            "remito_pdf_ris",
+            "remito_pdf_rda",
+            "remito_pdf_rdn",
+        }
+        self.assertEqual(set(items), expected_keys)
+        for key in ("sales_order_remito_ready", "billing_pending_summary", "service_order_ready_to_bill"):
+            self.assertEqual(items[key]["group"], "Cobranzas")
+            self.assertEqual(items[key]["allowed_channels"], ["bell", "email", "push"])
+        self.assertEqual(
+            {key for key in items if key.startswith("remito_pdf_")},
+            {
+                "remito_pdf_rt",
+                "remito_pdf_rd",
+                "remito_pdf_rta",
+                "remito_pdf_rtn",
+                "remito_pdf_rss",
+                "remito_pdf_ris",
+                "remito_pdf_rda",
+                "remito_pdf_rdn",
+            },
+        )
+        for key in (
+            "remito_pdf_rt",
+            "remito_pdf_rd",
+            "remito_pdf_rta",
+            "remito_pdf_rtn",
+            "remito_pdf_rss",
+            "remito_pdf_ris",
+            "remito_pdf_rda",
+            "remito_pdf_rdn",
+        ):
+            self.assertEqual(items[key]["allowed_channels"], ["email"])
+            self.assertFalse(items[key]["effective_channels"]["bell"])
+            self.assertTrue(items[key]["effective_channels"]["email"])
+            self.assertFalse(items[key]["effective_channels"]["push"])
+
     def test_emails_extra_solo_admin_y_cobranzas(self):
         self.client.force_authenticate(user=self.tecnico)
         resp = self.client.post(
@@ -1004,22 +1428,9 @@ class NotificationsAPITest(TestCase):
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
         DEFAULT_FROM_EMAIL="noreply@nexora.test",
     )
-    def test_remito_pdf_obligatorio_ignora_optout_y_usa_emails_extra(self):
+    def test_remito_pdf_rss_respeta_optout_de_cobranzas_y_emails_extra(self):
         mail.outbox = []
         self.client.force_authenticate(user=self.cobranzas)
-        self.client.put(
-            "/api/notificaciones/configuracion/",
-            {
-                "preferences": {
-                    "sales_order_remito_ready": {
-                        "bell": False,
-                        "email": False,
-                        "push": False,
-                    }
-                }
-            },
-            format="json",
-        )
         self.client.post(
             "/api/notificaciones/configuracion/emails/",
             {"email": "cobranzas.extra@notif.test"},
@@ -1028,8 +1439,8 @@ class NotificationsAPITest(TestCase):
 
         with self.captureOnCommitCallbacks(execute=True):
             result = notify_bejerman_remito_pdf_issued(
-                remito_number="RDA 0001-00000001",
-                document_type="RDA",
+                remito_number="RSS R 00004-00000001",
+                document_type="RSS",
                 company_key="MGBIO",
                 customer_name="Cliente Notificaciones",
                 source="test",
@@ -1047,6 +1458,164 @@ class NotificationsAPITest(TestCase):
                 "recepcion@notif.test",
             },
         )
+        self.assertEqual(result["notificationKey"], "remito_pdf_rss")
+
+        mail.outbox = []
+        self.client.put(
+            "/api/notificaciones/configuracion/",
+            {"preferences": {"remito_pdf_rss": {"email": False}}},
+            format="json",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RSS R 00004-00000002",
+                document_type="RSS",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+
+        self.assertEqual(result["emails"], 2)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(set(mail.outbox[0].to), {"admin@notif.test", "recepcion@notif.test"})
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="noreply@nexora.test",
+    )
+    def test_remito_pdf_rd_usa_politica_de_entrega(self):
+        mail.outbox = []
+
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RD R 00004-00000001",
+                document_type="RD",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+
+        self.assertEqual(result["notificationKey"], "remito_pdf_rd")
+        self.assertEqual(result["emails"], 3)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(
+            set(mail.outbox[0].to),
+            {"admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"},
+        )
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="noreply@nexora.test",
+    )
+    def test_remito_pdf_rda_incluye_cobranzas_y_excluye_tecnico_aunque_tenga_preferencia(self):
+        mail.outbox = []
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notification_user_preferences(
+                  user_id, notification_key, enabled, bell_enabled, email_enabled, push_enabled
+                )
+                VALUES (%s, 'remito_pdf_rda', TRUE, TRUE, TRUE, TRUE)
+                ON CONFLICT (user_id, notification_key) DO UPDATE SET
+                  enabled = EXCLUDED.enabled,
+                  bell_enabled = EXCLUDED.bell_enabled,
+                  email_enabled = EXCLUDED.email_enabled,
+                  push_enabled = EXCLUDED.push_enabled
+                """,
+                [self.tecnico.id],
+            )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RDA R 00004-00000001",
+                document_type="RDA",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+
+        self.assertEqual(result["notificationKey"], "remito_pdf_rda")
+        self.assertEqual(result["emails"], 3)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(set(mail.outbox[0].to), {"admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"})
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        DEFAULT_FROM_EMAIL="noreply@nexora.test",
+    )
+    def test_remito_pdf_rda_admin_recepcion_y_cobranzas_pueden_desactivar_por_codigo(self):
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RDA R 00004-00000010",
+                document_type="RDA",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+        self.assertEqual(result["emails"], 3)
+        self.assertEqual(set(mail.outbox[0].to), {"admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"})
+
+        self.client.force_authenticate(user=self.admin)
+        self.client.put(
+            "/api/notificaciones/configuracion/",
+            {"preferences": {"remito_pdf_rda": {"email": False}}},
+            format="json",
+        )
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RDA R 00004-00000011",
+                document_type="RDA",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+        self.assertEqual(result["emails"], 2)
+        self.assertEqual(set(mail.outbox[0].to), {"cobranzas@notif.test", "recepcion@notif.test"})
+
+        self.client.force_authenticate(user=self.recepcion)
+        self.client.put(
+            "/api/notificaciones/configuracion/",
+            {"preferences": {"remito_pdf_rda": {"email": False}}},
+            format="json",
+        )
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RDA R 00004-00000012",
+                document_type="RDA",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+        self.assertEqual(result["emails"], 1)
+        self.assertEqual(set(mail.outbox[0].to), {"cobranzas@notif.test"})
+
+        self.client.force_authenticate(user=self.cobranzas)
+        self.client.put(
+            "/api/notificaciones/configuracion/",
+            {"preferences": {"remito_pdf_rda": {"email": False}}},
+            format="json",
+        )
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_bejerman_remito_pdf_issued(
+                remito_number="RDA R 00004-00000013",
+                document_type="RDA",
+                company_key="MGBIO",
+                customer_name="Cliente Notificaciones",
+                source="test",
+                pdf_loader=lambda: (b"%PDF-1.4\nremito", "remito.pdf"),
+            )
+        self.assertEqual(result["emails"], 0)
+        self.assertEqual(mail.outbox, [])
 
     def test_orden_entrega_creada_notifica_recepcion(self):
         order = create_delivery_order(
@@ -1503,6 +2072,31 @@ class NotificationsAPITest(TestCase):
             cur.execute("SELECT discount_percent FROM delivery_order_items WHERE id = %s", [item["id"]])
             self.assertEqual(cur.fetchone()[0], Decimal("10.00"))
 
+    def test_supervisor_puede_cargar_descuento_por_item_en_orden_entrega(self):
+        order = create_delivery_order(
+            {
+                "id": "do-discount-supervisor",
+                "orderNumber": "OE-DESC-SUP",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "items": [
+                    {
+                        "description": "Artículo de prueba",
+                        "quantity": 1,
+                        "unitPrice": "1000",
+                        "discountPercent": "5",
+                    }
+                ],
+            },
+            self.supervisor.id,
+        )
+
+        item = order["items"][0]
+        self.assertEqual(item["discountPercent"], 5.0)
+        self.assertEqual(item["discountAmount"], 50.0)
+        self.assertEqual(item["netSubtotal"], 950.0)
+
     def test_no_admin_no_puede_crear_descuento_por_item(self):
         with self.assertRaises(DeliveryOrderError) as ctx:
             create_delivery_order(
@@ -1604,31 +2198,175 @@ class NotificationsAPITest(TestCase):
 
         self.assertEqual(ctx.exception.code, "INVALID_COMPANY_KEY")
 
-    def test_orden_alquiler_requiere_equipo_vinculado(self):
+    def test_orden_entrega_pendiente_stock_se_lista_y_se_libera_manual(self):
+        order = create_delivery_order(
+            {
+                "id": "do-stock-pending",
+                "orderNumber": "OE-STOCK-001",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "status": "pendiente_stock",
+                "sellerName": "Ventas",
+                "items": [{"id": "doi-stock-pending", "description": "Equipo por ingresar", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        self.assertEqual(order["status"], "pendiente_stock")
+        listed = list_delivery_orders({"status": "pendiente_stock", "limit": 10})
+        self.assertEqual([item["id"] for item in listed["items"]], [order["id"]])
         with self.assertRaises(DeliveryOrderError) as ctx:
-            create_delivery_order(
-                {
-                    "id": "do-rental-free-row",
-                    "orderNumber": "OEA-FREE-001",
-                    "customerId": self.customer_id,
-                    "deliveryType": "rental",
-                    "companyKey": "SEPID",
-                    "sellerName": "ADM",
-                    "items": [
-                        {
-                            "articleCode": "ART-ALQ",
-                            "description": "Equipo libre",
-                            "quantity": 1,
-                            "partida": "SN-LIBRE",
-                            "stockDepositCode": "STL",
-                            "stockAvailableQuantity": 1,
-                        }
-                    ],
-                },
-                self.jefe.id,
+            mark_prepared(order["id"], self.recepcion.id)
+
+        self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_STOCK_PENDING")
+        updated = update_delivery_order(
+            order["id"],
+            {
+                "status": "pendiente_armado",
+                "items": order["items"],
+            },
+            self.jefe.id,
+        )
+        self.assertEqual(updated["status"], "pendiente_armado")
+
+    def test_orden_entrega_pendiente_stock_no_emite_remito(self):
+        order = create_delivery_order(
+            {
+                "id": "do-stock-remito",
+                "orderNumber": "OE-STOCK-002",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "status": "pendiente_stock",
+                "sellerName": "Ventas",
+                "items": [{"id": "doi-stock-remito", "description": "Equipo por ingresar", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            generate_bejerman_remito([order["id"]], self.jefe.id)
+
+        self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_STOCK_PENDING")
+
+    def test_orden_alquiler_planificada_permite_articulo_sin_ns(self):
+        order = create_delivery_order(
+            {
+                "id": "do-rental-future-row",
+                "orderNumber": "OEA-FUT-001",
+                "customerId": self.customer_id,
+                "deliveryType": "rental",
+                "companyKey": "SEPID",
+                "sellerName": "ADM",
+                "items": [
+                    {
+                        "id": "doi-rental-future-row",
+                        "articleCode": "ART-ALQ",
+                        "articleName": "Equipo alquiler",
+                        "description": "Equipo alquiler futuro",
+                        "quantity": 2,
+                        "stockDepositCode": "STL",
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+
+        self.assertEqual(order["status"], "pendiente_armado")
+        self.assertEqual(order["items"][0]["quantity"], 2.0)
+        self.assertIsNone(order["items"][0]["ingresoId"])
+        self.assertIsNone(order["items"][0]["deviceId"])
+        self.assertEqual(order["items"][0]["partida"], "")
+        self.assertEqual(order["items"][0]["partidas"], [])
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            mark_prepared(order["id"], self.recepcion.id)
+
+        self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_PARTIDAS_REQUIRED")
+
+    def test_orden_alquiler_carga_ns_resuelve_os_y_bloquea_reserva_duplicada(self):
+        ingreso_1, device_1 = self._create_rental_ingreso("NS-NOTIF-001", "MG 9001", existing=True)
+        ingreso_2, device_2 = self._create_rental_ingreso("NS-NOTIF-002", "MG 9002")
+        order = create_delivery_order(
+            {
+                "id": "do-rental-future-ns",
+                "orderNumber": "OEA-FUT-002",
+                "customerId": self.customer_id,
+                "deliveryType": "rental",
+                "companyKey": "SEPID",
+                "sellerName": "ADM",
+                "items": [
+                    {
+                        "id": "doi-rental-future-ns",
+                        "articleCode": "ART-ALQ",
+                        "articleName": "Equipo alquiler",
+                        "description": "Equipo alquiler futuro",
+                        "quantity": 2,
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+        lots = [
+            {"articleCode": "ART-ALQ", "depositCode": "STL", "partida": "NS-NOTIF-001", "availableQuantity": 1},
+            {"articleCode": "ART-ALQ", "depositCode": "STL", "partida": "NS-NOTIF-002", "availableQuantity": 1},
+        ]
+
+        with self._delivery_partida_stock_patch(lots):
+            updated = update_item_partidas(
+                order["id"],
+                "doi-rental-future-ns",
+                self.recepcion.id,
+                [
+                    {"partida": "NS-NOTIF-001", "assignedQuantity": 1},
+                    {"partida": "NS-NOTIF-002", "assignedQuantity": 1},
+                ],
+            )
+            prepared = mark_prepared(order["id"], self.recepcion.id)
+
+        partidas = updated["items"][0]["partidas"]
+        self.assertEqual([row["ingresoId"] for row in partidas], [ingreso_1, ingreso_2])
+        self.assertEqual([row["deviceId"] for row in partidas], [device_1, device_2])
+        self.assertEqual([row["stockDepositCode"] for row in partidas], ["STL", "STL"])
+        self.assertEqual(prepared["status"], "armado_pendiente_entrega")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ingreso_id, device_id
+                  FROM delivery_order_item_partidas
+                 WHERE order_item_id = %s
+                 ORDER BY sort_order
+                """,
+                ["doi-rental-future-ns"],
+            )
+            self.assertEqual(cur.fetchall(), [(ingreso_1, device_1), (ingreso_2, device_2)])
+
+        duplicate = create_delivery_order(
+            {
+                "id": "do-rental-future-duplicate",
+                "orderNumber": "OEA-FUT-003",
+                "customerId": self.customer_id,
+                "deliveryType": "rental",
+                "companyKey": "SEPID",
+                "sellerName": "ADM",
+                "items": [
+                    {
+                        "id": "doi-rental-future-duplicate",
+                        "articleCode": "ART-ALQ",
+                        "description": "Equipo alquiler duplicado",
+                        "quantity": 1,
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+        with self._delivery_partida_stock_patch(lots), self.assertRaises(DeliveryOrderError) as ctx:
+            update_item_partidas(
+                duplicate["id"],
+                "doi-rental-future-duplicate",
+                self.recepcion.id,
+                [{"partida": "NS-NOTIF-001", "assignedQuantity": 1}],
             )
 
-        self.assertEqual(ctx.exception.code, "RENTAL_EQUIPMENT_REQUIRED")
+        self.assertEqual(ctx.exception.code, "RENTAL_EQUIPMENT_RESERVED")
 
     def test_orden_alquiler_guarda_equipo_vinculado_y_bloquea_reserva_duplicada(self):
         self._ensure_rental_article_mapping()
@@ -1735,10 +2473,27 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(selected["partida"], "NS-NOTIF-001")
         self.assertEqual(selected["stockAvailableQuantity"], 1.0)
 
+    def test_selector_alquiler_usa_articulo_del_stock_stl_si_falta_mapeo(self):
+        with connection.cursor() as cur:
+            cur.execute("DELETE FROM bejerman_article_mappings")
+        ingreso_id, _device_id = self._create_rental_ingreso("NS-NOTIF-001", "MG 9001", existing=True)
+        stock_rows = [
+            {"Articulo_Codigo": "ART-STL-DIRECTO", "Art_CodDeposito": "STL", "Art_Partida": "NS-NOTIF-001", "Art_DispUM1": 1, "Art_RealUM1": 1},
+        ]
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", self._fake_rta_client([], stock_rows)):
+            data = list_rental_available_equipment(search="NS-NOTIF-001", limit=20, actor_user_id=self.jefe.id, company_key="SEPID")
+
+        self.assertEqual(data["warning"], None)
+        selected = next(item for item in data["items"] if item["ingresoId"] == ingreso_id)
+        self.assertEqual(selected["articleCode"], "ART-STL-DIRECTO")
+        self.assertEqual(selected["partida"], "NS-NOTIF-001")
+        self.assertEqual(selected["stockDepositCode"], "STL")
+        self.assertEqual(selected["stockAvailableQuantity"], 1.0)
+
     def test_rta_emitido_marca_varios_ingresos_como_alquilados(self):
-        self._ensure_rental_article_mapping()
-        ingreso_1, device_1 = self._create_rental_ingreso("NS-NOTIF-001", "MG 9001", existing=True)
-        ingreso_2, device_2 = self._create_rental_ingreso("NS-NOTIF-002", "MG 9002")
+        ingreso_1, _device_1 = self._create_rental_ingreso("NS-NOTIF-001", "MG 9001", existing=True)
+        ingreso_2, _device_2 = self._create_rental_ingreso("NS-NOTIF-002", "MG 9002")
         order = create_delivery_order(
             {
                 "id": "do-rental-rta-sync",
@@ -1748,10 +2503,14 @@ class NotificationsAPITest(TestCase):
                 "companyKey": "SEPID",
                 "sellerName": "Ventas",
                 "sellerCode": "EZE",
-                "status": "armado_pendiente_entrega",
                 "items": [
-                    self._rental_item(ingreso_1, device_1, "NS-NOTIF-001"),
-                    self._rental_item(ingreso_2, device_2, "NS-NOTIF-002"),
+                    {
+                        "id": "doi-rental-rta-sync",
+                        "articleCode": "ART-ALQ",
+                        "articleName": "Equipo alquiler",
+                        "description": "Equipo alquiler futuro",
+                        "quantity": 2,
+                    },
                 ],
             },
             self.jefe.id,
@@ -1762,22 +2521,42 @@ class NotificationsAPITest(TestCase):
             {"Articulo_Codigo": "ART-ALQ", "Art_CodDeposito": "STL", "Art_Partida": "NS-NOTIF-001", "Art_DispUM1": 1, "Art_RealUM1": 1},
             {"Articulo_Codigo": "ART-ALQ", "Art_CodDeposito": "STL", "Art_Partida": "NS-NOTIF-002", "Art_DispUM1": 1, "Art_RealUM1": 1},
         ]
+        lots = [
+            {"articleCode": "ART-ALQ", "depositCode": "STL", "partida": "NS-NOTIF-001", "availableQuantity": 1},
+            {"articleCode": "ART-ALQ", "depositCode": "STL", "partida": "NS-NOTIF-002", "availableQuantity": 1},
+        ]
 
-        with patch("service.bejerman_delivery.BejermanSDKClient", self._fake_rta_client(sent_comprobantes, stock_rows)):
+        with self._delivery_partida_stock_patch(lots):
+            update_item_partidas(
+                order["id"],
+                "doi-rental-rta-sync",
+                self.recepcion.id,
+                [
+                    {"partida": "NS-NOTIF-001", "assignedQuantity": 1},
+                    {"partida": "NS-NOTIF-002", "assignedQuantity": 1},
+                ],
+            )
+            prepared = mark_prepared(order["id"], self.recepcion.id)
+
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient", self._fake_rta_client(sent_comprobantes, stock_rows)),
+            self._delivery_partida_stock_patch(lots),
+        ):
             result = generate_bejerman_remito(
-                [order["id"]],
+                [prepared["id"]],
                 self.jefe.id,
                 {"issueDate": "2026-06-19", "sellerCode": "TOM"},
             )
 
         self.assertEqual(result["remitoNumber"], "RTA R 00004-00004567")
         self.assertFalse(result["billingRequired"])
-        self.assertEqual(result["orders"][0]["status"], "entregado_no_facturable")
+        self.assertEqual(result["orders"][0]["status"], "armado_pendiente_entrega")
+        self.assertIsNone(result["orders"][0]["deliveredAt"])
         self.assertEqual(sent_comprobantes[0]["Comprobante_Tipo"], "RTA")
         self.assertEqual(sent_comprobantes[0]["Comprobante_TipoOperacion"], "ALQ")
         self.assertEqual(sent_comprobantes[0]["Vendedor_Codigo"], "ADM")
         article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual([line["Item_CantidadUM1"] for line in article_lines], [-1, -1])
+        self.assertEqual([line["Item_CantidadUM1"] for line in article_lines], [1, 1])
         self.assertEqual([line["Item_Deposito"] for line in article_lines], ["STL", "STL"])
         self.assertEqual([line["Item_Partida"] for line in article_lines], ["NS-NOTIF-001", "NS-NOTIF-002"])
         with connection.cursor() as cur:
@@ -1815,20 +2594,23 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(group_seller_code, "ADM")
 
     def test_remito_bejerman_usa_empresa_explicitada_en_orden(self):
-        order = create_delivery_order(
-            {
-                "id": "do-remito-company",
-                "orderNumber": "OE-COMPANY-REMITO",
-                "customerId": self.customer_id,
-                "deliveryType": "sale",
-                "companyKey": "MGBIO",
-                "sellerName": "Ventas",
-                "sellerCode": "MAX",
-                "status": "armado_pendiente_entrega",
-                "items": [{"articleCode": "ART-1", "description": "Artículo de prueba", "quantity": 1, "partida": "P1"}],
-            },
-            self.jefe.id,
-        )
+        with self._delivery_partida_stock_patch(
+            [{"articleCode": "ART-1", "depositCode": "VAL", "partida": "P1", "availableQuantity": 1}]
+        ):
+            order = create_delivery_order(
+                {
+                    "id": "do-remito-company",
+                    "orderNumber": "OE-COMPANY-REMITO",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": "MGBIO",
+                    "sellerName": "Ventas",
+                    "sellerCode": "MAX",
+                    "status": "armado_pendiente_entrega",
+                    "items": [{"articleCode": "ART-1", "description": "Artículo de prueba", "quantity": 1, "partida": "P1"}],
+                },
+                self.jefe.id,
+            )
         init_kwargs = []
         sent_comprobantes = []
 
@@ -1867,28 +2649,101 @@ class NotificationsAPITest(TestCase):
             result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
 
         self.assertEqual(result["companyKey"], "MGBIO")
+        self.assertTrue(result["billingRequired"])
+        self.assertEqual(result["orders"][0]["status"], "armado_pendiente_entrega")
+        self.assertIsNone(result["orders"][0]["deliveredAt"])
+        pending_billing = list_delivery_orders({"pendingBilling": True, "limit": 10})
+        self.assertIn(order["id"], [item["id"] for item in pending_billing["items"]])
         self.assertEqual(init_kwargs[0]["company_key"], "MGBIO")
         self.assertEqual(sent_comprobantes[0]["Cliente_SitIVA"], "1")
         with connection.cursor() as cur:
             cur.execute("SELECT company_key, seller_code FROM bejerman_remito_groups WHERE id = %s", [result["groupId"]])
             self.assertEqual(cur.fetchone(), ("MGBIO", "MAX"))
 
-    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
-    def test_remito_rtn_emitido_queda_no_facturable_sin_notificar_cobranzas(self):
-        mail.outbox = []
+    def test_remito_bejerman_emite_articulo_sin_partida_en_blanco(self):
         order = create_delivery_order(
             {
-                "id": "do-rtn-no-billing",
-                "orderNumber": "OE-RTN-NO-BILLING",
+                "id": "do-remito-no-partida",
+                "orderNumber": "OE-NO-PARTIDA",
                 "customerId": self.customer_id,
-                "deliveryType": "demo",
+                "deliveryType": "sale",
                 "companyKey": "SEPID",
-                "sellerName": "Demo",
+                "sellerName": "Ventas",
+                "sellerCode": "MAX",
                 "status": "armado_pendiente_entrega",
-                "items": [{"articleCode": "ART-DEMO", "description": "Equipo demo", "quantity": 1, "partida": "P-DEMO"}],
+                "items": [
+                    {
+                        "articleCode": "1208010",
+                        "articleName": "Filtro de aire",
+                        "articleRequiresPartida": False,
+                        "description": "Filtro de aire",
+                        "quantity": 10,
+                    }
+                ],
             },
             self.jefe.id,
         )
+        sent_comprobantes = []
+
+        class FakeRemitoClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clinica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                sent_comprobantes.append(comprobante)
+                return {
+                    "Resultado": "OK",
+                    "DatosJSON": json.dumps(
+                        {
+                            "Comprobante_Tipo": "RT",
+                            "Comprobante_Letra": "R",
+                            "Comprobante_PtoVenta": "00004",
+                            "Comprobante_Numero": "00001236",
+                        }
+                    ),
+                }
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", FakeRemitoClient):
+            result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertEqual(result["remitoNumber"], "RT R 00004-00001236")
+        article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_CodigoArticulo"], "1208010")
+        self.assertEqual(article_lines[0]["Item_Partida"], " ")
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 10)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_remito_rtn_emitido_queda_no_facturable_sin_notificar_cobranzas(self):
+        mail.outbox = []
+        with self._delivery_partida_stock_patch(
+            [{"articleCode": "ART-DEMO", "depositCode": "VAL", "partida": "P-DEMO", "availableQuantity": 1}]
+        ):
+            order = create_delivery_order(
+                {
+                    "id": "do-rtn-no-billing",
+                    "orderNumber": "OE-RTN-NO-BILLING",
+                    "customerId": self.customer_id,
+                    "deliveryType": "demo",
+                    "companyKey": "SEPID",
+                    "sellerName": "Demo",
+                    "status": "armado_pendiente_entrega",
+                    "items": [{"articleCode": "ART-DEMO", "description": "Equipo demo", "quantity": 1, "partida": "P-DEMO"}],
+                },
+                self.jefe.id,
+            )
 
         sent_comprobantes = []
 
@@ -1928,7 +2783,8 @@ class NotificationsAPITest(TestCase):
 
         self.assertEqual(sent_comprobantes[0]["Comprobante_Tipo"], "RTN")
         self.assertFalse(result["billingRequired"])
-        self.assertEqual(result["orders"][0]["status"], "entregado_no_facturable")
+        self.assertEqual(result["orders"][0]["status"], "armado_pendiente_entrega")
+        self.assertIsNone(result["orders"][0]["deliveredAt"])
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -1939,7 +2795,7 @@ class NotificationsAPITest(TestCase):
                 """,
                 [order["id"]],
             )
-            self.assertEqual(cur.fetchone(), ("entregado_no_facturable", "false"))
+            self.assertEqual(cur.fetchone(), ("armado_pendiente_entrega", "false"))
             cur.execute(
                 """
                 SELECT COUNT(*)
@@ -2198,6 +3054,19 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(after_remito, before_remito)
         self.assertEqual(after_fecha_entrega, before_fecha_entrega)
         self.assertEqual(after_factura, "FC A 0001-00001234")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT invoice_number, invoiced_by_user_id, invoiced_at
+                  FROM delivery_orders
+                 WHERE id = %s
+                """,
+                ["do-os-bill-queue"],
+            )
+            synced_order = cur.fetchone()
+        self.assertEqual(synced_order[0], "FC A 0001-00001234")
+        self.assertEqual(synced_order[1], self.cobranzas.id)
+        self.assertIsNotNone(synced_order[2])
         listed_after = list_service_orders_to_bill({})
         self.assertNotIn(self.ingreso_id, [item["ingresoId"] for item in listed_after["items"]])
 
@@ -2416,6 +3285,61 @@ class NotificationsAPITest(TestCase):
         with connection.cursor() as cur:
             cur.execute("SELECT status FROM delivery_orders WHERE id = %s", [order["id"]])
             self.assertEqual(cur.fetchone()[0], "pendiente_armado")
+
+    def test_orden_entrega_preparada_permite_articulo_sin_partida_en_bejerman(self):
+        order = create_delivery_order(
+            {
+                "id": "do-prepare-no-partida-article",
+                "orderNumber": "OE-PREP-NO-PARTIDA",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "items": [
+                    {
+                        "id": "doi-no-partida-article",
+                        "articleCode": "1208010",
+                        "articleName": "Filtro de aire",
+                        "articleRequiresPartida": False,
+                        "description": "Filtro de aire",
+                        "quantity": 10,
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+
+        self.assertIs(order["items"][0]["articleRequiresPartida"], False)
+        prepared = mark_prepared(order["id"], self.recepcion.id)
+
+        self.assertEqual(prepared["status"], "armado_pendiente_entrega")
+        self.assertEqual(prepared["items"][0]["partidas"], [])
+        self.assertIs(prepared["items"][0]["articleRequiresPartida"], False)
+
+    def test_orden_entrega_preparada_bloquea_articulo_seriado_sin_partida(self):
+        order = create_delivery_order(
+            {
+                "id": "do-prepare-requires-partida",
+                "orderNumber": "OE-PREP-REQUIRES-PARTIDA",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "items": [
+                    {
+                        "id": "doi-requires-partida",
+                        "articleCode": "ART-PARTIDA",
+                        "articleRequiresPartida": True,
+                        "description": "Artículo con partida",
+                        "quantity": 1,
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            mark_prepared(order["id"], self.recepcion.id)
+
+        self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_PARTIDAS_REQUIRED")
 
     def test_orden_entrega_preparada_exige_partidas_completas(self):
         order = create_delivery_order(
@@ -2778,7 +3702,7 @@ class NotificationsAPITest(TestCase):
                 ["2026-06-20 10:00:00-03", "2026-06-20 10:00:00-03", imported["id"]],
             )
 
-        result = list_delivery_orders({"status": "entregado_pendiente_facturacion", "limit": 10})
+        result = list_delivery_orders({"pendingBilling": True, "limit": 10})
 
         self.assertEqual(result["total"], 3)
         self.assertEqual(
@@ -2860,35 +3784,170 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(row[2], self.cobranzas.id)
         self.assertIsNotNone(row[3])
 
-    def test_ordenes_entrega_buscan_por_articulos_y_exponen_origen(self):
+    def test_facturacion_orden_reparacion_sincroniza_factura_en_hoja(self):
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET factura_numero = NULL WHERE id = %s", [self.ingreso_id])
+        order = self._create_service_release_order("do-service-invoice-sync")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET remito_number = %s,
+                       status = 'entregado_pendiente_facturacion',
+                       remito_location = 'recepcion'
+                 WHERE id = %s
+                """,
+                ["RT 0002-00015555", order["id"]],
+            )
+
+        updated = mark_invoiced(order["id"], self.cobranzas.id, "FC A 0001-00015555")
+
+        self.assertEqual(updated["status"], "facturado")
+        self.assertEqual(updated["invoiceNumber"], "FC A 0001-00015555")
+        with connection.cursor() as cur:
+            cur.execute("SELECT factura_numero FROM ingresos WHERE id = %s", [self.ingreso_id])
+            factura_numero = cur.fetchone()[0]
+        self.assertEqual(factura_numero, "FC A 0001-00015555")
+
+    def test_facturacion_de_remito_emitido_no_entrega_orden(self):
         order = create_delivery_order(
             {
-                "id": "do-article-search",
-                "orderNumber": "OE-ART-001",
+                "id": "do-invoice-before-delivery",
+                "orderNumber": "OE-INV-004",
                 "customerId": self.customer_id,
                 "deliveryType": "sale",
+                "status": "armado_pendiente_entrega",
                 "sellerName": "Ventas",
-                "operationCompanyLabel": "SEPID",
-                "sourceSystem": "portal",
-                "sourceExternalId": "portal-order-001",
-                "sourceReference": "Pedido Drive 15",
-                "sourceSheet": "Ventas Junio",
-                "sourceRow": 15,
-                "sourceColor": "#fff2cc",
-                "rawPedido": "Pedido de artículos generales",
-                "commercialCondition": "Contado",
-                "items": [
-                    {
-                        "articleCode": "ART-1504005",
-                        "articleName": "Filtro bacteriológico",
-                        "description": "Set universal para alquiler",
-                        "quantity": 2,
-                        "partida": "L-2026",
-                    }
-                ],
+                "operationCompanyLabel": "RESPIFLOW",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
             },
             self.jefe.id,
         )
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET remito_number = %s,
+                       remito_location = 'recepcion',
+                       prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP)
+                 WHERE id = %s
+                """,
+                ["RT 0002-00022347", order["id"]],
+            )
+
+        pending = list_delivery_orders({"pendingBilling": True, "limit": 10})
+        self.assertIn(order["id"], [item["id"] for item in pending["items"]])
+
+        updated = mark_invoiced(order["id"], self.cobranzas.id, "FC A 0001-00002234")
+
+        self.assertEqual(updated["status"], "armado_pendiente_entrega")
+        self.assertEqual(updated["invoiceNumber"], "FC A 0001-00002234")
+        self.assertIsNone(updated["deliveredAt"])
+        pending_after_invoice = list_delivery_orders({"pendingBilling": True, "limit": 10})
+        self.assertNotIn(order["id"], [item["id"] for item in pending_after_invoice["items"]])
+
+        delivered = mark_delivered(order["id"], self.recepcion.id, None)
+
+        self.assertEqual(delivered["status"], "facturado")
+        self.assertIsNotNone(delivered["deliveredAt"])
+
+    def test_no_se_factura_cierra_remito_pendiente_como_no_facturable(self):
+        order = create_delivery_order(
+            {
+                "id": "do-not-billable-ok",
+                "orderNumber": "OE-NOBILL-001",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "remitoNumber": "RT 0002-00012348",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        updated = mark_not_billable(order["id"], self.cobranzas.id, "No corresponde facturar")
+
+        self.assertEqual(updated["status"], "entregado_no_facturable")
+        self.assertEqual(updated["invoiceNumber"], "")
+        pending = list_delivery_orders({"pendingBilling": True, "limit": 10})
+        self.assertNotIn(order["id"], [item["id"] for item in pending["items"]])
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, invoice_number
+                  FROM delivery_orders
+                 WHERE id = %s
+                """,
+                [order["id"]],
+            )
+            row = cur.fetchone()
+            cur.execute(
+                """
+                SELECT event_type, note
+                  FROM delivery_order_events
+                 WHERE order_id = %s
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1
+                """,
+                [order["id"]],
+            )
+            event = cur.fetchone()
+        self.assertEqual(row[0], "entregado_no_facturable")
+        self.assertIsNone(row[1])
+        self.assertEqual(event, ("delivery_order_not_billable", "No corresponde facturar"))
+
+    def test_no_se_factura_solo_acepta_remitos_pendientes(self):
+        order = create_delivery_order(
+            {
+                "id": "do-not-billable-state",
+                "orderNumber": "OE-NOBILL-002",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "operationCompanyLabel": "RESPIFLOW",
+                "items": [{"description": "Equipo de prueba", "quantity": 1}],
+            },
+            self.jefe.id,
+        )
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            mark_not_billable(order["id"], self.cobranzas.id, "No corresponde facturar")
+
+        self.assertEqual(ctx.exception.code, "INVALID_NOT_BILLABLE_STATE")
+
+    def test_ordenes_entrega_buscan_por_articulos_y_exponen_origen(self):
+        with self._delivery_partida_stock_patch(
+            [{"articleCode": "ART-1504005", "depositCode": "VAL", "partida": "L-2026", "availableQuantity": 2}]
+        ):
+            order = create_delivery_order(
+                {
+                    "id": "do-article-search",
+                    "orderNumber": "OE-ART-001",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "sellerName": "Ventas",
+                    "operationCompanyLabel": "SEPID",
+                    "sourceSystem": "portal",
+                    "sourceExternalId": "portal-order-001",
+                    "sourceReference": "Pedido Drive 15",
+                    "sourceSheet": "Ventas Junio",
+                    "sourceRow": 15,
+                    "sourceColor": "#fff2cc",
+                    "rawPedido": "Pedido de artículos generales",
+                    "commercialCondition": "Contado",
+                    "items": [
+                        {
+                            "articleCode": "ART-1504005",
+                            "articleName": "Filtro bacteriológico",
+                            "description": "Set universal para alquiler",
+                            "quantity": 2,
+                            "partida": "L-2026",
+                        }
+                    ],
+                },
+                self.jefe.id,
+            )
 
         self.assertEqual(order["sourceSheet"], "Ventas Junio")
         self.assertEqual(order["sourceRow"], 15)
@@ -2921,7 +3980,8 @@ class NotificationsAPITest(TestCase):
 
         self.assertEqual(result["remitoNumber"], "RSS R 00004-00001234")
         self.assertFalse(result["billingRequired"])
-        self.assertEqual(result["orders"][0]["status"], "entregado_no_facturable")
+        self.assertEqual(result["orders"][0]["status"], "armado_pendiente_entrega")
+        self.assertIsNone(result["orders"][0]["deliveredAt"])
         with connection.cursor() as cur:
             cur.execute(
                 "SELECT estado, remito_salida, fecha_entrega FROM ingresos WHERE id = %s",

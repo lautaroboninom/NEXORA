@@ -35,7 +35,9 @@ coverage/
 etl/out/
 tmp/
 outputs/
-
+output/
+informes/
+documentos/
 # --- Avoid committing PDFs accidentally from api/
 api/**/*.pdf
 

@@ -4,7 +4,10 @@ import {
   CheckCircle2,
   Link2,
   Loader2,
+  MapPinned,
+  Navigation,
   Pencil,
+  Plus,
   RefreshCw,
   Search,
   Trash2,
@@ -20,6 +23,7 @@ import {
   postClienteBejermanSync,
   postCliente,
   postClienteMerge,
+  postRouteLocation,
 } from "../lib/api";
 
 const BLANK_CUSTOMER = {
@@ -121,6 +125,28 @@ function formatDateTime(value) {
   return date.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
 }
 
+function routeAddressQuery(location, customer) {
+  return clean([location?.address, location?.name || customer?.razon_social].filter(Boolean).join(" "));
+}
+
+function googleMapsUrl(location, customer) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(routeAddressQuery(location, customer))}`;
+}
+
+function wazeUrl(location, customer) {
+  return `https://waze.com/ul?q=${encodeURIComponent(routeAddressQuery(location, customer))}&navigate=yes`;
+}
+
+function routeSheetUrl(location, customer) {
+  const params = new URLSearchParams();
+  if (location?.id) params.set("locationId", location.id);
+  if (customer?.id) params.set("customerId", customer.id);
+  if (location?.name || customer?.razon_social) params.set("placeName", location?.name || customer?.razon_social);
+  if (location?.address) params.set("address", location.address);
+  const qs = params.toString();
+  return `/hoja-de-ruta${qs ? `?${qs}` : ""}`;
+}
+
 function BejermanDetailChips({ details, limit = 4 }) {
   const items = visibleDetailFields(details, limit);
   if (!items.length) return null;
@@ -170,6 +196,60 @@ function BejermanDetailsPanel({ customer }) {
         </details>
       )}
     </section>
+  );
+}
+
+function CustomerAddresses({ customer, compact = false }) {
+  const items = Array.isArray(customer?.routeLocations) ? customer.routeLocations : [];
+  if (!items.length) {
+    return compact ? <div className="text-xs text-gray-500">Sin direcciones cargadas.</div> : null;
+  }
+  const visible = compact ? items.slice(0, 2) : items;
+  return (
+    <div className={compact ? "space-y-1" : "mt-4 rounded border border-gray-200 bg-white"}>
+      {!compact && <div className="border-b px-3 py-2 text-sm font-semibold text-gray-950">Direcciones</div>}
+      <div className={compact ? "space-y-1" : "space-y-2 p-3"}>
+        {visible.map((item, index) => {
+          const isBejerman = item.sourceType === "bejerman";
+          const query = routeAddressQuery(item, customer);
+          return (
+            <div key={`${item.sourceType || "route"}-${item.id || index}`} className={compact ? "text-xs text-gray-600" : "rounded border border-gray-200 px-3 py-2"}>
+              <div className={compact ? "" : "flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"}>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-gray-950">{item.label || (isBejerman ? "Domicilio Bejerman" : "Hoja de ruta")}</span>
+                    {!compact && (
+                      <span className={`rounded-full border px-2 py-0.5 text-[11px] ${isBejerman ? "border-gray-200 bg-gray-50 text-gray-700" : "border-sky-200 bg-sky-50 text-sky-800"}`}>
+                        {isBejerman ? "Solo lectura" : "Operativa"}
+                      </span>
+                    )}
+                  </div>
+                  <div className={`${compact ? "line-clamp-2" : "mt-1 break-words"} text-gray-600`}>{item.address || "-"}</div>
+                  {!compact && item.notes && <div className="mt-1 text-xs text-gray-500">{item.notes}</div>}
+                </div>
+                {!compact && query && (
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <a href={routeSheetUrl(item, customer)} className="inline-flex h-8 items-center gap-1 rounded border px-2 text-xs hover:bg-gray-50">
+                      <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                      Usar en Hoja de ruta
+                    </a>
+                    <a href={googleMapsUrl(item, customer)} target="_blank" rel="noreferrer" className="inline-flex h-8 items-center gap-1 rounded border px-2 text-xs hover:bg-gray-50">
+                      <MapPinned className="h-3.5 w-3.5" aria-hidden="true" />
+                      Google Maps
+                    </a>
+                    <a href={wazeUrl(item, customer)} target="_blank" rel="noreferrer" className="inline-flex h-8 items-center gap-1 rounded border px-2 text-xs hover:bg-gray-50">
+                      <Navigation className="h-3.5 w-3.5" aria-hidden="true" />
+                      Waze
+                    </a>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {compact && items.length > visible.length && <div className="text-xs text-gray-500">+{items.length - visible.length} más</div>}
+      </div>
+    </div>
   );
 }
 
@@ -337,15 +417,20 @@ export default function CatalogoClientes() {
   const [filters, setFilters] = useState({ q: "", sync: "all" });
   const [addCandidates, setAddCandidates] = useState({ items: [] });
   const [editCandidates, setEditCandidates] = useState({ items: [] });
+  const [routeAddressForm, setRouteAddressForm] = useState({ name: "", address: "" });
+  const [savingRouteAddress, setSavingRouteAddress] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setErr("");
     try {
-      const data = await getClientes({ include_stats: 1, include_bejerman: 1 });
-      setRows(Array.isArray(data) ? data : []);
+      const data = await getClientes({ include_stats: 1, include_bejerman: 1, include_route_locations: 1 });
+      const items = Array.isArray(data) ? data : [];
+      setRows(items);
+      return items;
     } catch (e) {
       setErr(e.message || "No se pudieron cargar los clientes.");
+      return [];
     } finally {
       setLoading(false);
     }
@@ -461,6 +546,7 @@ export default function CatalogoClientes() {
     setMsg("");
     setEdit(cliente);
     setEf(customerFormFrom(cliente, candidate));
+    setRouteAddressForm({ name: cliente?.razon_social || "", address: "" });
     const candidates = candidate ? [candidate] : cliente?.bejerman_sync?.candidates || [];
     setEditCandidates({ items: candidates });
   };
@@ -482,6 +568,35 @@ export default function CatalogoClientes() {
       setErr(e.message || "No se pudo actualizar el cliente.");
     } finally {
       setSavingEdit(false);
+    }
+  };
+
+  const saveRouteAddress = async (event) => {
+    event?.preventDefault?.();
+    if (!edit) return;
+    const address = clean(routeAddressForm.address);
+    if (!address) {
+      setErr("Ingresá la dirección operativa.");
+      return;
+    }
+    try {
+      setSavingRouteAddress(true);
+      setErr("");
+      setMsg("");
+      await postRouteLocation({
+        customerId: edit.id,
+        name: clean(routeAddressForm.name) || edit.razon_social,
+        address,
+      });
+      const updatedRows = await load();
+      const updated = updatedRows.find((row) => String(row.id) === String(edit.id));
+      if (updated) setEdit(updated);
+      setRouteAddressForm({ name: updated?.razon_social || edit.razon_social || "", address: "" });
+      setMsg("Dirección de Hoja de ruta agregada");
+    } catch (e) {
+      setErr(e.message || "No se pudo agregar la dirección de Hoja de ruta.");
+    } finally {
+      setSavingRouteAddress(false);
     }
   };
 
@@ -679,6 +794,7 @@ export default function CatalogoClientes() {
                 <th className="px-3 py-2">Cliente</th>
                 <th className="px-3 py-2">Código</th>
                 <th className="px-3 py-2">Bejerman</th>
+                <th className="px-3 py-2">Direcciones</th>
                 <th className="px-3 py-2">Contacto</th>
                 <th className="px-3 py-2 text-right">Actividad</th>
                 <th className="px-3 py-2 text-right">Acciones</th>
@@ -687,7 +803,7 @@ export default function CatalogoClientes() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="6" className="px-3 py-8 text-center text-gray-500">
+                  <td colSpan="7" className="px-3 py-8 text-center text-gray-500">
                     Cargando...
                   </td>
                 </tr>
@@ -727,6 +843,9 @@ export default function CatalogoClientes() {
                             ))}
                           </div>
                         )}
+                      </td>
+                      <td className="px-3 py-3">
+                        <CustomerAddresses customer={c} compact />
                       </td>
                       <td className="px-3 py-3">
                         <div>{c.contacto || "-"}</div>
@@ -772,7 +891,7 @@ export default function CatalogoClientes() {
               )}
               {!loading && !filteredRows.length && (
                 <tr>
-                  <td colSpan="6" className="px-3 py-8 text-center text-gray-500">
+                  <td colSpan="7" className="px-3 py-8 text-center text-gray-500">
                     Sin resultados
                   </td>
                 </tr>
@@ -819,6 +938,38 @@ export default function CatalogoClientes() {
               </div>
               <CustomerFields form={ef} setForm={setEf} disabled={savingEdit} showCode={false} />
               <BejermanDetailsPanel customer={edit} />
+              <CustomerAddresses customer={edit} />
+              <section className="mt-4 rounded border border-sky-200 bg-sky-50 p-3">
+                <div className="text-sm font-semibold text-gray-950">Agregar dirección de Hoja de ruta</div>
+                <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_1.6fr_auto] md:items-end">
+                  <label>
+                    <Label>Lugar</Label>
+                    <Input
+                      value={routeAddressForm.name}
+                      onChange={(event) => setRouteAddressForm((prev) => ({ ...prev, name: event.target.value }))}
+                      disabled={savingRouteAddress}
+                    />
+                  </label>
+                  <label>
+                    <Label>Dirección operativa</Label>
+                    <Input
+                      value={routeAddressForm.address}
+                      onChange={(event) => setRouteAddressForm((prev) => ({ ...prev, address: event.target.value }))}
+                      disabled={savingRouteAddress}
+                      placeholder="Dirección para entregas o retiros"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={saveRouteAddress}
+                    disabled={savingRouteAddress}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded bg-sky-700 px-3 text-sm text-white hover:bg-sky-800 disabled:opacity-50"
+                  >
+                    {savingRouteAddress ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Plus className="h-4 w-4" aria-hidden="true" />}
+                    Agregar
+                  </button>
+                </div>
+              </section>
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"

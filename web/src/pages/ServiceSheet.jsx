@@ -25,6 +25,7 @@ import {
   postRisPreflightCustomerFix,
   postRisPreflightArticleFix,
   postIngresoRisEmitir,
+  getIngresoRisStatus,
   getIngresoBarcodeBlob,
 } from "../lib/api";
 import { openPdfBlob } from "../lib/pdf";
@@ -449,6 +450,7 @@ export default function ServiceSheet() {
   // datos generales
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
   const [identifierConflict, setIdentifierConflict] = useState(null);
   const [releaseOrderRow, setReleaseOrderRow] = useState(null);
   const ingressDocumentName = useMemo(() => documentNameFromRis(data, "RIS"), [data]);
@@ -898,7 +900,20 @@ export default function ServiceSheet() {
       setRisBusy(true);
       await waitForRisProgressPaint();
       let risSource = data;
-      if (!isRisGenerated(data)) {
+      const existingRemito = risRemitoFrom(data);
+      if (!isRisGenerated(risSource) && existingRemito) {
+        setRisProgressStatus(`Buscando PDF del ${ingressDocumentName}...`);
+        const status = await getIngresoRisStatus(id);
+        risSource = { ...data, ...status, ris: status?.ris || status };
+        await refreshIngreso({ strong: 1 });
+      }
+      if (isRisRegistered(risSource)) {
+        const remito = risRemitoFrom(risSource);
+        setToastMsg(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
+        setTimeout(() => setToastMsg(""), 2500);
+        return;
+      }
+      if (!isRisGenerated(risSource)) {
         setRisProgressStatus(`Validando ${ingressDocumentName}...`);
         const preflight = await runRisPreflight({ silent: true });
         if (!preflight?.can_emit) return;
@@ -907,6 +922,12 @@ export default function ServiceSheet() {
         await waitForRisProgressPaint();
         risSource = await postIngresoRisEmitir(id);
         await refreshIngreso({ strong: 1 });
+        if (isRisRegistered(risSource)) {
+          const remito = risRemitoFrom(risSource);
+          setToastMsg(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
+          setTimeout(() => setToastMsg(""), 2500);
+          return;
+        }
       }
       const risDocumentName = ingressDocumentNameFor(risSource);
       const remito = risRemitoFrom(risSource) || risRemitoFrom(data);
@@ -1304,12 +1325,27 @@ export default function ServiceSheet() {
     }
     try {
       setSavingBaja(true);
-      await postBajaIngreso(id);
+      const resp = await postBajaIngreso(id);
       setActionsOpen(false);
       await refreshIngreso({ strong: 1 });
       setTabPersisted("principal");
       setErr("");
+      const job = resp?.bejerman_sync_job || {};
+      const jobStatus = String(job?.status || "").trim().toLowerCase();
+      const jobDetail = String(job?.last_error || job?.detail || "").trim();
+      if (jobStatus === "succeeded") {
+        setNotice("Baja registrada. La sincronización Bejerman fue completada.");
+      } else if (jobStatus === "blocked") {
+        setNotice(`Baja registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`);
+      } else if (jobStatus === "not_queued") {
+        setNotice(`Baja registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`);
+      } else if (jobStatus) {
+        setNotice("Baja registrada. La sincronización Bejerman quedó en cola.");
+      } else {
+        setNotice("Baja registrada.");
+      }
     } catch (e) {
+      setNotice("");
       setErr(e?.message || "No se pudo marcar la baja");
     } finally {
       setSavingBaja(false);
@@ -1346,12 +1382,27 @@ export default function ServiceSheet() {
     if (!ok) return;
     try {
       setSavingAlta(true);
-      await postAltaIngreso(id);
+      const resp = await postAltaIngreso(id);
       setActionsOpen(false);
       await refreshIngreso({ strong: 1 });
       setTabPersisted("principal");
       setErr("");
+      const job = resp?.bejerman_sync_job || {};
+      const jobStatus = String(job?.status || "").trim().toLowerCase();
+      const jobDetail = String(job?.last_error || job?.detail || "").trim();
+      if (jobStatus === "succeeded") {
+        setNotice("Alta registrada. La sincronización Bejerman fue completada.");
+      } else if (jobStatus === "blocked") {
+        setNotice(`Alta registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`);
+      } else if (jobStatus === "not_queued") {
+        setNotice(`Alta registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`);
+      } else if (jobStatus) {
+        setNotice("Alta registrada. La sincronización Bejerman quedó en cola.");
+      } else {
+        setNotice("Alta registrada.");
+      }
     } catch (e) {
+      setNotice("");
       setErr(e?.message || "No se pudo marcar el alta");
     } finally {
       setSavingAlta(false);
@@ -1662,7 +1713,10 @@ export default function ServiceSheet() {
           brand_id: marcaIdSel || null,
           model_id: modeloIdSel || null,
         });
-        if (typeof r?.within_365_days !== "boolean") return;
+        if (typeof r?.within_365_days !== "boolean") {
+          setForm((f) => ({ ...f, garantia_fabrica: false }));
+          return;
+        }
         const enGarantia = r.within_365_days;
         setFormBasics((s) => ({ ...(s || {}), garantia: enGarantia }));
       } catch {}
@@ -1762,7 +1816,7 @@ export default function ServiceSheet() {
   const canManagePhotos = canEditDiag;
   const canMarkReparado = canRepairTransitions && (canAssignTecnico || assignedToMe);
   const canResolve = canRepairTransitions && isJefe(user);
-  const canAutorizarReparar = canRepairTransitions && (canAssignTecnico || assignedToMe);
+  const canAutorizarReparar = canRepairTransitions && isJefe(user);
   const canDarBaja = Boolean(canBajaAltaPermission && isOwnedByMgCustomer);
   const canDarAlta = Boolean(canBajaAltaPermission && estadoLower === "baja");
   const canRequestBaja = Boolean(
@@ -2042,6 +2096,11 @@ export default function ServiceSheet() {
               Abrir e imprimir {ingressDocumentName}
             </button>
           )}
+        </div>
+      )}
+      {notice && (
+        <div className="mb-4 rounded border border-sky-200 bg-sky-50 p-2 text-sky-800">
+          {notice}
         </div>
       )}
       <Tabs

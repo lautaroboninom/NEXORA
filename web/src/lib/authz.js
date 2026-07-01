@@ -5,9 +5,11 @@ export const ROLES = {
   JEFE: "jefe",
   JEFE_VEEDOR: "jefe_veedor",
   ADMIN: "admin",
+  SUPERVISOR: "supervisor",
   VENTAS: "ventas",
   RECEPCION: "recepcion",
   COBRANZAS: "cobranzas",
+  LOGISTICA: "logistica",
   TECNICO: "tecnico",
 };
 
@@ -20,13 +22,15 @@ export const canActAsTech = (user) =>
 
 // Quienes pueden liberar (imprimir orden de salida).
 export const canRelease = (user) =>
-  [ROLES.JEFE, ROLES.JEFE_VEEDOR, ROLES.ADMIN, ROLES.VENTAS].includes(normalizeRole(user?.rol));
+  [ROLES.JEFE, ROLES.JEFE_VEEDOR, ROLES.ADMIN, ROLES.SUPERVISOR, ROLES.VENTAS].includes(normalizeRole(user?.rol));
 
 // Helpers por rol para uso en otras pantallas.
 export const isJefe = (u) => normalizeRole(u?.rol) === ROLES.JEFE;
 export const isJefeVeedor = (u) => normalizeRole(u?.rol) === ROLES.JEFE_VEEDOR;
 export const isAdmin = (u) => normalizeRole(u?.rol) === ROLES.ADMIN;
+export const isSupervisor = (u) => normalizeRole(u?.rol) === ROLES.SUPERVISOR;
 export const isVentas = (u) => normalizeRole(u?.rol) === ROLES.VENTAS;
 export const isRecepcion = (u) => normalizeRole(u?.rol) === ROLES.RECEPCION;
 export const isCobranzas = (u) => normalizeRole(u?.rol) === ROLES.COBRANZAS;
+export const isLogistica = (u) => normalizeRole(u?.rol) === ROLES.LOGISTICA;
 export const isTecnico = (u) => normalizeRole(u?.rol) === ROLES.TECNICO;

@@ -32,11 +32,15 @@ services:
     command: >
       bash -lc "python manage.py migrate --noinput && \
       python manage.py apply_ticket_sale_states_schema && \
+      python manage.py apply_no_se_repara_schema && \
       python manage.py apply_delivery_orders_schema && \
+      python manage.py apply_route_sheet_schema && \
       python manage.py apply_bejerman_purchase_entries_schema && \
       python manage.py apply_bejerman_user_credentials_schema && \
+      python manage.py apply_bejerman_pdf_settings_schema && \
       python manage.py apply_customer_bejerman_schema && \
       python manage.py apply_customer_alias_schema --seed-examples && \
+      python manage.py apply_bejerman_sale_items_schema && \
       python manage.py apply_notifications_schema && \
       python manage.py apply_assignment_requests_schema && \
       python manage.py collectstatic --noinput && \
@@ -51,6 +55,9 @@ services:
         source: ${REPUESTOS_COSTOS_HOST_DIR:-./repuestos}
         target: /repuestos
         read_only: true
+      - type: bind
+        source: "${BEJERMAN_PDF_WINDOWS_Z_HOST_DIR:-Z:/}"
+        target: ${BEJERMAN_PDF_WINDOWS_Z_CONTAINER_DIR:-/mnt/nexora-z}
       - type: bind
         source: "C:/trazabilidad_general"
         target: /trazabilidad
@@ -74,6 +81,7 @@ services:
       python manage.py apply_customer_bejerman_schema && \
       python manage.py apply_customer_alias_schema --seed-examples && \
       python manage.py apply_bejerman_sync_schema && \
+      python manage.py apply_bejerman_sale_items_schema && \
       python manage.py run_bejerman_sync_loop --interval 30 --limit 10"
     restart: unless-stopped
 

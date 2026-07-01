@@ -113,6 +113,21 @@ def _q(sql, params=None, one=False):
     return (rows[0] if rows else None) if one else rows
 
 
+def _has_table_column(table_name: str, column_name: str) -> bool:
+    try:
+        with connection.cursor() as cur:
+            columns = connection.introspection.get_table_description(cur, table_name)
+        return any(getattr(column, "name", None) == column_name for column in columns)
+    except Exception:
+        return False
+
+
+def _customer_alias_select(alias: str = "cliente_alias_interno") -> str:
+    if _has_table_column("customers", "alias_interno"):
+        return f"COALESCE(NULLIF(TRIM(c.alias_interno), ''), '') AS {alias}"
+    return f"'' AS {alias}"
+
+
 def _latest_quote_row(ingreso_id: int):
     return _q(
         """
@@ -131,7 +146,8 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
     if quote_id is None:
         latest = _latest_quote_row(ingreso_id) or {}
         quote_id = latest.get("id")
-    head = _q("""
+    customer_alias_select = _customer_alias_select()
+    head = _q(f"""
         SELECT
             t.id AS ingreso_id,
             t.Resolucion,
@@ -143,6 +159,8 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
             COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
             t.motivo AS motivo,
             c.razon_social AS cliente,
+            COALESCE(c.razon_social, '') AS cliente_razon_social,
+            {customer_alias_select},
             COALESCE(c.cuit, '') AS cliente_cuit,
             COALESCE(c.contacto, '') AS cliente_contacto,
             COALESCE(c.telefono, '') AS cliente_telefono,
@@ -261,6 +279,17 @@ def _first_non_empty(*vals) -> str:
             return s
     return ""
 
+
+def _customer_display_name(head: dict | None) -> str:
+    data = head or {}
+    current = _first_non_empty(data.get("cliente"))
+    legal = _first_non_empty(data.get("cliente_razon_social"), current)
+    alias = _first_non_empty(data.get("cliente_alias_interno"))
+    if current and legal and current.casefold() != legal.casefold():
+        return current
+    return alias or current or legal or "Cliente"
+
+
 def _compose_serial_internal(numero_serie, numero_interno) -> str:
     ns = (numero_serie or "").strip()
     ni = (numero_interno or "").strip()
@@ -298,10 +327,13 @@ def _get_derivacion_data(ingreso_id: int, deriv_id: int | None = None) -> dict |
     if deriv_id is not None:
         where += " AND ed.id=%s"
         params.append(deriv_id)
+    customer_alias_select = _customer_alias_select()
     sql = f"""
         SELECT
             t.id AS ingreso_id,
             COALESCE(c.razon_social,'') AS cliente,
+            COALESCE(c.razon_social, '') AS cliente_razon_social,
+            {customer_alias_select},
             COALESCE(b.nombre,'') AS marca,
             COALESCE(m.nombre,'') AS modelo,
             m.tipo_equipo AS equipo,
@@ -842,7 +874,7 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
     except Exception:
         pass
 
-    cliente_display = (head.get("cliente") or "Cliente").strip()
+    cliente_display = _customer_display_name(head)
     title = f"{os_version_title(head.get('ingreso_id'), head.get('quote_version_num'))} {cliente_display}".strip()
     filename = f"{safe_name(title)}.pdf"
 
@@ -896,7 +928,7 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
     y -= 10
 
     c.setFont("Helvetica", 11)
-    c.drawString(ml, y, f"Señor(es): {head['cliente']}")
+    c.drawString(ml, y, f"Señor(es): {cliente_display}")
     fecha = fecha_larga(head["fecha_emitido"])
     c.drawRightString(W - ml, y, fecha) 
     y -= 16
@@ -1333,8 +1365,9 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         )
 
         # r1: Cliente | Fecha | CUIT (si Particular usa CUIT del propietario)
-        cliente_rs = (head.get("cliente") or "").strip()
-        is_particular = (cliente_rs.lower() == "particular")
+        cliente_rs = _customer_display_name(head)
+        cliente_legal = _first_non_empty(head.get("cliente_razon_social"), head.get("cliente"))
+        is_particular = (cliente_legal.lower() == "particular")
         comp_cliente = cliente_rs
         if is_particular:
             owner_nm = (head.get("propietario_nombre") or "").strip()
@@ -1469,7 +1502,7 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         c.setFont("Helvetica-Bold", 13.0); c.drawString(x, y, f"OS {head['ingreso_id']}")
         y -= 8.5 * mm
         c.setFont("Helvetica", 10.0)
-        c.drawString(x, y, f"Cliente: {head.get('cliente') or '-'}"); y -= 6.5 * mm
+        c.drawString(x, y, f"Cliente: {_customer_display_name(head) or '-'}"); y -= 6.5 * mm
         serial_comp = _compose_serial_internal(head.get("numero_serie"), head.get("numero_interno"))
         c.drawString(x, y, f"Número Serie | Número interno: {serial_comp or '-'}"); y -= 6.5 * mm
         c.drawString(x, y, f"Equipo: {_compose_equipment_label(head) or (head.get('equipo') or '-')}"); y -= 10 * mm

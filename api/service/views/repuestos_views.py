@@ -26,7 +26,7 @@ FOUR_DEC = Decimal("0.0001")
 
 def _can_view_costs(user) -> bool:
     rol = (getattr(user, "rol", "") or "").strip().lower()
-    return rol in ("jefe", "jefe_veedor", "admin")
+    return rol in ("jefe", "jefe_veedor", "admin", "supervisor")
 
 
 def _parse_decimal_field(val, label, allow_none=False):

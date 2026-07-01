@@ -28,6 +28,7 @@ const severityClasses = {
 };
 
 const STATUS_LABELS = {
+  pendiente_stock: "Pendiente de stock",
   pendiente_armado: "Pendiente de armado",
   armado_pendiente_entrega: "Listo para entrega",
   entregado_pendiente_facturacion: "Pendiente de facturación",
@@ -650,7 +651,7 @@ export default function WorkDashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const canCreateOrder = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_CREATE);
-  const canEditItemDiscounts = String(user?.rol || "").trim().toLowerCase() === "ventas";
+  const canEditItemDiscounts = ["admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
 
   async function load() {
     try {

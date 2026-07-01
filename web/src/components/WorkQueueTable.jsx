@@ -72,7 +72,7 @@ function nextActionOf(row) {
   if (estado === "ingresado") return "Diagnosticar";
   if (presupuesto === "presupuestado") return "Seguimiento del presupuesto";
   if (presupuesto === "aprobado" || estado === "reparar") return "Reparar";
-  if (estado === "reparado") return "Liberar o entregar";
+  if (["reparado", "controlado_sin_defecto", "no_se_repara"].includes(estado)) return "Liberar o entregar";
   if (estado === "liberado") return "Coordinar entrega";
   if (estado === "vendido_pendiente_entrega") return "Confirmar entrega de venta";
   return "Actualizar avance";

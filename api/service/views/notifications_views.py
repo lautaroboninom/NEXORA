@@ -37,7 +37,7 @@ def _current_user_role(request):
 
 
 def _can_manage_extra_emails(request):
-    return _current_user_role(request) in {"admin", "cobranzas"}
+    return _current_user_role(request) in {"admin", "supervisor", "cobranzas"}
 
 
 class NotificacionesView(APIView):

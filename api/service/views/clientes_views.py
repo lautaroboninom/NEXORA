@@ -19,8 +19,8 @@ from ..permissions import require_any_permission
 from .helpers import exec_void, q, require_roles, _set_audit_user
 
 
-CUSTOMER_ADMIN_ROLES = ["jefe", "admin", "ventas", "jefe_veedor", "recepcion"]
-CUSTOMER_MANAGE_ROLES = ["jefe", "admin", "ventas", "jefe_veedor"]
+CUSTOMER_ADMIN_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "recepcion"]
+CUSTOMER_MANAGE_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor"]
 
 
 def _clean(value):
@@ -87,6 +87,88 @@ def _customer_base_columns(columns):
 def _attach_persisted_bejerman_details(rows):
     for row in rows:
         row["bejerman_details"] = customer_bejerman_detail_payload(row)
+    return rows
+
+
+def _format_datetime(value):
+    if not value:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _route_address_from_bejerman(details):
+    parts = [
+        details.get("domicilio"),
+        details.get("localidad"),
+        details.get("provincia"),
+        details.get("codigoPostal"),
+    ]
+    return ", ".join(_clean(part) for part in parts if _clean(part))
+
+
+def _attach_route_locations(rows):
+    for row in rows:
+        details = row.get("bejerman_details") or {}
+        address = _route_address_from_bejerman(details)
+        items = []
+        if address:
+            items.append(
+                {
+                    "id": None,
+                    "sourceType": "bejerman",
+                    "label": "Domicilio Bejerman",
+                    "name": row.get("razon_social") or "",
+                    "address": address,
+                    "notes": "",
+                    "readOnly": True,
+                }
+            )
+        row["routeLocations"] = items
+
+    if not rows or not _table_exists("route_locations"):
+        return rows
+    columns = _table_columns("route_locations")
+    if "customer_id" not in columns:
+        return rows
+
+    by_id = {int(row["id"]): row for row in rows if row.get("id") is not None}
+    customer_ids = list(by_id)
+    if not customer_ids:
+        return rows
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, customer_id, name, address, notes, active, last_used_at, usage_count
+              FROM route_locations
+             WHERE customer_id = ANY(%s)
+               AND active = TRUE
+             ORDER BY usage_count DESC, last_used_at DESC NULLS LAST, name ASC, address ASC
+            """,
+            [customer_ids],
+        )
+        route_rows = [
+            dict(zip([col[0] for col in cur.description], row)) for row in cur.fetchall()
+        ]
+    for item in route_rows:
+        customer = by_id.get(int(item.get("customer_id") or 0))
+        if not customer:
+            continue
+        customer.setdefault("routeLocations", []).append(
+            {
+                "id": item.get("id"),
+                "sourceType": "route_location",
+                "label": "Dirección de Hoja de ruta",
+                "name": item.get("name") or customer.get("razon_social") or "",
+                "address": item.get("address") or "",
+                "notes": item.get("notes") or "",
+                "active": item.get("active") if item.get("active") is not None else True,
+                "lastUsedAt": _format_datetime(item.get("last_used_at")),
+                "usageCount": item.get("usage_count") or 0,
+                "readOnly": False,
+            }
+        )
     return rows
 
 
@@ -381,6 +463,8 @@ class ClientesView(APIView):
     def get(self, request):
         require_roles(request, CUSTOMER_ADMIN_ROLES)
         rows = _customer_rows(include_stats=_bool_param(request.GET.get("include_stats")))
+        if _bool_param(request.GET.get("include_route_locations")):
+            rows = _attach_route_locations(rows)
         if _bool_param(request.GET.get("include_bejerman")):
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
             rows = _attach_bejerman_sync(rows, user_id=user_id)

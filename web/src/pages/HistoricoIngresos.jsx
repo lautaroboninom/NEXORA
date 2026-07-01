@@ -1,5 +1,5 @@
 // web/src/pages/HistoricoIngresos.jsx
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { getHistoricoIngresos, downloadAuth } from "../lib/api";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, resolveFechaIngreso } from "../lib/ui-helpers";
@@ -204,14 +204,18 @@ export default function HistoricoIngresos() {
   ]);
 
   const filtered = rows;
+  const isDeletedRow = (row) => Boolean(row?.eliminado) || String(row?.estado || "").toLowerCase() === "eliminado";
+  const rowKey = (row) => `${isDeletedRow(row) ? "deleted" : "ingreso"}-${ingresoIdOf(row)}`;
 
   const go = (row) => {
+    if (isDeletedRow(row)) return;
     const id = ingresoIdOf(row);
     if (!id) return;
     navigate(`/ingresos/${id}`);
   };
 
   const onRowKeyDown = (e, row) => {
+    if (isDeletedRow(row)) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       go(row);
@@ -284,17 +288,19 @@ export default function HistoricoIngresos() {
                 No hay resultados que coincidan con el filtro.
               </MobileDataCard>
             ) : (
-              filtered.map((row) => (
+              filtered.map((row) => {
+                const deleted = isDeletedRow(row);
+                return (
                 <MobileDataCard
-                  key={ingresoIdOf(row)}
-                  as="button"
-                  type="button"
-                  onClick={() => go(row)}
-                  className="hover:bg-gray-50"
-                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                  data-testid={`row-mobile-${ingresoIdOf(row)}`}
+                  key={rowKey(row)}
+                  as={deleted ? "div" : "button"}
+                  type={deleted ? undefined : "button"}
+                  onClick={deleted ? undefined : () => go(row)}
+                  className={deleted ? "border-gray-300 bg-gray-50 text-gray-700" : "hover:bg-gray-50"}
+                  aria-label={deleted ? `${formatOS(row)} eliminado` : `Abrir hoja de servicio de ${formatOS(row)}`}
+                  data-testid={`row-mobile-${rowKey(row)}`}
                 >
-                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                  <div className={`font-semibold text-gray-900 ${deleted ? "" : "underline"}`}>{formatOS(row)}</div>
                   <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                     <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
                     <MobileDataField label="Equipo" value={[tipoEquipoOf(row), row?.marca ?? row?.equipo?.marca, row?.modelo ?? row?.equipo?.modelo].filter(Boolean).join(" · ") || "-"} />
@@ -308,9 +314,17 @@ export default function HistoricoIngresos() {
                     <MobileDataField label="Fecha ingreso" value={formatDateTime(resolveFechaIngreso(row))} />
                     <MobileDataField label="Fecha liberación" value={formatDateTime(row?.fecha_liberacion)} />
                     <MobileDataField label="Fecha entrega" value={formatDateTime(row?.fecha_entrega)} />
+                    {deleted && (
+                      <MobileDataField
+                        label="Trazabilidad"
+                        value={row?.eliminacion_motivo || "Ingreso eliminado por corrección operativa."}
+                        className="min-[420px]:col-span-2"
+                      />
+                    )}
                   </div>
                 </MobileDataCard>
-              ))
+                );
+              })
             )}
           </MobileDataList>
           <DesktopTableWrap>
@@ -514,18 +528,20 @@ export default function HistoricoIngresos() {
                   </td>
                 </tr>
               ) : (
-                filtered.map((row) => (
+                filtered.map((row) => {
+                  const deleted = isDeletedRow(row);
+                  return (
+                  <Fragment key={rowKey(row)}>
                   <tr
-                    key={ingresoIdOf(row)}
-                    onClick={() => go(row)}
+                    onClick={deleted ? undefined : () => go(row)}
                     onKeyDown={(e) => onRowKeyDown(e, row)}
-                    className="hover:bg-gray-50 cursor-pointer"
-                    role="link"
-                    tabIndex={0}
-                    aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                    data-testid={`row-${ingresoIdOf(row)}`}
+                    className={deleted ? "bg-gray-50 text-gray-700" : "hover:bg-gray-50 cursor-pointer"}
+                    role={deleted ? undefined : "link"}
+                    tabIndex={deleted ? undefined : 0}
+                    aria-label={deleted ? `${formatOS(row)} eliminado` : `Abrir hoja de servicio de ${formatOS(row)}`}
+                    data-testid={`row-${rowKey(row)}`}
                   >
-                    <td className="p-2 underline">{formatOS(row)}</td>
+                    <td className={`p-2 ${deleted ? "font-medium" : "underline"}`}>{formatOS(row)}</td>
                     <td className="p-2">
                       {row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}
                     </td>
@@ -539,7 +555,16 @@ export default function HistoricoIngresos() {
                     <td className="p-2 whitespace-nowrap">{formatDateTime(row?.fecha_liberacion)}</td>
                     <td className="p-2 whitespace-nowrap">{formatDateTime(row?.fecha_entrega)}</td>
                   </tr>
-                ))
+                  {deleted && (
+                    <tr className="bg-gray-50 text-gray-600">
+                      <td className="px-2 pb-2 text-xs" colSpan={12}>
+                        {row?.eliminacion_motivo || "Ingreso eliminado por corrección operativa."}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  );
+                })
               )}
             </tbody>
           </table>

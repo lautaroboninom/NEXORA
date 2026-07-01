@@ -4,6 +4,7 @@ import api from "../lib/api";
 import { useNavigate } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import StatusChip from "../components/StatusChip.jsx";
 import useQueryState from "../hooks/useQueryState";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 
@@ -119,6 +120,9 @@ export default function Reparados() {
                 <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
                 <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                   <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                  <MobileDataField label="Estado">
+                    <StatusChip value={row?.estado} />
+                  </MobileDataField>
                   <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
                   <MobileDataField label="Serie">
                     <DeviceIdentifier row={row} />
@@ -141,6 +145,7 @@ export default function Reparados() {
             <thead>
               <tr className="text-left">
                 <th scope="col" className="p-2">OS</th>
+                <th scope="col" className="p-2">Estado</th>
                 <th scope="col" className="p-2">Cliente</th>
                 <th scope="col" className="p-2">Equipo</th>
                 <th scope="col" className="p-2">Serie</th>
@@ -161,6 +166,7 @@ export default function Reparados() {
                   data-testid={`row-${ingresoIdOf(row)}`}
                 >
                   <td className="p-2 underline">{formatOS(row)}</td>
+                  <td className="p-2"><StatusChip value={row?.estado} /></td>
                   <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}</td>
                   <td className="p-2">{catalogEquipmentLabel(row) ?? "-"}</td>
                   

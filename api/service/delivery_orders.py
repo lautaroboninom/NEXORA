@@ -21,6 +21,7 @@ from .notifications import active_users_for_notification, emit_notification, not
 logger = logging.getLogger(__name__)
 
 DELIVERY_STATUSES = {
+    "pendiente_stock",
     "pendiente_armado",
     "armado_pendiente_entrega",
     "entregado_pendiente_facturacion",
@@ -35,7 +36,9 @@ PRIORITIES = {"normal", "urgente"}
 REMITO_LOCATIONS = {"recepcion", "oficina"}
 CLOSED_STATUSES = {"entregado_no_facturable", "facturado", "cancelado"}
 NON_CANCELABLE_STATUSES = CLOSED_STATUSES | {"entregado_pendiente_facturacion"}
-EDITABLE_STATUSES = {"pendiente_armado", "armado_pendiente_entrega"}
+EDITABLE_STATUSES = {"pendiente_stock", "pendiente_armado", "armado_pendiente_entrega"}
+MANUAL_PLANNING_STATUSES = {"pendiente_stock", "pendiente_armado"}
+PREPARABLE_STATUSES = {"pendiente_armado", "armado_pendiente_entrega"}
 PARTIDA_QUANTITY_TOLERANCE = Decimal("0.0001")
 RENTAL_STOCK_DEPOSIT = "STL"
 RENTAL_UNAVAILABLE_STATES = {"entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado"}
@@ -185,6 +188,8 @@ def _normalize_item_partidas(partidas: Any, item_quantity: Decimal) -> list[dict
             {
                 "id": _optional_text(partida.get("id")),
                 "partida": partida_text,
+                "ingresoId": _optional_int(partida.get("ingresoId") or partida.get("ingreso_id")),
+                "deviceId": _optional_int(partida.get("deviceId") or partida.get("device_id")),
                 "assignedQuantity": assigned_quantity,
                 "partidaExpirationDate": partida.get("partidaExpirationDate") or None,
                 "stockDepositCode": _optional_text(partida.get("stockDepositCode")),
@@ -214,15 +219,76 @@ def _partida_rows_for_prepared_validation(item: dict[str, Any]) -> list[dict[str
         return partidas
     partida = _optional_text(item.get("partida"))
     if partida:
-        return [{"partida": partida, "assignedQuantity": item.get("quantity")}]
+        return [
+            {
+                "partida": partida,
+                "ingresoId": item.get("ingresoId") or item.get("ingreso_id"),
+                "deviceId": item.get("deviceId") or item.get("device_id"),
+                "assignedQuantity": item.get("quantity"),
+                "partidaExpirationDate": item.get("partidaExpirationDate") or item.get("partida_expiration_date"),
+                "stockDepositCode": item.get("stockDepositCode") or item.get("stock_deposit_code"),
+                "stockAvailableQuantity": item.get("stockAvailableQuantity") or item.get("stock_available_quantity"),
+                "stockCheckedAt": item.get("stockCheckedAt") or item.get("stock_checked_at"),
+            }
+        ]
     return []
 
 
+def _nullable_bool(value: Any) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "s", "si", "sí", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "n", "no", "false", "f", "off"}:
+        return False
+    return None
+
+
+def _item_article_requires_partida(item: dict[str, Any]) -> bool | None:
+    if "articleRequiresPartida" in item:
+        return _nullable_bool(item.get("articleRequiresPartida"))
+    return _nullable_bool(item.get("article_requires_partida"))
+
+
+def _item_can_omit_catalog_partida(order: dict[str, Any], item: dict[str, Any]) -> bool:
+    return (
+        normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type")) in {"sale", "demo"}
+        and _item_article_requires_partida(item) is False
+    )
+
+
+def _partida_policy_unknown_error(item: dict[str, Any], index: int, action: str) -> DeliveryOrderError:
+    article_code = _optional_text(item.get("articleCode") or item.get("article_code")) or f"renglón {index}"
+    return DeliveryOrderError(
+        "DELIVERY_ORDER_ARTICLE_PARTIDA_POLICY_UNKNOWN",
+        f"No se pudo verificar si el artículo {article_code} requiere partida. Reintente la verificación Bejerman o cargue partidas antes de {action}.",
+        status_code=409,
+    )
+
+
 def _validate_order_partidas_ready(order: dict[str, Any]) -> None:
+    delivery_type = normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type"))
     for index, item in enumerate(order.get("items") or [], start=1):
         quantity = _decimal(item.get("quantity"), "0")
         rows = _partida_rows_for_prepared_validation(item)
         if not rows:
+            if delivery_type == "rental":
+                raise DeliveryOrderError(
+                    "DELIVERY_ORDER_PARTIDAS_REQUIRED",
+                    f"Faltan NS del renglón {index}.",
+                    status_code=409,
+                )
+            if _item_can_omit_catalog_partida(order, item):
+                continue
+            if (
+                delivery_type in {"sale", "demo"}
+                and _optional_text(item.get("articleCode") or item.get("article_code"))
+                and _item_article_requires_partida(item) is None
+            ):
+                raise _partida_policy_unknown_error(item, index, "preparar")
             raise DeliveryOrderError(
                 "DELIVERY_ORDER_PARTIDAS_REQUIRED",
                 f"Complete las partidas del renglón {index} antes de preparar.",
@@ -291,6 +357,15 @@ def _normalize_order_items(
         description = _clean_text(item.get("description") or item.get("sourceText") or item.get("articleName") or item.get("articleCode"))
         if not description:
             raise DeliveryOrderError("ITEM_DESCRIPTION_REQUIRED", "Cada renglón necesita un detalle")
+        article_requires_input_present = "articleRequiresPartida" in item or "article_requires_partida" in item
+        article_requires_partida = _nullable_bool(
+            item.get("articleRequiresPartida") if "articleRequiresPartida" in item else item.get("article_requires_partida")
+        )
+        if not article_requires_input_present and current_item:
+            current_code = _optional_text(current_item.get("articleCode") or current_item.get("article_code"))
+            next_code = _optional_text(item.get("articleCode") or item.get("article_code"))
+            if _article_code_key(current_code) == _article_code_key(next_code):
+                article_requires_partida = _item_article_requires_partida(current_item)
         effective_item = dict(item)
         effective_item["partidas"] = partidas
         if partidas:
@@ -302,6 +377,7 @@ def _normalize_order_items(
                 "deviceId": _optional_int(item.get("deviceId") or item.get("device_id")),
                 "articleCode": _optional_text(item.get("articleCode")),
                 "articleName": _optional_text(item.get("articleName")),
+                "articleRequiresPartida": article_requires_partida,
                 "description": description,
                 "quantity": quantity,
                 "unitPrice": _decimal(item.get("unitPrice"), "0") if item.get("unitPrice") not in (None, "") else None,
@@ -602,8 +678,51 @@ def delivery_source_reference(source_reference: Any, delivery_type: Any, ingreso
     return service_order_reference(match.group(1)) if match else reference
 
 
+def _append_unique_int(values: list[int], value: Any) -> None:
+    parsed = _optional_int(value)
+    if parsed and parsed not in values:
+        values.append(parsed)
+
+
+def service_release_ingreso_ids_from_order(order: dict[str, Any]) -> list[int]:
+    delivery_type = normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type") or "")
+    if delivery_type != "service_release":
+        return []
+
+    ids: list[int] = []
+    _append_unique_int(ids, order.get("ingresoId") or order.get("ingreso_id"))
+    if _clean_text(order.get("sourceSystem") or order.get("source_system")).lower() == "nexora":
+        _append_unique_int(ids, order.get("sourceExternalId") or order.get("source_external_id"))
+
+    for item in order.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        _append_unique_int(ids, item.get("ingresoId") or item.get("ingreso_id"))
+        for partida in item.get("partidas") or []:
+            if isinstance(partida, dict):
+                _append_unique_int(ids, partida.get("ingresoId") or partida.get("ingreso_id"))
+    return ids
+
+
+def service_release_references_from_order(order: dict[str, Any]) -> list[str]:
+    return [service_order_reference(ingreso_id) for ingreso_id in service_release_ingreso_ids_from_order(order)]
+
+
 def delivery_order_number(row: dict[str, Any]) -> str:
     if row.get("delivery_type") == "service_release":
+        service_references = service_release_references_from_order(
+            {
+                **row,
+                "deliveryType": row.get("delivery_type"),
+                "ingresoId": row.get("ingreso_id"),
+                "sourceSystem": row.get("source_system"),
+                "sourceExternalId": row.get("source_external_id"),
+            }
+        )
+        if len(service_references) > 1:
+            return f"{service_references[0]} + {len(service_references) - 1} OS"
+        if len(service_references) == 1:
+            return service_references[0]
         service_reference = service_order_reference(row.get("ingreso_id")) or delivery_source_reference(
             row.get("source_reference"),
             row.get("delivery_type"),
@@ -708,7 +827,7 @@ def actor_is_delivery_discount_admin(actor_user_id: int | None) -> bool:
     with connection.cursor() as cur:
         cur.execute("SELECT LOWER(TRIM(COALESCE(rol, ''))) FROM users WHERE id = %s", [actor_user_id])
         row = cur.fetchone()
-    return bool(row and row[0] in {"admin", "ventas"})
+    return bool(row and row[0] in {"admin", "supervisor", "ventas"})
 
 
 def _assert_item_discounts_allowed(
@@ -726,7 +845,7 @@ def _assert_item_discounts_allowed(
         if item.get("discountPercent") != previous:
             raise DeliveryOrderError(
                 "DELIVERY_ORDER_DISCOUNT_ADMIN_REQUIRED",
-                "Solo un usuario de Administración o Ventas puede cargar descuentos en órdenes de entrega",
+                "Solo un usuario de Administración, Supervisor o Ventas puede cargar descuentos en órdenes de entrega",
                 status_code=403,
             )
 
@@ -755,7 +874,209 @@ def remito_status(remito_number: Any, *, billing_required: bool | None = None) -
     return "entregado_pendiente_facturacion" if billing_required else "entregado_no_facturable"
 
 
+def _service_release_ingreso_id(order: dict[str, Any]) -> int | None:
+    delivery_type = normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type") or "")
+    if delivery_type != "service_release":
+        return None
+    ingreso_id = _optional_int(order.get("ingresoId") or order.get("ingreso_id"))
+    if ingreso_id:
+        return ingreso_id
+    if _clean_text(order.get("sourceSystem") or order.get("source_system")).lower() == "nexora":
+        return _optional_int(order.get("sourceExternalId") or order.get("source_external_id"))
+    return None
+
+
+def _service_release_ingreso_ids_for_order_ids(order_ids: list[str]) -> list[int]:
+    ids = [str(order_id).strip() for order_id in order_ids if str(order_id or "").strip()]
+    if not ids:
+        return []
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ingreso_id
+              FROM (
+                    SELECT ingreso_id
+                      FROM delivery_orders
+                     WHERE id = ANY(%s)
+                       AND delivery_type = 'service_release'
+                       AND ingreso_id IS NOT NULL
+                    UNION
+                    SELECT doi.ingreso_id
+                      FROM delivery_order_items doi
+                      JOIN delivery_orders o ON o.id = doi.order_id
+                     WHERE o.id = ANY(%s)
+                       AND o.delivery_type = 'service_release'
+                       AND doi.ingreso_id IS NOT NULL
+                    UNION
+                    SELECT doip.ingreso_id
+                      FROM delivery_order_item_partidas doip
+                      JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+                      JOIN delivery_orders o ON o.id = doi.order_id
+                     WHERE o.id = ANY(%s)
+                       AND o.delivery_type = 'service_release'
+                       AND doip.ingreso_id IS NOT NULL
+                   ) linked_ingresos
+             ORDER BY ingreso_id
+            """,
+            [ids, ids, ids],
+        )
+        return [int(row[0]) for row in cur.fetchall() if row[0] is not None]
+
+
+def _sync_service_release_ingresos_invoice(ingreso_ids: list[int], invoice: str) -> list[int]:
+    ids: list[int] = []
+    for ingreso_id in ingreso_ids:
+        _append_unique_int(ids, ingreso_id)
+    if not ids:
+        return []
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, factura_numero
+              FROM ingresos
+             WHERE id = ANY(%s)
+             FOR UPDATE
+            """,
+            [ids],
+        )
+        rows = _rows(cur)
+        found_ids = [int(row["id"]) for row in rows]
+        for row in rows:
+            current_invoice = _optional_text(row.get("factura_numero"))
+            if current_invoice and current_invoice != invoice:
+                raise DeliveryOrderError(
+                    "SERVICE_ORDER_INVOICE_CONFLICT",
+                    "Una hoja de servicio del grupo ya tiene otra factura registrada.",
+                    status_code=409,
+                )
+        if found_ids:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET factura_numero = %s
+                 WHERE id = ANY(%s)
+                   AND NULLIF(TRIM(COALESCE(factura_numero, '')), '') IS NULL
+                """,
+                [invoice, found_ids],
+            )
+    return found_ids
+
+
+def _sync_service_release_ingreso_invoice(order: dict[str, Any], invoice: str) -> list[int]:
+    ingreso_ids = service_release_ingreso_ids_from_order(order)
+    if not ingreso_ids:
+        ingreso_id = _service_release_ingreso_id(order)
+        if ingreso_id:
+            ingreso_ids = [ingreso_id]
+    return _sync_service_release_ingresos_invoice(ingreso_ids, invoice)
+
+
+def _delivery_order_ids_linked_to_service_ingreso(cur, ingreso_id: int) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT o.id, o.invoice_number
+          FROM delivery_orders o
+         WHERE o.delivery_type = 'service_release'
+           AND o.status <> 'cancelado'
+           AND (
+                o.ingreso_id = %s
+                OR (o.source_system = 'nexora' AND o.source_external_id = %s)
+                OR EXISTS (
+                    SELECT 1
+                      FROM delivery_order_items doi
+                     WHERE doi.order_id = o.id
+                       AND doi.ingreso_id = %s
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM delivery_order_item_partidas doip
+                      JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+                     WHERE doi.order_id = o.id
+                       AND doip.ingreso_id = %s
+                )
+               )
+         ORDER BY o.created_at DESC NULLS LAST, o.id DESC
+         FOR UPDATE
+        """,
+        [ingreso_id, str(ingreso_id), ingreso_id, ingreso_id],
+    )
+    return _rows(cur)
+
+
+def sync_service_release_orders_invoice_from_ingreso(
+    ingreso_id: int,
+    invoice_number: str,
+    actor_user_id: int | None = None,
+) -> list[str]:
+    invoice = _optional_text(invoice_number)
+    if not invoice:
+        raise DeliveryOrderError("INVOICE_REQUIRED", "Número de factura requerido")
+    ingreso_id = int(ingreso_id)
+    with connection.cursor() as cur:
+        rows = _delivery_order_ids_linked_to_service_ingreso(cur, ingreso_id)
+        conflicting = [row for row in rows if _optional_text(row.get("invoice_number")) not in (None, invoice)]
+        if conflicting:
+            raise DeliveryOrderError(
+                "DELIVERY_ORDER_INVOICE_CONFLICT",
+                "La orden de entrega vinculada ya tiene otra factura registrada.",
+                status_code=409,
+            )
+        target_ids = [row["id"] for row in rows if not _optional_text(row.get("invoice_number"))]
+        if target_ids:
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET invoice_number = %s,
+                       invoiced_by_user_id = COALESCE(invoiced_by_user_id, %s),
+                       invoiced_at = COALESCE(invoiced_at, CURRENT_TIMESTAMP)
+                 WHERE id = ANY(%s)
+                """,
+                [invoice, actor_user_id, target_ids],
+            )
+        linked_ingreso_ids = _service_release_ingreso_ids_for_order_ids(target_ids or [row["id"] for row in rows])
+    if linked_ingreso_ids:
+        _sync_service_release_ingresos_invoice(linked_ingreso_ids, invoice)
+    for order_id in target_ids:
+        create_event(
+            order_id,
+            actor_user_id,
+            "delivery_order_invoiced",
+            metadata={
+                "invoiceNumber": invoice,
+                "source": "service_order_billing",
+                "ingresoId": ingreso_id,
+                "ingresoIds": linked_ingreso_ids,
+            },
+        )
+    return target_ids
+
+
+def order_requires_billing(order: dict[str, Any]) -> bool:
+    remito_number = _optional_text(order.get("remitoNumber") or order.get("remito_number"))
+    if not remito_number:
+        return False
+    group = order.get("bejermanRemitoGroup") if isinstance(order.get("bejermanRemitoGroup"), dict) else {}
+    response_summary = group.get("responseSummary") if isinstance(group.get("responseSummary"), dict) else {}
+    billing_required = response_summary.get("billingRequired")
+    if isinstance(billing_required, bool):
+        return billing_required
+    if isinstance(billing_required, str) and billing_required.strip().lower() in ("true", "false"):
+        return billing_required.strip().lower() == "true"
+    return remito_number_requires_billing(remito_number)
+
+
 def serialize_order(row: dict[str, Any]) -> dict[str, Any]:
+    order_id = str(row.get("id") or "")
+    has_remito = bool(_optional_text(row.get("remito_number")))
+    service_release_references = service_release_references_from_order(
+        {
+            **row,
+            "deliveryType": row.get("delivery_type"),
+            "ingresoId": row.get("ingreso_id"),
+            "sourceSystem": row.get("source_system"),
+            "sourceExternalId": row.get("source_external_id"),
+        }
+    )
     return {
         "id": row.get("id"),
         "orderNumber": delivery_order_number(row),
@@ -781,6 +1102,8 @@ def serialize_order(row: dict[str, Any]) -> dict[str, Any]:
         "commercialCondition": row.get("commercial_condition") or "",
         "commercialDeadline": row.get("commercial_deadline") or "",
         "remitoNumber": row.get("remito_number") or "",
+        "remitoPdfUrl": _delivery_order_remito_pdf_path(order_id) if has_remito else "",
+        "remitoPrintUrl": _delivery_order_remito_print_path(order_id) if has_remito else "",
         "bejermanRemitoGroupId": row.get("bejerman_remito_group_id") or "",
         "remitoLocation": row.get("remito_location") or "",
         "invoiceNumber": row.get("invoice_number") or "",
@@ -799,6 +1122,8 @@ def serialize_order(row: dict[str, Any]) -> dict[str, Any]:
         "cancelledAt": _iso(row.get("cancelled_at")),
         "createdAt": _iso(row.get("created_at")),
         "updatedAt": _iso(row.get("updated_at")),
+        "serviceReleaseCount": len(service_release_references),
+        "serviceReleaseReferences": service_release_references,
         "bejermanRemitoGroup": row.get("bejerman_remito_group") or None,
         "items": row.get("items") or [],
         "events": row.get("events") or [],
@@ -829,6 +1154,7 @@ def _serialize_item(row: dict[str, Any]) -> dict[str, Any]:
         "deviceId": row.get("device_id"),
         "articleCode": row.get("article_code") or "",
         "articleName": row.get("article_name") or "",
+        "articleRequiresPartida": _nullable_bool(row.get("article_requires_partida")),
         "description": row.get("description") or "",
         "quantity": float(row.get("quantity") or 0),
         "unitPrice": float(row["unit_price"]) if row.get("unit_price") is not None else None,
@@ -857,6 +1183,8 @@ def _serialize_partida(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row.get("id"),
         "orderItemId": row.get("order_item_id"),
+        "ingresoId": row.get("ingreso_id"),
+        "deviceId": row.get("device_id"),
         "partida": row.get("partida") or "",
         "assignedQuantity": float(row.get("assigned_quantity") or 0),
         "partidaExpirationDate": _iso(row.get("partida_expiration_date")),
@@ -867,6 +1195,108 @@ def _serialize_partida(row: dict[str, Any]) -> dict[str, Any]:
         "stockCheckedAt": _iso(row.get("stock_checked_at")),
         "sortOrder": row.get("sort_order") or 0,
     }
+
+
+def _item_needs_partida_policy_resolution(order: dict[str, Any], item: dict[str, Any]) -> bool:
+    if normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type")) not in {"sale", "demo"}:
+        return False
+    if not _optional_text(item.get("articleCode") or item.get("article_code")):
+        return False
+    if _item_article_requires_partida(item) is not None:
+        return False
+    return not _partida_rows_for_prepared_validation(item)
+
+
+def _lookup_article_requires_partida(
+    article_code: str,
+    company_key: str,
+    actor_user_id: int | None,
+    cache: dict[str, Any],
+) -> bool | None:
+    from .bejerman_sdk import BejermanSDKClient, build_article_filters, build_articles_result
+
+    code_key = _article_code_key(article_code)
+    lookup_key = f"{company_key}|{code_key}"
+    if lookup_key in cache:
+        return cache[lookup_key]
+
+    company_cache = cache.setdefault(f"client:{company_key}", {})
+    client = company_cache.get("client")
+    if client is None:
+        client = BejermanSDKClient(
+            company_key=company_key,
+            actor_user_id=actor_user_id,
+            allow_system_credentials=True,
+        )
+        company_cache["client"] = client
+
+    data = build_articles_result(
+        client.list_articulos(build_article_filters(article_code, field="code"), 50),
+        {"search": article_code, "limit": 50},
+    )
+    for article in data.get("items") or []:
+        if _article_code_key(article.get("code")) == code_key:
+            result = _nullable_bool(article.get("requiresPartida"))
+            cache[lookup_key] = result
+            return result
+    cache[lookup_key] = None
+    return None
+
+
+def refresh_delivery_order_article_partida_flags(
+    order: dict[str, Any],
+    actor_user_id: int | None,
+    *,
+    strict: bool = False,
+    action: str = "continuar",
+) -> dict[str, Any]:
+    if normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type")) not in {"sale", "demo"}:
+        return order
+
+    company_key = normalize_company_key(order.get("companyKey") or order.get("company_key") or "SEPID")
+    cache: dict[str, Any] = {}
+    updates: list[tuple[str, bool]] = []
+    for index, item in enumerate(order.get("items") or [], start=1):
+        if not _item_needs_partida_policy_resolution(order, item):
+            continue
+        article_code = _optional_text(item.get("articleCode") or item.get("article_code"))
+        try:
+            requires_partida = _lookup_article_requires_partida(article_code, company_key, actor_user_id, cache)
+        except Exception as exc:
+            logger.warning(
+                "delivery_order_article_partida_policy_lookup_failed",
+                extra={"article_code": article_code, "company_key": company_key},
+                exc_info=True,
+            )
+            if strict:
+                raise DeliveryOrderError(
+                    "DELIVERY_ORDER_ARTICLE_PARTIDA_POLICY_UNAVAILABLE",
+                    f"No se pudo verificar en Bejerman si el artículo {article_code} requiere partida. Reintente o cargue partidas antes de {action}.",
+                    status_code=502,
+                ) from exc
+            continue
+        if requires_partida is None:
+            if strict:
+                raise _partida_policy_unknown_error(item, index, action)
+            continue
+
+        item["articleRequiresPartida"] = requires_partida
+        item_id = _optional_text(item.get("id"))
+        if item_id:
+            updates.append((item_id, requires_partida))
+
+    if updates:
+        with connection.cursor() as cur:
+            for item_id, requires_partida in updates:
+                cur.execute(
+                    """
+                    UPDATE delivery_order_items
+                       SET article_requires_partida = %s
+                     WHERE id = %s
+                    """,
+                    [requires_partida, item_id],
+                )
+    return order
 
 
 def _remito_group_order_ids(row: dict[str, Any]) -> list[str]:
@@ -888,6 +1318,14 @@ def _serialize_remito_group(
     group_id = row.get("id")
     orders = orders_by_group.get(group_id, [])
     generated = row.get("status") == "generated"
+    response_summary = _decode_json(row.get("response_summary"), {}) or {}
+    registered_mode = str(
+        response_summary.get("documentMode")
+        or response_summary.get("document_mode")
+        or response_summary.get("mode")
+        or ""
+    ).strip().lower() in {"register", "registered", "registrar", "registrado"}
+    printable = generated and not registered_mode
     return {
         "id": group_id,
         "comprobanteTipo": row.get("comprobante_tipo") or "",
@@ -903,11 +1341,12 @@ def _serialize_remito_group(
         "paymentTermCode": row.get("payment_term_code") or "",
         "operationCode": row.get("operation_code") or "",
         "depositCode": row.get("deposit_code") or "",
+        "responseSummary": response_summary if isinstance(response_summary, dict) else {},
         "createdAt": _iso(row.get("created_at")),
         "generatedAt": _iso(row.get("generated_at")),
         "orderCount": len(order_ids_by_group.get(group_id, [])) or len(orders),
-        "pdfUrl": f"/api/ordenes-entrega/remito-bejerman/{group_id}/pdf/" if generated else None,
-        "printUrl": f"/api/ordenes-entrega/remito-bejerman/{group_id}/print/" if generated else None,
+        "pdfUrl": f"/api/ordenes-entrega/remito-bejerman/{group_id}/pdf/" if printable else None,
+        "printUrl": f"/api/ordenes-entrega/remito-bejerman/{group_id}/print/" if printable else None,
         "orders": [
             {
                 "id": order.get("id"),
@@ -967,7 +1406,7 @@ def load_remito_groups_by_id(group_ids: list[str]) -> dict[str, dict[str, Any]]:
             SELECT id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
                    comprobante_numero, remito_number, customer_code, customer_name,
                    seller_code, payment_term_code, operation_code, deposit_code,
-                   status, order_ids, created_at, generated_at
+                   status, order_ids, response_summary, created_at, generated_at
             FROM bejerman_remito_groups
             WHERE id = ANY(%s)
             """,
@@ -988,7 +1427,7 @@ def list_remito_history(limit: Any = 20) -> list[dict[str, Any]]:
             SELECT id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
                    comprobante_numero, remito_number, customer_code, customer_name,
                    seller_code, payment_term_code, operation_code, deposit_code,
-                   status, order_ids, created_at, generated_at
+                   status, order_ids, response_summary, created_at, generated_at
             FROM bejerman_remito_groups
             ORDER BY COALESCE(generated_at, created_at) DESC, id DESC
             LIMIT %s
@@ -1108,11 +1547,22 @@ def _billing_order_path(order_id: str) -> str:
     return f"/cobranzas/facturacion?orderId={quote(str(order_id or ''), safe='')}"
 
 
+def _delivery_order_remito_pdf_path(order_id: str) -> str:
+    return f"/api/ordenes-entrega/{quote(str(order_id or ''), safe='')}/remito/pdf/"
+
+
+def _delivery_order_remito_print_path(order_id: str) -> str:
+    return f"/api/ordenes-entrega/{quote(str(order_id or ''), safe='')}/remito/print/"
+
+
 def delivery_order_billing_url(order: dict[str, Any]) -> str:
     return _frontend_link(_billing_order_path(str(order.get("id") or "")))
 
 
 def delivery_order_remito_print_url(order: dict[str, Any]) -> str:
+    direct_print_url = _optional_text(order.get("remitoPrintUrl") or order.get("remito_print_url"))
+    if direct_print_url:
+        return _frontend_link(direct_print_url)
     group = order.get("bejermanRemitoGroup") if isinstance(order.get("bejermanRemitoGroup"), dict) else {}
     print_url = _optional_text(group.get("printUrl"))
     return _frontend_link(print_url) if print_url else ""
@@ -1294,6 +1744,21 @@ def notify_delivery_order_remito_ready(order_id: str, actor_user_id: int | None 
     return _delivery_order_notification(order_id, actor_user_id, "remito_ready")
 
 
+def _billing_suppressed(order_id: str) -> bool:
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM delivery_order_events
+             WHERE order_id = %s
+               AND event_type = 'delivery_order_not_billable'
+             LIMIT 1
+            """,
+            [order_id],
+        )
+        return bool(cur.fetchone())
+
+
 def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any]:
     filters = filters or {}
     where = []
@@ -1363,6 +1828,8 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
             "o.commercial_deadline",
         ]
         item_search_expressions = [
+            "CAST(oi.ingreso_id AS TEXT)",
+            "CASE WHEN oi.ingreso_id IS NOT NULL THEN CONCAT('OS-', LPAD(CAST(oi.ingreso_id AS TEXT), 5, '0')) ELSE '' END",
             "oi.article_code",
             "oi.article_name",
             "oi.description",
@@ -1388,12 +1855,30 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
         )
         params.extend([like] * (len(order_search_expressions) + len(item_search_expressions)))
 
-    pending_billing_requested = (
-        normalized_statuses == ["entregado_pendiente_facturacion"]
-        or str(filters.get("pending_billing") or filters.get("pendingBilling") or "").lower() in ("1", "true", "yes")
-    )
-    if str(filters.get("pending_billing") or filters.get("pendingBilling") or "").lower() in ("1", "true", "yes"):
-        where.append("o.status = 'entregado_pendiente_facturacion'")
+    pending_billing_filter = str(filters.get("pending_billing") or filters.get("pendingBilling") or "").lower() in ("1", "true", "yes")
+    pending_billing_requested = normalized_statuses == ["entregado_pendiente_facturacion"] or pending_billing_filter
+    if pending_billing_filter:
+        where.append("NULLIF(BTRIM(COALESCE(o.remito_number, '')), '') IS NOT NULL")
+        where.append("o.status NOT IN ('facturado', 'cancelado', 'entregado_no_facturable')")
+        where.append(
+            """
+            NOT EXISTS (
+              SELECT 1
+                FROM delivery_order_events e
+               WHERE e.order_id = o.id
+                 AND e.event_type = 'delivery_order_not_billable'
+            )
+            """
+        )
+        where.append(
+            """
+            (
+              COALESCE(g.response_summary ->> 'billingRequired', '') = 'true'
+              OR UPPER(SPLIT_PART(BTRIM(COALESCE(o.remito_number, '')), ' ', 1)) = ANY(%s)
+            )
+            """
+        )
+        params.append(sorted(BILLABLE_REMITO_TYPES))
     if pending_billing_requested:
         where.append("NULLIF(BTRIM(COALESCE(o.invoice_number, '')), '') IS NULL")
 
@@ -1487,7 +1972,14 @@ def load_items_by_order(order_ids: list[str]) -> dict[str, list[dict[str, Any]]]
     return out
 
 
-def get_delivery_order(order_id: str, *, include_events: bool = True, for_update: bool = False) -> dict[str, Any]:
+def get_delivery_order(
+    order_id: str,
+    *,
+    include_events: bool = True,
+    for_update: bool = False,
+    actor_user_id: int | None = None,
+    refresh_article_flags: bool = False,
+) -> dict[str, Any]:
     suffix = "FOR UPDATE" if for_update else ""
     with connection.cursor() as cur:
         cur.execute(f"SELECT * FROM delivery_orders WHERE id = %s {suffix}", [order_id])
@@ -1521,7 +2013,10 @@ def get_delivery_order(order_id: str, *, include_events: bool = True, for_update
                 }
                 for item in _rows(cur)
             ]
-    return serialize_order(row)
+    order = serialize_order(row)
+    if refresh_article_flags:
+        order = refresh_delivery_order_article_partida_flags(order, actor_user_id, strict=False)
+    return order
 
 
 @transaction.atomic
@@ -1558,6 +2053,7 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
         else payload_order_number or order_number_for_now(delivery_type)
     )
     remito_number = _optional_text(payload.get("remitoNumber") or payload.get("remito_number"))
+    invoice_number = _optional_text(payload.get("invoiceNumber"))
     equipment_serial = _optional_text(payload.get("equipmentSerial") or payload.get("equipment_serial"))
     price_currency = _price_currency(payload.get("priceCurrency") or payload.get("price_currency"))
     if remito_number and status not in {"facturado", "cancelado"}:
@@ -1568,6 +2064,12 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
     rental_header: dict[str, Any] = {}
     if delivery_type == "rental":
         rental_contexts = validate_rental_delivery_items(items, order_id=order_id)
+        items = resolve_present_rental_item_partidas(
+            items,
+            order_id=order_id,
+            company_key=company_key,
+            actor_user_id=actor_user_id,
+        )
         rental_header = rental_header_from_contexts(rental_contexts)
         equipment_serial = rental_header.get("equipmentSerial")
     else:
@@ -1648,7 +2150,7 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
                 priority,
                 remito_number,
                 "recepcion" if remito_number else _optional_text(payload.get("remitoLocation")),
-                _optional_text(payload.get("invoiceNumber")),
+                invoice_number,
                 actor_user_id,
                 status,
                 status,
@@ -1660,11 +2162,11 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
             cur.execute(
                 """
                 INSERT INTO delivery_order_items (
-                  id, order_id, ingreso_id, device_id, article_code, article_name, description, quantity, unit_price, price_currency, discount_percent,
+                  id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida, description, quantity, unit_price, price_currency, discount_percent,
                   source_text, partida, partida_expiration_date, stock_deposit_code,
                   stock_available_quantity, stock_checked_at, sort_order
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     item_id,
@@ -1673,6 +2175,7 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
                     item.get("deviceId"),
                     _optional_text(item.get("articleCode")),
                     _optional_text(item.get("articleName")),
+                    item["articleRequiresPartida"],
                     item["description"],
                     item["quantity"],
                     item["unitPrice"],
@@ -1688,6 +2191,17 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
                 ],
             )
             insert_item_partidas(cur, item_id, item["partidas"])
+
+    if invoice_number:
+        _sync_service_release_ingreso_invoice(
+            {
+                "delivery_type": delivery_type,
+                "ingreso_id": rental_header.get("ingresoId") if delivery_type == "rental" else ingreso_id,
+                "source_system": _optional_text(payload.get("sourceSystem")) or "nexora",
+                "source_external_id": _optional_text(payload.get("sourceExternalId")),
+            },
+            invoice_number,
+        )
 
     create_event(order_id, actor_user_id, "delivery_order_created", metadata={"status": status})
     notify_delivery_order_created(order_id, actor_user_id)
@@ -1715,6 +2229,18 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
     _assert_order_editable(current)
 
     delivery_type = normalize_delivery_type(payload.get("deliveryType") or current.get("deliveryType"))
+    if "status" in payload or "estado" in payload:
+        next_status = normalize_status(payload.get("status") if "status" in payload else payload.get("estado"))
+    else:
+        next_status = current.get("status") or "pendiente_armado"
+    if next_status != current.get("status") and (
+        next_status not in MANUAL_PLANNING_STATUSES or current.get("status") not in MANUAL_PLANNING_STATUSES
+    ):
+        raise DeliveryOrderError(
+            "INVALID_DELIVERY_ORDER_STATUS_CHANGE",
+            "Solo se puede cambiar manualmente entre pendiente de stock y pendiente de armado",
+            status_code=409,
+        )
     company_key = normalize_company_key(
         payload.get("companyKey") if "companyKey" in payload else current.get("companyKey") or "SEPID"
     )
@@ -1750,6 +2276,12 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
     rental_header: dict[str, Any] = {}
     if delivery_type == "rental":
         rental_contexts = validate_rental_delivery_items(items, order_id=order_id)
+        items = resolve_present_rental_item_partidas(
+            items,
+            order_id=order_id,
+            company_key=company_key,
+            actor_user_id=actor_user_id,
+        )
         rental_header = rental_header_from_contexts(rental_contexts)
     else:
         _validate_delivery_partidas_stock(items, company_key, delivery_type, actor_user_id)
@@ -1790,7 +2322,8 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                    price_currency = %s,
                    commercial_condition = %s,
                    commercial_deadline = %s,
-                   priority = %s
+                   priority = %s,
+                   status = %s
              WHERE id = %s
             """,
             [
@@ -1833,6 +2366,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                 ),
                 _optional_text(payload.get("commercialDeadline") if "commercialDeadline" in payload else current.get("commercialDeadline")),
                 priority,
+                next_status,
                 order_id,
             ],
         )
@@ -1850,6 +2384,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                            device_id = %s,
                            article_code = %s,
                            article_name = %s,
+                           article_requires_partida = %s,
                            description = %s,
                            quantity = %s,
                            unit_price = %s,
@@ -1869,6 +2404,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                         item["deviceId"],
                         item["articleCode"],
                         item["articleName"],
+                        item["articleRequiresPartida"],
                         item["description"],
                         item["quantity"],
                         item["unitPrice"],
@@ -1892,11 +2428,11 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                 cur.execute(
                     """
                     INSERT INTO delivery_order_items (
-                      id, order_id, ingreso_id, device_id, article_code, article_name, description, quantity, unit_price, price_currency, discount_percent,
+                      id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida, description, quantity, unit_price, price_currency, discount_percent,
                       source_text, partida, partida_expiration_date, stock_deposit_code,
                       stock_available_quantity, stock_checked_at, sort_order
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         item_id,
@@ -1905,6 +2441,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                         item["deviceId"],
                         item["articleCode"],
                         item["articleName"],
+                        item["articleRequiresPartida"],
                         item["description"],
                         item["quantity"],
                         item["unitPrice"],
@@ -1945,14 +2482,16 @@ def insert_item_partidas(cur, item_id: str, partidas: list[dict[str, Any]]):
         cur.execute(
             """
             INSERT INTO delivery_order_item_partidas (
-              id, order_item_id, partida, assigned_quantity, partida_expiration_date,
+              id, order_item_id, ingreso_id, device_id, partida, assigned_quantity, partida_expiration_date,
               stock_deposit_code, stock_available_quantity, stock_checked_at, sort_order
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             [
                 _optional_text(partida.get("id")) or f"doip-{uuid4()}",
                 item_id,
+                _optional_int(partida.get("ingresoId") or partida.get("ingreso_id")),
+                _optional_int(partida.get("deviceId") or partida.get("device_id")),
                 partida_text,
                 _decimal(partida.get("assignedQuantity") or partida.get("quantity")),
                 partida.get("partidaExpirationDate") or None,
@@ -1969,14 +2508,35 @@ def insert_item_partidas(cur, item_id: str, partidas: list[dict[str, Any]]):
 @transaction.atomic
 def mark_prepared(order_id: str, actor_user_id: int | None, remito_number: str | None = None) -> dict[str, Any]:
     current = get_delivery_order(order_id, include_events=False, for_update=True)
-    if current["status"] in CLOSED_STATUSES:
+    if current["status"] == "pendiente_stock":
+        raise DeliveryOrderError(
+            "DELIVERY_ORDER_STOCK_PENDING",
+            "La orden está pendiente de stock",
+            status_code=409,
+        )
+    if current["status"] not in PREPARABLE_STATUSES:
         raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "La orden ya está cerrada", status_code=409)
+    current = refresh_delivery_order_article_partida_flags(current, actor_user_id, strict=True, action="preparar")
     _validate_order_partidas_ready(current)
-    next_status = remito_status(remito_number or current.get("remitoNumber"))
+    if current.get("deliveryType") == "rental":
+        validate_rental_delivery_items_ready(
+            current.get("items") or [],
+            order_id=order_id,
+            company_key=current.get("companyKey") or "SEPID",
+            actor_user_id=actor_user_id,
+        )
+    next_status = "armado_pendiente_entrega"
+    effective_remito = _optional_text(remito_number)
+    manual_remito_metadata: dict[str, Any] = {}
+    if effective_remito and not _optional_text(current.get("remitoNumber")) and not _optional_text(current.get("bejermanRemitoGroupId")):
+        from .bejerman_delivery import register_delivery_order_manual_remito
+
+        manual_remito_metadata = register_delivery_order_manual_remito(current, actor_user_id, effective_remito)
+        effective_remito = _optional_text(manual_remito_metadata.get("remitoNumber")) or effective_remito
     should_notify_billing = (
-        next_status == "entregado_pendiente_facturacion"
-        and bool(_optional_text(remito_number))
+        bool(effective_remito)
         and not bool(_optional_text(current.get("remitoNumber")))
+        and remito_number_requires_billing(effective_remito)
     )
     with connection.cursor() as cur:
         cur.execute(
@@ -1988,22 +2548,17 @@ def mark_prepared(order_id: str, actor_user_id: int | None, remito_number: str |
                 remito_location_updated_by = CASE WHEN %s IS NOT NULL AND remito_location_updated_by IS NULL THEN %s ELSE remito_location_updated_by END,
                 remito_location_updated_at = CASE WHEN %s IS NOT NULL AND remito_location_updated_at IS NULL THEN CURRENT_TIMESTAMP ELSE remito_location_updated_at END,
                 prepared_by_user_id = COALESCE(prepared_by_user_id, %s),
-                delivered_by_user_id = CASE WHEN %s IN ('entregado_pendiente_facturacion','entregado_no_facturable') THEN COALESCE(delivered_by_user_id, %s) ELSE delivered_by_user_id END,
-                prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP),
-                delivered_at = CASE WHEN %s IN ('entregado_pendiente_facturacion','entregado_no_facturable') THEN COALESCE(delivered_at, CURRENT_TIMESTAMP) ELSE delivered_at END
+                prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP)
             WHERE id = %s
             """,
             [
                 next_status,
-                _optional_text(remito_number),
-                _optional_text(remito_number),
-                _optional_text(remito_number),
+                effective_remito,
+                effective_remito,
+                effective_remito,
                 actor_user_id,
-                _optional_text(remito_number),
+                effective_remito,
                 actor_user_id,
-                next_status,
-                actor_user_id,
-                next_status,
                 order_id,
             ],
         )
@@ -2011,7 +2566,7 @@ def mark_prepared(order_id: str, actor_user_id: int | None, remito_number: str |
         order_id,
         actor_user_id,
         "delivery_order_prepared",
-        metadata={"status": next_status, "remitoNumber": _optional_text(remito_number)},
+        metadata={"status": next_status, "remitoNumber": effective_remito, **manual_remito_metadata},
     )
     if should_notify_billing:
         notify_delivery_order_remito_ready(order_id, actor_user_id)
@@ -2021,12 +2576,23 @@ def mark_prepared(order_id: str, actor_user_id: int | None, remito_number: str |
 @transaction.atomic
 def mark_delivered(order_id: str, actor_user_id: int | None, remito_number: str | None) -> dict[str, Any]:
     current = get_delivery_order(order_id, include_events=False, for_update=True)
+    if current["status"] == "pendiente_stock":
+        raise DeliveryOrderError(
+            "DELIVERY_ORDER_STOCK_PENDING",
+            "La orden está pendiente de stock",
+            status_code=409,
+        )
     if current["status"] in CLOSED_STATUSES:
         raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "La orden ya está cerrada", status_code=409)
     effective_remito = _optional_text(remito_number) or _optional_text(current.get("remitoNumber"))
     if not effective_remito:
         raise DeliveryOrderError("REMITO_REQUIRED", "Para entregar la orden se necesita un remito")
-    next_status = remito_status(effective_remito)
+    if _optional_text(current.get("invoiceNumber")):
+        next_status = "facturado"
+    elif _billing_suppressed(order_id):
+        next_status = "entregado_no_facturable"
+    else:
+        next_status = remito_status(effective_remito)
     with connection.cursor() as cur:
         cur.execute(
             """
@@ -2037,9 +2603,9 @@ def mark_delivered(order_id: str, actor_user_id: int | None, remito_number: str 
                 remito_location_updated_by = COALESCE(remito_location_updated_by, %s),
                 remito_location_updated_at = COALESCE(remito_location_updated_at, CURRENT_TIMESTAMP),
                 prepared_by_user_id = COALESCE(prepared_by_user_id, %s),
-                delivered_by_user_id = %s,
+                delivered_by_user_id = COALESCE(delivered_by_user_id, %s),
                 prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP),
-                delivered_at = CURRENT_TIMESTAMP
+                delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
             WHERE id = %s
             """,
             [next_status, effective_remito, actor_user_id, actor_user_id, actor_user_id, order_id],
@@ -2056,21 +2622,51 @@ def mark_invoiced(order_id: str, actor_user_id: int | None, invoice_number: str)
     if not invoice:
         raise DeliveryOrderError("INVOICE_REQUIRED", "Número de factura requerido")
     current = get_delivery_order(order_id, include_events=False, for_update=True)
-    if current["status"] != "entregado_pendiente_facturacion":
-        raise DeliveryOrderError("INVALID_INVOICE_STATE", "Solo se factura una orden entregada con remito", status_code=409)
+    if not order_requires_billing(current) or _optional_text(current.get("invoiceNumber")) or _billing_suppressed(order_id):
+        raise DeliveryOrderError("INVALID_INVOICE_STATE", "Solo se factura una orden con remito facturable pendiente", status_code=409)
+    next_status = "facturado" if current["status"] == "entregado_pendiente_facturacion" or current.get("deliveredAt") else current["status"]
     with connection.cursor() as cur:
         cur.execute(
             """
             UPDATE delivery_orders
-            SET status = 'facturado',
+            SET status = %s,
                 invoice_number = %s,
                 invoiced_by_user_id = %s,
                 invoiced_at = CURRENT_TIMESTAMP
             WHERE id = %s
             """,
-            [invoice, actor_user_id, order_id],
+            [next_status, invoice, actor_user_id, order_id],
         )
-    create_event(order_id, actor_user_id, "delivery_order_invoiced", metadata={"invoiceNumber": invoice})
+    synced_ingreso_ids = _sync_service_release_ingreso_invoice(current, invoice)
+    event_metadata = {"invoiceNumber": invoice}
+    if synced_ingreso_ids:
+        if len(synced_ingreso_ids) == 1:
+            event_metadata["ingresoId"] = synced_ingreso_ids[0]
+        event_metadata["ingresoIds"] = synced_ingreso_ids
+    create_event(order_id, actor_user_id, "delivery_order_invoiced", metadata=event_metadata)
+    return get_delivery_order(order_id)
+
+
+@transaction.atomic
+def mark_not_billable(order_id: str, actor_user_id: int | None, note: str | None = None) -> dict[str, Any]:
+    current = get_delivery_order(order_id, include_events=False, for_update=True)
+    if not order_requires_billing(current) or _optional_text(current.get("invoiceNumber")):
+        raise DeliveryOrderError("INVALID_NOT_BILLABLE_STATE", "Solo se marca como no facturable una orden con remito facturable pendiente", status_code=409)
+    next_status = (
+        "entregado_no_facturable"
+        if current["status"] == "entregado_pendiente_facturacion" or current.get("deliveredAt")
+        else current["status"]
+    )
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE delivery_orders
+            SET status = %s
+            WHERE id = %s
+            """,
+            [next_status, order_id],
+        )
+    create_event(order_id, actor_user_id, "delivery_order_not_billable", note=note)
     return get_delivery_order(order_id)
 
 
@@ -2081,6 +2677,8 @@ def cancel_order(order_id: str, actor_user_id: int | None, note: str | None = No
         raise DeliveryOrderError("DELIVERY_ORDER_INVOICED", "No se puede cancelar una orden facturada", status_code=409)
     if current["status"] in {"entregado_pendiente_facturacion", "entregado_no_facturable"}:
         raise DeliveryOrderError("DELIVERY_ORDER_DELIVERED", "No se puede cancelar una orden entregada", status_code=409)
+    if _optional_text(current.get("remitoNumber")):
+        raise DeliveryOrderError("DELIVERY_ORDER_REMITO_EMITTED", "No se puede cancelar una orden con remito emitido", status_code=409)
     if current["status"] in NON_CANCELABLE_STATUSES:
         raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "La orden ya está cerrada", status_code=409)
     with connection.cursor() as cur:
@@ -2185,6 +2783,7 @@ def update_item_article(order_id: str, item_id: str, actor_user_id: int | None, 
             UPDATE delivery_order_items
             SET article_code = %s,
                 article_name = %s,
+                article_requires_partida = %s,
                 unit_price = %s,
                 price_currency = COALESCE(%s, price_currency),
                 partida = %s,
@@ -2197,6 +2796,7 @@ def update_item_article(order_id: str, item_id: str, actor_user_id: int | None, 
             [
                 _optional_text(stock_payload.get("articleCode")),
                 _optional_text(stock_payload.get("articleName")),
+                _nullable_bool(stock_payload.get("articleRequiresPartida") if "articleRequiresPartida" in stock_payload else stock_payload.get("article_requires_partida")),
                 _decimal(stock_payload.get("unitPrice"), "0") if stock_payload.get("unitPrice") not in (None, "") else None,
                 price_currency_update,
                 _optional_text(stock_payload.get("partida")),
@@ -2220,12 +2820,6 @@ def update_item_article(order_id: str, item_id: str, actor_user_id: int | None, 
 def update_item_partidas(order_id: str, item_id: str, actor_user_id: int | None, partidas: list[dict[str, Any]]) -> dict[str, Any]:
     current = get_delivery_order(order_id, include_events=False, for_update=True)
     _assert_order_editable(current)
-    if current.get("deliveryType") == "rental":
-        raise DeliveryOrderError(
-            "RENTAL_ITEMS_READ_ONLY",
-            "Las partidas de alquiler se toman de la serie del equipo seleccionado",
-            status_code=409,
-        )
     with connection.cursor() as cur:
         cur.execute(
             """
@@ -2239,19 +2833,33 @@ def update_item_partidas(order_id: str, item_id: str, actor_user_id: int | None,
         if not item_row:
             raise DeliveryOrderError("DELIVERY_ORDER_ITEM_NOT_FOUND", "Ítem de orden no encontrado", status_code=404)
         normalized_partidas = _normalize_item_partidas(partidas or [], _decimal(item_row.get("quantity")))
-        _validate_delivery_partidas_stock(
-            [
+        if current.get("deliveryType") == "rental":
+            normalized_partidas = resolve_rental_item_partidas(
                 {
+                    "id": item_row.get("id"),
                     "articleCode": item_row.get("article_code"),
                     "quantity": item_row.get("quantity"),
-                    "stockDepositCode": item_row.get("stock_deposit_code"),
                     "partidas": normalized_partidas,
-                }
-            ],
-            normalize_company_key(current.get("companyKey") or "SEPID"),
-            normalize_delivery_type(current.get("deliveryType")),
-            actor_user_id,
-        )
+                },
+                normalized_partidas,
+                company_key=current.get("companyKey") or "SEPID",
+                actor_user_id=actor_user_id,
+                order_id=order_id,
+            )
+        else:
+            _validate_delivery_partidas_stock(
+                [
+                    {
+                        "articleCode": item_row.get("article_code"),
+                        "quantity": item_row.get("quantity"),
+                        "stockDepositCode": item_row.get("stock_deposit_code"),
+                        "partidas": normalized_partidas,
+                    }
+                ],
+                normalize_company_key(current.get("companyKey") or "SEPID"),
+                normalize_delivery_type(current.get("deliveryType")),
+                actor_user_id,
+            )
         cur.execute("DELETE FROM delivery_order_item_partidas WHERE order_item_id = %s", [item_id])
         if normalized_partidas:
             cur.execute(
@@ -2449,37 +3057,341 @@ def rental_item_from_context(row: dict[str, Any], mapping: dict[str, Any], *, st
     }
 
 
-def _rental_duplicate_reservation(ingreso_id: int, order_id: str | None = None) -> str | None:
+def _rental_equipment_contexts_by_serial(serial: str) -> list[dict[str, Any]]:
+    serial_text = _optional_text(serial)
+    if not serial_text:
+        return []
+    company_expr = "COALESCE(t.empresa_bejerman, 'SEPID')" if _has_table_column("ingresos", "empresa_bejerman") else "'SEPID'"
+    has_location = _has_table_column("ingresos", "ubicacion_id")
+    has_alquilado = _has_table_column("ingresos", "alquilado")
+    location_select = "t.ubicacion_id, COALESCE(loc.nombre, '') AS ubicacion_nombre" if has_location else "NULL AS ubicacion_id, '' AS ubicacion_nombre"
+    location_join = "LEFT JOIN locations loc ON loc.id = t.ubicacion_id" if has_location else ""
+    alquilado_expr = "COALESCE(t.alquilado, FALSE)" if has_alquilado else "FALSE"
     with connection.cursor() as cur:
         cur.execute(
-            """
+            f"""
+            SELECT t.id AS ingreso_id,
+                   t.device_id,
+                   t.estado,
+                   {alquilado_expr} AS alquilado,
+                   {company_expr} AS company_key,
+                   {location_select},
+                   COALESCE(t.equipo_variante, '') AS equipo_variante,
+                   c.id AS owner_customer_id,
+                   COALESCE(c.razon_social, '') AS owner_customer_name,
+                   COALESCE(d.numero_serie, '') AS equipment_serial,
+                   COALESCE(d.numero_interno, '') AS equipment_internal_number,
+                   d.model_id,
+                   COALESCE(d.variante, '') AS device_variante,
+                   COALESCE(m.nombre, '') AS modelo,
+                   COALESCE(m.tipo_equipo, '') AS tipo_equipo,
+                   COALESCE(m.variante, '') AS modelo_variante,
+                   COALESCE(b.nombre, '') AS marca
+              FROM ingresos t
+              JOIN devices d ON d.id = t.device_id
+              JOIN customers c ON c.id = d.customer_id
+              LEFT JOIN models m ON m.id = d.model_id
+              LEFT JOIN marcas b ON b.id = d.marca_id
+              {location_join}
+             WHERE LOWER(TRIM(COALESCE(d.numero_serie, ''))) = LOWER(TRIM(%s))
+             ORDER BY t.id DESC
+             LIMIT 20
+            """,
+            [serial_text],
+        )
+        return _rows(cur)
+
+
+def _rental_context_available(row: dict[str, Any]) -> bool:
+    estado = _clean_text(row.get("estado")).lower()
+    return (
+        estado not in RENTAL_UNAVAILABLE_STATES
+        and not bool(row.get("alquilado"))
+        and is_rental_shelf_location_name(row.get("ubicacion_nombre"))
+    )
+
+
+def _assert_rental_context_available(row: dict[str, Any], label: str) -> None:
+    estado = _clean_text(row.get("estado")).lower()
+    if estado in RENTAL_UNAVAILABLE_STATES or bool(row.get("alquilado")):
+        raise DeliveryOrderError(
+            "RENTAL_EQUIPMENT_NOT_AVAILABLE",
+            f"NS no vinculado a una OS disponible: {label}",
+            status_code=409,
+        )
+    if not is_rental_shelf_location_name(row.get("ubicacion_nombre")):
+        raise DeliveryOrderError(
+            "RENTAL_EQUIPMENT_NOT_IN_SHELF",
+            f"El NS {label} no está en Estantería de Alquiler",
+            status_code=409,
+        )
+
+
+def _resolve_rental_context_for_partida(partida: str, ingreso_id: int | None, device_id: int | None) -> dict[str, Any]:
+    partida_text = _optional_text(partida)
+    if not partida_text:
+        raise DeliveryOrderError("RENTAL_SERIAL_REQUIRED", "Cada NS de alquiler debe tener número de serie", status_code=409)
+    if ingreso_id:
+        row = rental_equipment_context(int(ingreso_id))
+        if not row:
+            raise DeliveryOrderError("RENTAL_EQUIPMENT_NOT_FOUND", f"No se encontró la OS {ingreso_id}", status_code=404)
+        if device_id and int(row.get("device_id") or 0) != int(device_id):
+            raise DeliveryOrderError("RENTAL_EQUIPMENT_MISMATCH", f"La OS {ingreso_id} no corresponde al equipo seleccionado", status_code=409)
+        serial = _optional_text(row.get("equipment_serial"))
+        if not serial or serial.casefold() != partida_text.casefold():
+            raise DeliveryOrderError("RENTAL_PARTIDA_MISMATCH", f"La partida {partida_text} no coincide con la serie de la OS {ingreso_id}", status_code=409)
+        _assert_rental_context_available(row, partida_text)
+        return row
+
+    rows = _rental_equipment_contexts_by_serial(partida_text)
+    if not rows:
+        raise DeliveryOrderError(
+            "RENTAL_EQUIPMENT_NOT_FOUND",
+            f"NS no vinculado a una OS disponible: {partida_text}",
+            status_code=409,
+        )
+    available = next((row for row in rows if _rental_context_available(row)), None)
+    if not available:
+        raise DeliveryOrderError(
+            "RENTAL_EQUIPMENT_NOT_AVAILABLE",
+            f"NS no vinculado a una OS disponible: {partida_text}",
+            status_code=409,
+        )
+    if device_id and int(available.get("device_id") or 0) != int(device_id):
+        raise DeliveryOrderError("RENTAL_EQUIPMENT_MISMATCH", f"El NS {partida_text} no corresponde al equipo seleccionado", status_code=409)
+    return available
+
+
+def _rental_duplicate_reservation(ingreso_id: int, order_id: str | None = None) -> str | None:
+    partida_column_exists = _has_table_column("delivery_order_item_partidas", "ingreso_id")
+    partida_exists_sql = "FALSE"
+    params: list[Any] = [ingreso_id]
+    if partida_column_exists:
+        partida_exists_sql = """
+        EXISTS (
+          SELECT 1
+            FROM delivery_order_items doi_partida
+            JOIN delivery_order_item_partidas doip ON doip.order_item_id = doi_partida.id
+           WHERE doi_partida.order_id = o.id
+             AND doip.ingreso_id = %s
+        )
+        """
+        params.append(ingreso_id)
+    params.extend([order_id, order_id])
+    with connection.cursor() as cur:
+        cur.execute(
+            f"""
             SELECT o.order_number
-              FROM delivery_order_items doi
-              JOIN delivery_orders o ON o.id = doi.order_id
-             WHERE doi.ingreso_id = %s
+              FROM delivery_orders o
+             WHERE (
+                    EXISTS (
+                      SELECT 1
+                        FROM delivery_order_items doi
+                       WHERE doi.order_id = o.id
+                         AND doi.ingreso_id = %s
+                    )
+                    OR {partida_exists_sql}
+                   )
                AND o.delivery_type = 'rental'
                AND o.status NOT IN ('facturado', 'cancelado')
                AND (%s IS NULL OR o.id <> %s)
              ORDER BY o.created_at DESC
              LIMIT 1
             """,
-            [ingreso_id, order_id, order_id],
+            params,
         )
         row = cur.fetchone()
     return row[0] if row else None
 
 
+def _stock_lot_available_quantity(lot: dict[str, Any]) -> Decimal:
+    return _stock_quantity(lot.get("availableQuantity") or lot.get("stockAvailableQuantity") or lot.get("realQuantity"))
+
+
+def resolve_rental_item_partidas(
+    item: dict[str, Any],
+    partidas: list[dict[str, Any]],
+    *,
+    company_key: str,
+    actor_user_id: int | None,
+    order_id: str | None = None,
+) -> list[dict[str, Any]]:
+    quantity = _decimal(item.get("quantity"), "0")
+    normalized_partidas = _normalize_item_partidas(partidas or [], quantity)
+    if not normalized_partidas:
+        return []
+
+    article_code = _optional_text(item.get("articleCode") or item.get("article_code"))
+    if not article_code:
+        raise DeliveryOrderError(
+            "RENTAL_ARTICLE_REQUIRED",
+            "Cada renglón de alquiler necesita un artículo Bejerman",
+            status_code=409,
+        )
+
+    try:
+        lots = _delivery_partida_stock_lots(
+            article_code,
+            RENTAL_STOCK_DEPOSIT,
+            normalize_company_key(company_key or "SEPID"),
+            actor_user_id,
+            {},
+        )
+    except Exception as exc:
+        raise DeliveryOrderError(
+            "RENTAL_STL_STOCK_UNAVAILABLE",
+            "No se pudo verificar stock Bejerman para los NS de alquiler.",
+            status_code=502,
+        ) from exc
+
+    lots_by_partida = {
+        (_optional_text(lot.get("partida")) or "").casefold(): lot
+        for lot in lots
+        if _optional_text(lot.get("partida"))
+    }
+    resolved: list[dict[str, Any]] = []
+    seen_ingresos: set[int] = set()
+    checked_at = timezone.now().isoformat()
+    for row in normalized_partidas:
+        partida_text = _optional_text(row.get("partida"))
+        lot = lots_by_partida.get((partida_text or "").casefold())
+        if not lot:
+            raise DeliveryOrderError(
+                "RENTAL_STL_STOCK_REQUIRED",
+                f"NS sin stock en STL: {partida_text}",
+                status_code=409,
+            )
+        assigned_quantity = _decimal(row.get("assignedQuantity"), "0")
+        available_quantity = _stock_lot_available_quantity(lot)
+        if available_quantity < assigned_quantity:
+            raise DeliveryOrderError(
+                "RENTAL_STL_STOCK_REQUIRED",
+                f"NS sin stock suficiente en STL: {partida_text}",
+                status_code=409,
+            )
+
+        context = _resolve_rental_context_for_partida(
+            partida_text or "",
+            _optional_int(row.get("ingresoId") or row.get("ingreso_id")),
+            _optional_int(row.get("deviceId") or row.get("device_id")),
+        )
+        ingreso_id = int(context.get("ingreso_id"))
+        if ingreso_id in seen_ingresos:
+            raise DeliveryOrderError(
+                "RENTAL_EQUIPMENT_DUPLICATED",
+                f"La OS {ingreso_id} está repetida en la orden",
+                status_code=409,
+            )
+        seen_ingresos.add(ingreso_id)
+        duplicate = _rental_duplicate_reservation(ingreso_id, order_id)
+        if duplicate:
+            raise DeliveryOrderError(
+                "RENTAL_EQUIPMENT_RESERVED",
+                f"NS ya reservado en la orden {duplicate}: {partida_text}",
+                status_code=409,
+            )
+
+        resolved.append(
+            {
+                **row,
+                "ingresoId": ingreso_id,
+                "deviceId": int(context.get("device_id")),
+                "partida": _optional_text(lot.get("partida")) or partida_text,
+                "partidaExpirationDate": lot.get("expirationDate") or row.get("partidaExpirationDate"),
+                "stockDepositCode": RENTAL_STOCK_DEPOSIT,
+                "stockAvailableQuantity": available_quantity,
+                "stockCheckedAt": row.get("stockCheckedAt") or checked_at,
+            }
+        )
+    return resolved
+
+
+def validate_rental_delivery_items_ready(
+    items: list[dict[str, Any]],
+    *,
+    order_id: str | None,
+    company_key: str,
+    actor_user_id: int | None,
+) -> list[dict[str, Any]]:
+    if not items:
+        raise DeliveryOrderError("RENTAL_EQUIPMENT_REQUIRED", "La orden de alquiler necesita al menos un artículo")
+    contexts: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        if not _optional_text(item.get("articleCode") or item.get("article_code")):
+            raise DeliveryOrderError(
+                "RENTAL_ARTICLE_REQUIRED",
+                f"El renglón {index} de alquiler necesita un artículo Bejerman",
+                status_code=409,
+            )
+        rows = _partida_rows_for_prepared_validation(item)
+        if not rows:
+            raise DeliveryOrderError(
+                "DELIVERY_ORDER_PARTIDAS_REQUIRED",
+                f"Faltan NS del renglón {index}.",
+                status_code=409,
+            )
+        resolved_rows = resolve_rental_item_partidas(
+            item,
+            rows,
+            company_key=company_key,
+            actor_user_id=actor_user_id,
+            order_id=order_id,
+        )
+        for row in resolved_rows:
+            context = rental_equipment_context(int(row["ingresoId"]))
+            if context:
+                contexts.append(context)
+    return contexts
+
+
+def resolve_present_rental_item_partidas(
+    items: list[dict[str, Any]],
+    *,
+    order_id: str | None,
+    company_key: str,
+    actor_user_id: int | None,
+) -> list[dict[str, Any]]:
+    resolved_items: list[dict[str, Any]] = []
+    for item in items:
+        next_item = dict(item)
+        if next_item.get("partidas"):
+            next_item["partidas"] = resolve_rental_item_partidas(
+                next_item,
+                next_item.get("partidas") or [],
+                company_key=company_key,
+                actor_user_id=actor_user_id,
+                order_id=order_id,
+            )
+            next_item["partida"] = None
+        resolved_items.append(next_item)
+    return resolved_items
+
+
 def validate_rental_delivery_items(items: list[dict[str, Any]], *, order_id: str | None = None) -> list[dict[str, Any]]:
     if not items:
-        raise DeliveryOrderError("RENTAL_EQUIPMENT_REQUIRED", "La orden de alquiler necesita al menos un equipo")
+        raise DeliveryOrderError("RENTAL_EQUIPMENT_REQUIRED", "La orden de alquiler necesita al menos un artículo")
 
     seen_ingresos: set[int] = set()
     contexts: list[dict[str, Any]] = []
     for index, item in enumerate(items, start=1):
+        if not _optional_text(item.get("articleCode") or item.get("article_code")):
+            raise DeliveryOrderError(
+                "RENTAL_ARTICLE_REQUIRED",
+                f"El renglón {index} de alquiler necesita un artículo Bejerman",
+                status_code=409,
+            )
+
         ingreso_id = item.get("ingresoId")
         device_id = item.get("deviceId")
+        partida = _optional_text(item.get("partida"))
+        if not ingreso_id and not device_id and not partida:
+            continue
         if not ingreso_id or not device_id:
-            raise DeliveryOrderError("RENTAL_EQUIPMENT_REQUIRED", f"El renglón {index} debe estar vinculado a un equipo de alquiler")
+            raise DeliveryOrderError(
+                "RENTAL_EQUIPMENT_REQUIRED",
+                f"El renglón {index} debe estar vinculado a un equipo de alquiler o quedar sin NS hasta preparación",
+                status_code=409,
+            )
         if ingreso_id in seen_ingresos:
             raise DeliveryOrderError("RENTAL_EQUIPMENT_DUPLICATED", f"La OS {ingreso_id} está repetida en la orden")
         seen_ingresos.add(ingreso_id)
@@ -2506,18 +3418,10 @@ def validate_rental_delivery_items(items: list[dict[str, Any]], *, order_id: str
                 status_code=409,
             )
 
-        mapping = _article_mapping_for_equipment(row)
-        article_code = _optional_text(item.get("articleCode"))
-        mapped_code = _optional_text((mapping or {}).get("article_code"))
-        if not mapped_code:
-            raise DeliveryOrderError("RENTAL_ARTICLE_MAPPING_REQUIRED", f"La OS {ingreso_id} no tiene artículo Bejerman mapeado", status_code=409)
-        if not article_code or _article_code_key(article_code) != _article_code_key(mapped_code):
-            raise DeliveryOrderError("RENTAL_ARTICLE_MAPPING_MISMATCH", f"El artículo del renglón {index} no coincide con el mapeo del equipo", status_code=409)
-
         serial = _optional_text(row.get("equipment_serial"))
         if not serial:
             raise DeliveryOrderError("RENTAL_SERIAL_REQUIRED", f"La OS {ingreso_id} no tiene número de serie para usar como partida", status_code=409)
-        if _optional_text(item.get("partida")).casefold() != serial.casefold():
+        if not partida or partida.casefold() != serial.casefold():
             raise DeliveryOrderError("RENTAL_PARTIDA_MISMATCH", f"La partida del renglón {index} debe ser la serie del equipo", status_code=409)
 
         duplicate = _rental_duplicate_reservation(int(ingreso_id), order_id)
@@ -2644,109 +3548,31 @@ def _service_release_equipment_detail(row: dict[str, Any]) -> str:
     return " - ".join(part for part in parts if part) or "Equipo"
 
 
-def _existing_service_release_order_id(ingreso_id: int) -> str | None:
-    with connection.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id
-              FROM delivery_orders
-             WHERE source_system = 'nexora'
-               AND source_external_id = %s
-               AND delivery_type = 'service_release'
-             LIMIT 1
-            """,
-            [str(ingreso_id)],
-        )
-        row = cur.fetchone()
-    return row[0] if row else None
+def _service_release_raw_pedido(row: dict[str, Any]) -> str:
+    return _optional_text(row.get("resolucion")) or "reparado"
 
 
-@transaction.atomic
-def _refresh_service_release_order(order_id: str, row: dict[str, Any], mapping: dict[str, Any] | None, actor_user_id: int | None) -> dict[str, Any]:
-    equipment_label = _service_release_equipment_label(row)
+def _service_release_item_payload(row: dict[str, Any], mapping: dict[str, Any] | None) -> dict[str, Any]:
     equipment_detail = _service_release_equipment_detail(row)
-    equipment_serial = _optional_text(row.get("equipment_serial"))
-    article_code = _optional_text((mapping or {}).get("article_code"))
-    with connection.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE delivery_orders
-               SET customer_id = %s,
-                   order_number = %s,
-                   bejerman_customer_code = %s,
-                   customer_name = %s,
-                   company_key = %s,
-                   source_reference = %s,
-                   ingreso_id = %s,
-                   device_id = %s,
-                   equipment_model = %s,
-                   equipment_serial = %s,
-                   equipment_internal_number = %s,
-                   order_date = %s,
-                   raw_pedido = %s,
-                   status = CASE WHEN status = 'pendiente_armado' THEN 'armado_pendiente_entrega' ELSE status END
-             WHERE id = %s
-               AND status NOT IN ('entregado_no_facturable','facturado','cancelado')
-               AND remito_number IS NULL
-            """,
-            [
-                row.get("customer_id"),
-                service_order_reference(row.get("ingreso_id")),
-                _optional_text(row.get("bejerman_customer_code")),
-                row.get("customer_name") or "",
-                normalize_company_key(row.get("company_key") or "SEPID"),
-                service_order_reference(row.get("ingreso_id")),
-                row.get("ingreso_id"),
-                row.get("device_id"),
-                equipment_label,
-                equipment_serial,
-                _optional_text(row.get("equipment_internal_number")),
-                _date_for_order(row.get("order_date")),
-                _optional_text(row.get("resolucion")) or "reparado",
-                order_id,
-            ],
-        )
-        cur.execute(
-            """
-            UPDATE delivery_order_items
-               SET article_code = CASE
-                     WHEN NULLIF(%s, '') IS NOT NULL THEN COALESCE(NULLIF(article_code, ''), %s)
-                     ELSE article_code
-                   END,
-                   article_name = %s,
-                   description = %s,
-                   source_text = %s,
-                   partida = COALESCE(NULLIF(partida, ''), %s)
-             WHERE id = (
-               SELECT id
-                 FROM delivery_order_items
-                WHERE order_id = %s
-                ORDER BY sort_order, created_at
-                LIMIT 1
-             )
-            """,
-            [article_code, article_code, equipment_detail, equipment_detail, equipment_detail, equipment_serial, order_id],
-        )
-    create_event(order_id, actor_user_id, "service_release_order_synced", metadata={"ingresoId": row.get("ingreso_id")})
-    return get_delivery_order(order_id)
+    return {
+        "ingresoId": row.get("ingreso_id"),
+        "deviceId": row.get("device_id"),
+        "articleCode": _optional_text((mapping or {}).get("article_code")) or "",
+        "articleName": equipment_detail,
+        "description": equipment_detail,
+        "quantity": 1,
+        "sourceText": equipment_detail,
+        "partida": _optional_text(row.get("equipment_serial")) or "",
+    }
 
 
-def ensure_service_release_order_for_ingreso(ingreso_id: int, actor_user_id: int | None = None) -> dict[str, Any] | None:
-    row = _service_release_context(ingreso_id)
-    if not row:
-        return None
-    if _clean_text(row.get("estado")).lower() not in {"liberado", "vendido_pendiente_entrega"}:
-        return None
-
-    mapping = _article_mapping_for_service_release(row)
-    existing_id = _existing_service_release_order_id(ingreso_id)
-    if existing_id:
-        return _refresh_service_release_order(existing_id, row, mapping, actor_user_id)
-
+def _service_release_order_payload(
+    ingreso_id: int,
+    row: dict[str, Any],
+    mapping: dict[str, Any] | None,
+) -> dict[str, Any]:
     equipment_label = _service_release_equipment_label(row)
-    equipment_detail = _service_release_equipment_detail(row)
-    article_code = _optional_text((mapping or {}).get("article_code"))
-    payload = {
+    return {
         "customerId": row.get("customer_id"),
         "customerName": row.get("customer_name") or "",
         "bejermanCustomerCode": _optional_text(row.get("bejerman_customer_code")),
@@ -2763,20 +3589,279 @@ def ensure_service_release_order_for_ingreso(ingreso_id: int, actor_user_id: int
         "sellerName": "Servicio Técnico",
         "orderDate": _date_for_order(row.get("order_date")),
         "operationCompanyLabel": "REPARACION",
-        "rawPedido": _optional_text(row.get("resolucion")) or "reparado",
+        "rawPedido": _service_release_raw_pedido(row),
         "priority": "normal",
         "status": "armado_pendiente_entrega",
-        "items": [
-            {
-                "articleCode": article_code,
-                "articleName": equipment_detail,
-                "description": equipment_detail,
-                "quantity": 1,
-                "sourceText": equipment_detail,
-                "partida": _optional_text(row.get("equipment_serial")),
-            }
-        ],
+        "items": [_service_release_item_payload(row, mapping)],
     }
+
+
+def _existing_service_release_order_id(ingreso_id: int) -> str | None:
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.id
+              FROM delivery_orders o
+             WHERE o.delivery_type = 'service_release'
+               AND o.status <> 'cancelado'
+               AND (
+                    o.ingreso_id = %s
+                    OR (o.source_system = 'nexora' AND o.source_external_id = %s)
+                    OR EXISTS (
+                        SELECT 1
+                          FROM delivery_order_items doi
+                         WHERE doi.order_id = o.id
+                           AND doi.ingreso_id = %s
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM delivery_order_item_partidas doip
+                          JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+                         WHERE doi.order_id = o.id
+                           AND doip.ingreso_id = %s
+                    )
+                   )
+             ORDER BY
+                   CASE
+                     WHEN o.ingreso_id = %s THEN 0
+                     WHEN o.source_system = 'nexora' AND o.source_external_id = %s THEN 1
+                     ELSE 2
+                   END,
+                   o.created_at DESC NULLS LAST,
+                   o.id DESC
+             LIMIT 1
+            """,
+            [ingreso_id, str(ingreso_id), ingreso_id, ingreso_id, ingreso_id, str(ingreso_id)],
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str | None:
+    customer_code = _optional_text(row.get("bejerman_customer_code")) or ""
+    customer_id = _optional_int(row.get("customer_id"))
+    if not customer_code and not customer_id:
+        return None
+    company_key = normalize_company_key(row.get("company_key") or "SEPID")
+    raw_pedido = _service_release_raw_pedido(row)
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.id
+              FROM delivery_orders o
+             WHERE o.delivery_type = 'service_release'
+               AND o.status IN ('pendiente_armado', 'armado_pendiente_entrega')
+               AND NULLIF(BTRIM(COALESCE(o.remito_number, '')), '') IS NULL
+               AND o.bejerman_remito_group_id IS NULL
+               AND COALESCE(o.company_key, 'SEPID') = %s
+               AND LOWER(BTRIM(COALESCE(o.raw_pedido, ''))) = LOWER(BTRIM(%s))
+               AND (
+                    (%s <> '' AND UPPER(BTRIM(COALESCE(o.bejerman_customer_code, ''))) = UPPER(BTRIM(%s)))
+                    OR (%s = '' AND %s IS NOT NULL AND o.customer_id = %s)
+                   )
+             ORDER BY o.created_at ASC NULLS LAST, o.id ASC
+             LIMIT 1
+             FOR UPDATE
+            """,
+            [company_key, raw_pedido, customer_code, customer_code, customer_code, customer_id, customer_id],
+        )
+        found = cur.fetchone()
+    return found[0] if found else None
+
+
+def _upsert_service_release_order_item(
+    cur,
+    order_id: str,
+    row: dict[str, Any],
+    mapping: dict[str, Any] | None,
+) -> str:
+    item = _service_release_item_payload(row, mapping)
+    ingreso_id = _optional_int(item.get("ingresoId"))
+    article_code = _optional_text(item.get("articleCode"))
+    partida = _optional_text(item.get("partida"))
+    cur.execute(
+        """
+        SELECT doi.id
+          FROM delivery_order_items doi
+          JOIN delivery_orders o ON o.id = doi.order_id
+         WHERE doi.order_id = %s
+           AND (
+                doi.ingreso_id = %s
+                OR EXISTS (
+                    SELECT 1
+                      FROM delivery_order_item_partidas doip
+                     WHERE doip.order_item_id = doi.id
+                       AND doip.ingreso_id = %s
+                )
+                OR (doi.ingreso_id IS NULL AND o.ingreso_id = %s)
+               )
+         ORDER BY
+               CASE
+                 WHEN doi.ingreso_id = %s THEN 0
+                 WHEN doi.ingreso_id IS NULL THEN 1
+                 ELSE 2
+               END,
+               doi.sort_order ASC,
+               doi.created_at ASC
+         LIMIT 1
+        """,
+        [order_id, ingreso_id, ingreso_id, ingreso_id, ingreso_id],
+    )
+    existing = cur.fetchone()
+    if existing:
+        item_id = existing[0]
+        cur.execute(
+            """
+            UPDATE delivery_order_items
+               SET ingreso_id = %s,
+                   device_id = %s,
+                   article_code = COALESCE(NULLIF(%s, ''), article_code),
+                   article_name = %s,
+                   description = %s,
+                   quantity = 1,
+                   unit_price = NULL,
+                   discount_percent = 0,
+                   source_text = %s,
+                   partida = %s,
+                   partida_expiration_date = NULL,
+                   stock_deposit_code = NULL,
+                   stock_available_quantity = NULL,
+                   stock_checked_at = NULL
+             WHERE id = %s
+            """,
+            [
+                ingreso_id,
+                _optional_int(item.get("deviceId")),
+                article_code,
+                item["articleName"],
+                item["description"],
+                item["sourceText"],
+                partida,
+                item_id,
+            ],
+        )
+        return item_id
+
+    cur.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM delivery_order_items WHERE order_id = %s", [order_id])
+    sort_order = int(cur.fetchone()[0] or 0)
+    item_id = f"doi-{uuid4()}"
+    cur.execute(
+        """
+        INSERT INTO delivery_order_items (
+          id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida,
+          description, quantity, unit_price, price_currency, discount_percent, source_text, partida,
+          partida_expiration_date, stock_deposit_code, stock_available_quantity, stock_checked_at, sort_order
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, 1, NULL, 'ARS', 0, %s, %s, NULL, NULL, NULL, NULL, %s)
+        """,
+        [
+            item_id,
+            order_id,
+            ingreso_id,
+            _optional_int(item.get("deviceId")),
+            article_code,
+            item["articleName"],
+            item["description"],
+            item["sourceText"],
+            partida,
+            sort_order,
+        ],
+    )
+    return item_id
+
+
+@transaction.atomic
+def _refresh_service_release_order(order_id: str, row: dict[str, Any], mapping: dict[str, Any] | None, actor_user_id: int | None) -> dict[str, Any]:
+    equipment_label = _service_release_equipment_label(row)
+    equipment_serial = _optional_text(row.get("equipment_serial"))
+    ingreso_id = _optional_int(row.get("ingreso_id"))
+    with connection.cursor() as cur:
+        cur.execute("SELECT ingreso_id, source_system, source_external_id FROM delivery_orders WHERE id = %s FOR UPDATE", [order_id])
+        current = _one(cur)
+        current_ingreso_id = _optional_int((current or {}).get("ingreso_id"))
+        current_source_external_id = _optional_text((current or {}).get("source_external_id"))
+        should_refresh_header = (
+            current_ingreso_id in (None, ingreso_id)
+            or (
+                _clean_text((current or {}).get("source_system")).lower() == "nexora"
+                and current_source_external_id == str(ingreso_id)
+            )
+        )
+        if should_refresh_header:
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET customer_id = %s,
+                       order_number = %s,
+                       bejerman_customer_code = %s,
+                       customer_name = %s,
+                       company_key = %s,
+                       source_reference = %s,
+                       ingreso_id = %s,
+                       device_id = %s,
+                       equipment_model = %s,
+                       equipment_serial = %s,
+                       equipment_internal_number = %s,
+                       order_date = %s,
+                       raw_pedido = %s,
+                       status = CASE WHEN status = 'pendiente_armado' THEN 'armado_pendiente_entrega' ELSE status END
+                 WHERE id = %s
+                   AND status NOT IN ('entregado_no_facturable','facturado','cancelado')
+                   AND remito_number IS NULL
+                """,
+                [
+                    row.get("customer_id"),
+                    service_order_reference(row.get("ingreso_id")),
+                    _optional_text(row.get("bejerman_customer_code")),
+                    row.get("customer_name") or "",
+                    normalize_company_key(row.get("company_key") or "SEPID"),
+                    service_order_reference(row.get("ingreso_id")),
+                    row.get("ingreso_id"),
+                    row.get("device_id"),
+                    equipment_label,
+                    equipment_serial,
+                    _optional_text(row.get("equipment_internal_number")),
+                    _date_for_order(row.get("order_date")),
+                    _service_release_raw_pedido(row),
+                    order_id,
+                ],
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET status = CASE WHEN status = 'pendiente_armado' THEN 'armado_pendiente_entrega' ELSE status END
+                 WHERE id = %s
+                   AND status NOT IN ('entregado_no_facturable','facturado','cancelado')
+                   AND remito_number IS NULL
+                """,
+                [order_id],
+            )
+        _upsert_service_release_order_item(cur, order_id, row, mapping)
+    create_event(order_id, actor_user_id, "service_release_order_synced", metadata={"ingresoId": row.get("ingreso_id")})
+    return get_delivery_order(order_id)
+
+
+@transaction.atomic
+def ensure_service_release_order_for_ingreso(ingreso_id: int, actor_user_id: int | None = None) -> dict[str, Any] | None:
+    row = _service_release_context(ingreso_id)
+    if not row:
+        return None
+    if _clean_text(row.get("estado")).lower() not in {"liberado", "vendido_pendiente_entrega"}:
+        return None
+
+    mapping = _article_mapping_for_service_release(row)
+    with connection.cursor() as cur:
+        cur.execute("LOCK TABLE delivery_orders IN SHARE ROW EXCLUSIVE MODE")
+    existing_id = _existing_service_release_order_id(ingreso_id)
+    if existing_id:
+        return _refresh_service_release_order(existing_id, row, mapping, actor_user_id)
+
+    compatible_id = _find_compatible_open_service_release_order_id(row)
+    if compatible_id:
+        return _refresh_service_release_order(compatible_id, row, mapping, actor_user_id)
+
+    payload = _service_release_order_payload(ingreso_id, row, mapping)
     try:
         return create_delivery_order(payload, actor_user_id)
     except IntegrityError:

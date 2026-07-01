@@ -14,6 +14,12 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import require_company
+from .bejerman_documents import (
+    REMITO_COMPROBANTE_TYPES,
+    RIS_REGISTERED_NO_PDF_CODE,
+    parse_bejerman_remito_number,
+    registered_remito_no_pdf_detail,
+)
 from .bejerman_sdk import (
     BejermanPdfReference,
     BejermanPdfPendingError,
@@ -21,6 +27,7 @@ from .bejerman_sdk import (
     BejermanSdkConfigError,
     BejermanSdkResponseError,
     BejermanSdkUnavailable,
+    as_bool,
     as_string,
     bejerman_filter,
     build_customer_document_fields,
@@ -35,6 +42,9 @@ from .bejerman_sdk import (
     parse_remito_response,
     records_from_response,
     resolve_customer_document_fields,
+    resolve_equipment_partida,
+    sdk_signed_article_quantity,
+    sdk_uses_negative_article_quantity,
 )
 from .bejerman_sync import (
     BejermanBlockedError,
@@ -61,8 +71,6 @@ RIS_REGISTER_POINT_OF_SALE = "00001"
 RIS_REGISTER_NUMERA_FLEX = "N"
 RIS_REGISTER_EMITE_REG = "R"
 MG_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", re.IGNORECASE)
-
-
 class BejermanRisError(RuntimeError):
     pass
 
@@ -85,6 +93,14 @@ class BejermanRisPreflightError(BejermanRisError):
     def __init__(self, payload: dict[str, Any]):
         super().__init__(payload.get("detail") or "La validación previa del RIS falló")
         self.payload = payload
+
+
+class BejermanRisRegisteredNoPdfError(BejermanRisError):
+    code = RIS_REGISTERED_NO_PDF_CODE
+
+    def __init__(self, remito_number: Any = ""):
+        super().__init__(registered_remito_no_pdf_detail(remito_number))
+        self.remito_number = _clean(remito_number)
 
 
 def _json_param(value: Any) -> str:
@@ -188,6 +204,10 @@ def _is_digital_registered_document(document: dict[str, str], payload: dict[str,
     return point in digital_points
 
 
+def _is_manual_registered_document(document: dict[str, str]) -> bool:
+    return _clean(document.get("point")).zfill(5) == _register_point_of_sale()
+
+
 def normalize_manual_ris_remito_number(
     value: Any,
     profile: dict[str, Any] | None = None,
@@ -200,55 +220,23 @@ def normalize_manual_ris_remito_number(
     profile = profile if isinstance(profile, dict) else {}
     tipo = _clean(profile.get("type")) or _clean(getattr(settings, "BEJERMAN_RIS_TYPE", "RIS")) or "RIS"
     letter = _clean(profile.get("letter")) or _clean(getattr(settings, "BEJERMAN_RIS_LETTER", "R")) or "R"
-    point_and_number = re.search(r"^\s*(\d{1,5})\s*[-/ ]\s*(\d{1,8})\s*$", text)
-    if point_and_number:
-        point = point_and_number.group(1).zfill(5)
-        _validate_registered_point_of_sale(point, profile)
-        number = point_and_number.group(2).zfill(8)
-        return {
-            "type": tipo,
-            "letter": letter,
-            "point": point,
-            "number": number,
-            "remitoNumber": format_remito_number(tipo, letter, point, number),
-        }
-    explicit = re.search(r"^\s*([A-Za-z]{2,4})(?:\s+([A-Za-z]))?\s+(\d{1,5})\s*[-/ ]\s*(\d{1,8})\s*$", text)
-    if explicit:
-        explicit_type = explicit.group(1).upper()
-        explicit_letter = (explicit.group(2) or letter).upper()
-        if _clean_upper(explicit_type) != _clean_upper(tipo) or _clean_upper(explicit_letter) != _clean_upper(letter):
-            raise BejermanRisError(f"El remito debe corresponder a {tipo} {letter} para este motivo de ingreso")
-        point = explicit.group(3).zfill(5)
-        _validate_registered_point_of_sale(point, profile)
-        number = explicit.group(4).zfill(8)
-        return {
-            "type": tipo,
-            "letter": letter,
-            "point": point,
-            "number": number,
-            "remitoNumber": format_remito_number(tipo, letter, point, number),
-        }
-    if require_complete:
-        points = _register_allowed_points_of_sale(profile)
-        examples = " o ".join(f"{tipo} {letter} {point}-00004566" for point in points)
-        raise BejermanRisError(
-            f"Debe cargar el remito completo con punto de venta, por ejemplo {examples}"
+    points = _register_allowed_points_of_sale(profile)
+    examples = " o ".join(f"{tipo} {letter} {point}-00004566" for point in points)
+    try:
+        return parse_bejerman_remito_number(
+            text,
+            default_type=tipo,
+            default_letter=letter,
+            require_explicit_match=True,
+            validate_point=lambda point: _validate_registered_point_of_sale(point, profile),
+            allow_number_only=not require_complete,
+            default_point=_expected_register_point_of_sale(profile),
+            require_complete=require_complete,
+            complete_error_message=f"Debe cargar el remito completo con punto de venta, por ejemplo {examples}",
+            explicit_mismatch_message=f"El remito debe corresponder a {tipo} {letter} para este motivo de ingreso",
         )
-    match = re.search(r"(\d+)\s*$", text)
-    if not match:
-        raise BejermanRisError("Número de remito inválido")
-    number = match.group(1)
-    if len(number) > 8:
-        raise BejermanRisError("El número de remito debe tener hasta 8 dígitos")
-    number = number.zfill(8)
-    point = _expected_register_point_of_sale(profile)
-    return {
-        "type": tipo,
-        "letter": letter,
-        "point": point,
-        "number": number,
-        "remitoNumber": format_remito_number(tipo, letter, point, number),
-    }
+    except ValueError as exc:
+        raise BejermanRisError(str(exc)) from exc
 
 
 def _date_iso(value: Any) -> str | None:
@@ -686,7 +674,8 @@ def serialize_ris_row(row: dict[str, Any] | None) -> dict[str, Any]:
         "pdf_status": row.get("pdf_status") or "pending",
         "document_mode": row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT,
         "manual_remito_number": row.get("manual_remito_number") or "",
-        "is_registered": (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER,
+        "is_registered": (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER
+        and (row.get("status") or "") == "generated",
         "attempts": row.get("attempts") or 0,
         "last_error": row.get("last_error") or "",
         "remito_number": row.get("remito_number") or "",
@@ -707,7 +696,7 @@ def serialize_ris_row(row: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def get_ris_status_for_ingreso(ingreso_id: int) -> dict[str, Any]:
-    return serialize_ris_row(_row_for_ingreso(ingreso_id))
+    return serialize_ris_row(_adopt_existing_ingress_remito_reference(ingreso_id))
 
 
 def _ensure_ris_row(ingreso_id: int, user_id: int | None) -> dict[str, Any]:
@@ -884,7 +873,13 @@ def _update_ris_failure_many(
         )
 
 
-def _update_ris_generated(ingreso_id: int, payload: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+def _update_ris_generated(
+    ingreso_id: int,
+    payload: dict[str, Any],
+    response: dict[str, Any],
+    *,
+    sync_ingreso_remito: bool = True,
+) -> dict[str, Any]:
     summary = response.get("response") if isinstance(response.get("response"), dict) else {}
     profile = response.get("profile") if isinstance(response.get("profile"), dict) else {}
     document_mode = parse_ris_document_mode(response.get("documentMode") or payload.get("documentMode"))
@@ -951,7 +946,7 @@ def _update_ris_generated(ingreso_id: int, payload: dict[str, Any], response: di
         )
         row = cur.fetchone()
         cols = [col[0] for col in cur.description]
-    if remito_number:
+    if sync_ingreso_remito and remito_number:
         with connection.cursor() as cur:
             cur.execute("UPDATE ingresos SET remito_ingreso = %s WHERE id = %s", [remito_number, ingreso_id])
     return dict(zip(cols, row)) if row else (_row_for_ingreso(ingreso_id) or {})
@@ -1011,6 +1006,115 @@ def _number_from_remito(remito_number: str) -> str:
         return match.group(1)
     match = re.search(r"(\d+)\s*$", text)
     return match.group(1) if match else ""
+
+
+def _parse_complete_existing_remito(raw_remito: str) -> dict[str, str]:
+    if not re.match(r"^\s*[A-Za-z]{2,4}\s+[A-Za-z]\s+\d{1,5}\s*[-/ ]\s*\d{1,8}\s*$", raw_remito):
+        raise BejermanRisError(
+            "El remito guardado debe tener tipo, letra y punto de venta para asociarlo automáticamente"
+        )
+    try:
+        return parse_bejerman_remito_number(
+            raw_remito,
+            default_type="RIS",
+            default_letter="R",
+            allowed_types=REMITO_COMPROBANTE_TYPES,
+            allow_number_only=False,
+            require_complete=True,
+        )
+    except ValueError as exc:
+        raise BejermanRisError(str(exc)) from exc
+
+
+def _existing_ingress_remito_reference(
+    ingreso_id: int,
+    current: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    context = _ingreso_context(ingreso_id)
+    if not context:
+        return None
+    raw_remito = _clean((current or {}).get("remito_number")) or _clean(context.get("remito_ingreso"))
+    if not raw_remito:
+        return None
+    try:
+        company = require_company(context.get("empresa_bejerman") or context.get("empresa_facturar") or "SEPID")
+    except ValueError as exc:
+        raise BejermanRisError(str(exc)) from exc
+    profile = _ingress_document_profile(context, company.key)
+    document = _parse_complete_existing_remito(raw_remito)
+    document_mode = RIS_DOCUMENT_MODE_REGISTER if _is_manual_registered_document(document) else RIS_DOCUMENT_MODE_EMIT
+    issue_date = _date_iso(context.get("fecha_ingreso")) or timezone.localdate().isoformat()
+    summary = {
+        "comprobanteTipo": document["type"],
+        "comprobanteLetra": document["letter"],
+        "comprobantePtoVenta": document["point"],
+        "comprobanteNumero": document["number"],
+        "remitoNumber": document["remitoNumber"],
+    }
+    payload = {
+        "requestId": f"reparaciones-ingreso-{ingreso_id}-remito-existente",
+        "ingresoId": ingreso_id,
+        "companyKey": company.key,
+        "companyLabel": company.label,
+        "bejermanCompany": company.bejerman_company,
+        "documentProfile": profile,
+        "documentMode": document_mode,
+        "issueDate": issue_date,
+        "customerCode": _clean(context.get("customer_code")),
+        "customerName": _clean(context.get("customer_name")),
+        "operation": "view_existing_ingress_remito",
+        "existingBejermanRemito": True,
+        "legacyRemitoIngreso": raw_remito,
+    }
+    if document_mode == RIS_DOCUMENT_MODE_REGISTER:
+        payload["manualRemitoNumber"] = document["remitoNumber"]
+    response = {
+        "success": True,
+        "requestId": payload["requestId"],
+        "documentMode": document_mode,
+        "companyKey": company.key,
+        "companyLabel": company.label,
+        "bejermanCompany": company.bejerman_company,
+        "issueDate": issue_date,
+        "remitoNumber": document["remitoNumber"],
+        "response": summary,
+        "profile": profile,
+        "lineCount": 1,
+        "raw": {"source": "ingresos.remito_ingreso", "value": raw_remito},
+        "associatedExistingBejermanRemito": True,
+    }
+    if document_mode == RIS_DOCUMENT_MODE_REGISTER:
+        response["manualRemitoNumber"] = document["remitoNumber"]
+    return payload, response
+
+
+def _adopt_existing_ingress_remito_reference(
+    ingreso_id: int,
+    user_id: int | None = None,
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not _has_ris_schema():
+        return current
+    row = current if current is not None else (_row_for_ingreso(ingreso_id) or {})
+    if _clean(row.get("remito_number")) and row.get("status") == "generated":
+        return row
+    if _clean(row.get("remito_number")) and (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER:
+        return row
+    if row.get("status") == "running":
+        return row
+    try:
+        reference = _existing_ingress_remito_reference(ingreso_id, row)
+    except BejermanRisError as exc:
+        logger.info(
+            "bejerman_ris_existing_remito_not_adopted",
+            extra={"ingreso_id": ingreso_id, "error": str(exc)},
+        )
+        return row or None
+    if not reference:
+        return row or None
+    payload, response = reference
+    _ensure_ris_row(ingreso_id, user_id)
+    return _update_ris_generated(ingreso_id, payload, response, sync_ingreso_remito=False)
 
 
 def _accessories_text_for_ingreso(ingreso_id: int) -> str:
@@ -1182,7 +1286,7 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
     document_profile = _ingress_document_profile(context, company.key)
     issue_date = _date_iso(context.get("fecha_ingreso")) or timezone.localdate().isoformat()
     serial_number = _clean(context.get("numero_serie"))
-    serial = serial_number if _is_rental_return_profile(document_profile, context) else (serial_number or _clean(context.get("numero_interno")))
+    serial = serial_number or _clean(context.get("numero_interno"))
     return {
         "requestId": f"reparaciones-ingreso-{context['id']}",
         "ingresoId": context["id"],
@@ -1283,6 +1387,12 @@ def _payload_equipment_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [equipment] if isinstance(equipment, dict) else []
 
 
+def _is_stock_ingress_payload(payload: dict[str, Any]) -> bool:
+    profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
+    document_type = _clean_upper(profile.get("type"))
+    return bool(profile.get("updateStock")) and sdk_uses_negative_article_quantity(document_type)
+
+
 def _payload_equipment_identifiers(payload: dict[str, Any]) -> list[str]:
     identifiers: list[str] = []
     for equipment in _payload_equipment_items(payload):
@@ -1303,6 +1413,64 @@ def _payload_ingreso_ids(payload: dict[str, Any]) -> list[int]:
     if ingreso_id > 0 and ingreso_id not in ids:
         ids.append(ingreso_id)
     return ids
+
+
+def _existing_ingreso_ids(ingreso_ids: list[int]) -> list[int]:
+    clean_ids: list[int] = []
+    for raw in ingreso_ids or []:
+        try:
+            ingreso_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if ingreso_id > 0 and ingreso_id not in clean_ids:
+            clean_ids.append(ingreso_id)
+    if not clean_ids:
+        return []
+    rows = q("SELECT id FROM ingresos WHERE id = ANY(%s)", [clean_ids])
+    existing = {int(row["id"]) for row in rows or []}
+    return [ingreso_id for ingreso_id in clean_ids if ingreso_id in existing]
+
+
+def _stored_register_payload(rows: list[dict[str, Any]], document: dict[str, str]) -> dict[str, Any]:
+    for row in rows:
+        payload = _json_dict(row.get("request_payload"))
+        if not payload:
+            continue
+        manual = _clean(payload.get("manualRemitoNumber") or row.get("manual_remito_number") or row.get("remito_number"))
+        if manual and manual != document["remitoNumber"]:
+            continue
+        if (payload.get("documentMode") or row.get("document_mode")) != RIS_DOCUMENT_MODE_REGISTER:
+            continue
+        return payload
+    return {}
+
+
+def _apply_stored_register_payload(batch_payload: dict[str, Any], stored_payload: dict[str, Any]) -> dict[str, Any]:
+    if not stored_payload:
+        return batch_payload
+    out = dict(batch_payload)
+    stored_profile = stored_payload.get("documentProfile")
+    if isinstance(stored_profile, dict):
+        out["documentProfile"] = {
+            **(out.get("documentProfile") if isinstance(out.get("documentProfile"), dict) else {}),
+            **stored_profile,
+        }
+        if "updateStock" in stored_profile:
+            out["preserveRegisteredDocumentStockFlag"] = True
+    for key in (
+        "issueDate",
+        "sellerCode",
+        "paymentTermCode",
+        "companyKey",
+        "companyLabel",
+        "bejermanCompany",
+        "customerCode",
+        "customerName",
+    ):
+        value = stored_payload.get(key)
+        if value not in (None, ""):
+            out[key] = value
+    return out
 
 
 def _ingress_duplicate_document_types(profile: dict[str, Any] | None) -> list[str]:
@@ -1734,15 +1902,30 @@ def _context_from_payload(payload: dict[str, Any], *, item_index: int | None = N
         )
     equipment = payload.get("equipo") if isinstance(payload.get("equipo"), dict) else {}
     if not _clean(equipment.get("numero_serie")) and not _clean(equipment.get("numero_interno")):
-        issues.append(
-            _issue(
-                "EQUIPMENT_IDENTIFIER_REQUIRED",
-                "Debe completar número de serie o número interno para identificar el equipo en el RIS.",
-                scope="equipo",
-                field="equipo.numero_serie",
-                item_index=item_index,
+        company_key = _clean(payload.get("empresa_bejerman") or payload.get("empresa_facturar") or "SEPID")
+        document_profile = _ingress_document_profile({"motivo": _clean(payload.get("motivo"))}, company_key)
+        document_type = _clean_upper(document_profile.get("type") or "RIS")
+        check_payload = {"documentProfile": document_profile}
+        if _is_stock_ingress_payload(check_payload):
+            issues.append(
+                _issue(
+                    f"{document_type}_PARTIDA_REQUIRED",
+                    f"Para {document_type} con actualización de stock, Bejerman requiere una partida/identificador del equipo. Cargá N° serie o número interno antes de emitir.",
+                    scope="equipo",
+                    field="equipo.numero_serie",
+                    item_index=item_index,
+                )
             )
-        )
+        else:
+            issues.append(
+                _issue(
+                    "EQUIPMENT_IDENTIFIER_REQUIRED",
+                    "Debe completar número de serie o número interno para identificar el equipo en el RIS.",
+                    scope="equipo",
+                    field="equipo.numero_serie",
+                    item_index=item_index,
+                )
+            )
     if not _clean(payload.get("motivo")):
         issues.append(
             _issue(
@@ -1889,8 +2072,7 @@ def _stock_article_candidates_for_payload(
     *,
     actor_user_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
-    if _is_rental_return_profile(profile, context):
+    if _is_stock_ingress_payload(payload):
         return []
     equipment = payload.get("equipment") or {}
     return _stock_article_candidates(
@@ -1929,15 +2111,16 @@ def _validate_document_partida(
     item_index: int | None = None,
 ) -> None:
     profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
-    if not _is_rental_return_profile(profile, context):
+    document_type = _clean_upper(profile.get("type") or "RIS")
+    if not _is_stock_ingress_payload(payload):
         return
     equipment = payload.get("equipment") or {}
-    if _clean(equipment.get("serial")):
+    if resolve_equipment_partida(equipment):
         return
     issues.append(
         _issue(
-            "RDA_SERIAL_PARTIDA_REQUIRED",
-            "Para baja o reparación de alquiler, Bejerman requiere que la partida sea el número de serie del equipo. Cargá el N° serie real antes de emitir.",
+            f"{document_type}_PARTIDA_REQUIRED",
+            f"Para {document_type} con actualización de stock, Bejerman requiere una partida/identificador del equipo. Cargá N° serie o número interno antes de emitir.",
             scope="equipo",
             field="equipo.numero_serie",
             item_index=item_index,
@@ -1971,12 +2154,15 @@ def _validate_article(
             candidates = _stock_article_candidates_for_payload(payload, context, actor_user_id=actor_user_id)
         except Exception:
             candidates = []
-        message = "El modelo/variante no tiene artículo Bejerman mapeado. Resuelva el mapeo antes de emitir el RIS."
+        message = "El modelo/variante no tiene artículo Bejerman mapeado. Resuelva el mapeo antes de emitir el comprobante."
         profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
-        if _is_rental_return_profile(profile, context):
+        if _is_stock_ingress_payload(payload):
+            document_type = _clean_upper(profile.get("type")) or "remito"
+            deposit = _clean_upper(profile.get("deposit")) or "STR"
             message = (
-                "El modelo/variante no tiene artículo Bejerman mapeado. Para baja o reparación de alquiler no se busca "
-                "partida en stock: el RDA ingresa a STR y la partida será el número de serie del equipo. Mapeá el artículo antes de emitir."
+                f"El modelo/variante no tiene artículo Bejerman mapeado. Para {document_type} con ingreso de stock "
+                f"a {deposit} no se busca partida con stock positivo previo: la partida puede ser el número de serie "
+                "o interno del equipo. Mapeá el artículo antes de emitir."
             )
         issues.append(
             _issue(
@@ -2127,10 +2313,7 @@ def _preview_payload(payload: dict[str, Any] | None, built: dict[str, Any] | Non
     for equipment in equipments:
         profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
         update_stock = bool(profile.get("updateStock"))
-        uses_serial_partida = _is_rental_return_profile(profile)
-        partida = _clean(equipment.get("serial")) if uses_serial_partida else (
-            _clean(equipment.get("serial")) or _clean(equipment.get("internalNumber"))
-        )
+        partida = resolve_equipment_partida(equipment)
         items.append(
             {
                 "articleCode": _clean(equipment.get("articleCode")),
@@ -2140,7 +2323,7 @@ def _preview_payload(payload: dict[str, Any] | None, built: dict[str, Any] | Non
                 "equipmentLabel": _clean(equipment.get("equipmentLabel")),
                 "deposit": _clean(profile.get("deposit")) if update_stock else "",
                 "partida": partida if update_stock else "",
-                "partidaPolicy": "serial" if uses_serial_partida else ("identifier" if update_stock else ""),
+                "partidaPolicy": "identifier" if update_stock else "",
             }
         )
     return {
@@ -2305,7 +2488,7 @@ def preflight_ris_for_request_payload(data: dict[str, Any], user_id: int | None 
             result["detail"] = "La validación previa del remito encontró problemas."
     if manual_document:
         duplicate_issue: dict[str, Any] | None = None
-        if result.get("can_emit"):
+        if result.get("can_emit") and not _is_manual_registered_document(manual_document):
             company_key = _clean((result.get("preview") or {}).get("companyKey")) or "SEPID"
             duplicate = _local_registered_ris_duplicate(manual_document, company_key, [])
             if duplicate:
@@ -2575,11 +2758,13 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
     out = dict(comprobante or {})
     profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
     deposit = _clean(profile.get("deposit")) or _clean(getattr(settings, "BEJERMAN_RIS_DEPOSIT", "STR")) or "STR"
+    preserve_stock_flag = as_bool(payload.get("preserveRegisteredDocumentStockFlag"))
+    update_stock = as_bool(profile.get("updateStock")) if preserve_stock_flag and "updateStock" in profile else True
     out["Comprobante_Tipo"] = document["type"]
     out["Comprobante_Letra"] = document["letter"]
     out["Comprobante_PtoVenta"] = document["point"]
     out["Comprobante_Numero"] = document["number"]
-    out["Comprobante_ActualizaStock"] = "S"
+    out["Comprobante_ActualizaStock"] = "S" if update_stock else "N"
     equipments = payload.get("equipments") if isinstance(payload.get("equipments"), list) else [payload.get("equipment") or {}]
     article_index = 0
     items: list[dict[str, Any]] = []
@@ -2591,23 +2776,25 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
         next_item["Comprobante_Numero"] = document["number"]
         if next_item.get("Item_Tipo") == "A":
             equipment = equipments[min(article_index, max(len(equipments) - 1, 0))] if equipments else {}
-            if _is_rental_return_profile(profile):
-                partida = _clean((equipment or {}).get("serial")) or " "
-            else:
-                partida = _clean((equipment or {}).get("serial")) or _clean((equipment or {}).get("internalNumber")) or " "
+            partida = resolve_equipment_partida(equipment) or " "
             quantity = _registered_document_article_quantity(document["type"])
-            next_item["Item_Deposito"] = deposit
-            next_item["Item_Partida"] = partida or " "
             next_item["Item_CantidadUM1"] = quantity
-            next_item["Item_CantidadUM2"] = quantity
+            if update_stock:
+                next_item["Item_Deposito"] = deposit
+                next_item["Item_Partida"] = partida or " "
+                next_item["Item_CantidadUM2"] = quantity
+            else:
+                next_item["Item_Deposito"] = next_item.get("Item_Deposito")
+                next_item["Item_Partida"] = next_item.get("Item_Partida") or " "
+                next_item["Item_CantidadUM2"] = next_item.get("Item_CantidadUM2") or 0
             article_index += 1
         items.append(next_item)
     out["Comprobante_Items"] = items
     return out
 
 
-def _registered_document_article_quantity(document_type: Any) -> int:
-    return -1 if _clean_upper(document_type) in {"RDA", "RDN"} else 1
+def _registered_document_article_quantity(document_type: Any) -> int | float:
+    return sdk_signed_article_quantity(document_type, 1)
 
 
 def _document_key_from_parts(parts: dict[str, Any]) -> tuple[str, str, str, str, str]:
@@ -2729,26 +2916,30 @@ def _register_payload_to_bejerman(
         require_complete=True,
     )
     try:
-        duplicate = _local_registered_ris_duplicate(document, payload["companyKey"], ingreso_ids)
-        if duplicate:
-            return _registered_document_association_response(
-                payload,
-                document,
-                raw={"source": "local", "existing": duplicate},
-            )
-        if _is_digital_registered_document(document, payload):
-            return _registered_document_association_response(payload, document)
+        skip_duplicate_checks = _is_manual_registered_document(document)
+        if not skip_duplicate_checks:
+            duplicate = _local_registered_ris_duplicate(document, payload["companyKey"], ingreso_ids)
+            if duplicate:
+                return _registered_document_association_response(
+                    payload,
+                    document,
+                    raw={"source": "local", "existing": duplicate},
+                )
+            if _is_digital_registered_document(document, payload):
+                return _registered_document_association_response(payload, document)
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
-        duplicate_remote = _remote_ris_duplicate(document, payload["companyKey"], client)
-        if duplicate_remote:
-            raise BejermanSdkResponseError(f"Bejerman ya registra el remito {document['remitoNumber']}")
-        _ensure_equipment_remito_not_duplicated(payload, ingreso_ids, client)
+        if not skip_duplicate_checks:
+            duplicate_remote = _remote_ris_duplicate(document, payload["companyKey"], client)
+            if duplicate_remote:
+                raise BejermanSdkResponseError(f"Bejerman ya registra el remito {document['remitoNumber']}")
+            _ensure_equipment_remito_not_duplicated(payload, ingreso_ids, client)
         customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
-        built = build_service_ingress_comprobante(payload, customer_fields)
+        compact_payload = {**payload, "compactServiceIngressLegends": True}
+        built = build_service_ingress_comprobante(compact_payload, customer_fields)
         comprobante = _apply_registered_document(built["comprobante"], payload, document)
         profile = {**(built.get("profile") or {}), "pointOfSale": document["point"], "type": document["type"]}
         request_payload = {
-            **payload,
+            **compact_payload,
             "documentMode": RIS_DOCUMENT_MODE_REGISTER,
             "manualRemitoNumber": document["remitoNumber"],
             "comprobante": comprobante,
@@ -2794,6 +2985,75 @@ def _register_payload_to_bejerman(
         raise BejermanRisError(str(exc)) from exc
 
 
+def _build_service_ingress_request(
+    payload: dict[str, Any],
+    customer_fields: dict[str, str],
+    *,
+    operation: str,
+    numera_flex: str,
+    emite_reg: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    built = build_service_ingress_comprobante(payload, customer_fields)
+    request_payload = {
+        **payload,
+        "comprobante": built["comprobante"],
+        "operation": operation,
+        "numeraFlex": numera_flex,
+        "emiteReg": emite_reg,
+    }
+    return request_payload, built
+
+
+def _service_ingress_response(
+    request_payload: dict[str, Any],
+    built: dict[str, Any],
+    raw_response: dict[str, Any],
+) -> dict[str, Any]:
+    summary = parse_remito_response(raw_response)
+    remito_number = _clean(summary.get("remitoNumber"))
+    if not remito_number:
+        raise BejermanSdkResponseError("Bejerman no devolvió número de RIS")
+    return {
+        "success": True,
+        "requestId": request_payload["requestId"],
+        "companyKey": request_payload["companyKey"],
+        "companyLabel": request_payload["companyLabel"],
+        "bejermanCompany": request_payload["bejermanCompany"],
+        "issueDate": request_payload["issueDate"],
+        "remitoNumber": remito_number,
+        "response": summary,
+        "profile": built["profile"],
+        "lineCount": built["lineCount"],
+        "raw": raw_response,
+    }
+
+
+def _send_service_ingress_comprobante(
+    client: BejermanSDKClient,
+    payload: dict[str, Any],
+    customer_fields: dict[str, str],
+    *,
+    operation: str,
+    numera_flex: str,
+    emite_reg: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    request_payload, built = _build_service_ingress_request(
+        payload,
+        customer_fields,
+        operation=operation,
+        numera_flex=numera_flex,
+        emite_reg=emite_reg,
+    )
+    raw_response = client.ingresar_comprobante_ventas_json(
+        built["comprobante"],
+        circuito="VENTAS",
+        operacion=operation,
+        numera_flex=numera_flex,
+        emite_reg=emite_reg,
+    )
+    return request_payload, _service_ingress_response(request_payload, built, raw_response)
+
+
 def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     operation = _clean(getattr(settings, "BEJERMAN_RIS_OPERATION", "IngresarComprobanteJSON")) or "IngresarComprobanteJSON"
     numera_flex = _clean(getattr(settings, "BEJERMAN_RIS_NUMERA_FLEX", "S")) or "S"
@@ -2802,39 +3062,14 @@ def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = Non
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         _ensure_equipment_remito_not_duplicated(payload, _payload_ingreso_ids(payload), client)
         customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
-        built = build_service_ingress_comprobante(payload, customer_fields)
-        request_payload = {
-            **payload,
-            "comprobante": built["comprobante"],
-            "operation": operation,
-            "numeraFlex": numera_flex,
-            "emiteReg": emite_reg,
-        }
-        raw_response = client.ingresar_comprobante_ventas_json(
-            built["comprobante"],
-            circuito="VENTAS",
-            operacion=operation,
+        return _send_service_ingress_comprobante(
+            client,
+            payload,
+            customer_fields,
+            operation=operation,
             numera_flex=numera_flex,
             emite_reg=emite_reg,
         )
-        summary = parse_remito_response(raw_response)
-        remito_number = _clean(summary.get("remitoNumber"))
-        if not remito_number:
-            raise BejermanSdkResponseError("Bejerman no devolvió número de RIS")
-        response = {
-            "success": True,
-            "requestId": request_payload["requestId"],
-            "companyKey": request_payload["companyKey"],
-            "companyLabel": request_payload["companyLabel"],
-            "bejermanCompany": request_payload["bejermanCompany"],
-            "issueDate": request_payload["issueDate"],
-            "remitoNumber": remito_number,
-            "response": summary,
-            "profile": built["profile"],
-            "lineCount": built["lineCount"],
-            "raw": raw_response,
-        }
-        return request_payload, response
     except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
         raise BejermanRisError(str(exc)) from exc
 
@@ -2843,12 +3078,29 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, An
     started_at = time.monotonic()
     _ensure_ris_row(ingreso_id, user_id)
     current = _row_for_ingreso(ingreso_id) or {}
+    manual_remito_number = _clean(current.get("manual_remito_number")) or _clean(current.get("remito_number"))
+    if (
+        current.get("status") == "failed"
+        and (current.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER
+        and manual_remito_number
+    ):
+        batch_ids = _existing_ingreso_ids(_ingreso_ids_from_payload(current.get("request_payload"))) or [ingreso_id]
+        if ingreso_id not in batch_ids:
+            batch_ids.append(ingreso_id)
+        return register_ris_batch(batch_ids, manual_remito_number, user_id=user_id)
     if _clean(current.get("remito_number")) and current.get("status") == "generated":
         logger.info(
             "bejerman_ris_emit_reused",
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
         )
         return current
+    existing = _adopt_existing_ingress_remito_reference(ingreso_id, user_id=user_id, current=current)
+    if existing and _clean(existing.get("remito_number")) and existing.get("status") == "generated":
+        logger.info(
+            "bejerman_ris_existing_remito_reused",
+            extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
+        )
+        return existing
     batch_ids = _ingreso_ids_from_payload(current.get("request_payload"))
     if len(batch_ids) > 1:
         return emit_or_get_ris_batch(batch_ids, user_id=user_id)
@@ -2870,18 +3122,11 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, An
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         _ensure_equipment_remito_not_duplicated(payload, [ingreso_id], client)
         customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
-        built = build_service_ingress_comprobante(payload, customer_fields)
-        request_payload = {
-            **payload,
-            "comprobante": built["comprobante"],
-            "operation": operation,
-            "numeraFlex": numera_flex,
-            "emiteReg": emite_reg,
-        }
-        raw_response = client.ingresar_comprobante_ventas_json(
-            built["comprobante"],
-            circuito="VENTAS",
-            operacion=operation,
+        request_payload, response = _send_service_ingress_comprobante(
+            client,
+            payload,
+            customer_fields,
+            operation=operation,
             numera_flex=numera_flex,
             emite_reg=emite_reg,
         )
@@ -2889,24 +3134,14 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, An
             "bejerman_ris_emit_request_finished",
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
         )
-        summary = parse_remito_response(raw_response)
-        remito_number = _clean(summary.get("remitoNumber"))
-        if not remito_number:
-            raise BejermanSdkResponseError("Bejerman no devolvió número de RIS")
         payload = request_payload
-        response = {
-            "success": True,
-            "requestId": payload["requestId"],
-            "companyKey": payload["companyKey"],
-            "companyLabel": payload["companyLabel"],
-            "bejermanCompany": payload["bejermanCompany"],
-            "issueDate": payload["issueDate"],
-            "remitoNumber": remito_number,
-            "response": summary,
-            "profile": built["profile"],
-            "lineCount": built["lineCount"],
-            "raw": raw_response,
-        }
+        row = _update_ris_generated(ingreso_id, payload, response)
+        _notify_ingress_remito_pdf_email(row, [ingreso_id], payload, response, user_id)
+        logger.info(
+            "bejerman_ris_emit_generated",
+            extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
+        )
+        return row
     except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
         logger.warning(
             "bejerman_ris_emit_failed",
@@ -2914,15 +3149,6 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, An
         )
         _update_ris_failure(ingreso_id, str(exc), pdf_error=False, request_payload=request_payload or payload or None)
         raise BejermanRisError(str(exc)) from exc
-
-    row = _update_ris_generated(ingreso_id, payload, response)
-    _notify_ingress_remito_pdf_email(row, [ingreso_id], payload, response, user_id)
-    logger.info(
-        "bejerman_ris_emit_generated",
-        extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
-    )
-    return row
-
 
 def emit_or_get_ris_batch(ingreso_ids: list[int], user_id: int | None = None) -> dict[str, Any]:
     clean_ids: list[int] = []
@@ -2974,6 +3200,7 @@ def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_i
             continue
         if ingreso_id > 0 and ingreso_id not in clean_ids:
             clean_ids.append(ingreso_id)
+    clean_ids = _existing_ingreso_ids(clean_ids)
     if not clean_ids:
         raise BejermanRisError("No hay ingresos para registrar remito")
     batch_payload = _build_batch_payload(clean_ids)
@@ -2985,6 +3212,7 @@ def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_i
     for ingreso_id in clean_ids:
         _ensure_ris_row(ingreso_id, user_id)
     rows = [_row_for_ingreso(ingreso_id) or {} for ingreso_id in clean_ids]
+    batch_payload = _apply_stored_register_payload(batch_payload, _stored_register_payload(rows, document))
 
     def is_same_registered_document(row: dict[str, Any]) -> bool:
         return (
@@ -3033,10 +3261,12 @@ def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_i
 def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, str, dict[str, Any]]:
     started_at = time.monotonic()
     row = _row_for_ingreso(ingreso_id) or {}
+    if row.get("status") != "generated" or not _clean(row.get("remito_number")):
+        row = _adopt_existing_ingress_remito_reference(ingreso_id, user_id=user_id, current=row) or {}
     if not row:
         raise BejermanRisError("RIS no inicializado")
     if (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER:
-        raise BejermanRisError("El remito de ingreso fue registrado; no corresponde imprimir PDF RIS desde NEXORA")
+        raise BejermanRisRegisteredNoPdfError(row.get("remito_number") or row.get("manual_remito_number"))
     if row.get("status") != "generated" or not _clean(row.get("remito_number")):
         if row.get("status") == "failed":
             raise BejermanRisError(_clean(row.get("last_error")) or "No se pudo emitir el RIS")

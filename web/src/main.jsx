@@ -47,6 +47,7 @@ import ProtocolosTest from "./pages/ProtocolosTest.jsx";
 import BejermanSync from "./pages/BejermanSync.jsx";
 import RecepcionDashboard from "./pages/RecepcionDashboard.jsx";
 import DeliveryOrders from "./pages/DeliveryOrders.jsx";
+import HojaDeRuta from "./pages/HojaDeRuta.jsx";
 import Billing from "./pages/Billing.jsx";
 import { canAny, PERMISSION_CODES } from "./lib/permissions";
 
@@ -67,6 +68,9 @@ function IndexRoute() {
   ]);
   if (canUseDashboard) {
     return <WorkDashboard />;
+  }
+  if (canAny(user, [PERMISSION_CODES.PAGE_ROUTE_SHEET])) {
+    return <Navigate to="/hoja-de-ruta" replace />;
   }
   if (canAny(user, [PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES])) {
     return <Navigate to="/ingresos/nuevo?tab=mercaderia" replace />;
@@ -91,6 +95,7 @@ const router = createBrowserRouter([
               PERMISSION_CODES.PAGE_HOME_SEARCH,
               PERMISSION_CODES.PAGE_RECEPCION,
               PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
+              PERMISSION_CODES.PAGE_ROUTE_SHEET,
               PERMISSION_CODES.PAGE_BILLING,
               PERMISSION_CODES.ACTION_INGRESO_CREATE,
               PERMISSION_CODES.PAGE_NEW_INGRESO,
@@ -127,7 +132,23 @@ const router = createBrowserRouter([
         ),
       },
       {
+        path: "hoja-de-ruta",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_ROUTE_SHEET}>
+            <HojaDeRuta />
+          </ProtectedRoute>
+        ),
+      },
+      {
         path: "cobranzas/facturacion",
+        element: (
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_BILLING}>
+            <Billing />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "cobranzas/remitos",
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_BILLING}>
             <Billing />
@@ -364,7 +385,7 @@ const router = createBrowserRouter([
       {
         path: "catalogo/clientes",
         element: (
-          <ProtectedRoute roles={["jefe", "admin", "ventas", "jefe_veedor"]}>
+          <ProtectedRoute roles={["jefe", "admin", "supervisor", "ventas", "jefe_veedor"]}>
             <CatalogoClientes />
           </ProtectedRoute>
         ),

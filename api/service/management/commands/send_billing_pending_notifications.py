@@ -16,7 +16,6 @@ from service.views.helpers import _email_append_footer_text
 
 
 NOTIFICATION_KEY = "billing_pending_summary"
-PENDING_STATUS = "entregado_pendiente_facturacion"
 
 
 def _money_label(value):
@@ -72,7 +71,7 @@ class Command(BaseCommand):
             self.stdout.write("Sin destinatarios activos de cobranzas con email habilitado.")
             return
 
-        result = list_delivery_orders({"status": PENDING_STATUS, "limit": limit})
+        result = list_delivery_orders({"pendingBilling": True, "limit": limit})
         items = result.get("items") or []
         total_pending = int(result.get("total") or len(items))
         if total_pending <= 0:

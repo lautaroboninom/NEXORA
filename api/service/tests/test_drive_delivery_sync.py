@@ -304,6 +304,17 @@ class DeliveryOrderDriveSyncViewTests(SimpleTestCase):
         self.assertEqual(response.data["createdRows"], 1)
         sync_mock.assert_called_once_with()
 
+    def test_supervisor_can_sync(self):
+        with patch(
+            "service.views.delivery_orders_views.sync_delivery_orders_to_drive",
+            return_value={"ok": True, "createdRows": 1, "alreadyInDrive": 0},
+        ) as sync_mock:
+            response = self.view(self._request("supervisor"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["createdRows"], 1)
+        sync_mock.assert_called_once_with()
+
     def test_jefe_can_sync(self):
         with patch(
             "service.views.delivery_orders_views.sync_delivery_orders_to_drive",

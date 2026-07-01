@@ -26,8 +26,8 @@ from ..media_utils import (
 
 logger = logging.getLogger(__name__)
 
-MEDIA_VIEW_ROLES = {"jefe", "admin", "jefe_veedor", "recepcion", "tecnico"}
-MEDIA_MANAGE_ROLES = {"jefe", "admin", "jefe_veedor", "tecnico"}
+MEDIA_VIEW_ROLES = {"jefe", "admin", "supervisor", "jefe_veedor", "recepcion", "tecnico"}
+MEDIA_MANAGE_ROLES = {"jefe", "admin", "supervisor", "jefe_veedor", "tecnico"}
 
 MEDIA_SELECT_BASE = """
     SELECT

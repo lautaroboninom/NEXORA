@@ -10,7 +10,7 @@ from django.db import connection, transaction
 from service.models import User
 
 
-ALLOWED_ROLES = {"jefe", "jefe_veedor", "admin", "recepcion"}
+ALLOWED_ROLES = {"jefe", "jefe_veedor", "admin", "supervisor", "recepcion"}
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_COMMENT = "Marcado como baja desde la hoja de servicio"
 

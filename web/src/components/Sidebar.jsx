@@ -13,7 +13,7 @@ const VARIANT_BORDER = {
   gray: "border-gray-400",
 };
 
-const CUSTOMER_CATALOG_ROLES = new Set(["jefe", "admin", "ventas", "jefe_veedor"]);
+const CUSTOMER_CATALOG_ROLES = new Set(["jefe", "admin", "supervisor", "ventas", "jefe_veedor"]);
 
 function variantOfPath(to) {
   const p = String(to || "");
@@ -31,6 +31,7 @@ function variantOfPath(to) {
   if (p.startsWith("/ingresos/nuevo")) return "blue";
   if (p === "/administracion/ordenes-entrega") return "indigo";
   if (p === "/cobranzas/facturacion") return "green";
+  if (p === "/cobranzas/remitos") return "green";
   return null;
 }
 
@@ -82,6 +83,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canBejermanPurchases = can(user, PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES);
   const canRecepcion = can(user, PERMISSION_CODES.PAGE_RECEPCION);
   const canDeliveryOrders = can(user, PERMISSION_CODES.PAGE_DELIVERY_ORDERS);
+  const canRouteSheet = can(user, PERMISSION_CODES.PAGE_ROUTE_SHEET);
   const canBilling = can(user, PERMISSION_CODES.PAGE_BILLING);
   const canCreateIngreso = canAny(user, [
     PERMISSION_CODES.ACTION_INGRESO_CREATE,
@@ -90,8 +92,8 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
   const canCustomerCatalog = CUSTOMER_CATALOG_ROLES.has(String(user?.rol || "").trim().toLowerCase());
 
-  const showRecepcion = (canRecepcion || canCreateIngreso || canBejermanPurchases) && canDeliveryOrders;
-  const showDeliveryOrdersInRecepcion = showRecepcion;
+  const showRecepcion = ((canRecepcion || canCreateIngreso || canBejermanPurchases) && canDeliveryOrders) || canRouteSheet;
+  const showDeliveryOrdersInRecepcion = showRecepcion && canDeliveryOrders;
   const showDeliveryOrdersInAdministracion = canDeliveryOrders && !showDeliveryOrdersInRecepcion;
   const showServicioTecnico = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
   const showAdministracion =
@@ -160,6 +162,11 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
               {showDeliveryOrdersInRecepcion && (
                 <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
                   Órdenes de entrega
+                </LinkItem>
+              )}
+              {canRouteSheet && (
+                <LinkItem to="/hoja-de-ruta" {...linkProps}>
+                  Hoja de ruta
                 </LinkItem>
               )}
             </Section>
@@ -264,8 +271,8 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
                 Facturación
               </LinkItem>
               {canDeliveryOrders && (
-                <LinkItem to="/cobranzas/facturacion" {...linkProps}>
-                  Remitos pendientes
+                <LinkItem to="/cobranzas/remitos" {...linkProps}>
+                  Remitos
                 </LinkItem>
               )}
             </Section>

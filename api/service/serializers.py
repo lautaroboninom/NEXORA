@@ -112,6 +112,7 @@ class IngresoDetailSerializer(serializers.Serializer):
     fecha_servicio = serializers.DateTimeField(allow_null=True, required=False)
     fecha_entrega = serializers.DateTimeField(allow_null=True, required=False)
     remito_salida = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+    remito_salida_bejerman = serializers.CharField(allow_null=True, allow_blank=True, required=False)
     factura_numero = serializers.CharField(allow_null=True, allow_blank=True, required=False)
     ris = serializers.DictField(required=False)
     garantia_reparacion = serializers.BooleanField(required=False)

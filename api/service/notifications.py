@@ -17,6 +17,17 @@ except Exception:  # pragma: no cover - dependencia opcional hasta instalar requ
 
 logger = logging.getLogger(__name__)
 
+MANAGEMENT_NOTIFICATION_ROLES = ("jefe", "jefe_veedor", "admin", "supervisor")
+TECHNICAL_NOTIFICATION_ROLES = ("tecnico", "jefe", "jefe_veedor")
+DELIVERY_NOTIFICATION_ROLES = ("recepcion", "admin", "supervisor", "ventas", "jefe", "jefe_veedor")
+ROUTE_SHEET_NOTIFICATION_ROLES = ("logistica",)
+BILLING_NOTIFICATION_ROLES = ("cobranzas", "admin", "supervisor", "jefe", "jefe_veedor")
+REMITO_PDF_DELIVERY_ROLES = ("admin", "supervisor", "jefe", "jefe_veedor", "recepcion", "cobranzas")
+REMITO_PDF_INGRESS_ROLES = ("admin", "supervisor", "jefe", "jefe_veedor", "recepcion", "cobranzas")
+REMITO_PDF_DELIVERY_DEFAULT_ROLES = ("admin", "recepcion", "cobranzas")
+REMITO_PDF_INGRESS_DEFAULT_ROLES = ("admin", "recepcion", "cobranzas")
+REMITO_PDF_CHANNELS = ("email",)
+
 
 NOTIFICATION_CATALOG = [
     {
@@ -25,6 +36,7 @@ NOTIFICATION_CATALOG = [
         "description": "Equipo liberado con orden de salida impresa.",
         "group": "Ingresos",
         "default_roles": [],
+        "allowed_roles": TECHNICAL_NOTIFICATION_ROLES,
     },
     {
         "key": "ingreso_asignado",
@@ -32,6 +44,7 @@ NOTIFICATION_CATALOG = [
         "description": "Ingreso asignado o reasignado a un técnico.",
         "group": "Ingresos",
         "default_roles": ["tecnico"],
+        "allowed_roles": TECHNICAL_NOTIFICATION_ROLES,
     },
     {
         "key": "sales_order_created",
@@ -39,6 +52,15 @@ NOTIFICATION_CATALOG = [
         "description": "Orden de entrega pendiente de preparación para Recepción.",
         "group": "Órdenes de entrega",
         "default_roles": ["recepcion"],
+        "allowed_roles": DELIVERY_NOTIFICATION_ROLES,
+    },
+    {
+        "key": "route_stop_created",
+        "label": "Nueva parada de Hoja de ruta",
+        "description": "Parada agregada a la agenda diaria de entregas.",
+        "group": "Hoja de ruta",
+        "default_roles": ROUTE_SHEET_NOTIFICATION_ROLES,
+        "allowed_roles": ROUTE_SHEET_NOTIFICATION_ROLES,
     },
     {
         "key": "sales_order_remito_ready",
@@ -46,6 +68,7 @@ NOTIFICATION_CATALOG = [
         "description": "Orden de entrega con remito disponible para Cobranzas.",
         "group": "Cobranzas",
         "default_roles": ["cobranzas"],
+        "allowed_roles": BILLING_NOTIFICATION_ROLES,
     },
     {
         "key": "billing_pending_summary",
@@ -53,6 +76,7 @@ NOTIFICATION_CATALOG = [
         "description": "Resumen de remitos pendientes para Cobranzas.",
         "group": "Cobranzas",
         "default_roles": ["cobranzas"],
+        "allowed_roles": BILLING_NOTIFICATION_ROLES,
     },
     {
         "key": "service_order_ready_to_bill",
@@ -60,6 +84,7 @@ NOTIFICATION_CATALOG = [
         "description": "Orden de servicio liberada para facturar como concepto.",
         "group": "Cobranzas",
         "default_roles": ["cobranzas"],
+        "allowed_roles": BILLING_NOTIFICATION_ROLES,
     },
     {
         "key": "solicitud_asignacion",
@@ -67,6 +92,7 @@ NOTIFICATION_CATALOG = [
         "description": "Un técnico solicita que se le asigne un ingreso.",
         "group": "Ingresos",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "presupuesto_aprobado",
@@ -74,6 +100,7 @@ NOTIFICATION_CATALOG = [
         "description": "Presupuesto aprobado para un ingreso asignado.",
         "group": "Presupuestos",
         "default_roles": ["tecnico"],
+        "allowed_roles": TECHNICAL_NOTIFICATION_ROLES,
     },
     {
         "key": "reparacion_lista_remito",
@@ -81,6 +108,7 @@ NOTIFICATION_CATALOG = [
         "description": "Equipo reparado que ya puede liberarse con orden de salida.",
         "group": "Ingresos",
         "default_roles": ["jefe", "recepcion"],
+        "allowed_roles": (*MANAGEMENT_NOTIFICATION_ROLES, "recepcion"),
     },
     {
         "key": "solicitud_baja",
@@ -88,6 +116,7 @@ NOTIFICATION_CATALOG = [
         "description": "Solicitud pendiente para dar de baja un ingreso.",
         "group": "Ingresos",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "baja_patrimonial",
@@ -95,6 +124,7 @@ NOTIFICATION_CATALOG = [
         "description": "Equipo dado de baja para reflejar en gestión patrimonial.",
         "group": "Patrimonio",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "alta_patrimonial",
@@ -102,6 +132,7 @@ NOTIFICATION_CATALOG = [
         "description": "Equipo dado de alta para reflejar en gestión patrimonial.",
         "group": "Patrimonio",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "derivacion_devuelta",
@@ -109,6 +140,7 @@ NOTIFICATION_CATALOG = [
         "description": "Equipo devuelto desde un proveedor externo.",
         "group": "Derivaciones",
         "default_roles": ["tecnico"],
+        "allowed_roles": TECHNICAL_NOTIFICATION_ROLES,
     },
     {
         "key": "preventivo_vencido",
@@ -116,6 +148,7 @@ NOTIFICATION_CATALOG = [
         "description": "Mantenimiento preventivo vencido.",
         "group": "Preventivos",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "preventivo_proximo",
@@ -123,6 +156,7 @@ NOTIFICATION_CATALOG = [
         "description": "Mantenimiento preventivo próximo a vencer.",
         "group": "Preventivos",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "stock_minimo",
@@ -130,6 +164,7 @@ NOTIFICATION_CATALOG = [
         "description": "Repuesto que llegó al stock mínimo.",
         "group": "Repuestos",
         "default_roles": ["jefe", "jefe_veedor"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "presupuesto_pendiente",
@@ -137,6 +172,7 @@ NOTIFICATION_CATALOG = [
         "description": "Presupuesto emitido con aprobación demorada.",
         "group": "Presupuestos",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "presupuesto_decision_portal",
@@ -144,6 +180,7 @@ NOTIFICATION_CATALOG = [
         "description": "Un cliente aprobo o rechazo un presupuesto desde el Portal.",
         "group": "Presupuestos",
         "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
         "key": "resumen_operativo",
@@ -151,6 +188,79 @@ NOTIFICATION_CATALOG = [
         "description": "Resumen de alertas y objetivos del servicio técnico.",
         "group": "Operación",
         "default_roles": ["jefe", "jefe_veedor", "admin"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
+    },
+    {
+        "key": "remito_pdf_rt",
+        "label": "PDF remito RT",
+        "description": "PDF impreso de remitos Bejerman RT de venta.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_DELIVERY_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_DELIVERY_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_rd",
+        "label": "PDF remito RD",
+        "description": "PDF impreso de remitos Bejerman RD.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_DELIVERY_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_DELIVERY_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_rta",
+        "label": "PDF remito RTA",
+        "description": "PDF impreso de remitos Bejerman RTA de alquiler.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_DELIVERY_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_DELIVERY_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_rtn",
+        "label": "PDF remito RTN",
+        "description": "PDF impreso de remitos Bejerman RTN de demo.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_DELIVERY_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_DELIVERY_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_rss",
+        "label": "PDF remito RSS",
+        "description": "PDF impreso de remitos Bejerman RSS de servicio técnico.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_DELIVERY_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_DELIVERY_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_ris",
+        "label": "PDF remito RIS",
+        "description": "PDF impreso de remitos Bejerman RIS de ingreso.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_INGRESS_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_INGRESS_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_rda",
+        "label": "PDF remito RDA",
+        "description": "PDF impreso de remitos Bejerman RDA de devolución de alquiler.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_INGRESS_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_INGRESS_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
+    },
+    {
+        "key": "remito_pdf_rdn",
+        "label": "PDF remito RDN",
+        "description": "PDF impreso de remitos Bejerman RDN de devolución de demo.",
+        "group": "Remitos Bejerman",
+        "default_roles": REMITO_PDF_INGRESS_DEFAULT_ROLES,
+        "allowed_roles": REMITO_PDF_INGRESS_ROLES,
+        "channels": REMITO_PDF_CHANNELS,
     },
 ]
 
@@ -158,7 +268,7 @@ CATALOG_BY_KEY = {item["key"]: item for item in NOTIFICATION_CATALOG}
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 50
 NOTIFICATION_CHANNELS = ("bell", "email", "push")
-EXTRA_EMAIL_ROLES = {"admin", "cobranzas"}
+EXTRA_EMAIL_ROLES = {"admin", "supervisor", "cobranzas"}
 
 
 def q(sql, params=None, one=False):
@@ -499,9 +609,54 @@ def _can_manage_extra_emails_for_role(role):
     return _normalize_role(role) in EXTRA_EMAIL_ROLES
 
 
+def _normalize_catalog_roles(values):
+    return {
+        _normalize_role(value)
+        for value in (values or [])
+        if _normalize_role(value)
+    }
+
+
+def _item_allowed_roles(item):
+    if "allowed_roles" in item:
+        return _normalize_catalog_roles(item.get("allowed_roles"))
+    return _normalize_catalog_roles(item.get("default_roles"))
+
+
+def _item_channels(item):
+    raw_channels = item.get("channels") or NOTIFICATION_CHANNELS
+    channels = tuple(
+        channel
+        for channel in (str(value or "").strip().lower() for value in raw_channels)
+        if channel in NOTIFICATION_CHANNELS
+    )
+    return channels or NOTIFICATION_CHANNELS
+
+
+def _role_allowed_for_item(item, role):
+    role_key = _normalize_role(role)
+    return bool(role_key and role_key in _item_allowed_roles(item or {}))
+
+
+def _role_allowed_for_notification(notification_key, role):
+    item = CATALOG_BY_KEY.get(notification_key) or {}
+    return _role_allowed_for_item(item, role)
+
+
+def _channel_allowed_for_notification(notification_key, channel):
+    item = CATALOG_BY_KEY.get(notification_key) or {}
+    return str(channel or "").strip().lower() in _item_channels(item)
+
+
+def notification_allowed_roles(notification_key):
+    return sorted(_item_allowed_roles(CATALOG_BY_KEY.get(notification_key) or {}))
+
+
 def _role_default_enabled(notification_key, role):
     item = CATALOG_BY_KEY.get(notification_key) or {}
     role_key = _normalize_role(role)
+    if not _role_allowed_for_item(item, role_key):
+        return False
     return role_key in {str(r).strip().lower() for r in item.get("default_roles") or []}
 
 
@@ -572,6 +727,10 @@ def _load_overrides(notification_key, user_ids):
 def _effective_enabled(user_row, notification_key, overrides, channel="bell"):
     uid = int(user_row.get("id"))
     channel_key = channel if channel in NOTIFICATION_CHANNELS else "bell"
+    if not _channel_allowed_for_notification(notification_key, channel_key):
+        return False
+    if not _role_allowed_for_notification(notification_key, user_row.get("rol")):
+        return False
     override = overrides.get(uid) or {}
     value = override.get(channel_key)
     if value is not None:
@@ -646,6 +805,8 @@ def active_users_for_roles(roles):
 
 
 def active_users_for_notification(notification_key, *, user_ids=None, roles=None, emails=None, require_email=False, channel=None):
+    if notification_key not in CATALOG_BY_KEY:
+        return []
     candidates = OrderedDict()
     if user_ids:
         for row in _load_active_users(user_ids=user_ids):
@@ -658,11 +819,20 @@ def active_users_for_notification(notification_key, *, user_ids=None, roles=None
             candidates[int(row["id"])] = row
     if not candidates:
         return []
+    candidates = OrderedDict(
+        (uid, row)
+        for uid, row in candidates.items()
+        if _role_allowed_for_notification(notification_key, row.get("rol"))
+    )
+    if not candidates:
+        return []
     overrides = _load_overrides(notification_key, list(candidates))
     channel_key = channel or ("email" if require_email else "bell")
     if channel_key == "any":
         recipients = [row for row in candidates.values() if _effective_any_enabled(row, notification_key, overrides)]
     else:
+        if not _channel_allowed_for_notification(notification_key, channel_key):
+            return []
         recipients = [
             row
             for row in candidates.values()
@@ -696,6 +866,9 @@ def emit_notification(
 
     # "roles" queda solo por compatibilidad de firma: ya no crea audiencia interna.
     candidates = _candidate_users(notification_key, user_ids=user_ids, roles=roles, emails=emails)
+    if not candidates:
+        return 0
+    candidates = [row for row in candidates if _role_allowed_for_notification(notification_key, row.get("rol"))]
     if not candidates:
         return 0
     overrides = _load_overrides(notification_key, [row.get("id") for row in candidates])
@@ -988,6 +1161,22 @@ def notify_derivacion_devuelta(ingreso_id, tecnico_id=None):
     )
 
 
+def _notification_keys_visible_for_user(user_id):
+    user = q(
+        "SELECT id, rol FROM users WHERE id = %s AND COALESCE(activo, TRUE) = TRUE",
+        [user_id],
+        one=True,
+    )
+    if not user:
+        return []
+    role = _normalize_role(user.get("rol"))
+    return [
+        item["key"]
+        for item in NOTIFICATION_CATALOG
+        if _role_allowed_for_item(item, role)
+    ]
+
+
 def list_notifications_for_user(user_id, limit=DEFAULT_LIMIT):
     if not _table_exists("notifications"):
         return {"items": [], "unread_count": 0}
@@ -995,16 +1184,20 @@ def list_notifications_for_user(user_id, limit=DEFAULT_LIMIT):
         limit_value = max(1, min(MAX_LIMIT, int(limit or DEFAULT_LIMIT)))
     except Exception:
         limit_value = DEFAULT_LIMIT
+    visible_keys = _notification_keys_visible_for_user(user_id)
+    if not visible_keys:
+        return {"items": [], "unread_count": 0}
     bell_filter = "AND COALESCE(bell_enabled, TRUE) = TRUE" if _table_has_column("notifications", "bell_enabled") else ""
     unread = q(
         f"""
         SELECT COUNT(*) AS total
           FROM notifications
          WHERE user_id = %s
+           AND notification_key = ANY(%s)
            AND read_at IS NULL
            {bell_filter}
         """,
-        [user_id],
+        [user_id, visible_keys],
         one=True,
     ) or {}
     rows = q(
@@ -1013,11 +1206,12 @@ def list_notifications_for_user(user_id, limit=DEFAULT_LIMIT):
                entity_id, payload, created_at, read_at, clicked_at
           FROM notifications
          WHERE user_id = %s
+           AND notification_key = ANY(%s)
            {bell_filter}
          ORDER BY created_at DESC, id DESC
          LIMIT %s
         """,
-        [user_id, limit_value],
+        [user_id, visible_keys, limit_value],
     ) or []
     return {"items": rows, "unread_count": int(unread.get("total") or 0)}
 
@@ -1099,6 +1293,9 @@ def _notification_settings_items_for_user(user):
     items = []
     for item in NOTIFICATION_CATALOG:
         key = item["key"]
+        if not _role_allowed_for_item(item, user.get("rol")):
+            continue
+        allowed_channels = _item_channels(item)
         override = overrides.get(key) or {}
         default_enabled = _role_default_enabled(key, user.get("rol"))
         override_channels = {channel: override.get(channel) for channel in NOTIFICATION_CHANNELS}
@@ -1106,13 +1303,19 @@ def _notification_settings_items_for_user(user):
             channel: _effective_enabled(user, key, {int(user["id"]): override}, channel)
             for channel in NOTIFICATION_CHANNELS
         }
+        primary_channel = allowed_channels[0] if allowed_channels else "bell"
         items.append(
             {
                 **item,
                 "default_enabled": bool(default_enabled),
-                "override_enabled": override_channels["bell"],
-                "effective_enabled": bool(effective_channels["bell"]),
-                "default_channels": {channel: bool(default_enabled) for channel in NOTIFICATION_CHANNELS},
+                "override_enabled": override_channels.get(primary_channel),
+                "effective_enabled": bool(effective_channels.get(primary_channel)),
+                "channels": list(allowed_channels),
+                "allowed_channels": list(allowed_channels),
+                "default_channels": {
+                    channel: bool(default_enabled and channel in allowed_channels)
+                    for channel in NOTIFICATION_CHANNELS
+                },
                 "override_channels": override_channels,
                 "effective_channels": {channel: bool(value) for channel, value in effective_channels.items()},
             }
@@ -1159,13 +1362,7 @@ def get_current_user_notification_configuration(user_id):
         "primary_email": str(user.get("email") or "").strip(),
         "extra_emails": list_notification_email_addresses(user_id),
         "push": get_push_config_for_user(user_id),
-        "mandatory": {
-            "bejermanRemitoPdf": {
-                "enabled": _normalize_role(user.get("rol")) in {"admin", "cobranzas", "recepcion"},
-                "label": "PDF de remitos Bejerman",
-                "description": "Se envía siempre por mail a Administración, Cobranzas y Recepción.",
-            }
-        },
+        "mandatory": {},
     }
 
 
@@ -1249,15 +1446,42 @@ def save_user_notification_settings(user_id, preferences, updated_by=None):
         raise RuntimeError("El esquema de notificaciones no está aplicado.")
     if not isinstance(preferences, dict):
         raise ValueError("preferences debe ser un objeto.")
+    user = q(
+        "SELECT id, rol FROM users WHERE id = %s",
+        [user_id],
+        one=True,
+    )
+    if not user:
+        raise ValueError("Usuario inválido.")
     valid_keys = set(CATALOG_BY_KEY)
     with transaction.atomic():
         for key, raw_value in preferences.items():
             clean_key = (key or "").strip()
             if clean_key not in valid_keys:
                 raise ValueError(f"Tipo de notificación inválido: {clean_key}")
+            item = CATALOG_BY_KEY[clean_key]
+            if not _role_allowed_for_item(item, user.get("rol")):
+                raise ValueError(f"Tu rol no puede configurar esta notificación: {clean_key}")
             incoming_values, legacy_payload = _payload_channel_values(raw_value)
             if legacy_payload and incoming_values.get("bell") is None:
                 _delete_user_notification_preference(user_id, clean_key)
+                continue
+            allowed_channels = set(_item_channels(item))
+            invalid_enabled_channels = sorted(
+                channel
+                for channel, value in incoming_values.items()
+                if channel not in allowed_channels and value
+            )
+            if invalid_enabled_channels:
+                raise ValueError(
+                    f"Canal no permitido para {clean_key}: {', '.join(invalid_enabled_channels)}"
+                )
+            incoming_values = {
+                channel: value
+                for channel, value in incoming_values.items()
+                if channel in allowed_channels
+            }
+            if not incoming_values:
                 continue
             current = (_load_overrides(clean_key, [user_id]).get(int(user_id)) or {})
             next_values = {channel: current.get(channel) for channel in NOTIFICATION_CHANNELS}

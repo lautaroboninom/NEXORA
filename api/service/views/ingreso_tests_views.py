@@ -24,8 +24,8 @@ from ..permissions import require_any_permission
 from .helpers import _rol, _set_audit_user, exec_void, q, require_permission
 
 
-_EDIT_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin"}
-_VIEW_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin", "recepcion"}
+_EDIT_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin", "supervisor"}
+_VIEW_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin", "supervisor", "recepcion"}
 _BLOCKED_EDIT_STATES = {"entregado", "baja", "vendido_pendiente_entrega", "vendido_entregado"}
 _VALID_GLOBAL_RESULTS = {"", "pendiente", "apto", "apto_condicional", "no_apto"}
 _VALID_ITEM_RESULTS = {"", "ok", "observado", "no_ok", "na"}

@@ -440,6 +440,8 @@ def require_roles(request, roles):
     expanded = set(roles)
     if "jefe" in expanded:
         expanded.add("jefe_veedor")
+    if expanded.intersection({"admin", "ventas", "recepcion"}):
+        expanded.add("supervisor")
     if r not in expanded:
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("No autorizado")
@@ -449,7 +451,10 @@ def require_roles_strict(request, roles):
     if _require_mapped_permission(request):
         return
     r = _rol(request)
-    if r not in set(roles):
+    expanded = set(roles)
+    if expanded.intersection({"admin", "ventas", "recepcion"}):
+        expanded.add("supervisor")
+    if r not in expanded:
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("No autorizado")
 

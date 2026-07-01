@@ -15,6 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .delivery_orders import sync_service_release_orders_invoice_from_ingreso
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
 
 logger = logging.getLogger(__name__)
@@ -175,13 +176,29 @@ def _delivery_order_join() -> tuple[str, str]:
               SELECT article_code, article_name, description
                 FROM delivery_order_items
                WHERE order_id = o.id
-               ORDER BY sort_order ASC, created_at ASC
+               ORDER BY
+                     CASE WHEN ingreso_id = t.id THEN 0 ELSE 1 END,
+                     sort_order ASC,
+                     created_at ASC
                LIMIT 1
             ) i ON TRUE
            WHERE o.delivery_type = 'service_release'
              AND (
                   o.ingreso_id = t.id
                   OR (o.source_system = 'nexora' AND o.source_external_id = CAST(t.id AS TEXT))
+                  OR EXISTS (
+                      SELECT 1
+                        FROM delivery_order_items doi
+                       WHERE doi.order_id = o.id
+                         AND doi.ingreso_id = t.id
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                        FROM delivery_order_item_partidas doip
+                        JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+                       WHERE doi.order_id = o.id
+                         AND doip.ingreso_id = t.id
+                  )
                  )
            ORDER BY o.created_at DESC NULLS LAST, o.id DESC
            LIMIT 1
@@ -391,6 +408,7 @@ def get_service_order_billing_item(ingreso_id: int, *, include_invoiced: bool = 
     return _format_service_order_item(row) if row else None
 
 
+@transaction.atomic
 def register_service_order_invoice(ingreso_id: int, factura_numero: str, actor_user_id: int | None = None) -> dict[str, Any]:
     invoice = _clean(factura_numero)
     if not invoice:
@@ -402,6 +420,7 @@ def register_service_order_invoice(ingreso_id: int, factura_numero: str, actor_u
     current = _clean(item.get("facturaNumero"))
     if current:
         if current == invoice:
+            sync_service_release_orders_invoice_from_ingreso(ingreso_id, invoice, actor_user_id)
             return item
         raise ServiceOrderBillingError("SERVICE_ORDER_ALREADY_INVOICED", "La OS ya tiene una factura registrada.", status_code=409)
 
@@ -418,6 +437,7 @@ def register_service_order_invoice(ingreso_id: int, factura_numero: str, actor_u
         if not cur.rowcount:
             raise ServiceOrderBillingError("SERVICE_ORDER_ALREADY_INVOICED", "La OS ya tiene una factura registrada.", status_code=409)
 
+    sync_service_release_orders_invoice_from_ingreso(ingreso_id, invoice, actor_user_id)
     updated = get_service_order_billing_item(ingreso_id, include_invoiced=True)
     return updated or {**item, "facturaNumero": invoice}
 

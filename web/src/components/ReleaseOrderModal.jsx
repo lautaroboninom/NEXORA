@@ -78,16 +78,16 @@ export default function ReleaseOrderModal({
         selectedResolution === RESOLUCION.CAMBIO
       )
   );
-  const usesBackendAutoRepaired = Boolean(
+  const usesBackendAutoResolution = Boolean(
     !currentResolution &&
-      flow.estado === "reparado" &&
-      selectedResolution === RESOLUCION.REPARADO &&
+      flow.suggestedResolution &&
+      selectedResolution === flow.suggestedResolution &&
       !canManageResolution
   );
   const resolutionBlockedByPermission = Boolean(
-    missingResolution &&
+      missingResolution &&
       !canManageResolution &&
-      !usesBackendAutoRepaired
+      !usesBackendAutoResolution
   );
 
   const normalizedCharge = normalizeNumberInput(charge);

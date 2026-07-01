@@ -20,8 +20,11 @@ from .bejerman_sdk import (
     BejermanSdkConfigError,
     BejermanSdkResponseError,
     BejermanSdkUnavailable,
+    as_number,
+    as_nullable_bool,
     as_string,
     build_article_filters,
+    build_article_sales_vat_map,
     build_article_stock_lots,
     build_articles_result,
     build_partida_rows,
@@ -40,6 +43,16 @@ from .bejerman_sdk import (
     resolve_customer_document_fields,
 )
 from .bejerman_companies import company_for_key
+from .bejerman_documents import (
+    REGISTERED_REMITO_NO_PDF_CODE,
+    REMITO_COMPROBANTE_TYPES,
+    cobranzas_remito_pdf_metadata,
+    is_registered_remito_summary,
+    is_transient_pdf_lookup_message,
+    local_remito_pdf_metadata,
+    parse_bejerman_remito_number,
+    registered_remito_no_pdf_detail,
+)
 from .delivery_orders import (
     DeliveryOrderError,
     RENTAL_STOCK_DEPOSIT,
@@ -54,11 +67,13 @@ from .delivery_orders import (
     list_delivery_orders,
     notify_delivery_order_remito_ready,
     normalize_delivery_type,
+    refresh_delivery_order_article_partida_flags,
     rental_item_from_context,
     remito_profile_for_type,
     remito_type_requires_billing,
     serialize_order,
-    validate_rental_delivery_items,
+    service_release_ingreso_ids_from_order,
+    validate_rental_delivery_items_ready,
 )
 from .remito_pdf_notifications import notify_bejerman_remito_pdf_issued
 
@@ -74,14 +89,26 @@ class BillingError(RuntimeError):
         self.retry_after_ms = retry_after_ms
 
 
+def registered_remito_no_pdf_error(remito_number: Any = "") -> BillingError:
+    return BillingError(REGISTERED_REMITO_NO_PDF_CODE, registered_remito_no_pdf_detail(remito_number), status_code=409)
+
+
 FACTURACION_COMPROBANTE_TYPES = ("FC", "NC", "ND")
-REMITO_COMPROBANTE_TYPES = ("RT", "RD", "RTA", "RTN", "RSS", "RIS", "RDA", "RDN")
 REMITO_OPERATION_TYPES = ("MC", "REP", "ALQ", "DEMO", "BUSO", "FAB")
 DELIVERY_ORDER_STOCK_DEPOSIT = "VAL"
 DELIVERY_ORDER_FALLBACK_DEPOSITS = ("VAL", "STL")
+DELIVERY_MANUAL_REGISTER_POINT_OF_SALE = "00001"
+DELIVERY_EXISTING_BEJERMAN_POINTS_OF_SALE = {"00004", "00007"}
+
+
+def _is_bejerman_sales_query_schema_error(message: str) -> bool:
+    text = str(message or "")
+    markers = ("IMPORTE_TOTAL", "ConvMonLocal", "CabVenta.", "ORDER BY items must appear")
+    return any(marker in text for marker in markers)
 
 
 def _sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
+    message = str(exc)
     if isinstance(exc, BejermanPdfPendingError):
         return BillingError(
             "BEJERMAN_PDF_PENDING",
@@ -90,12 +117,24 @@ def _sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
             retry_after_ms=getattr(exc, "retry_after_ms", 2500),
         )
     if isinstance(exc, BejermanSdkConfigError):
-        return BillingError("BEJERMAN_SDK_NOT_CONFIGURED", str(exc), status_code=503)
+        return BillingError("BEJERMAN_SDK_NOT_CONFIGURED", message, status_code=503)
     if isinstance(exc, BejermanSdkUnavailable):
-        return BillingError("BEJERMAN_SDK_UNAVAILABLE", str(exc), status_code=503)
+        return BillingError("BEJERMAN_SDK_UNAVAILABLE", message, status_code=503)
     if isinstance(exc, BejermanSdkResponseError):
-        return BillingError("BEJERMAN_SDK_ERROR", str(exc), status_code=502)
-    return BillingError("BEJERMAN_ERROR", str(exc), status_code=502)
+        if "expSinCuotasV1" in message:
+            return BillingError(
+                "BEJERMAN_BILLING_QUERY_BUSY",
+                "Bejerman no pudo completar la consulta de facturación porque dejó bloqueado el objeto interno expSinCuotasV1. Reintente la consulta; si persiste, hay que revisar el servicio Bejerman.",
+                status_code=502,
+            )
+        if _is_bejerman_sales_query_schema_error(message):
+            return BillingError(
+                "BEJERMAN_SDK_INTERNAL_QUERY_ERROR",
+                "Bejerman devolvió un error interno al consultar comprobantes. No es un bloqueo por partidas ni por datos de NEXORA; verifique si el comprobante quedó emitido antes de reintentar.",
+                status_code=502,
+            )
+        return BillingError("BEJERMAN_SDK_ERROR", message, status_code=502)
+    return BillingError("BEJERMAN_ERROR", message, status_code=502)
 
 
 def list_facturacion_company_options() -> list[dict[str, Any]]:
@@ -160,15 +199,13 @@ def list_bejerman_articles(
     q = _optional_text(search)
     normalized_company = _normalize_delivery_company_key(company_key)
     try:
-        client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
-        if q:
-            responses = [
-                client.list_articulos(build_article_filters(q, field="code"), clean_limit),
-                client.list_articulos(build_article_filters(q, field="description"), clean_limit),
-            ]
-        else:
-            responses = client.list_articulos([], clean_limit)
-        data = build_articles_result(responses, {"search": q, "limit": clean_limit})
+        client = BejermanSDKClient(
+            company_key=normalized_company,
+            actor_user_id=actor_user_id,
+            allow_system_credentials=True,
+        )
+        filters = build_article_filters(q) if q else []
+        data = build_articles_result(client.list_articulos(filters, clean_limit), {"search": q, "limit": clean_limit})
     except Exception as exc:
         raise _sdk_error(exc) from exc
     return {
@@ -209,6 +246,11 @@ def _order_item_price_currencies(order: dict[str, Any]) -> set[str]:
 
 def _order_exchange_rate(order: dict[str, Any]) -> str:
     return _optional_text(order.get("commercialExchangeRate") or order.get("commercial_exchange_rate")) or ""
+
+
+def _parsed_order_exchange_rate(value: Any) -> float | None:
+    parsed = as_number(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _normalize_deposit_code(value: Any, default: str = DELIVERY_ORDER_STOCK_DEPOSIT) -> str:
@@ -263,7 +305,11 @@ def _deposit_item(record: dict[str, Any]) -> dict[str, Any] | None:
 def list_bejerman_depositos(company_key: str | None = None, actor_user_id: int | None = None) -> dict[str, Any]:
     normalized_company = _normalize_delivery_company_key(company_key)
     try:
-        client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
+        client = BejermanSDKClient(
+            company_key=normalized_company,
+            actor_user_id=actor_user_id,
+            allow_system_credentials=True,
+        )
         deposits: dict[str, dict[str, Any]] = {}
         for record in records_from_response(client.obtener_depositos()):
             item = _deposit_item(record)
@@ -304,7 +350,11 @@ def list_bejerman_article_stock(
     except (TypeError, ValueError):
         clean_limit = 100
     try:
-        client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
+        client = BejermanSDKClient(
+            company_key=normalized_company,
+            actor_user_id=actor_user_id,
+            allow_system_credentials=True,
+        )
         stock_response = client.obtener_stock_deposito(normalized_deposit)
         partidas_response = client.obtener_partidas()
         lots = build_article_stock_lots(
@@ -342,15 +392,68 @@ def _available_quantity(value: Any) -> float:
         return 0.0
 
 
+def _effective_available_quantity(record: dict[str, Any]) -> float:
+    available = record.get("availableQuantity")
+    if available is not None:
+        return _available_quantity(available)
+    return _available_quantity(record.get("realQuantity"))
+
+
 def _matching_lot_for_partida(lots: list[dict[str, Any]], partida: str) -> dict[str, Any] | None:
-    wanted = _optional_text(partida).casefold()
+    wanted = (_optional_text(partida) or "").casefold()
     if not wanted:
         return None
     for lot in lots:
-        if _optional_text(lot.get("partida")).casefold() != wanted:
+        if (_optional_text(lot.get("partida")) or "").casefold() != wanted:
             continue
-        if _available_quantity(lot.get("availableQuantity")) > 0:
+        if _effective_available_quantity(lot) > 0:
             return lot
+    return None
+
+
+def _partida_expiration(partida_rows: list[dict[str, Any]], deposit_code: str, partida: str) -> str:
+    wanted_deposit = (_optional_text(deposit_code) or "").upper()
+    wanted_partida = (_optional_text(partida) or "").casefold()
+    fallback = ""
+    if not wanted_partida:
+        return ""
+    for row in partida_rows:
+        if (_optional_text(row.get("partida")) or "").casefold() != wanted_partida:
+            continue
+        expiration = _optional_text(row.get("expirationDate")) or ""
+        if (_optional_text(row.get("depositCode")) or "").upper() == wanted_deposit:
+            return expiration
+        if not fallback:
+            fallback = expiration
+    return fallback
+
+
+def _stock_lot_for_partida(
+    stock_rows: list[dict[str, Any]],
+    partida_rows: list[dict[str, Any]],
+    partida: str,
+    deposit_code: str,
+) -> dict[str, Any] | None:
+    wanted_partida = (_optional_text(partida) or "").casefold()
+    wanted_deposit = (_optional_text(deposit_code) or "").upper()
+    if not wanted_partida or not wanted_deposit:
+        return None
+    for row in stock_rows:
+        if (_optional_text(row.get("depositCode")) or "").upper() != wanted_deposit:
+            continue
+        if (_optional_text(row.get("partida")) or "").casefold() != wanted_partida:
+            continue
+        if _effective_available_quantity(row) <= 0:
+            continue
+        return {
+            "articleCode": row.get("articleCode") or "",
+            "depositCode": row.get("depositCode") or deposit_code,
+            "partida": row.get("partida") or partida,
+            "expirationDate": _partida_expiration(partida_rows, row.get("depositCode") or deposit_code, row.get("partida") or partida),
+            "realQuantity": row.get("realQuantity"),
+            "committedQuantity": row.get("committedQuantity"),
+            "availableQuantity": row.get("availableQuantity"),
+        }
     return None
 
 
@@ -365,7 +468,8 @@ def list_rental_available_equipment(
         clean_limit = max(1, min(200, int(limit or 80)))
     except (TypeError, ValueError):
         clean_limit = 80
-    fetch_limit = min(300, max(clean_limit * 4, 80))
+    q = normalize_search(search)
+    fetch_limit = 2000 if q else min(300, max(clean_limit * 4, 80))
     ingreso_columns = _table_columns("ingresos", {"empresa_bejerman", "alquilado", "ubicacion_id"})
     company_expr = "COALESCE(t.empresa_bejerman, 'SEPID')" if "empresa_bejerman" in ingreso_columns else "'SEPID'"
     alquilado_expr = "COALESCE(t.alquilado, FALSE)" if "alquilado" in ingreso_columns else "FALSE"
@@ -423,29 +527,39 @@ def list_rental_available_equipment(
         raise _sdk_error(exc) from exc
 
     lots_by_article: dict[str, list[dict[str, Any]]] = {}
-    q = normalize_search(search)
     items: list[dict[str, Any]] = []
     for row in local_rows:
         serial = _optional_text(row.get("equipment_serial"))
         if not serial:
             continue
-        mapping = _article_mapping_for_equipment(row)
+        mapping = _article_mapping_for_equipment(row) or {}
         article_code = _optional_text((mapping or {}).get("article_code"))
+        lot = None
         if not article_code:
-            continue
-        if article_code not in lots_by_article:
+            lot = _stock_lot_for_partida(stock_rows, partida_rows, serial, RENTAL_STOCK_DEPOSIT)
+            article_code = _optional_text((lot or {}).get("articleCode"))
+        if article_code and not lot and article_code not in lots_by_article:
             lots_by_article[article_code] = build_article_stock_lots(
                 stock_rows,
                 partida_rows,
                 article_code,
                 RENTAL_STOCK_DEPOSIT,
             )
-        lot = _matching_lot_for_partida(lots_by_article[article_code], serial)
+        if article_code and not lot:
+            lot = _matching_lot_for_partida(lots_by_article[article_code], serial)
         if not lot:
+            lot = _stock_lot_for_partida(stock_rows, partida_rows, serial, RENTAL_STOCK_DEPOSIT)
+            article_code = _optional_text((lot or {}).get("articleCode")) or article_code
+        if not lot or not article_code:
             continue
+        item_mapping = {
+            **mapping,
+            "article_code": article_code,
+            "article_description": mapping.get("article_description") or "",
+        }
         item = rental_item_from_context(
             row,
-            mapping or {},
+            item_mapping,
             stock={
                 "stockAvailableQuantity": lot.get("availableQuantity"),
                 "partidaExpirationDate": lot.get("expirationDate"),
@@ -575,6 +689,13 @@ def _facturacion_comprobante_types(params: dict[str, Any]) -> tuple[str, ...]:
     return FACTURACION_COMPROBANTE_TYPES
 
 
+def _facturacion_query_comprobante_types(params: dict[str, Any]) -> tuple[str | None, ...]:
+    requested_types = _facturacion_comprobante_types(params)
+    if requested_types == FACTURACION_COMPROBANTE_TYPES:
+        return (None,)
+    return requested_types
+
+
 def _normalize_remito_company_key(value: Any) -> str:
     company = company_for_key(value, default="SEPID")
     if not company:
@@ -629,6 +750,309 @@ def _remito_comprobante_types(params: dict[str, Any]) -> tuple[str, ...]:
     return REMITO_COMPROBANTE_TYPES
 
 
+def _remito_partial_error(comprobante_type: str, exc: Exception) -> dict[str, str]:
+    normalized = _sdk_error(exc)
+    return {
+        "remitoType": comprobante_type,
+        "code": getattr(normalized, "code", "BEJERMAN_ERROR"),
+        "message": str(normalized),
+    }
+
+
+def _pdf_sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
+    message = str(exc)
+    if "expCuotasV" in message:
+        return BillingError(
+            "BEJERMAN_PDF_GENERATION_ERROR",
+            "Bejerman no pudo generar el PDF del comprobante porque su SDK informa que falta el objeto interno expCuotasV.",
+            status_code=502,
+        )
+    if _is_bejerman_sales_query_schema_error(message):
+        return BillingError(
+            "BEJERMAN_PDF_GENERATION_ERROR",
+            "El remito está emitido, pero Bejerman no pudo consultar o generar el PDF por un error interno de su SDK. Reintente la impresión desde el historial; si persiste, hay que revisar Bejerman.",
+            status_code=502,
+        )
+    if is_transient_pdf_lookup_message(message):
+        return BillingError(
+            "BEJERMAN_PDF_NOT_AVAILABLE",
+            "Bejerman no devolvió el PDF del comprobante. El comprobante existe en la consulta, pero el PDF no está disponible desde el SDK.",
+            status_code=502,
+        )
+    return _sdk_error(exc)
+
+
+def _date_only(value: Any) -> str:
+    if hasattr(value, "date"):
+        return value.date().isoformat()
+    text = _optional_text(value)
+    if not text:
+        return ""
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
+    return match.group(1) if match else text
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _local_remito_issue_date(row: dict[str, Any], raw: dict[str, Any]) -> str:
+    raw_date = first_value(raw, ("Comprobante_FechaEmision", "Comprobante_FEmision", "FechaEmision"))
+    return _date_only(raw_date) or _date_only(row.get("generated_at")) or _date_only(row.get("created_at"))
+
+
+def _local_remito_document_number(tipo: str, letter: str, point: str, number: str, fallback: Any) -> str:
+    remito_number = _optional_text(fallback)
+    if remito_number:
+        return remito_number
+    if tipo and letter and point and number:
+        return f"{tipo} {letter} {point}-{number}"
+    return "RSS"
+
+
+def resolve_remito_group_for_document_id(document_id: str, company_key: str | None = None) -> dict[str, Any] | None:
+    doc = _optional_text(document_id)
+    if not doc:
+        return None
+    try:
+        decoded = decode_document_id(doc)
+    except Exception:
+        return None
+    tipo = (_optional_text(decoded.get("t") or decoded.get("type")) or "").upper()
+    letter = _optional_text(decoded.get("l") or decoded.get("letter"))
+    point = _optional_text(decoded.get("p") or decoded.get("pointOfSale"))
+    number = _optional_text(decoded.get("n") or decoded.get("number"))
+    customer_code = _optional_text(decoded.get("c") or decoded.get("customerCode"))
+    if not all((tipo, letter, point, number)):
+        return None
+    normalized_company = _company_key_for_marker(company_key) if company_key else None
+
+    where = [
+        "status = 'generated'",
+        "UPPER(COALESCE(comprobante_tipo, '')) = %s",
+        "COALESCE(comprobante_letra, '') = %s",
+        "COALESCE(comprobante_pto_venta, '') = %s",
+        "COALESCE(comprobante_numero, '') = %s",
+    ]
+    params: list[Any] = [tipo, letter, point, number]
+    if customer_code:
+        where.append("UPPER(TRIM(COALESCE(customer_code, ''))) = UPPER(TRIM(%s))")
+        params.append(customer_code)
+    if normalized_company:
+        where.append("(company_key IS NULL OR company_key = %s)")
+        params.append(normalized_company)
+
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
+                       comprobante_numero, remito_number, customer_code, customer_name, operation_code,
+                       created_at, generated_at, response_summary
+                  FROM bejerman_remito_groups
+                 WHERE {' AND '.join(where)}
+                 ORDER BY
+                       CASE WHEN company_key = %s THEN 0 ELSE 1 END,
+                       generated_at DESC NULLS LAST,
+                       created_at DESC NULLS LAST
+                 LIMIT 5
+                """,
+                [*params, normalized_company or ""],
+            )
+            cols = [col[0] for col in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception:
+        logger.warning("bejerman_remito_group_lookup_failed", exc_info=True)
+        return None
+
+    for row in rows:
+        summary = row.get("response_summary") if isinstance(row.get("response_summary"), dict) else {}
+        resolved_company = _company_key_for_remito_group(row.get("id"), summary, row.get("company_key"))
+        if normalized_company and resolved_company != normalized_company:
+            continue
+        return {**row, "resolvedCompanyKey": resolved_company}
+    return None
+
+
+def resolve_registered_ingreso_remito_for_document_id(document_id: str, company_key: str | None = None) -> dict[str, Any] | None:
+    doc = _optional_text(document_id)
+    if not doc or not _table_exists("bejerman_ingreso_remitos"):
+        return None
+    try:
+        decoded = decode_document_id(doc)
+    except Exception:
+        return None
+    tipo = (_optional_text(decoded.get("t") or decoded.get("type")) or "").upper()
+    letter = _optional_text(decoded.get("l") or decoded.get("letter"))
+    point = _optional_text(decoded.get("p") or decoded.get("pointOfSale"))
+    number = _optional_text(decoded.get("n") or decoded.get("number"))
+    customer_code = _optional_text(decoded.get("c") or decoded.get("customerCode"))
+    if not all((tipo, letter, point, number)):
+        return None
+    normalized_company = _company_key_for_marker(company_key) if company_key else None
+
+    where = [
+        "status = 'generated'",
+        "document_mode = 'register'",
+        "UPPER(COALESCE(comprobante_tipo, '')) = %s",
+        "COALESCE(comprobante_letra, '') = %s",
+        "COALESCE(comprobante_pto_venta, '') = %s",
+        "COALESCE(comprobante_numero, '') = %s",
+    ]
+    params: list[Any] = [tipo, letter, point, number]
+    if customer_code:
+        where.append("UPPER(TRIM(COALESCE(customer_code, ''))) = UPPER(TRIM(%s))")
+        params.append(customer_code)
+    if normalized_company:
+        where.append("(company_key IS NULL OR company_key = %s)")
+        params.append(normalized_company)
+
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, ingreso_id, company_key, comprobante_tipo, comprobante_letra,
+                       comprobante_pto_venta, comprobante_numero, remito_number,
+                       manual_remito_number, customer_code, customer_name, issue_date,
+                       generated_at
+                  FROM bejerman_ingreso_remitos
+                 WHERE {' AND '.join(where)}
+                 ORDER BY
+                       CASE WHEN company_key = %s THEN 0 ELSE 1 END,
+                       generated_at DESC NULLS LAST,
+                       id DESC
+                 LIMIT 1
+                """,
+                [*params, normalized_company or ""],
+            )
+            cols = [col[0] for col in cur.description]
+            row_raw = cur.fetchone()
+            return dict(zip(cols, row_raw)) if row_raw else None
+    except Exception:
+        logger.warning("bejerman_ingreso_registered_remito_lookup_failed", exc_info=True)
+        return None
+
+
+def _enrich_remito_items_with_local_groups(items: list[dict[str, Any]], company_key: str) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for item in items:
+        document_id = _optional_text(item.get("documentId") or item.get("id"))
+        if not document_id:
+            enriched.append(item)
+            continue
+        had_pdf_metadata = bool(item.get("pdfUrl") and item.get("printUrl"))
+        metadata = cobranzas_remito_pdf_metadata(
+            document_id,
+            customer_code=item.get("bejermanCustomerCode") or item.get("customerCode"),
+            company_key=item.get("companyKey") or company_key,
+        )
+        item = {**metadata, **item}
+        if had_pdf_metadata:
+            enriched.append(item)
+            continue
+        group = resolve_remito_group_for_document_id(document_id, company_key=company_key)
+        if not group:
+            enriched.append(item)
+            continue
+        enriched.append({**item, **local_remito_pdf_metadata(group["id"], group.get("resolvedCompanyKey") or company_key)})
+    return enriched
+
+
+def _local_generated_rss_remito_items(
+    params: dict[str, Any],
+    *,
+    company_key: str,
+    customer_code: str,
+) -> list[dict[str, Any]]:
+    requested_type = (_optional_text(params.get("remitoType")) or "").upper()
+    if requested_type and requested_type != "RSS":
+        return []
+
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
+                   comprobante_numero, remito_number, customer_code, customer_name, operation_code,
+                   created_at, generated_at, response_summary
+              FROM bejerman_remito_groups
+             WHERE status = 'generated'
+               AND UPPER(COALESCE(comprobante_tipo, '')) = 'RSS'
+               AND (company_key IS NULL OR company_key = %s)
+            """,
+            [company_key],
+        )
+        cols = [col[0] for col in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    date_from = _date_only(params.get("dateFrom"))
+    date_to = _date_only(params.get("dateTo"))
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        summary = row.get("response_summary") if isinstance(row.get("response_summary"), dict) else {}
+        resolved_company = _company_key_for_remito_group(row.get("id"), summary, row.get("company_key"))
+        if resolved_company != company_key:
+            continue
+        row_customer_code = _optional_text(row.get("customer_code"))
+        if customer_code and row_customer_code != customer_code:
+            continue
+
+        raw = summary.get("raw") if isinstance(summary.get("raw"), dict) else {}
+        issue_date = _local_remito_issue_date(row, raw)
+        if date_from and issue_date and issue_date < date_from:
+            continue
+        if date_to and issue_date and issue_date > date_to:
+            continue
+
+        tipo = (_optional_text(row.get("comprobante_tipo") or summary.get("comprobanteTipo")) or "").upper() or "RSS"
+        letter = _optional_text(row.get("comprobante_letra") or summary.get("comprobanteLetra") or "R") or "R"
+        point = _optional_text(row.get("comprobante_pto_venta") or summary.get("comprobantePtoVenta"))
+        number = _optional_text(row.get("comprobante_numero") or summary.get("comprobanteNumero"))
+        if not point or not number:
+            continue
+        operation_code = (_optional_text(row.get("operation_code")) or "").upper()
+        document_number = _local_remito_document_number(tipo, letter, point, number, row.get("remito_number"))
+        document_id = _document_id({"t": tipo, "n": number, "l": letter, "p": point, "f": issue_date, "c": row_customer_code})
+        total = as_number(first_value(raw, ("Comprobante_ImporteTotal", "Comprobante_Total", "ImporteTotal", "Total")))
+        items.append(
+            {
+                "id": document_id,
+                "documentId": document_id,
+                "type": tipo,
+                "comprobanteTipo": tipo,
+                "letter": letter,
+                "pointOfSale": point,
+                "number": number,
+                "comprobanteNumero": number,
+                "documentNumber": document_number,
+                "numero": document_number,
+                "issueDate": issue_date,
+                "date": issue_date,
+                "customerCode": row_customer_code,
+                "bejermanCustomerCode": row_customer_code,
+                "customerName": _optional_text(row.get("customer_name")),
+                "operationCode": operation_code,
+                "tipoOperacion": operation_code,
+                "operationLabel": operation_code,
+                "origin": operation_code,
+                "subtotal": as_number(first_value(raw, ("Comprobante_ImporteNeto", "Comprobante_Subtotal", "Subtotal"))),
+                "taxes": as_number(first_value(raw, ("Comprobante_ImporteIVA", "Comprobante_Impuestos", "Impuestos", "IVA"))),
+                "totalAmount": total,
+                "amount": total,
+                **local_remito_pdf_metadata(row.get("id"), resolved_company),
+                "raw": raw,
+            }
+        )
+    return items
+
+
 def list_remitos_from_bejerman(
     customer_code: str | None,
     filters: dict[str, Any] | None = None,
@@ -645,19 +1069,49 @@ def list_remitos_from_bejerman(
         client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
         effective_code = _resolve_facturacion_customer_code(client, code) if code else ""
         _default_facturacion_dates(params)
-        responses = [
-            client.list_comprobantes_ventas(
-                build_sales_filters(
-                    effective_code,
-                    params.get("dateFrom"),
-                    params.get("dateTo"),
-                    comprobante_type,
-                    params.get("operationType"),
+        requested_types = _remito_comprobante_types(params)
+        responses = []
+        partial_errors = []
+        strict_type = bool(_optional_text(params.get("remitoType")))
+        for comprobante_type in requested_types:
+            try:
+                responses.append(
+                    client.list_comprobantes_ventas(
+                        build_sales_filters(
+                            effective_code,
+                            params.get("dateFrom"),
+                            params.get("dateTo"),
+                            comprobante_type,
+                            params.get("operationType"),
+                        )
+                    )
                 )
-            )
-            for comprobante_type in _remito_comprobante_types(params)
-        ]
-        data = build_remitos_result(responses, effective_code, params)
+            except Exception as exc:
+                if strict_type and comprobante_type != "RSS":
+                    raise
+                partial_errors.append(_remito_partial_error(comprobante_type, exc))
+                logger.warning("bejerman_remito_type_query_failed", extra={"remito_type": comprobante_type})
+        failed_type_set = {error["remitoType"] for error in partial_errors}
+        local_rss_items = (
+            _local_generated_rss_remito_items(params, company_key=normalized_company, customer_code=effective_code)
+            if "RSS" in failed_type_set
+            else []
+        )
+        if partial_errors and not responses and not local_rss_items and failed_type_set != {"RSS"}:
+            first_error = partial_errors[0]
+            raise BillingError(first_error["code"], first_error["message"], status_code=502)
+        data = build_remitos_result(responses, effective_code, params, extra_items=local_rss_items)
+        data["items"] = _enrich_remito_items_with_local_groups(data.get("items") or [], normalized_company)
+        if partial_errors:
+            data["partialErrors"] = partial_errors
+            if "RSS" in failed_type_set:
+                data["warning"] = (
+                    "No se pudo consultar RSS desde Bejerman. "
+                    "Se muestran los RSS generados por NEXORA y los demás remitos disponibles."
+                )
+            else:
+                failed_types = ", ".join(error["remitoType"] for error in partial_errors)
+                data["warning"] = f"No se pudieron consultar estos tipos de remito: {failed_types}. Se muestran los demás resultados."
         data["requestedCustomerCode"] = code
         data["effectiveCustomerCode"] = as_string(effective_code)
         data["bejermanCustomerCode"] = effective_code
@@ -700,7 +1154,7 @@ def list_facturacion_from_bejerman(
             client.list_comprobantes_ventas(
                 build_sales_filters(effective_code, params.get("dateFrom"), params.get("dateTo"), comprobante_type)
             )
-            for comprobante_type in _facturacion_comprobante_types(params)
+            for comprobante_type in _facturacion_query_comprobante_types(params)
         ]
         data = build_facturacion_result(
             responses,
@@ -907,7 +1361,7 @@ def get_facturacion_pdf(
     except Exception as exc:
         if isinstance(exc, BillingError):
             raise
-        raise _sdk_error(exc) from exc
+        raise _pdf_sdk_error(exc) from exc
 
 
 def _env_text(name: str, default: str) -> str:
@@ -921,6 +1375,35 @@ def _env_text(name: str, default: str) -> str:
 def _remito_requires_billing(profile: dict[str, Any]) -> bool:
     comprobante_tipo = (_optional_text(profile.get("type") or profile.get("comprobanteTipo")) or "").upper()
     return remito_type_requires_billing(comprobante_tipo)
+
+
+def _delivery_article_codes_requiring_vat(bridge_request: dict[str, Any], profile: dict[str, Any]) -> list[str]:
+    if not _remito_requires_billing(profile):
+        return []
+    codes: set[str] = set()
+    for order in bridge_request.get("orders") or []:
+        if not isinstance(order, dict):
+            continue
+        for item in order.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            code = _optional_text(item.get("articleCode"))
+            unit_price = as_number(item.get("unitPrice")) or 0
+            if code and unit_price > 0:
+                codes.add(code)
+    return sorted(codes)
+
+
+def _delivery_article_sales_vat_map(
+    client: BejermanSDKClient,
+    bridge_request: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    article_codes = _delivery_article_codes_requiring_vat(bridge_request, profile)
+    if not article_codes:
+        return {}
+    catalog = client.list_articulos([], max(50, len(article_codes)))
+    return build_article_sales_vat_map(catalog, article_codes)
 
 
 def _delivery_status_for_remito_profile(profile: dict[str, Any]) -> str:
@@ -986,6 +1469,134 @@ def _company_key_for_order(order: dict[str, Any]) -> str:
     return "SEPID"
 
 
+def _parse_delivery_order_remito_number(order: dict[str, Any]) -> dict[str, str]:
+    remito_number = _optional_text(order.get("remitoNumber") or order.get("remito_number"))
+    if not remito_number:
+        raise BillingError("REMITO_REQUIRED", "La orden no tiene número de remito cargado.", status_code=409)
+
+    profile = remito_profile_for_type(order.get("deliveryType") or order.get("delivery_type") or "sale")
+    try:
+        return parse_bejerman_remito_number(
+            remito_number,
+            default_type=profile.comprobante_tipo,
+            default_letter="R",
+            allowed_types=REMITO_COMPROBANTE_TYPES,
+            complete_error_message="Cargue el remito completo, por ejemplo RSS R 00004-00004715.",
+        )
+    except ValueError as exc:
+        message = str(exc)
+        code = "INVALID_REMITO_TYPE" if message.startswith("Tipo de remito no válido") else "REMITO_NUMBER_INVALID"
+        raise BillingError(code, message, status_code=400) from exc
+
+
+def _remito_item_matches_document(document: dict[str, str], item: dict[str, Any]) -> bool:
+    item_type = (_optional_text(item.get("type") or item.get("comprobanteTipo")) or "").upper()
+    item_letter = (_optional_text(item.get("letter") or item.get("comprobanteLetra")) or "").upper()
+    item_point = _digits_only(item.get("pointOfSale") or item.get("comprobantePtoVenta")).zfill(5)
+    item_number = _digits_only(item.get("number") or item.get("comprobanteNumero")).zfill(8)
+    return (
+        item_type == document["type"]
+        and (not item_letter or item_letter == document["letter"])
+        and item_point == document["point"]
+        and item_number == document["number"]
+    )
+
+
+def _delivery_order_remito_lookup_attempts(customer_code: str, document: dict[str, str]) -> list[tuple[str, dict[str, Any]]]:
+    base = {"remitoType": document["type"], "pageSize": 100}
+    search_terms = [document["number"], document["remitoNumber"]]
+    customer_scopes = [customer_code, ""]
+    attempts: list[tuple[str, dict[str, Any]]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for search_term in search_terms:
+        for scope_code in customer_scopes:
+            params = {**base, "search": search_term}
+            key = (scope_code, params["remitoType"], params.get("search") or "")
+            if key not in seen:
+                seen.add(key)
+                attempts.append((scope_code, params))
+
+    for scope_code in customer_scopes:
+        key = (scope_code, base["remitoType"], "")
+        if key not in seen:
+            seen.add(key)
+            attempts.append((scope_code, dict(base)))
+
+    return attempts
+
+
+def resolve_delivery_order_remito_document(order: dict[str, Any], actor_user_id: int | None = None) -> dict[str, Any]:
+    customer_code = _optional_text(order.get("bejermanCustomerCode") or order.get("bejerman_customer_code"))
+    document = _parse_delivery_order_remito_number(order)
+    company_key = _company_key_for_order(order)
+    matches_by_id: dict[str, dict[str, Any]] = {}
+    matched_payload: dict[str, Any] = {}
+    first_error: BillingError | None = None
+    for scope_customer_code, params in _delivery_order_remito_lookup_attempts(customer_code, document):
+        try:
+            payload = list_remitos_from_bejerman(
+                scope_customer_code,
+                params,
+                actor_user_id=actor_user_id,
+                company_key=company_key,
+            )
+        except BillingError as exc:
+            if first_error is None:
+                first_error = exc
+            if scope_customer_code:
+                continue
+            raise
+        for item in payload.get("items") or []:
+            document_id = _optional_text(item.get("documentId") or item.get("id"))
+            if document_id and _remito_item_matches_document(document, item):
+                matches_by_id.setdefault(document_id, item)
+        if matches_by_id:
+            matched_payload = payload
+            break
+
+    if not matches_by_id:
+        if first_error is not None:
+            raise first_error
+        raise BillingError(
+            "REMITO_DOCUMENT_NOT_FOUND",
+            f"No se encontró en Bejerman un remito que coincida con {document['remitoNumber']}.",
+            status_code=404,
+        )
+    if len(matches_by_id) > 1:
+        raise BillingError(
+            "REMITO_DOCUMENT_AMBIGUOUS",
+            f"Bejerman devolvió más de un remito compatible con {document['remitoNumber']}.",
+            status_code=409,
+        )
+    resolved = next(iter(matches_by_id.values()))
+    resolved["effectiveCustomerCode"] = (
+        (matched_payload or {}).get("effectiveCustomerCode")
+        or resolved.get("bejermanCustomerCode")
+        or resolved.get("customerCode")
+        or customer_code
+    )
+    resolved["companyKey"] = company_key
+    return resolved
+
+
+def get_delivery_order_remito_pdf(order_id: str, actor_user_id: int | None = None) -> tuple[bytes, str, str]:
+    order = get_delivery_order(order_id, include_events=False)
+    document = resolve_delivery_order_remito_document(order, actor_user_id=actor_user_id)
+    document_id = document.get("documentId") or document.get("id")
+    customer_code = document.get("bejermanCustomerCode") or document.get("customerCode") or order.get("bejermanCustomerCode")
+    company_key = document.get("companyKey") or _company_key_for_order(order)
+    bytes_, content_type = get_facturacion_pdf(
+        customer_code,
+        document_id,
+        interactive=True,
+        actor_user_id=actor_user_id,
+        company_key=company_key,
+    )
+    remito_label = re.sub(r"[^A-Za-z0-9._-]+", "-", as_string(order.get("remitoNumber"))).strip("-") or as_string(order_id)
+    return bytes_, content_type, f"remito-{remito_label}.pdf"
+
+
 def _profile_value(delivery_type: str, company_key: str, field: str, default: str) -> str:
     prefix = _delivery_profile_prefix(delivery_type)
     company = (company_key or "SEPID").strip().upper() or "SEPID"
@@ -1021,6 +1632,313 @@ def _profile_for_order(delivery_type: str, company_key: str = "SEPID"):
         "operation": _profile_value(delivery_type, company_key, "OPERATION", profile.operation_code),
         "deposit": _profile_value(delivery_type, company_key, "DEPOSIT", profile.deposit_code),
     }
+
+
+def _format_points_of_sale(points: list[str]) -> str:
+    if len(points) <= 1:
+        return points[0] if points else ""
+    return ", ".join(points[:-1]) + f" o {points[-1]}"
+
+
+def _manual_delivery_allowed_points(profile: dict[str, Any]) -> list[str]:
+    points: list[str] = []
+    for raw in (
+        DELIVERY_MANUAL_REGISTER_POINT_OF_SALE,
+        profile.get("pointOfSale"),
+        *sorted(DELIVERY_EXISTING_BEJERMAN_POINTS_OF_SALE),
+    ):
+        point = _digits_only(raw).zfill(5)
+        if point and point != "00000" and point not in points:
+            points.append(point)
+    return points
+
+
+def _validate_manual_delivery_point_of_sale(point: str, profile: dict[str, Any]) -> None:
+    allowed = _manual_delivery_allowed_points(profile)
+    if point not in allowed:
+        raise ValueError(f"El punto de venta del remito debe ser {_format_points_of_sale(allowed)}")
+
+
+def _company_key_for_manual_remito_point(point: str, fallback: str) -> str:
+    normalized = _digits_only(point).zfill(5)
+    if normalized == "00007":
+        return "MGBIO"
+    if normalized == "00004":
+        return "SEPID"
+    return fallback
+
+
+def normalize_delivery_order_manual_remito_number(order: dict[str, Any], value: Any) -> dict[str, Any]:
+    delivery_type = normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type") or "sale")
+    order_company_key = _company_key_for_order(order)
+    profile = _profile_for_order(delivery_type, order_company_key)
+    try:
+        document = parse_bejerman_remito_number(
+            value,
+            default_type=profile["type"],
+            default_letter="R",
+            allowed_types=(profile["type"],),
+            require_explicit_match=True,
+            validate_point=lambda point: _validate_manual_delivery_point_of_sale(point, profile),
+            allow_number_only=False,
+            require_complete=True,
+            complete_error_message=(
+                f"Debe cargar el remito con punto de venta, por ejemplo "
+                f"{profile['type']} R {profile['pointOfSale']}-00004715."
+            ),
+            explicit_mismatch_message=f"El remito debe corresponder a {profile['type']} R para esta orden de entrega.",
+        )
+    except ValueError as exc:
+        raise DeliveryOrderError("MANUAL_REMITO_INVALID", str(exc), status_code=409) from exc
+
+    point = document["point"]
+    document_mode = "register" if point == DELIVERY_MANUAL_REGISTER_POINT_OF_SALE else "existing"
+    company_key = _company_key_for_manual_remito_point(point, order_company_key)
+    return {
+        **document,
+        "documentMode": document_mode,
+        "stockMovementGenerated": document_mode == "register",
+        "companyKey": company_key,
+        "profile": {**profile, "pointOfSale": point},
+    }
+
+
+def _manual_delivery_seller_code(order: dict[str, Any], actor_user_id: int | None, delivery_type: str) -> str:
+    type_default_seller = {
+        "service_release": _env_text("BEJERMAN_REMITO_SERVICE_SELLER", "ADM"),
+        "rental": _env_text("BEJERMAN_REMITO_RENTAL_SELLER", "ADM"),
+        "demo": _env_text("BEJERMAN_REMITO_DEMO_SELLER", "ADM"),
+    }.get(delivery_type)
+    return (
+        _optional_text(order.get("sellerCode") or order.get("seller_code"))
+        or type_default_seller
+        or get_user_seller_code(actor_user_id)
+        or _env_text("BEJERMAN_REMITO_SELLER", "ADM")
+    )
+
+
+def _insert_manual_delivery_remito_group(
+    order: dict[str, Any],
+    actor_user_id: int | None,
+    document: dict[str, Any],
+    *,
+    group_id: str | None = None,
+    seller_code: str,
+    payment_term_code: str,
+    response_summary: dict[str, Any],
+) -> str:
+    group_id = group_id or f"brg-{uuid4()}"
+    order_id = order["id"]
+    profile = document["profile"]
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO bejerman_remito_groups (
+              id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
+              comprobante_numero, remito_number, customer_code, customer_name,
+              seller_code, payment_term_code, operation_code, deposit_code,
+              status, order_ids, response_summary, created_by_user_id, generated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'generated', %s::jsonb, %s::jsonb, %s, CURRENT_TIMESTAMP)
+            """,
+            [
+                group_id,
+                document["companyKey"],
+                document["type"],
+                document["letter"],
+                document["point"],
+                document["number"],
+                document["remitoNumber"],
+                _optional_text(order.get("bejermanCustomerCode") or order.get("bejerman_customer_code")) or "",
+                _optional_text(order.get("customerName") or order.get("customer_name")) or "",
+                seller_code,
+                payment_term_code,
+                profile.get("operation") or "",
+                profile.get("deposit") or "",
+                _json_param([order_id]),
+                _json_param(response_summary),
+                actor_user_id,
+            ],
+        )
+        cur.execute(
+            """
+            UPDATE delivery_orders
+               SET bejerman_remito_group_id = %s
+             WHERE id = %s
+            """,
+            [group_id, order_id],
+        )
+    return group_id
+
+
+def _manual_delivery_bridge_request(
+    order: dict[str, Any],
+    group_id: str,
+    compatibility: dict[str, Any],
+    seller_code: str,
+    payment_term_code: str,
+) -> dict[str, Any]:
+    return {
+        "groupId": group_id,
+        "companyKey": compatibility["companyKey"],
+        "issueDate": timezone.localdate().isoformat(),
+        "customerCode": compatibility["customerCode"],
+        "customerName": compatibility["customerName"],
+        "priceCurrency": compatibility["priceCurrency"],
+        "exchangeRate": compatibility["exchangeRate"],
+        "sellerCode": seller_code,
+        "paymentTermCode": payment_term_code,
+        "notes": "Remito cargado manualmente en NEXORA",
+        "orders": [_bridge_order(order)],
+    }
+
+
+def _register_manual_delivery_order_stock_movement(
+    order: dict[str, Any],
+    actor_user_id: int | None,
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    compatibility = _validate_remito_orders([order])
+    seller_code = _manual_delivery_seller_code(order, actor_user_id, compatibility["deliveryType"])
+    payment_term_code = _env_text("BEJERMAN_REMITO_PAYMENT_TERM", _env_text("BEJERMAN_RIS_PAYMENT_TERM", "30"))
+    group_id = f"brg-{uuid4()}"
+    profile = {
+        **_profile_for_order(compatibility["deliveryType"], compatibility["companyKey"]),
+        "pointOfSale": document["point"],
+    }
+    bridge_request = _manual_delivery_bridge_request(order, group_id, compatibility, seller_code, payment_term_code)
+    bridge_request["companyKey"] = document["companyKey"]
+
+    try:
+        client = BejermanSDKClient(company_key=document["companyKey"], actor_user_id=actor_user_id)
+        customer_fields = resolve_customer_document_fields(client, compatibility["customerCode"])
+        article_tax_by_code = _delivery_article_sales_vat_map(client, bridge_request, profile)
+        built = build_delivery_remito_comprobante(
+            bridge_request,
+            delivery_remito_config(profile),
+            customer_fields,
+            article_tax_by_code,
+        )
+        comprobante = built["comprobante"]
+        comprobante["Comprobante_PtoVenta"] = document["point"]
+        comprobante["Comprobante_Numero"] = document["number"]
+        raw_response = client.ingresar_comprobante_ventas_json(
+            comprobante,
+            circuito=_env_text("BEJERMAN_REMITO_CIRCUIT", "VENTAS"),
+            operacion=_env_text("BEJERMAN_REMITO_OPERATION", "IngresarComprobanteJSON"),
+            numera_flex="N",
+            emite_reg="R",
+        )
+    except Exception as exc:
+        converted = _sdk_error(exc)
+        raise DeliveryOrderError(converted.code, str(converted), status_code=converted.status_code) from exc
+
+    response = parse_remito_response(raw_response)
+    response_summary = {
+        **response,
+        "comprobanteTipo": response.get("comprobanteTipo") or document["type"],
+        "comprobanteLetra": response.get("comprobanteLetra") or document["letter"],
+        "comprobantePtoVenta": response.get("comprobantePtoVenta") or document["point"],
+        "comprobanteNumero": response.get("comprobanteNumero") or document["number"],
+        "remitoNumber": response.get("remitoNumber") or document["remitoNumber"],
+        "companyKey": document["companyKey"],
+        "profile": profile,
+        "documentMode": "register",
+        "manualRemitoNumber": document["remitoNumber"],
+        "stockMovementGenerated": True,
+        "stockMovementSource": "nexora_manual_pv1",
+        "billingRequired": _remito_requires_billing(profile),
+        "lineCount": built["lineCount"],
+        "raw": raw_response,
+    }
+    group_id = _insert_manual_delivery_remito_group(
+        order,
+        actor_user_id,
+        document,
+        group_id=group_id,
+        seller_code=seller_code,
+        payment_term_code=payment_term_code,
+        response_summary=response_summary,
+    )
+    create_event(
+        order["id"],
+        actor_user_id,
+        "bejerman_remito_registered",
+        metadata={
+            "groupId": group_id,
+            "remitoNumber": document["remitoNumber"],
+            "documentMode": "register",
+            "stockMovementGenerated": True,
+        },
+    )
+    return {
+        "groupId": group_id,
+        "remitoNumber": document["remitoNumber"],
+        "documentMode": "register",
+        "stockMovementGenerated": True,
+    }
+
+
+def _associate_existing_delivery_order_remito(
+    order: dict[str, Any],
+    actor_user_id: int | None,
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    delivery_type = normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type") or "sale")
+    seller_code = _manual_delivery_seller_code(order, actor_user_id, delivery_type)
+    payment_term_code = _env_text("BEJERMAN_REMITO_PAYMENT_TERM", _env_text("BEJERMAN_RIS_PAYMENT_TERM", "30"))
+    profile = document["profile"]
+    response_summary = {
+        "comprobanteTipo": document["type"],
+        "comprobanteLetra": document["letter"],
+        "comprobantePtoVenta": document["point"],
+        "comprobanteNumero": document["number"],
+        "remitoNumber": document["remitoNumber"],
+        "companyKey": document["companyKey"],
+        "profile": profile,
+        "documentMode": "existing",
+        "existingBejermanRemito": True,
+        "stockMovementGenerated": False,
+        "stockMovementSource": "bejerman_direct",
+        "billingRequired": _remito_requires_billing(profile),
+    }
+    group_id = _insert_manual_delivery_remito_group(
+        order,
+        actor_user_id,
+        document,
+        seller_code=seller_code,
+        payment_term_code=payment_term_code,
+        response_summary=response_summary,
+    )
+    create_event(
+        order["id"],
+        actor_user_id,
+        "bejerman_remito_associated",
+        metadata={
+            "groupId": group_id,
+            "remitoNumber": document["remitoNumber"],
+            "documentMode": "existing",
+            "stockMovementGenerated": False,
+        },
+    )
+    return {
+        "groupId": group_id,
+        "remitoNumber": document["remitoNumber"],
+        "documentMode": "existing",
+        "stockMovementGenerated": False,
+    }
+
+
+def register_delivery_order_manual_remito(
+    order: dict[str, Any],
+    actor_user_id: int | None,
+    remito_number: Any,
+) -> dict[str, Any]:
+    document = normalize_delivery_order_manual_remito_number(order, remito_number)
+    if document["documentMode"] == "register":
+        return _register_manual_delivery_order_stock_movement(order, actor_user_id, document)
+    return _associate_existing_delivery_order_remito(order, actor_user_id, document)
 
 
 def _validate_remito_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1061,14 +1979,33 @@ def _validate_remito_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
             "Las órdenes seleccionadas tienen monedas de precio distintas",
             status_code=409,
         )
+    price_currency = next(iter(price_currencies))
     exchange_rates = {_order_exchange_rate(order) for order in orders if _order_exchange_rate(order)}
-    if next(iter(price_currencies)) == "USD" and len(exchange_rates) > 1:
-        raise DeliveryOrderError(
-            "INCOMPATIBLE_DELIVERY_REMITO_EXCHANGE_RATE",
-            "Las órdenes en dólares tienen tipos de cambio distintos",
-            status_code=409,
-        )
+    exchange_rate = next(iter(exchange_rates)) if exchange_rates else ""
+    if price_currency == "USD":
+        parsed_exchange_rates = [_parsed_order_exchange_rate(rate) for rate in exchange_rates]
+        if not exchange_rates or any(rate is None for rate in parsed_exchange_rates):
+            raise DeliveryOrderError(
+                "DELIVERY_REMITO_EXCHANGE_RATE_REQUIRED",
+                "Las órdenes en dólares requieren tipo de cambio antes de emitir el remito",
+                status_code=409,
+            )
+        unique_exchange_rates = set(parsed_exchange_rates)
+        if len(unique_exchange_rates) > 1:
+            raise DeliveryOrderError(
+                "INCOMPATIBLE_DELIVERY_REMITO_EXCHANGE_RATE",
+                "Las órdenes en dólares tienen tipos de cambio distintos",
+                status_code=409,
+            )
+        if len(exchange_rates) > 1:
+            exchange_rate = str(next(iter(unique_exchange_rates)))
     for order in orders:
+        if order.get("status") == "pendiente_stock":
+            raise DeliveryOrderError(
+                "DELIVERY_ORDER_STOCK_PENDING",
+                "Una de las órdenes está pendiente de stock",
+                status_code=409,
+            )
         if order.get("status") in {"facturado", "cancelado"}:
             raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "Una de las órdenes ya está cerrada", status_code=409)
         if _optional_text(order.get("remitoNumber")):
@@ -1083,8 +2020,8 @@ def _validate_remito_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
         "customerName": orders[0].get("customerName") or "",
         "deliveryType": next(iter(delivery_types)),
         "companyKey": next(iter(company_keys)),
-        "priceCurrency": next(iter(price_currencies)),
-        "exchangeRate": next(iter(exchange_rates)) if exchange_rates else "",
+        "priceCurrency": price_currency,
+        "exchangeRate": exchange_rate,
     }
 
 
@@ -1112,6 +2049,25 @@ def _effective_item_partida(order: dict[str, Any], item: dict[str, Any]) -> str 
     return _optional_text(order.get("equipmentSerial"))
 
 
+def _item_article_requires_partida(item: dict[str, Any]) -> bool | None:
+    if "articleRequiresPartida" in item:
+        return as_nullable_bool(item.get("articleRequiresPartida"))
+    return as_nullable_bool(item.get("article_requires_partida"))
+
+
+def _item_can_omit_catalog_partida(order: dict[str, Any], item: dict[str, Any]) -> bool:
+    return normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type")) in {"sale", "demo"} and _item_article_requires_partida(item) is False
+
+
+def _partida_policy_unknown_error(item: dict[str, Any], action: str) -> DeliveryOrderError:
+    article_code = _optional_text(item.get("articleCode") or item.get("article_code")) or "el artículo"
+    return DeliveryOrderError(
+        "DELIVERY_ORDER_ARTICLE_PARTIDA_POLICY_UNKNOWN",
+        f"No se pudo verificar si el artículo {article_code} requiere partida. Reintente la verificación Bejerman o cargue partidas antes de {action}.",
+        status_code=409,
+    )
+
+
 def _assert_partidas_ready(order: dict[str, Any]) -> None:
     for item in order.get("items") or []:
         if not _optional_text(item.get("articleCode")):
@@ -1120,12 +2076,44 @@ def _assert_partidas_ready(order: dict[str, Any]) -> None:
         item_partidas = item.get("partidas") or []
         explicit_partida = _optional_text(item.get("partida"))
         if order.get("deliveryType") == "rental":
-            if item_partidas or not explicit_partida:
-                raise DeliveryOrderError("DELIVERY_REMITO_PARTIDAS_INCOMPLETE", "Cada equipo de alquiler debe salir con su serie como partida", status_code=409)
+            if not explicit_partida and not item_partidas:
+                raise DeliveryOrderError(
+                    "DELIVERY_REMITO_PARTIDAS_INCOMPLETE",
+                    "Faltan NS para emitir el RTA",
+                    status_code=409,
+                )
+            if item_partidas:
+                assigned = 0.0
+                for partida in item_partidas:
+                    try:
+                        assigned += float(partida.get("assignedQuantity") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    if (_optional_text(partida.get("stockDepositCode")) or "").upper() != RENTAL_STOCK_DEPOSIT:
+                        raise DeliveryOrderError(
+                            "RENTAL_STL_REQUIRED",
+                            "Los alquileres deben salir del depósito STL",
+                            status_code=409,
+                        )
+                if assigned <= 0 or abs(assigned - quantity) > 0.0001:
+                    raise DeliveryOrderError(
+                        "DELIVERY_REMITO_PARTIDAS_INCOMPLETE",
+                        "Faltan NS para emitir el RTA",
+                        status_code=409,
+                    )
+                continue
             if (_optional_text(item.get("stockDepositCode")) or "").upper() != RENTAL_STOCK_DEPOSIT:
-                raise DeliveryOrderError("RENTAL_STL_REQUIRED", "Los alquileres deben salir del depósito STL", status_code=409)
+                raise DeliveryOrderError(
+                    "RENTAL_STL_REQUIRED",
+                    "Los alquileres deben salir del depósito STL",
+                    status_code=409,
+                )
             continue
-        if order.get("deliveryType") == "sale" and not explicit_partida and not item_partidas:
+        if normalize_delivery_type(order.get("deliveryType")) in {"sale", "demo"} and not explicit_partida and not item_partidas:
+            if _item_can_omit_catalog_partida(order, item):
+                continue
+            if _item_article_requires_partida(item) is None:
+                raise _partida_policy_unknown_error(item, "emitir el remito")
             raise DeliveryOrderError("DELIVERY_REMITO_PARTIDAS_INCOMPLETE", "Complete las partidas antes de emitir el remito", status_code=409)
         assigned = 0.0
         for partida in item_partidas:
@@ -1169,6 +2157,7 @@ def _bridge_order(order: dict[str, Any]) -> dict[str, Any]:
                 "deviceId": item.get("deviceId"),
                 "articleCode": item.get("articleCode") or None,
                 "articleName": item.get("articleName") or None,
+                "articleRequiresPartida": _item_article_requires_partida(item),
                 "description": item.get("description") or item.get("sourceText") or "",
                 "quantity": item.get("quantity") or 1,
                 "unitPrice": item.get("unitPrice"),
@@ -1190,12 +2179,21 @@ def _bridge_order(order: dict[str, Any]) -> dict[str, Any]:
 def _refresh_service_release_orders_for_remito(orders: list[dict[str, Any]], actor_user_id: int | None) -> list[dict[str, Any]]:
     refreshed_orders: list[dict[str, Any]] = []
     for order in orders:
-        if order.get("deliveryType") != "service_release" or not order.get("ingresoId"):
+        if order.get("deliveryType") != "service_release":
             refreshed_orders.append(order)
             continue
+        ingreso_ids = service_release_ingreso_ids_from_order(order)
+        if not ingreso_ids:
+            refreshed_orders.append(order)
+            continue
+        for ingreso_id in ingreso_ids:
+            try:
+                ensure_service_release_order_for_ingreso(int(ingreso_id), actor_user_id)
+            except (TypeError, ValueError):
+                continue
         try:
-            refreshed = ensure_service_release_order_for_ingreso(int(order["ingresoId"]), actor_user_id)
-        except (TypeError, ValueError):
+            refreshed = get_delivery_order(order["id"], include_events=False, actor_user_id=actor_user_id)
+        except Exception:
             refreshed = None
         refreshed_orders.append(refreshed or order)
     return refreshed_orders
@@ -1374,13 +2372,33 @@ def _sync_service_release_ingresos_after_remito(
         cur.execute(
             """
             SELECT DISTINCT ingreso_id
-              FROM delivery_orders
-             WHERE id = ANY(%s)
-               AND bejerman_remito_group_id = %s
-               AND delivery_type = 'service_release'
-               AND ingreso_id IS NOT NULL
+              FROM (
+                    SELECT o.ingreso_id
+                      FROM delivery_orders o
+                     WHERE o.id = ANY(%s)
+                       AND o.bejerman_remito_group_id = %s
+                       AND o.delivery_type = 'service_release'
+                       AND o.ingreso_id IS NOT NULL
+                    UNION
+                    SELECT doi.ingreso_id
+                      FROM delivery_order_items doi
+                      JOIN delivery_orders o ON o.id = doi.order_id
+                     WHERE o.id = ANY(%s)
+                       AND o.bejerman_remito_group_id = %s
+                       AND o.delivery_type = 'service_release'
+                       AND doi.ingreso_id IS NOT NULL
+                    UNION
+                    SELECT doip.ingreso_id
+                      FROM delivery_order_item_partidas doip
+                      JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+                      JOIN delivery_orders o ON o.id = doi.order_id
+                     WHERE o.id = ANY(%s)
+                       AND o.bejerman_remito_group_id = %s
+                       AND o.delivery_type = 'service_release'
+                       AND doip.ingreso_id IS NOT NULL
+                   ) linked_ingresos
             """,
-            [order_ids, group_id],
+            [order_ids, group_id, order_ids, group_id, order_ids, group_id],
         )
         ingreso_ids = [int(row[0]) for row in cur.fetchall() if row[0] is not None]
 
@@ -1426,38 +2444,17 @@ def _assert_rental_orders_ready_for_remito(
     if not rental_orders:
         return
     for order in rental_orders:
-        validate_rental_delivery_items(order.get("items") or [], order_id=order.get("id"))
-
-    try:
-        client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
-        stock_rows = build_stock_rows(client.obtener_stock_deposito(RENTAL_STOCK_DEPOSIT))
-        partida_rows = build_partida_rows(client.obtener_partidas())
-    except Exception as exc:
-        raise _sdk_error(exc) from exc
-
-    lots_by_article: dict[str, list[dict[str, Any]]] = {}
-    for order in rental_orders:
-        for item in order.get("items") or []:
-            article_code = _optional_text(item.get("articleCode"))
-            partida = _optional_text(item.get("partida"))
-            if not article_code or not partida or not item.get("ingresoId") or not item.get("deviceId"):
-                raise DeliveryOrderError("RENTAL_EQUIPMENT_REQUIRED", "Cada renglón de alquiler debe estar vinculado a un equipo y una partida", status_code=409)
-            if (_optional_text(item.get("stockDepositCode")) or "").upper() != RENTAL_STOCK_DEPOSIT:
-                raise DeliveryOrderError("RENTAL_STL_REQUIRED", "Los renglones de alquiler deben salir de STL", status_code=409)
-            if article_code not in lots_by_article:
-                lots_by_article[article_code] = build_article_stock_lots(
-                    stock_rows,
-                    partida_rows,
-                    article_code,
-                    RENTAL_STOCK_DEPOSIT,
-                )
-            lot = _matching_lot_for_partida(lots_by_article[article_code], partida)
-            if not lot or _available_quantity(lot.get("availableQuantity")) < _available_quantity(item.get("quantity") or 1):
-                raise DeliveryOrderError(
-                    "RENTAL_STL_STOCK_REQUIRED",
-                    f"No hay stock disponible en STL para {article_code} / partida {partida}",
-                    status_code=409,
-                )
+        try:
+            validate_rental_delivery_items_ready(
+                order.get("items") or [],
+                order_id=order.get("id"),
+                company_key=company_key,
+                actor_user_id=actor_user_id,
+            )
+        except Exception as exc:
+            if isinstance(exc, DeliveryOrderError):
+                raise
+            raise _sdk_error(exc) from exc
 
 
 def _dash_location_id() -> int | None:
@@ -1515,17 +2512,30 @@ def _sync_rental_ingresos_after_remito(
     with connection.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT doi.ingreso_id,
-                   COALESCE(NULLIF(o.customer_name, ''), '-') AS customer_name
-              FROM delivery_order_items doi
-              JOIN delivery_orders o ON o.id = doi.order_id
-             WHERE o.id = ANY(%s)
-               AND o.bejerman_remito_group_id = %s
-               AND o.delivery_type = 'rental'
-               AND doi.ingreso_id IS NOT NULL
-             ORDER BY doi.ingreso_id
+            SELECT DISTINCT ingreso_id, customer_name
+              FROM (
+                    SELECT doi.ingreso_id,
+                           COALESCE(NULLIF(o.customer_name, ''), '-') AS customer_name
+                      FROM delivery_order_items doi
+                      JOIN delivery_orders o ON o.id = doi.order_id
+                     WHERE o.id = ANY(%s)
+                       AND o.bejerman_remito_group_id = %s
+                       AND o.delivery_type = 'rental'
+                       AND doi.ingreso_id IS NOT NULL
+                    UNION
+                    SELECT doip.ingreso_id,
+                           COALESCE(NULLIF(o.customer_name, ''), '-') AS customer_name
+                      FROM delivery_order_item_partidas doip
+                      JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+                      JOIN delivery_orders o ON o.id = doi.order_id
+                     WHERE o.id = ANY(%s)
+                       AND o.bejerman_remito_group_id = %s
+                       AND o.delivery_type = 'rental'
+                       AND doip.ingreso_id IS NOT NULL
+                   ) rental_ingresos
+             ORDER BY ingreso_id
             """,
-            [order_ids, group_id],
+            [order_ids, group_id, order_ids, group_id],
         )
         rows = [{"ingreso_id": int(row[0]), "customer_name": row[1] or "-"} for row in cur.fetchall()]
     if not rows:
@@ -1594,8 +2604,20 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
     ids = [str(item).strip() for item in (order_ids or []) if str(item).strip()]
     if not ids:
         raise DeliveryOrderError("ORDER_IDS_REQUIRED", "Hay que seleccionar órdenes")
-    orders = [get_delivery_order(order_id, include_events=False) for order_id in ids]
+    orders = [
+        get_delivery_order(
+            order_id,
+            include_events=False,
+            actor_user_id=actor_user_id,
+            refresh_article_flags=True,
+        )
+        for order_id in ids
+    ]
     orders = _refresh_service_release_orders_for_remito(orders, actor_user_id)
+    orders = [
+        refresh_delivery_order_article_partida_flags(order, actor_user_id, strict=True, action="emitir el remito")
+        for order in orders
+    ]
     compatibility = _validate_remito_orders(orders)
     order_seller_codes = {_optional_text(order.get("sellerCode")) for order in orders}
     order_seller_code = next(iter(order_seller_codes)) if len(order_seller_codes) == 1 else None
@@ -1645,10 +2667,12 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
     try:
         client = BejermanSDKClient(company_key=compatibility["companyKey"], actor_user_id=actor_user_id)
         customer_fields = resolve_customer_document_fields(client, compatibility["customerCode"])
+        article_tax_by_code = _delivery_article_sales_vat_map(client, bridge_request, compatibility["profile"])
         built = build_delivery_remito_comprobante(
             bridge_request,
             delivery_remito_config(compatibility["profile"]),
             customer_fields,
+            article_tax_by_code,
         )
         bejerman_started_at = time.monotonic()
         raw_response = client.ingresar_comprobante_ventas_json(
@@ -1690,7 +2714,6 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
     profile = bridge_data.get("profile") or compatibility["profile"]
     billing_profile = {**profile, "type": response.get("comprobanteTipo") or profile.get("type")}
     billing_required = _remito_requires_billing(billing_profile)
-    delivery_status = _delivery_status_for_remito_profile(billing_profile)
     if not remito_number:
         exc = DeliveryOrderError("BEJERMAN_REMITO_RESPONSE_INCOMPLETE", "Bejerman no devolvió número de remito", status_code=502)
         _mark_group_failed(group_id, ids, actor_user_id, exc)
@@ -1738,18 +2761,16 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
             cur.execute(
                 """
                 UPDATE delivery_orders
-                SET status = %s,
+                SET status = 'armado_pendiente_entrega',
                     remito_number = %s,
                     remito_location = COALESCE(remito_location, 'recepcion'),
                     remito_location_updated_by = COALESCE(remito_location_updated_by, %s),
                     remito_location_updated_at = COALESCE(remito_location_updated_at, CURRENT_TIMESTAMP),
                     prepared_by_user_id = COALESCE(prepared_by_user_id, %s),
-                    delivered_by_user_id = COALESCE(delivered_by_user_id, %s),
-                    prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP),
-                    delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+                    prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP)
                 WHERE id = ANY(%s) AND bejerman_remito_group_id = %s
                 """,
-                [delivery_status, remito_number, actor_user_id, actor_user_id, actor_user_id, ids, group_id],
+                [remito_number, actor_user_id, actor_user_id, ids, group_id],
             )
         _sync_service_release_ingresos_after_remito(ids, group_id, actor_user_id, remito_number)
         _sync_rental_ingresos_after_remito(ids, group_id, actor_user_id, remito_number, bridge_request["issueDate"])
@@ -1873,6 +2894,11 @@ def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tup
     if row.get("status") == "failed":
         summary = row.get("response_summary") if isinstance(row.get("response_summary"), dict) else {}
         raise BillingError("REMITO_FAILED", _optional_text(summary.get("error")) or "No se pudo emitir el remito Bejerman", status_code=409)
+    summary = _json_object(row.get("response_summary"))
+    if is_registered_remito_summary(summary):
+        raise registered_remito_no_pdf_error(
+            row.get("remito_number") or summary.get("manualRemitoNumber") or summary.get("manual_remito_number")
+        )
     if row.get("status") != "generated" or not row.get("comprobante_numero") or not row.get("comprobante_pto_venta"):
         raise BillingError(
             "BEJERMAN_PDF_PENDING",

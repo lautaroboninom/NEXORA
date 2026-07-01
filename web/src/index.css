@@ -12,3 +12,38 @@
 .input { @apply border rounded px-3 py-2 w-full; }
 .card { @apply bg-white rounded-xl shadow p-4; }
 .h1 { @apply text-2xl font-semibold; }
+
+@layer components {
+  .desktop-data-table table {
+    @apply min-w-full border-separate border-spacing-0 text-sm;
+  }
+
+  .desktop-data-table thead tr:first-child th {
+    @apply border-b border-slate-200 bg-slate-50 text-left text-xs font-semibold uppercase text-slate-600;
+  }
+
+  .desktop-data-table thead tr:not(:first-child) th {
+    @apply border-b border-slate-200 bg-white;
+  }
+
+  .desktop-data-table tbody td {
+    @apply border-b border-slate-100 align-middle text-slate-800;
+  }
+
+  .desktop-data-table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .desktop-data-table tbody tr:hover td {
+    @apply bg-sky-50/60;
+  }
+
+  .desktop-data-table :where(th, td) {
+    @apply px-3 py-2;
+  }
+
+  .desktop-data-table .font-mono,
+  .mobile-data-card .font-mono {
+    @apply inline-flex max-w-full rounded-full bg-slate-50 px-2 py-0.5 text-[11px] font-medium leading-5 text-slate-700 ring-1 ring-inset ring-slate-200;
+  }
+}

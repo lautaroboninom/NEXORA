@@ -40,6 +40,8 @@ class MetricasActividadTecnicosAPITest(TestCase):
                 )
                 """
             )
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code_confirmed_at TIMESTAMPTZ NULL")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_permission_overrides (
@@ -363,6 +365,16 @@ class MetricasActividadTecnicosAPITest(TestCase):
         with connection.cursor() as cur:
             cur.execute(
                 """
+                SELECT column_name
+                  FROM information_schema.columns
+                 WHERE table_name = 'ingreso_events'
+                   AND column_name IN ('ticket_id', 'ingreso_id')
+                """
+            )
+            ingreso_event_columns = {row[0] for row in cur.fetchall()}
+            ingreso_event_id_column = "ticket_id" if "ticket_id" in ingreso_event_columns else "ingreso_id"
+            cur.execute(
+                """
                 INSERT INTO audit.change_log
                   (ts, user_id, user_role, table_name, record_id, column_name, old_value, new_value, ingreso_id)
                 VALUES
@@ -391,9 +403,9 @@ class MetricasActividadTecnicosAPITest(TestCase):
                 ],
             )
             cur.execute(
-                """
+                f"""
                 INSERT INTO ingreso_events
-                  (ingreso_id, de_estado, a_estado, usuario_id, ts, comentario)
+                  ({ingreso_event_id_column}, de_estado, a_estado, usuario_id, ts, comentario)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 [
@@ -403,6 +415,24 @@ class MetricasActividadTecnicosAPITest(TestCase):
                     self.tecnico.id,
                     today_base + dt.timedelta(minutes=2),
                     "Diagnóstico listo",
+                ],
+            )
+            cur.execute(
+                """
+                INSERT INTO audit.change_log
+                  (ts, user_id, user_role, table_name, record_id, column_name, old_value, new_value, ingreso_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    today_base + dt.timedelta(minutes=2, seconds=30),
+                    self.tecnico.id,
+                    "tecnico",
+                    "ingresos",
+                    self.ingreso_id,
+                    "remito_ingreso",
+                    "25310",
+                    "RDA R 00004-00025310",
+                    self.ingreso_id,
                 ],
             )
             cur.execute(
@@ -488,6 +518,7 @@ class MetricasActividadTecnicosAPITest(TestCase):
         audit_row = next(row for row in timeline if row["source"] == "audit_log")
         self.assertEqual(audit_row["activity_type"], "apertura_hoja")
         self.assertNotIn("/api/busqueda/global/", [row.get("path") for row in timeline])
+        self.assertNotIn("remito_ingreso", [row.get("meta", {}).get("column_name") for row in timeline])
 
     def test_tipo_movimiento_repuesto_filtra_correctamente(self):
         resp = self._get_as(self.jefe, {"preset": "today", "tipo": "movimiento_repuesto"})

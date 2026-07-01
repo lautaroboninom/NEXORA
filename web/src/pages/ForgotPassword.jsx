@@ -106,7 +106,7 @@ export default function ForgotPassword() {
               <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden="true" />
               <input
                 id="recovery-email"
-                className={`input pl-10 ${emailLooksValid ? "" : "border-red-400 focus:outline-red-500"}`}
+                className={`w-full rounded border py-2 pl-10 pr-3 ${emailLooksValid ? "" : "border-red-400 focus:outline-red-500"}`}
                 type="email"
                 placeholder="usuario@sepid.com.ar"
                 value={email}

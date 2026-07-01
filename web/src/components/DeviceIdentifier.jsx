@@ -10,7 +10,7 @@ export default function DeviceIdentifier({
   const parts = deviceIdentifierPartsOf(row, fallback);
   const identifiers = Array.isArray(parts.identifiers) ? parts.identifiers : [];
   const title = identifiers.length
-    ? identifiers.map((item) => `${item.label}: ${item.value}`).join(" - ")
+    ? identifiers.map((item) => item.value).join(" - ")
     : (parts.secondary ? `${parts.primary} - ${parts.secondary}` : parts.primary);
 
   if (identifiers.length) {
@@ -18,7 +18,6 @@ export default function DeviceIdentifier({
       <span className={`inline-flex flex-col gap-0.5 ${className}`.trim()} title={title}>
         {identifiers.map((item, idx) => (
           <span key={item.kind || item.label} className={idx === 0 ? primaryClassName : secondaryClassName}>
-            <span className="font-medium text-gray-700">{item.label}:</span>{" "}
             <span className="font-mono">{item.value}</span>
           </span>
         ))}

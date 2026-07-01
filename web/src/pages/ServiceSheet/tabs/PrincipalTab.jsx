@@ -18,6 +18,7 @@ import { Printer } from "lucide-react";
 import {
   postEntregarIngreso,
   patchIngreso,
+  getIngresoBejermanEstado,
   checkGarantiaFabrica,
   patchIngresoTecnico,
   postSolicitarAsignacion,
@@ -25,6 +26,39 @@ import {
   postAccesorioAlquilerIngreso,
   deleteAccesorioAlquilerIngreso,
 } from "../../../lib/api";
+
+const BEJERMAN_ESTADO_LABELS = {
+  found: "En stock Bejerman",
+  zero_stock: "Sin stock positivo",
+  not_found: "No encontrado",
+  missing_identifier: "Sin identificador",
+};
+
+function bejermanEstadoLabel(status, hasError = false) {
+  if (hasError) return "No disponible";
+  return BEJERMAN_ESTADO_LABELS[status] || "No disponible";
+}
+
+function bejermanEstadoClass(status, hasError = false) {
+  if (hasError) return "bg-red-100 text-red-700";
+  if (status === "found") return "bg-emerald-100 text-emerald-700";
+  if (status === "zero_stock") return "bg-amber-100 text-amber-800";
+  if (status === "not_found" || status === "missing_identifier") return "bg-gray-100 text-gray-700";
+  return "bg-slate-100 text-slate-700";
+}
+
+function formatStockQuantity(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  return numeric.toLocaleString("es-AR", { maximumFractionDigits: 2 });
+}
+
+function bejermanItemQuantity(item) {
+  const available = item?.availableQuantity;
+  if (available !== null && available !== undefined && available !== "") return available;
+  return item?.realQuantity;
+}
 
 export default function PrincipalTab(props) {
   const {
@@ -98,7 +132,12 @@ export default function PrincipalTab(props) {
   const canUncheckAlquilado = isJefe(user);
   const isRegisteredRis = isRisRegistered(data);
   const risRemito = risRemitoFrom(data);
+  const remitoSalidaBejerman = (data?.remito_salida_bejerman || "").toString().trim();
+  const remitoSalida = (data?.remito_salida || remitoSalidaBejerman || "").toString().trim();
+  const remitoSalidaFromBejerman = Boolean(remitoSalidaBejerman) && remitoSalidaBejerman === remitoSalida;
   const hasRisRemito = Boolean(risRemito);
+  const hasRisError = String(data?.ris?.status || "").toLowerCase() === "failed"
+    || String(data?.ris?.pdf_status || "").toLowerCase() === "failed";
   const ingressDocumentName = documentNameFromRis(data, ingressDocumentNameProp || "RIS");
   const releaseFlow = useMemo(
     () => getReleaseFlow(data, { canManageResolution: canManageReleaseResolution }),
@@ -240,7 +279,7 @@ export default function PrincipalTab(props) {
     if (isSaleTicketState(estadoLower)) return "Venta";
     if (["entregado", "alquilado", "baja"].includes(estadoLower)) return "Cierre";
     if (estadoLower === "derivado") return "Derivación externa";
-    if (["reparar", "controlado_sin_defecto", "reparado", "liberado"].includes(estadoLower)) return "Reparación / Salida";
+    if (["reparar", "controlado_sin_defecto", "no_se_repara", "reparado", "liberado"].includes(estadoLower)) return "Reparación / Salida";
     if (estadoLower === "presupuestado" || ["emitido", "presupuestado", "aprobado", "rechazado"].includes(presupuestoLower)) return "Presupuesto";
     if (estadoLower === "diagnosticado") return "Diagnóstico";
     if (estadoLower === "ingresado") return "Ingreso";
@@ -271,6 +310,29 @@ export default function PrincipalTab(props) {
     ...(data?.mg_inactivo_venta || fechaVentaMg ? [{ label: "Venta MG", value: fechaVentaMg }] : []),
     ...(data?.baja_solicitada_id || fechaBajaSolicitada ? [{ label: "Solicitud baja", value: fechaBajaSolicitada }] : []),
   ];
+  const [bejermanEstado, setBejermanEstado] = useState(null);
+  const [bejermanEstadoLoading, setBejermanEstadoLoading] = useState(false);
+  const [bejermanEstadoError, setBejermanEstadoError] = useState("");
+  const cargarEstadoBejerman = useCallback(async () => {
+    if (!id) return;
+    setBejermanEstadoLoading(true);
+    setBejermanEstadoError("");
+    try {
+      const result = await getIngresoBejermanEstado(id);
+      setBejermanEstado(result || null);
+    } catch (error) {
+      setBejermanEstado(null);
+      setBejermanEstadoError(error?.data?.detail || error?.message || "No fue posible consultar Bejerman.");
+    } finally {
+      setBejermanEstadoLoading(false);
+    }
+  }, [id]);
+  useEffect(() => {
+    setBejermanEstado(null);
+    setBejermanEstadoError("");
+    cargarEstadoBejerman();
+  }, [cargarEstadoBejerman, data?.numero_serie, data?.numero_interno, data?.empresa_bejerman]);
+  const bejermanItems = Array.isArray(bejermanEstado?.items) ? bejermanEstado.items : [];
   // Labels auxiliares (evitar expresiones JSX complejas)
   const pendingLabel = (() => {
     if (data?.tecnico_solicitado_nombre) return `Solicitud de asignación pendiente: ${data.tecnico_solicitado_nombre}`;
@@ -437,7 +499,10 @@ export default function PrincipalTab(props) {
           brand_id: data?.marca_id ?? null,
           model_id: data?.model_id ?? null,
         });
-        if (typeof r?.within_365_days !== "boolean") return;
+        if (typeof r?.within_365_days !== "boolean") {
+          setForm((f) => ({ ...f, garantia_fabrica: false }));
+          return;
+        }
         const enGarantia = r.within_365_days;
         setFormBasics((s) => ({ ...(s || {}), garantia: enGarantia }));
       } catch {
@@ -695,7 +760,7 @@ export default function PrincipalTab(props) {
                 </div>
               )}
             </Row>
-            <Row label={"N° de remito"}>
+            <Row label="Remito ingreso">
               {editBasics ? (
                 <input
                   className="border rounded p-1 w-60"
@@ -720,11 +785,25 @@ export default function PrincipalTab(props) {
                       className="mt-1 inline-flex items-center gap-1 rounded border border-sky-200 px-2 py-1 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                      {risBusy ? `Preparando ${ingressDocumentName}...` : hasRisRemito ? `Ver ${ingressDocumentName}` : `Emitir ${ingressDocumentName}`}
+                      {risBusy
+                        ? `Preparando ${ingressDocumentName}...`
+                        : hasRisError
+                          ? `Reintentar ${ingressDocumentName}`
+                          : hasRisRemito
+                            ? `Ver ${ingressDocumentName}`
+                            : `Emitir ${ingressDocumentName}`}
                     </button>
                   )}
                 </span>
               )}
+            </Row>
+            <Row label="Remito salida">
+              <span className="inline-flex flex-col items-start gap-1">
+                <span>{remitoSalida || "-"}</span>
+                {remitoSalidaFromBejerman && remitoSalida && (
+                  <span className="block text-xs text-gray-500">RSS Bejerman</span>
+                )}
+              </span>
             </Row>
             <Row label={"Faja de garantía"}>
               <span>{data?.etiq_garantia_ok ? "OK" : "Abiertas"}</span>
@@ -809,6 +888,77 @@ export default function PrincipalTab(props) {
                 </div>
               ))}
             </div>
+          </div>
+          <div className="mt-3 border-t pt-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Bejerman</div>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                onClick={cargarEstadoBejerman}
+                disabled={bejermanEstadoLoading}
+              >
+                {bejermanEstadoLoading ? "Consultando..." : "Actualizar"}
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className={`rounded-full px-2 py-0.5 font-semibold ${bejermanEstadoClass(bejermanEstado?.status, Boolean(bejermanEstadoError))}`}>
+                {bejermanEstadoLoading && !bejermanEstado ? "Consultando Bejerman" : bejermanEstadoLabel(bejermanEstado?.status, Boolean(bejermanEstadoError))}
+              </span>
+              {bejermanEstado?.companyKey && (
+                <span className="text-gray-600">Empresa: <span className="font-medium text-gray-900">{bejermanEstado.companyKey}</span></span>
+              )}
+              {bejermanEstado?.identifier && (
+                <span className="text-gray-600">
+                  Partida: <span className="font-medium text-gray-900">{bejermanEstado.identifier}</span>
+                  {bejermanEstado.identifierSource === "numero_interno" ? " (MG)" : ""}
+                </span>
+              )}
+              {bejermanEstado?.checkedAt && (
+                <span className="text-gray-500">Consultado: {formatDateTimeHelper(bejermanEstado.checkedAt)}</span>
+              )}
+            </div>
+            {bejermanEstadoError ? (
+              <div className="mt-2 text-xs text-red-700">{bejermanEstadoError}</div>
+            ) : bejermanEstado?.warning ? (
+              <div className="mt-2 text-xs text-amber-700">{bejermanEstado.warning}</div>
+            ) : null}
+            {bejermanItems.length > 0 && (
+              <div className="mt-2 overflow-x-auto">
+                <div className="min-w-[520px] text-xs">
+                  <div className="grid grid-cols-[1fr_1.5fr_1fr_0.8fr_0.8fr_0.8fr] gap-2 border-b pb-1 font-semibold text-gray-500">
+                    <div>Depósito</div>
+                    <div>Artículo</div>
+                    <div>Partida</div>
+                    <div>Real</div>
+                    <div>Comp.</div>
+                    <div>Disp.</div>
+                  </div>
+                  {bejermanItems.map((item, idx) => (
+                    <div
+                      key={`${item.depositCode || "dep"}-${item.articleCode || "art"}-${item.partida || "partida"}-${idx}`}
+                      className="grid grid-cols-[1fr_1.5fr_1fr_0.8fr_0.8fr_0.8fr] gap-2 border-b py-1 last:border-b-0"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-medium text-gray-900">{item.depositCode || "-"}</div>
+                        {item.depositName && <div className="truncate text-gray-500">{item.depositName}</div>}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-gray-900">{item.articleCode || "-"}</div>
+                        {item.articleDescription && <div className="truncate text-gray-500">{item.articleDescription}</div>}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-gray-900">{item.partida || "-"}</div>
+                        {item.expirationDate && <div className="text-gray-500">Vto. {formatDateOnlyHelper(item.expirationDate)}</div>}
+                      </div>
+                      <div className="text-gray-900">{formatStockQuantity(item.realQuantity)}</div>
+                      <div className="text-gray-900">{formatStockQuantity(item.committedQuantity)}</div>
+                      <div className="font-medium text-gray-900">{formatStockQuantity(bejermanItemQuantity(item))}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="mt-1 text-xs text-gray-500">
             Ingresado por: {data?.ingresado_por_nombre || (data?.ingresado_por_id ? `ID ${data.ingresado_por_id}` : "-")}

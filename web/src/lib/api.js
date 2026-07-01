@@ -16,6 +16,191 @@ import { MOTIVO_OPTIONS } from "./constants";
     return value.startsWith("http") ? value : `${BASE}${value}`;
   }
 
+  const bejermanActivityListeners = new Set();
+  const bejermanActivityRequests = new Map();
+  let bejermanActivitySeq = 0;
+
+  function normalizedActivityPath(path) {
+    const value = String(path || "");
+    if (!value) return "";
+    try {
+      const origin = typeof window !== "undefined" && window.location ? window.location.origin : "http://localhost";
+      const url = value.startsWith("http") ? new URL(value) : new URL(resolveApiUrl(value), origin);
+      return `${url.pathname}${url.search}`;
+    } catch (_) {
+      return value;
+    }
+  }
+
+  function bejermanActivityInfo(path, method = "GET") {
+    const requestPath = normalizedActivityPath(path);
+    const pathname = requestPath.split("?")[0] || "";
+    const upperMethod = String(method || "GET").toUpperCase();
+
+    if (pathname.includes("/api/auth/bejerman-")) return null;
+    if (
+      pathname.includes("/api/bejerman/jobs/") ||
+      pathname.includes("/api/bejerman/pdf-output-settings/") ||
+      pathname.includes("/api/bejerman/ingress-companies/")
+    ) {
+      return null;
+    }
+    if (pathname.includes("/api/cobranzas/facturacion/documentos/") && pathname.includes("/pdf/")) {
+      return {
+        title: "Preparando PDF de facturación",
+        status: "Consultando Bejerman",
+        detail: "NEXORA está esperando el comprobante para abrirlo cuando esté listo.",
+      };
+    }
+    if (pathname.includes("/api/cobranzas/facturacion/documentos/")) {
+      return {
+        title: "Consultando facturación",
+        status: "Buscando comprobantes en Bejerman",
+        detail: "NEXORA está cargando la información solicitada.",
+      };
+    }
+    if (pathname.includes("/api/cobranzas/remitos/") && pathname.includes("/pdf/")) {
+      return {
+        title: "Preparando PDF de remito",
+        status: "Consultando Bejerman",
+        detail: "NEXORA está esperando el PDF del remito.",
+      };
+    }
+    if (pathname.includes("/api/cobranzas/remitos/")) {
+      return {
+        title: "Consultando remitos",
+        status: "Buscando remitos en Bejerman",
+        detail: "NEXORA está cargando la información solicitada.",
+      };
+    }
+    if (pathname.includes("/api/catalogos/clientes/sincronizar-bejerman/")) {
+      return {
+        title: "Sincronizando clientes",
+        status: "Consultando Bejerman",
+        detail: "NEXORA está actualizando datos de clientes.",
+      };
+    }
+    if (pathname.includes("/api/catalogos/clientes/bejerman-candidatos/")) {
+      return {
+        title: "Consultando clientes",
+        status: "Buscando candidatos en Bejerman",
+        detail: "NEXORA está cargando coincidencias.",
+      };
+    }
+    if (pathname.includes("/api/ingresos/ris/preflight/") || pathname.includes("/ris/preflight/")) {
+      return {
+        title: "Validando remito",
+        status: "Consultando Bejerman",
+        detail: "NEXORA está verificando los datos antes de emitir.",
+      };
+    }
+    if (pathname.includes("/api/ingresos/") && pathname.includes("/bejerman-estado/")) {
+      return {
+        title: "Consultando estado",
+        status: "Buscando el equipo en Bejerman",
+        detail: "NEXORA está cargando el estado actualizado.",
+      };
+    }
+    if (pathname.includes("/api/ordenes-entrega/remito-bejerman/") && pathname.includes("/pdf/")) {
+      return {
+        title: "Preparando PDF de remito",
+        status: "Consultando Bejerman",
+        detail: "NEXORA está esperando el PDF del remito.",
+      };
+    }
+    if (pathname.includes("/api/ordenes-entrega/remito-bejerman/historial/")) {
+      return {
+        title: "Consultando historial de remitos",
+        status: "Buscando datos en Bejerman",
+        detail: "NEXORA está cargando el historial solicitado.",
+      };
+    }
+    if (pathname.includes("/api/ordenes-entrega/bejerman-")) {
+      return {
+        title: "Consultando Bejerman",
+        status: "Buscando artículos y stock",
+        detail: "NEXORA está cargando datos de Bejerman.",
+      };
+    }
+    if (pathname.includes("/api/bejerman/purchase-entries/") && upperMethod !== "GET") {
+      return {
+        title: "Procesando ingreso de mercadería",
+        status: "Enviando datos a Bejerman",
+        detail: "NEXORA está esperando la respuesta de Bejerman.",
+      };
+    }
+    if (pathname.includes("/api/bejerman/purchase-")) {
+      return {
+        title: "Consultando mercadería",
+        status: "Buscando datos en Bejerman",
+        detail: "NEXORA está cargando la información solicitada.",
+      };
+    }
+    if (pathname.includes("/api/bejerman/")) {
+      return {
+        title: "Consultando Bejerman",
+        status: "Esperando respuesta",
+        detail: "NEXORA está cargando información de Bejerman.",
+      };
+    }
+    return null;
+  }
+
+  function currentBejermanActivity() {
+    const items = Array.from(bejermanActivityRequests.values());
+    const latest = items[items.length - 1] || null;
+    return {
+      active: items.length > 0,
+      count: items.length,
+      title: latest?.title || "Consultando Bejerman",
+      status: latest?.status || "Esperando respuesta",
+      detail: latest?.detail || "NEXORA está cargando información de Bejerman.",
+    };
+  }
+
+  function notifyBejermanActivity() {
+    const state = currentBejermanActivity();
+    bejermanActivityListeners.forEach((listener) => {
+      try {
+        listener(state);
+      } catch (_) {}
+    });
+  }
+
+  function beginBejermanActivity(path, { method = "GET", skipBejermanActivity = false, bejermanActivity = null } = {}) {
+    if (skipBejermanActivity) return () => {};
+    const info = bejermanActivity || bejermanActivityInfo(path, method);
+    if (!info) return () => {};
+    const id = ++bejermanActivitySeq;
+    bejermanActivityRequests.set(id, info);
+    notifyBejermanActivity();
+    return () => {
+      if (!bejermanActivityRequests.delete(id)) return;
+      notifyBejermanActivity();
+    };
+  }
+
+  export function subscribeBejermanActivity(listener) {
+    if (typeof listener !== "function") return () => {};
+    bejermanActivityListeners.add(listener);
+    listener(currentBejermanActivity());
+    return () => {
+      bejermanActivityListeners.delete(listener);
+    };
+  }
+
+  function htmlErrorMessage(status, fallback = "No se pudo completar la descarga.") {
+    if ([502, 503, 504].includes(Number(status))) {
+      return "Bejerman no pudo devolver el PDF en este momento. Probá de nuevo en unos minutos.";
+    }
+    return fallback;
+  }
+
+  function looksLikeHtmlResponse(text, contentType = "") {
+    const value = String(text || "").trimStart().toLowerCase();
+    return String(contentType || "").toLowerCase().includes("html") || value.startsWith("<!doctype") || value.startsWith("<html");
+  }
+
   /* ===== Token en memoria (compatibilidad) ===== */
   let token = null;
   export const setToken = (t) => {
@@ -47,17 +232,19 @@ import { MOTIVO_OPTIONS } from "./constants";
   }
 
   /* ===== Wrapper HTTP ===== */
-  async function http(path, { method = "GET", body, headers } = {}) {
-    const res = await fetch(`${BASE}${path}`, {
-      method,
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(headers || {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+  async function http(path, { method = "GET", body, headers, skipBejermanActivity = false, bejermanActivity = null } = {}) {
+    const endBejermanActivity = beginBejermanActivity(path, { method, skipBejermanActivity, bejermanActivity });
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        method,
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(headers || {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
 
     const ct = res.headers.get("content-type") || "";
     const isJSON = ct.includes("application/json");
@@ -97,7 +284,10 @@ import { MOTIVO_OPTIONS } from "./constants";
       err.response = res;
       throw err;
     }
-    return data;
+      return data;
+    } finally {
+      endBejermanActivity();
+    }
   }
 
   /* API cruda para quien prefiera */
@@ -113,7 +303,14 @@ import { MOTIVO_OPTIONS } from "./constants";
 
   export function fetchWithAuth(path, opts = {}) {
     const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
-    const { headers: extraHeaders, ...restOpts } = opts || {};
+    const {
+      headers: extraHeaders,
+      skipBejermanActivity = false,
+      bejermanActivity = null,
+      ...restOpts
+    } = opts || {};
+    const method = restOpts?.method || "GET";
+    const endBejermanActivity = beginBejermanActivity(path, { method, skipBejermanActivity, bejermanActivity });
     return fetch(resolveApiUrl(path), {
       credentials: "include",
       ...restOpts,
@@ -121,7 +318,7 @@ import { MOTIVO_OPTIONS } from "./constants";
         ...authHeader,
         ...(extraHeaders || {}),
       },
-    });
+    }).finally(endBejermanActivity);
   }
 
   /* ================== AUTH ================== */
@@ -696,8 +893,22 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.get(`/api/bejerman/jobs/${qs ? `?${qs}` : ""}`);
   };
 
+  export const getBejermanPdfOutputSettings = () =>
+    api.get("/api/bejerman/pdf-output-settings/");
+
+  export const putBejermanPdfOutputSettings = (payload = {}) =>
+    api.put("/api/bejerman/pdf-output-settings/", payload);
+
   export const postBejermanJobRetry = (jobId) =>
     api.post(`/api/bejerman/jobs/${jobId}/retry/`, {});
+
+  export const getBejermanRemitoProcesses = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/remitos/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const postBejermanRemitoProcessRetry = (source, processId, payload = {}) =>
+    api.post(`/api/bejerman/remitos/${encodeURIComponent(source)}/${encodeURIComponent(processId)}/retry/`, payload);
 
   export const getBejermanArticles = (params = {}) => {
     const qs = buildQuery(params);
@@ -804,6 +1015,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postDeliveryOrderInvoiced = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/facturar/`, payload);
 
+  export const postDeliveryOrderNotBillable = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/no-facturar/`, payload);
+
   export const postDeliveryOrderCancel = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/cancelar/`, payload);
 
@@ -859,6 +1073,45 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const getDeliveryOrderInvoicePdfBlob = (orderId) =>
     getBlob(deliveryOrderInvoicePdfUrl(orderId));
 
+  export const getRouteSheet = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/hoja-ruta/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const postRouteStop = (payload = {}) =>
+    api.post("/api/hoja-ruta/", payload);
+
+  export const patchRouteStop = (stopId, payload = {}) =>
+    api.patch(`/api/hoja-ruta/${encodeURIComponent(stopId)}/`, payload);
+
+  export const postRouteStopComplete = (stopId, payload = {}) =>
+    api.post(`/api/hoja-ruta/${encodeURIComponent(stopId)}/completar/`, payload);
+
+  export const postRouteStopPostpone = (stopId, payload = {}) =>
+    api.post(`/api/hoja-ruta/${encodeURIComponent(stopId)}/posponer/`, payload);
+
+  export const postRouteStopCancel = (stopId, payload = {}) =>
+    api.post(`/api/hoja-ruta/${encodeURIComponent(stopId)}/cancelar/`, payload);
+
+  export const postRouteStopsReorder = (payload = {}) =>
+    api.post("/api/hoja-ruta/reordenar/", payload);
+
+  export const getRouteLocations = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/hoja-ruta/lugares/${qs ? `?${qs}` : ""}`);
+  };
+
+  export const postRouteLocation = (payload = {}) =>
+    api.post("/api/hoja-ruta/lugares/", payload);
+
+  export const patchRouteLocation = (locationId, payload = {}) =>
+    api.patch(`/api/hoja-ruta/lugares/${encodeURIComponent(locationId)}/`, payload);
+
+  export const getRouteSuggestedDeliveryOrders = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/hoja-ruta/ordenes-sugeridas/${qs ? `?${qs}` : ""}`);
+  };
+
   export const getBillingCustomers = () =>
     api.get("/api/cobranzas/facturacion/clientes/");
 
@@ -877,9 +1130,13 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.get(`/api/cobranzas/remitos/${qs ? `?${qs}` : ""}`);
   };
 
-  export const getBillingRemitoPdfBlob = (documentId, params = {}) => {
+  export const billingRemitoPdfUrl = (documentId, params = {}) => {
     const qs = buildQuery(params);
-    return getBlob(`/api/cobranzas/remitos/${encodeURIComponent(documentId)}/pdf/${qs ? `?${qs}` : ""}`);
+    return `/api/cobranzas/remitos/${encodeURIComponent(documentId)}/pdf/${qs ? `?${qs}` : ""}`;
+  };
+
+  export const getBillingRemitoPdfBlob = (documentId, params = {}) => {
+    return getBlob(billingRemitoPdfUrl(documentId, params));
   };
 
   export const getServiceOrdersToBill = (params = {}) => {
@@ -972,6 +1229,7 @@ export const postModelo = (brandId, payloadOrNombre) => {
     if (marca) params.set("marca", marca);
     if (opts && opts.brand_id != null) params.set("brand_id", opts.brand_id);
     if (opts && opts.model_id != null) params.set("model_id", opts.model_id);
+    if (opts && opts.company_key) params.set("company_key", opts.company_key);
     const qs = params.toString();
     return api.get(`/api/equipos/garantia-fabrica/${qs ? `?${qs}` : ""}`);
   };
@@ -992,6 +1250,10 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export async function getIngreso(id, params = null) {
     const qs = params ? new URLSearchParams(params).toString() : "";
     return api.get(`/api/ingresos/${id}/${qs ? `?${qs}` : ""}`);
+  }
+
+  export async function getIngresoBejermanEstado(id) {
+    return api.get(`/api/ingresos/${id}/bejerman-estado/`);
   }
 
   export async function patchIngreso(id, payload) {
@@ -1089,8 +1351,23 @@ export const postModelo = (brandId, payloadOrNombre) => {
     });
 
     if (!res.ok) {
+      const contentType = res.headers.get("content-type") || "";
       const text = await res.text().catch(() => "");
-      throw new Error(text || `HTTP ${res.status}`);
+      let detail = text;
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+        detail = data?.detail || JSON.stringify(data);
+      } catch (_) {
+        if (looksLikeHtmlResponse(text, contentType)) {
+          detail = htmlErrorMessage(res.status, `No se pudo completar la descarga (HTTP ${res.status}).`);
+        }
+      }
+      const err = new Error(detail || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.data = data;
+      err.response = res;
+      throw err;
     }
     return await res.blob();
   }
@@ -1109,8 +1386,20 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.post(`/api/ingresos/${id}/controlado-sin-defecto/`);
   }
 
+  export async function postMarcarNoSeRepara(id) {
+    return api.post(`/api/ingresos/${id}/no-se-repara/`);
+  }
+
+  export async function postQuitarEstadoFinalReparacion(id) {
+    return api.post(`/api/ingresos/${id}/quitar-estado-final-reparacion/`);
+  }
+
   export async function postMarcarParaReparar(id) {
     return api.post(`/api/ingresos/${id}/reparar/`);
+  }
+
+  export async function postQuitarReparar(id) {
+    return api.post(`/api/ingresos/${id}/quitar-reparar/`);
   }
 
   export async function postHabilitarReparacionCotizacion(id) {

@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 
 
 VALID_STATUSES = {
+    "pendiente_stock",
     "pendiente_armado",
     "armado_pendiente_entrega",
     "entregado_pendiente_facturacion",
@@ -364,11 +365,24 @@ def apply_import(portal) -> dict[str, int]:
                       %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (id) DO UPDATE SET
-                      status = EXCLUDED.status,
+                      status = CASE
+                        WHEN NULLIF(BTRIM(COALESCE(delivery_orders.invoice_number, '')), '') IS NOT NULL
+                             AND NULLIF(BTRIM(COALESCE(EXCLUDED.invoice_number, '')), '') IS NULL
+                          THEN delivery_orders.status
+                        WHEN delivery_orders.status = 'entregado_no_facturable'
+                             AND EXCLUDED.status = 'entregado_pendiente_facturacion'
+                          THEN delivery_orders.status
+                        ELSE EXCLUDED.status
+                      END,
                       remito_number = EXCLUDED.remito_number,
                       bejerman_remito_group_id = EXCLUDED.bejerman_remito_group_id,
                       remito_location = EXCLUDED.remito_location,
-                      invoice_number = EXCLUDED.invoice_number,
+                      invoice_number = CASE
+                        WHEN NULLIF(BTRIM(COALESCE(EXCLUDED.invoice_number, '')), '') IS NULL
+                             AND NULLIF(BTRIM(COALESCE(delivery_orders.invoice_number, '')), '') IS NOT NULL
+                          THEN delivery_orders.invoice_number
+                        ELSE EXCLUDED.invoice_number
+                      END,
                       updated_at = EXCLUDED.updated_at
                     """,
                     [

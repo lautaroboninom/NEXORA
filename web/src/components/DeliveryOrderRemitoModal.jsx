@@ -10,9 +10,11 @@ import {
   deliveryOrderEquipmentContext,
   deliveryOrderCompanyKey,
   deliveryOrderCompanyLabel,
+  deliveryOrderItemCanOmitPartida,
   deliveryOrderItemEffectivePartida,
   deliveryOrderItemLabel,
   deliveryOrderItemPartidaLabel,
+  deliveryOrderItemRequiresPartida,
   deliveryOrderSourceLabel,
 } from "../lib/delivery-orders";
 import { openPrintablePdf, waitForPdfBlob } from "../lib/pdf";
@@ -100,6 +102,8 @@ function lotLabel(lot) {
 
 function lotDraft(lot, assignedQuantity = "1") {
   return {
+    ingresoId: "",
+    deviceId: "",
     partida: clean(lot?.partida),
     assignedQuantity: String(assignedQuantity),
     partidaExpirationDate: lotExpiration(lot),
@@ -115,6 +119,13 @@ function itemNeedsPartidas(order, item) {
   const partidas = Array.isArray(item.partidas) ? item.partidas : [];
   const assigned = partidas.reduce((sum, partida) => sum + numberOf(partida.assignedQuantity), 0);
   const explicitPartida = clean(item.partida);
+  const canOmitPartida = deliveryOrderItemCanOmitPartida(order, item);
+  if (canOmitPartida && !explicitPartida && partidas.length === 0) return false;
+  if (order?.deliveryType === "rental") {
+    if (!explicitPartida && partidas.length === 0) return true;
+    if (partidas.length > 0) return assigned <= 0 || Math.abs(assigned - quantity) > 0.0001;
+    return false;
+  }
   if (order?.deliveryType === "sale" && !explicitPartida && partidas.length === 0) return true;
   const equipmentSerialFallback =
     !explicitPartida &&
@@ -144,6 +155,9 @@ function compatibilityIssues(orders) {
   }
   if (types.size !== 1) issues.push("Todas las órdenes deben tener el mismo tipo de remito.");
   if (companyKeys.size !== 1) issues.push("Todas las órdenes deben pertenecer a la misma empresa Bejerman.");
+  if (orders.some((order) => order.status === "pendiente_stock")) {
+    issues.push("Las órdenes pendientes de stock deben pasar a pendiente de armado antes de emitir remito.");
+  }
   if (orders.some((order) => order.remitoNumber || order.status === "facturado" || order.status === "cancelado")) {
     issues.push("No se pueden emitir órdenes cerradas, canceladas o con remito.");
   }
@@ -153,7 +167,9 @@ function compatibilityIssues(orders) {
   orders.forEach((order) => {
     const issuesForOrder = orderIssues(order);
     if (issuesForOrder.missingArticle) issues.push(`${order.orderNumber}: falta artículo Bejerman.`);
-    if (issuesForOrder.missingPartidas) issues.push(`${order.orderNumber}: faltan partidas completas.`);
+    if (issuesForOrder.missingPartidas) {
+      issues.push(`${order.orderNumber}: ${order.deliveryType === "rental" ? "faltan NS completos" : "faltan partidas completas"}.`);
+    }
   });
   return issues;
 }
@@ -183,6 +199,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
   const [search, setSearch] = useState(clean(item.articleName) || clean(item.description) || clean(item.sourceText) || clean(item.articleCode));
   const [manualCode, setManualCode] = useState(clean(item.articleCode));
   const [manualName, setManualName] = useState(clean(item.articleName));
+  const [manualRequiresPartida, setManualRequiresPartida] = useState(deliveryOrderItemRequiresPartida(item));
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [empty, setEmpty] = useState(false);
@@ -270,6 +287,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
     const articleName = clean(article?.name || article?.description || articleCode);
     setManualCode(articleCode);
     setManualName(articleName);
+    setManualRequiresPartida(deliveryOrderItemRequiresPartida(article));
     setSearch(articleName || articleCode);
     setResults([]);
     setEmpty(false);
@@ -299,6 +317,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
       const updated = await patchDeliveryOrderItemArticle(order.id, item.id, {
         articleCode,
         articleName: articleName || articleCode,
+        articleRequiresPartida: manualRequiresPartida,
         unitPrice: item.unitPrice,
         partida: selectedLotDraft?.partida || deliveryOrderItemEffectivePartida(item, order),
         partidaExpirationDate: selectedLotDraft?.partidaExpirationDate || item.partidaExpirationDate || null,
@@ -351,14 +370,30 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
         )}
       </div>
       <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[130px_minmax(180px,1fr)_110px]">
-        <input value={manualCode} onChange={(event) => setManualCode(event.target.value)} onKeyDown={suppressEnterSubmit} onBlur={(event) => void loadStock(event.target.value)} className="h-9 rounded border bg-white px-2" placeholder="Código" disabled={disabled || saving} />
+        <input
+          value={manualCode}
+          onChange={(event) => {
+            setManualCode(event.target.value);
+            setManualRequiresPartida(null);
+          }}
+          onKeyDown={suppressEnterSubmit}
+          onBlur={(event) => void loadStock(event.target.value)}
+          className="h-9 rounded border bg-white px-2"
+          placeholder="Código"
+          disabled={disabled || saving}
+        />
         <input value={manualName} onChange={(event) => setManualName(event.target.value)} onKeyDown={suppressEnterSubmit} className="h-9 rounded border bg-white px-2" placeholder="Descripción" disabled={disabled || saving} />
         <button type="button" onClick={saveArticle} disabled={disabled || saving} className="rounded border bg-white px-3 text-sm hover:bg-gray-50 disabled:opacity-50">
           Guardar
         </button>
       </div>
       {error && <div className="mt-2 text-xs text-red-700">{error}</div>}
-      {(stock || manualCode) && (
+      {manualRequiresPartida === false && (
+        <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+          No requiere partida en Bejerman.
+        </div>
+      )}
+      {(stock || manualCode) && manualRequiresPartida !== false && (
         <div className="mt-3 rounded border border-amber-200 bg-white p-2">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-xs font-medium uppercase text-amber-900">Partidas disponibles</div>
@@ -395,6 +430,8 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
 function PartidasEditor({ order, item, onUpdated, disabled }) {
   const initial = Array.isArray(item.partidas) && item.partidas.length
     ? item.partidas.map((partida) => ({
+        ingresoId: partida.ingresoId == null ? "" : String(partida.ingresoId),
+        deviceId: partida.deviceId == null ? "" : String(partida.deviceId),
         partida: clean(partida.partida),
         assignedQuantity: String(partida.assignedQuantity || item.quantity || 1),
         partidaExpirationDate: clean(partida.partidaExpirationDate),
@@ -404,6 +441,8 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
       }))
     : [
         {
+          ingresoId: item?.ingresoId == null ? "" : String(item.ingresoId),
+          deviceId: item?.deviceId == null ? "" : String(item.deviceId),
           partida: deliveryOrderItemEffectivePartida(item, order),
           assignedQuantity: String(item.quantity || 1),
           partidaExpirationDate: clean(item.partidaExpirationDate),
@@ -489,6 +528,8 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
   const save = async () => {
     const partidas = rows
       .map((row, index) => ({
+        ingresoId: clean(row.ingresoId) ? Number(row.ingresoId) : null,
+        deviceId: clean(row.deviceId) ? Number(row.deviceId) : null,
         partida: clean(row.partida),
         assignedQuantity: numberOf(row.assignedQuantity, 0),
         partidaExpirationDate: clean(row.partidaExpirationDate) || null,
@@ -611,7 +652,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
         ))}
       </div>
       <div className="mt-2 flex justify-between gap-2">
-        <button type="button" onClick={() => setRows((current) => [...current, { partida: "", assignedQuantity: "1", partidaExpirationDate: "", stockDepositCode: "", stockAvailableQuantity: "", stockCheckedAt: "" }])} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={disabled || saving}>
+        <button type="button" onClick={() => setRows((current) => [...current, { ingresoId: "", deviceId: "", partida: "", assignedQuantity: "1", partidaExpirationDate: "", stockDepositCode: "", stockAvailableQuantity: "", stockCheckedAt: "" }])} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={disabled || saving}>
           Agregar partida
         </button>
         <button type="button" onClick={save} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50" disabled={disabled || saving || quantityMismatch}>
@@ -674,8 +715,9 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
     setProgressDetail("Enviando el remito a Bejerman.");
     setProgressOpen(true);
     await waitForRisProgressPaint();
+    let result = null;
     try {
-      const result = await postDeliveryOrderBejermanRemito({
+      result = await postDeliveryOrderBejermanRemito({
         orderIds: localOrders.map((order) => order.id),
         notes,
       });
@@ -687,13 +729,24 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         onGenerated(result, { keepOpen: true });
         return;
       }
-      const blob = await waitForPdfBlob(pdfUrl, {
-        label: documentLabel,
-        onProgress: (progress) => {
-          setProgressStatus(progress?.status || `Preparando PDF del ${documentLabel}...`);
-          setProgressDetail(progress?.detail || "Esperando el archivo de Bejerman.");
-        },
-      });
+      let blob = null;
+      try {
+        blob = await waitForPdfBlob(pdfUrl, {
+          label: documentLabel,
+          onProgress: (progress) => {
+            setProgressStatus(progress?.status || `Preparando PDF del ${documentLabel}...`);
+            setProgressDetail(progress?.detail || "Esperando el archivo de Bejerman.");
+          },
+        });
+      } catch (pdfError) {
+        setError(
+          `Remito ${result?.remitoNumber || ""} emitido, pero Bejerman no pudo devolver el PDF. ${
+            pdfError?.message || "Reintente imprimirlo desde el historial de pedidos."
+          }`
+        );
+        onGenerated(result, { keepOpen: true });
+        return;
+      }
       setProgressStatus("Abriendo impresión");
       setProgressDetail("El PDF está listo. Intentando abrir la ventana de impresión.");
       await waitForRisProgressMinimum(startedAt);
@@ -706,7 +759,11 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         onGenerated(result, { keepOpen: true });
       }
     } catch (err) {
-      setError(err?.message || "No se pudo generar el remito Bejerman.");
+      setError(
+        result?.remitoNumber
+          ? `Remito ${result.remitoNumber} emitido, pero ocurrió un error posterior. ${err?.message || ""}`.trim()
+          : err?.message || "No se pudo generar el remito Bejerman."
+      );
     } finally {
       setProgressOpen(false);
       setSaving(false);
@@ -807,13 +864,13 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
                           </div>
                           <div>
                             <div className="text-xs uppercase text-gray-500">Partida</div>
-                            <div>{deliveryOrderItemPartidaLabel(item, order) || "-"}</div>
+                            <div>{deliveryOrderItemPartidaLabel(item, order, { includePartidaLabel: false }) || "-"}</div>
                           </div>
                         </div>
                         {!clean(item.articleCode) && canAssignArticles && (
                           <ArticleEditor order={order} item={item} onUpdated={updateOrder} disabled={saving} />
                         )}
-                        {clean(item.articleCode) && canAssignArticles && (itemNeedsPartidas(order, item) || !deliveryOrderItemPartidaLabel(item, order)) && (
+                        {clean(item.articleCode) && canAssignArticles && !deliveryOrderItemCanOmitPartida(order, item) && (itemNeedsPartidas(order, item) || !deliveryOrderItemPartidaLabel(item, order)) && (
                           <PartidasEditor order={order} item={item} onUpdated={updateOrder} disabled={saving} />
                         )}
                       </div>

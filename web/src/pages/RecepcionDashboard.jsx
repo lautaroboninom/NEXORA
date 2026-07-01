@@ -14,6 +14,7 @@ import {
 } from "../components/Responsive.jsx";
 
 const STATUS_LABELS = {
+  pendiente_stock: "Pendiente de stock",
   pendiente_armado: "Pendiente de armado",
   armado_pendiente_entrega: "Listo para retiro",
   entregado_pendiente_facturacion: "Pendiente de facturación",
@@ -54,7 +55,7 @@ export default function RecepcionDashboard() {
     let active = true;
     setLoading(true);
     getDeliveryOrders({
-      status: "pendiente_armado,armado_pendiente_entrega,entregado_pendiente_facturacion,entregado_no_facturable",
+      status: "pendiente_stock,pendiente_armado,armado_pendiente_entrega,entregado_pendiente_facturacion,entregado_no_facturable",
       limit: 40,
     })
       .then((data) => {
@@ -84,7 +85,7 @@ export default function RecepcionDashboard() {
       { total: 0 }
     );
   }, [orders]);
-  const pendingDeliveryTotal = (summary.pendiente_armado || 0) + (summary.armado_pendiente_entrega || 0);
+  const pendingDeliveryTotal = (summary.pendiente_stock || 0) + (summary.pendiente_armado || 0) + (summary.armado_pendiente_entrega || 0);
   const remitoTotal = (summary.entregado_pendiente_facturacion || 0) + (summary.entregado_no_facturable || 0);
 
   return (
@@ -109,10 +110,14 @@ export default function RecepcionDashboard() {
         </ResponsiveActionBar>
       </div>
 
-      <div className="grid gap-2 md:grid-cols-4">
+      <div className="grid gap-2 md:grid-cols-5">
         <div className="border p-3">
           <div className="text-xs uppercase text-gray-500">Sin entregar</div>
           <div className="text-2xl font-semibold">{pendingDeliveryTotal}</div>
+        </div>
+        <div className="border p-3">
+          <div className="text-xs uppercase text-gray-500">Pendiente de stock</div>
+          <div className="text-2xl font-semibold">{summary.pendiente_stock || 0}</div>
         </div>
         <div className="border p-3">
           <div className="text-xs uppercase text-gray-500">A preparar</div>

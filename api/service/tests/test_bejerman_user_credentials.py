@@ -6,6 +6,7 @@ from unittest.mock import call, patch
 
 from service.bejerman_sdk import BejermanSDKClient, BejermanSdkConfigError, BejermanSdkResponseError
 from service.bejerman_user_credentials import (
+    BejermanUserCredentialsRequired,
     bejerman_workstation_for_role,
     decrypt_bejerman_password,
     encrypt_bejerman_password,
@@ -67,11 +68,31 @@ class BejermanUserCredentialsTests(SimpleTestCase):
 
         self.assertEqual(client.last_body, "")
 
+    @override_settings(
+        BEJERMAN_WSDL_URL="http://bejerman.test/EFlexSDK_Service.svc",
+        BEJERMAN_COMPANY="SEP",
+        BEJERMAN_WORKSTATION="STEC",
+        BEJERMAN_BRANCH="",
+        BEJERMAN_USER="SPST1",
+        BEJERMAN_PASSWORD="clave-sistema",
+    )
+    def test_sdk_register_can_fallback_to_system_credentials_when_allowed(self):
+        with patch(
+            "service.bejerman_sdk.get_user_bejerman_credentials",
+            side_effect=BejermanUserCredentialsRequired("sin credenciales personales"),
+        ), patch("service.bejerman_sdk.resolve_user_bejerman_workstation", return_value="STEC"):
+            client = CapturingBejermanSDKClient(actor_user_id=12, allow_system_credentials=True)
+            client.register()
+
+        self.assertIn("<xUsuario>SPST1</xUsuario>", client.last_body)
+        self.assertIn("<xClave>clave-sistema</xClave>", client.last_body)
+
     @override_settings(BEJERMAN_SERVICE_WORKSTATION="STEC", BEJERMAN_ADMIN_WORKSTATION="ADMV")
     def test_bejerman_workstation_is_resolved_by_role(self):
         self.assertEqual(bejerman_workstation_for_role("tecnico"), "STEC")
         self.assertEqual(bejerman_workstation_for_role("jefe"), "STEC")
         self.assertEqual(bejerman_workstation_for_role("admin"), "ADMV")
+        self.assertEqual(bejerman_workstation_for_role("supervisor"), "ADMV")
         self.assertEqual(bejerman_workstation_for_role("ventas"), "ADMV")
         self.assertEqual(bejerman_workstation_for_role("recepcion"), "ADMV")
         self.assertEqual(bejerman_workstation_for_role("cobranzas"), "ADMV")
@@ -79,6 +100,7 @@ class BejermanUserCredentialsTests(SimpleTestCase):
     @override_settings(BEJERMAN_WORKSTATION="STEC", BEJERMAN_SERVICE_WORKSTATION="STEC", BEJERMAN_ADMIN_WORKSTATION="")
     def test_admin_workstation_falls_back_to_general_when_admin_not_configured(self):
         self.assertEqual(bejerman_workstation_for_role("admin"), "STEC")
+        self.assertEqual(bejerman_workstation_for_role("supervisor"), "STEC")
         self.assertEqual(bejerman_workstation_for_role("ventas"), "STEC")
         self.assertEqual(bejerman_workstation_for_role("recepcion"), "STEC")
 

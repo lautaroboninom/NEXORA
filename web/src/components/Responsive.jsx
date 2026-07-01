@@ -15,7 +15,7 @@ export function MobileDataList({ children, className = "" }) {
 export function MobileDataCard({ children, className = "", as: Component = "div", ...props }) {
   return (
     <Component
-      className={`w-full rounded border border-gray-200 bg-white p-3 text-left text-sm shadow-sm ${className}`}
+      className={`mobile-data-card w-full rounded-md border border-slate-200 bg-white p-3 text-left text-sm shadow-sm transition-colors ${className}`}
       {...props}
     >
       {children}
@@ -26,14 +26,14 @@ export function MobileDataCard({ children, className = "", as: Component = "div"
 export function MobileDataField({ label, value, children, className = "", valueClassName = "" }) {
   return (
     <div className={className}>
-      <div className="text-[11px] font-semibold uppercase text-gray-500">{label}</div>
-      <div className={`mt-0.5 break-words text-sm text-gray-900 ${valueClassName}`}>{children ?? value ?? "-"}</div>
+      <div className="text-[11px] font-semibold uppercase text-slate-500">{label}</div>
+      <div className={`mt-0.5 break-words text-sm text-slate-900 ${valueClassName}`}>{children ?? value ?? "-"}</div>
     </div>
   );
 }
 
 export function DesktopTableWrap({ children, className = "" }) {
-  return <div className={`hidden overflow-x-auto md:block ${className}`}>{children}</div>;
+  return <div className={`desktop-data-table hidden overflow-x-auto rounded-md border border-slate-200 bg-white md:block ${className}`}>{children}</div>;
 }
 
 export function ResponsiveModalOverlay({ children, className = "", ...props }) {

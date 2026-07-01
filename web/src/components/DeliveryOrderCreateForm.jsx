@@ -9,6 +9,7 @@ import {
   postDeliveryOrder,
 } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
+import { deliveryOrderItemCanOmitPartida, deliveryOrderItemRequiresPartida } from "../lib/delivery-orders";
 
 const BEJERMAN_COMPANIES = [
   { key: "SEPID", label: "SEPID" },
@@ -32,8 +33,15 @@ const FALLBACK_DEPOSITS = [
   { code: "VAL", label: "VAL" },
   { code: "STL", label: "STL" },
 ];
+const PLANNING_STATUS_LABELS = {
+  pendiente_stock: "Pendiente de stock",
+  pendiente_armado: "Pendiente de armado",
+};
+const PLANNING_STATUSES = new Set(Object.keys(PLANNING_STATUS_LABELS));
 
 const emptyPartida = (assignedQuantity = "1", stockDepositCode = "") => ({
+  ingresoId: "",
+  deviceId: "",
   partida: "",
   assignedQuantity,
   partidaExpirationDate: "",
@@ -62,6 +70,7 @@ const emptyItem = (priceCurrency = "ARS") => ({
   stockDepositCode: "",
   stockAvailableQuantity: "",
   stockCheckedAt: "",
+  articleRequiresPartida: null,
   partidas: [emptyPartida()],
 });
 
@@ -72,6 +81,7 @@ const initialForm = (defaultSellerCode = "") => {
     customerName: "",
     customerSearch: "",
     deliveryType: "sale",
+    status: "pendiente_armado",
     priority: "normal",
     sellerCode: seller.code,
     sellerName: seller.label,
@@ -254,6 +264,15 @@ function activePartidas(item) {
   return (Array.isArray(item?.partidas) ? item.partidas : []).filter(hasPartidaData);
 }
 
+function isBlankItem(item) {
+  return !clean(item?.id) &&
+    !clean(item?.ingresoId) &&
+    !clean(item?.deviceId) &&
+    !clean(item?.articleCode) &&
+    !clean(item?.description) &&
+    activePartidas(item).length === 0;
+}
+
 function partidaStats(item) {
   const total = quantityNumber(item.quantity);
   const rows = activePartidas(item);
@@ -291,6 +310,8 @@ function itemFromOrderItem(item) {
   const partidas = Array.isArray(item?.partidas) && item.partidas.length
     ? item.partidas.map((partida) => ({
         id: clean(partida.id),
+        ingresoId: partida.ingresoId == null ? "" : String(partida.ingresoId),
+        deviceId: partida.deviceId == null ? "" : String(partida.deviceId),
         partida: clean(partida.partida),
         assignedQuantity: String(partida.assignedQuantity || quantity),
         partidaExpirationDate: clean(partida.partidaExpirationDate),
@@ -301,6 +322,8 @@ function itemFromOrderItem(item) {
     : clean(item?.partida)
       ? [
           {
+            ingresoId: item?.ingresoId == null ? "" : String(item.ingresoId),
+            deviceId: item?.deviceId == null ? "" : String(item.deviceId),
             partida: clean(item.partida),
             assignedQuantity: quantity,
             partidaExpirationDate: clean(item.partidaExpirationDate),
@@ -326,6 +349,7 @@ function itemFromOrderItem(item) {
     stockDepositCode: clean(item?.stockDepositCode),
     stockAvailableQuantity: item?.stockAvailableQuantity == null ? "" : String(item.stockAvailableQuantity),
     stockCheckedAt: clean(item?.stockCheckedAt),
+    articleRequiresPartida: deliveryOrderItemRequiresPartida(item),
     partidas,
   };
 }
@@ -348,7 +372,18 @@ function equipmentItemFromOption(option) {
     stockDepositCode: "STL",
     stockAvailableQuantity: stock,
     stockCheckedAt: clean(option?.stockCheckedAt),
-    partidas: [],
+    articleRequiresPartida: true,
+    partidas: [
+      {
+        ...emptyPartida("1", "STL"),
+        ingresoId: option?.ingresoId == null ? "" : String(option.ingresoId),
+        deviceId: option?.deviceId == null ? "" : String(option.deviceId),
+        partida: clean(option?.partida || option?.equipmentSerial),
+        partidaExpirationDate: clean(option?.partidaExpirationDate),
+        stockAvailableQuantity: stock,
+        stockCheckedAt: clean(option?.stockCheckedAt),
+      },
+    ],
   };
 }
 
@@ -365,6 +400,7 @@ function formFromOrder(order, defaultSellerCode = "") {
     customerName: clean(order.customerName),
     customerSearch: clean(order.customerName),
     deliveryType,
+    status: clean(order.status) || "pendiente_armado",
     priority: clean(order.priority) || "normal",
     sellerCode: seller.code,
     sellerName: seller.label,
@@ -397,6 +433,22 @@ function depositFromForm(form) {
     }
   }
   return defaultDepositForDeliveryType(form?.deliveryType);
+}
+
+function itemForDeposit(item, stockDepositCode) {
+  const deposit = clean(stockDepositCode).toUpperCase();
+  return {
+    ...item,
+    stockDepositCode: deposit,
+    partidas: (item.partidas || [emptyPartida()]).map((row) => ({
+      ...row,
+      stockDepositCode: clean(row.stockDepositCode) || deposit,
+    })),
+  };
+}
+
+function emptyItemForDeliveryType(deliveryType, priceCurrency = "ARS") {
+  return itemForDeposit(emptyItem(priceCurrency), defaultDepositForDeliveryType(deliveryType));
 }
 
 function suppressEnterSubmit(event) {
@@ -458,6 +510,10 @@ export default function DeliveryOrderCreateForm({
   );
   const headerDisabled = saving || readOnlyHeader;
   const itemDisabled = saving || readOnlyItems;
+  const canEditPlanningStatus =
+    !readOnlyHeader &&
+    !isPartidasMode &&
+    (!isEdit || PLANNING_STATUSES.has(clean(initialOrder?.status)));
 
   useEffect(() => {
     const nextForm = formFromOrder(initialOrder, currentUserSellerCode);
@@ -585,6 +641,12 @@ export default function DeliveryOrderCreateForm({
       setDepositOptions([{ code: "STL", label: "STL" }]);
       setDepositWarning("");
       setLoadingDeposits(false);
+      setForm((current) => ({
+        ...current,
+        items: current.items.length
+          ? current.items.map((item) => itemForDeposit(item, "STL"))
+          : [emptyItemForDeliveryType("rental", current.priceCurrency)],
+      }));
       return undefined;
     }
     let active = true;
@@ -658,7 +720,11 @@ export default function DeliveryOrderCreateForm({
           deliveryType: value,
           sellerCode: nextSeller.code,
           sellerName: nextSeller.label,
-          items: value === "rental" ? [] : current.deliveryType === "rental" ? [emptyItem(current.priceCurrency)] : current.items,
+          items: value === "rental"
+            ? [emptyItemForDeliveryType("rental", current.priceCurrency)]
+            : current.deliveryType === "rental"
+              ? [emptyItemForDeliveryType(value, current.priceCurrency)]
+              : current.items,
         };
       }
       return { ...current, [field]: value };
@@ -877,7 +943,10 @@ export default function DeliveryOrderCreateForm({
 
   const addItem = () => {
     if (readOnlyItems) return;
-    setForm((current) => ({ ...current, items: [...current.items, emptyItem(current.priceCurrency)] }));
+    setForm((current) => ({
+      ...current,
+      items: [...current.items, emptyItemForDeliveryType(current.deliveryType, current.priceCurrency)],
+    }));
   };
 
   const addRentalEquipment = (option) => {
@@ -886,7 +955,9 @@ export default function DeliveryOrderCreateForm({
     if (!ingresoId || selectedRentalIngresoIds.has(ingresoId)) return;
     setForm((current) => ({
       ...current,
-      items: [...current.items, { ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }],
+      items: current.items.length === 1 && isBlankItem(current.items[0])
+        ? [{ ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }]
+        : [...current.items, { ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }],
     }));
   };
 
@@ -958,7 +1029,8 @@ export default function DeliveryOrderCreateForm({
       stockDepositCode: depositCode,
       stockAvailableQuantity: "",
       stockCheckedAt: "",
-      partidas: [emptyPartida()],
+      articleRequiresPartida: null,
+      partidas: [emptyPartida("1", depositCode)],
     });
     setArticleStock((current) => ({ ...current, [index]: null }));
 
@@ -1030,14 +1102,14 @@ export default function DeliveryOrderCreateForm({
   };
 
   useEffect(() => {
-    if (isRental || (!partidasRequired && !partidasOpenByDefault)) return;
+    if (!partidasRequired && !partidasOpenByDefault) return;
     form.items.forEach((item, index) => {
       const articleCode = clean(item.articleCode);
       if (articleCode) {
         void loadArticleStock(index, articleCode, clean(item.stockDepositCode) || depositCode);
       }
     });
-  }, [initialOrder?.id, isRental, partidasRequired, partidasOpenByDefault, effectiveCompanyKey, depositCode]);
+  }, [initialOrder?.id, partidasRequired, partidasOpenByDefault, effectiveCompanyKey, depositCode]);
 
   const changeDeposit = (event) => {
     if (readOnlyItems) return;
@@ -1058,6 +1130,7 @@ export default function DeliveryOrderCreateForm({
     setPartidaScanWarnings({});
     const articleCode = clean(article?.code);
     const articleName = clean(article?.name || article?.description || articleCode);
+    const articleRequiresPartida = deliveryOrderItemRequiresPartida(article);
     updateItem(index, {
       articleCode,
       articleName,
@@ -1067,7 +1140,8 @@ export default function DeliveryOrderCreateForm({
       stockDepositCode: depositCode,
       stockAvailableQuantity: "",
       stockCheckedAt: "",
-      partidas: [emptyPartida()],
+      articleRequiresPartida,
+      partidas: [emptyPartida("1", depositCode)],
     });
     setArticleOptions((current) => ({ ...current, [index]: [] }));
     setArticleEmpty((current) => ({ ...current, [index]: false }));
@@ -1095,6 +1169,8 @@ export default function DeliveryOrderCreateForm({
   const buildPartidasPayloadForItem = (item) =>
     activePartidas(item).map((row, rowIndex) => ({
       id: clean(row.id) || null,
+      ingresoId: clean(row.ingresoId) ? Number(row.ingresoId) : null,
+      deviceId: clean(row.deviceId) ? Number(row.deviceId) : null,
       partida: clean(row.partida),
       assignedQuantity: quantityOf(row.assignedQuantity),
       partidaExpirationDate: clean(row.partidaExpirationDate) || null,
@@ -1105,30 +1181,12 @@ export default function DeliveryOrderCreateForm({
     }));
 
   const validateItems = (items, { requirePartidas = false } = {}) => {
-    if (isRental) {
-      if (!items.length) return "Seleccione al menos un equipo disponible para alquilar.";
-      const seen = new Set();
-      for (let index = 0; index < items.length; index += 1) {
-        const item = items[index];
-        if (!clean(item.ingresoId) || !clean(item.deviceId)) return `El renglón ${index + 1} debe estar vinculado a un equipo.`;
-        if (seen.has(clean(item.ingresoId))) return `La OS ${item.ingresoId} está repetida en la orden.`;
-        seen.add(clean(item.ingresoId));
-        if (quantityNumber(item.quantity, 0) !== 1) return `La cantidad del renglón ${index + 1} debe ser 1.`;
-        if (!clean(item.articleCode)) return `La OS ${item.ingresoId} no tiene artículo Bejerman mapeado.`;
-        if (!clean(item.partida)) return `La OS ${item.ingresoId} no tiene serie/partida.`;
-        if (canEditItemDiscounts) {
-          const discount = discountNumber(item.discountPercent);
-          if (discount === null || discount < 0 || discount > 100) return `El descuento del renglón ${index + 1} debe estar entre 0 y 100.`;
-        }
-        if (clean(item.stockDepositCode).toUpperCase() !== "STL") return `La OS ${item.ingresoId} debe salir de STL.`;
-        if (quantityNumber(item.stockAvailableQuantity, 0) <= 0) return `La OS ${item.ingresoId} no tiene stock disponible en STL.`;
-      }
-      return "";
-    }
+    if (isRental && !items.length) return "Cargue al menos un artículo de alquiler.";
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index];
       const description = clean(item.description) || clean(item.articleName) || clean(item.articleCode);
       if (!description) return `El renglón ${index + 1} necesita un detalle.`;
+      if (isRental && !clean(item.articleCode)) return `El renglón ${index + 1} de alquiler necesita un artículo Bejerman.`;
       const total = quantityNumber(item.quantity, 0);
       if (total <= 0) return `La cantidad del renglón ${index + 1} debe ser mayor a cero.`;
       if (canEditItemDiscounts) {
@@ -1137,7 +1195,8 @@ export default function DeliveryOrderCreateForm({
       }
       const rows = activePartidas(item);
       if (!rows.length) {
-        if (requirePartidas) return `Complete las partidas del renglón ${index + 1}.`;
+        if (deliveryOrderItemCanOmitPartida({ deliveryType: form.deliveryType }, item)) continue;
+        if (requirePartidas) return isRental ? `Faltan NS del renglón ${index + 1}.` : `Complete las partidas del renglón ${index + 1}.`;
         continue;
       }
       let assigned = 0;
@@ -1145,11 +1204,15 @@ export default function DeliveryOrderCreateForm({
       for (const row of rows) {
         const rowPartida = clean(row.partida);
         if (!rowPartida || quantityNumber(row.assignedQuantity, 0) <= 0) {
-          return `Cada partida del renglón ${index + 1} necesita número y cantidad.`;
+          return isRental
+            ? `Cada NS del renglón ${index + 1} necesita número y cantidad.`
+            : `Cada partida del renglón ${index + 1} necesita número y cantidad.`;
         }
         const rowPartidaKey = rowPartida.toLowerCase();
         if (seenPartidas.has(rowPartidaKey)) {
-          return `La partida ${rowPartida} ya está cargada en el renglón ${index + 1}.`;
+          return isRental
+            ? `El NS ${rowPartida} ya está cargado en el renglón ${index + 1}.`
+            : `La partida ${rowPartida} ya está cargada en el renglón ${index + 1}.`;
         }
         seenPartidas.add(rowPartidaKey);
         const stockState = articleStock[index];
@@ -1157,16 +1220,22 @@ export default function DeliveryOrderCreateForm({
         if (clean(item.articleCode) && stockState && !stockState.loading && !stockState.unavailable && stockLots.length) {
           const matchingLot = stockLots.find((lot) => partidaMatchKey(lot?.partida) === rowPartidaKey);
           if (!matchingLot) {
-            return `La partida ${rowPartida} no figura para este artículo en el depósito seleccionado.`;
+            return isRental
+              ? `NS sin stock en STL: ${rowPartida}.`
+              : `La partida ${rowPartida} no figura para este artículo en el depósito seleccionado.`;
           }
           if (quantityNumber(row.assignedQuantity, 0) - lotAvailableQuantity(matchingLot) > QUANTITY_TOLERANCE) {
-            return `La partida ${rowPartida} no tiene stock suficiente en el depósito seleccionado.`;
+            return isRental
+              ? `NS sin stock suficiente en STL: ${rowPartida}.`
+              : `La partida ${rowPartida} no tiene stock suficiente en el depósito seleccionado.`;
           }
         }
         assigned += quantityNumber(row.assignedQuantity, 0);
       }
       if (Math.abs(assigned - total) > QUANTITY_TOLERANCE) {
-        return `La suma de las partidas del renglón ${index + 1} debe ser igual a ${formatQuantity(total)}.`;
+        return isRental
+          ? `La suma de los NS del renglón ${index + 1} debe ser igual a ${formatQuantity(total)}.`
+          : `La suma de las partidas del renglón ${index + 1} debe ser igual a ${formatQuantity(total)}.`;
       }
     }
     return "";
@@ -1183,6 +1252,7 @@ export default function DeliveryOrderCreateForm({
           deviceId: clean(item.deviceId) ? Number(item.deviceId) : null,
           articleCode: clean(item.articleCode) || null,
           articleName: clean(item.articleName) || null,
+          articleRequiresPartida: deliveryOrderItemRequiresPartida(item),
           description,
           quantity: quantityOf(item.quantity),
           unitPrice: decimalTextOrNull(item.unitPrice),
@@ -1257,6 +1327,7 @@ export default function DeliveryOrderCreateForm({
       customerName: clean(form.customerName),
       bejermanCustomerCode: customer?.cod_empresa || initialOrder?.bejermanCustomerCode || "",
       deliveryType: form.deliveryType,
+      ...(canEditPlanningStatus ? { status: form.status } : {}),
       priority: form.priority,
       sellerName: sellerNameForCode(effectiveSellerCode, form.sellerName),
       sellerCode: effectiveSellerCode,
@@ -1297,7 +1368,7 @@ export default function DeliveryOrderCreateForm({
     }
   };
 
-  const hasPartidaQuantityMismatch = !isRental && form.items.some((item) => partidaStats(item).mismatch);
+  const hasPartidaQuantityMismatch = form.items.some((item) => partidaStats(item).mismatch);
 
   return (
     <form onSubmit={saveOrder} className={compact ? "space-y-4" : "space-y-5"}>
@@ -1435,6 +1506,23 @@ export default function DeliveryOrderCreateForm({
             <option value="urgente">Urgente</option>
           </select>
         </label>
+        {canEditPlanningStatus && (
+          <label className="text-sm">
+            <span className="mb-1 block text-xs uppercase text-gray-500">Estado</span>
+            <select
+              value={form.status}
+              onChange={update("status")}
+              className="h-10 w-full rounded border bg-white px-3 py-2 disabled:bg-gray-100 disabled:text-gray-600"
+              disabled={headerDisabled}
+            >
+              {Object.entries(PLANNING_STATUS_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="text-sm">
           <span className="mb-1 block text-xs uppercase text-gray-500">TC</span>
           <input
@@ -1475,7 +1563,7 @@ export default function DeliveryOrderCreateForm({
 
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-gray-900">{isRental ? "Equipos de alquiler" : "Artículos"}</h3>
+          <h3 className="text-sm font-semibold text-gray-900">{isRental ? "Artículos de alquiler" : "Artículos"}</h3>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-2 text-xs text-gray-600">
               <span className="uppercase">Depósito</span>
@@ -1492,7 +1580,7 @@ export default function DeliveryOrderCreateForm({
                 ))}
               </select>
             </label>
-            {!readOnlyItems && !isRental && (
+            {!readOnlyItems && (
               <button type="button" onClick={addItem} className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50">
                 Agregar renglón
               </button>
@@ -1504,7 +1592,7 @@ export default function DeliveryOrderCreateForm({
             {depositWarning}
           </div>
         )}
-        {!isRental && articleUnavailable && (
+        {articleUnavailable && (
           <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             Catálogo Bejerman no disponible. Se puede cargar texto libre.
           </div>
@@ -1513,7 +1601,7 @@ export default function DeliveryOrderCreateForm({
         {isRental && (
           <div className="rounded border bg-gray-50 p-3">
             <label className="block text-sm">
-              <span className="mb-1 block text-xs uppercase text-gray-500">Buscar equipo disponible</span>
+              <span className="mb-1 block text-xs uppercase text-gray-500">Atajo: agregar equipo disponible ahora</span>
               <input
                 value={rentalSearch}
                 onChange={(event) => setRentalSearch(event.target.value)}
@@ -1559,81 +1647,12 @@ export default function DeliveryOrderCreateForm({
           </div>
         )}
 
-        {isRental &&
-          form.items.map((item, index) => (
-            <div key={item.id || `${item.ingresoId}-${index}`} className="rounded border bg-gray-50 p-3">
-              <div className={`grid grid-cols-1 gap-3 ${canEditItemDiscounts ? "lg:grid-cols-[110px_minmax(220px,1fr)_minmax(180px,.8fr)_105px_74px_82px_42px]" : "lg:grid-cols-[110px_minmax(220px,1fr)_minmax(180px,.8fr)_105px_74px_42px]"}`}>
-                <div className="text-sm">
-                  <span className="block text-xs uppercase text-gray-500">OS</span>
-                  <span className="font-semibold text-gray-900">{item.ingresoId ? formatServiceOrderReference(item.ingresoId) : "-"}</span>
-                </div>
-                <div className="text-sm">
-                  <span className="block text-xs uppercase text-gray-500">Equipo</span>
-                  <span className="text-gray-900">{item.description || item.articleName || item.articleCode || "-"}</span>
-                  <span className="mt-1 block text-xs text-gray-500">Serie/partida {item.partida || "-"}</span>
-                </div>
-                <div className="text-sm">
-                  <span className="block text-xs uppercase text-gray-500">Artículo Bejerman</span>
-                  <span className="font-mono text-sky-800">{item.articleCode || "-"}</span>
-                  <span className="mt-1 block text-xs text-gray-500">{item.articleName || "-"}</span>
-                </div>
-                <label className="text-sm">
-                  <span className="block text-xs uppercase text-gray-500">Precio</span>
-                  <input
-                    value={item.unitPrice}
-                    onChange={(event) => updateItem(index, { unitPrice: event.target.value })}
-                    onKeyDown={suppressEnterSubmit}
-                    className="mt-1 h-9 w-full rounded border bg-white px-3 py-2 disabled:bg-gray-100 disabled:text-gray-600"
-                    disabled={itemDisabled}
-                  />
-                  <span className="mt-1 block text-xs text-gray-500">STL {formatQuantity(item.stockAvailableQuantity, 0)}</span>
-                </label>
-                <label className="text-sm">
-                  <span className="block text-xs uppercase text-gray-500">Moneda</span>
-                  <select
-                    value={item.priceCurrency}
-                    onChange={(event) => updateItem(index, { priceCurrency: event.target.value })}
-                    className="mt-1 h-9 w-full rounded border bg-white px-2 py-2 disabled:bg-gray-100 disabled:text-gray-600"
-                    disabled={itemDisabled}
-                  >
-                    <option value="ARS">$</option>
-                    <option value="USD">U$S</option>
-                  </select>
-                </label>
-                {canEditItemDiscounts && (
-                  <label className="text-sm">
-                    <span className="block text-xs uppercase text-gray-500">Desc. %</span>
-                    <input
-                      value={item.discountPercent}
-                      onChange={(event) => updateItem(index, { discountPercent: event.target.value })}
-                      onKeyDown={suppressEnterSubmit}
-                      placeholder="0"
-                      className="mt-1 h-9 w-full rounded border bg-white px-2 py-2 text-right disabled:bg-gray-100 disabled:text-gray-600"
-                      disabled={itemDisabled}
-                    />
-                  </label>
-                )}
-                {!readOnlyItems ? (
-                  <button
-                    type="button"
-                    onClick={() => removeItem(index)}
-                    className="h-9 rounded border bg-white px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-40"
-                    aria-label="Quitar equipo"
-                    disabled={saving}
-                  >
-                    X
-                  </button>
-                ) : (
-                  <div aria-hidden="true" />
-                )}
-              </div>
-            </div>
-          ))}
-
-        {!isRental && form.items.map((item, index) => {
+        {form.items.map((item, index) => {
           const stats = partidaStats(item);
+          const lotWordSingular = isRental ? "NS" : "partida";
+          const canOmitPartida = deliveryOrderItemCanOmitPartida({ deliveryType: form.deliveryType }, item) && !stats.hasRows;
           const partidaQuantityMessage = stats.mismatch
-            ? `La suma de las cantidades por partida debe ser igual a la cantidad del artículo (${stats.total}).`
+            ? `La suma de las cantidades por ${lotWordSingular} debe ser igual a la cantidad del artículo (${stats.total}).`
             : "";
           const stockState = articleStock[index];
           const stockLots = Array.isArray(stockState?.items) ? stockState.items : [];
@@ -1651,7 +1670,7 @@ export default function DeliveryOrderCreateForm({
             if (!suggestedPartidaQuery) return true;
             return lotLabel(lot).toLowerCase().includes(suggestedPartidaQuery);
           });
-          const partidasOpen = partidasRequired || Boolean(partidasOpenByItem[index]) || stats.hasRows;
+          const partidasOpen = !canOmitPartida && (partidasRequired || Boolean(partidasOpenByItem[index]) || stats.hasRows);
           return (
             <div key={item.id || index} className="rounded border bg-gray-50 p-2">
               <div className={`grid grid-cols-1 gap-2 ${canEditItemDiscounts ? "lg:grid-cols-[82px_minmax(180px,1fr)_minmax(220px,1.25fr)_105px_74px_82px_42px]" : "lg:grid-cols-[82px_minmax(180px,1fr)_minmax(220px,1.25fr)_105px_74px_42px]"}`}>
@@ -1759,9 +1778,13 @@ export default function DeliveryOrderCreateForm({
               <div className="mt-2 rounded border border-gray-200 bg-white p-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="text-xs font-medium uppercase text-gray-500">Partidas</div>
-                    {!partidasOpen && (
-                      <div className="mt-0.5 text-xs text-gray-500">Opcional al crear la orden. Recepción deberá completarlas antes de preparar.</div>
+                    <div className="text-xs font-medium uppercase text-gray-500">{isRental ? "NS" : "Partidas"}</div>
+                    {canOmitPartida ? (
+                      <div className="mt-0.5 text-xs text-emerald-700">No requiere partida en Bejerman.</div>
+                    ) : !partidasOpen && (
+                      <div className="mt-0.5 text-xs text-gray-500">
+                        {isRental ? "Opcional al crear la orden. Recepción deberá completar los NS antes de preparar." : "Opcional al crear la orden. Recepción deberá completarlas antes de preparar."}
+                      </div>
                     )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1769,22 +1792,22 @@ export default function DeliveryOrderCreateForm({
                       Asignado {stats.assigned} / {stats.total}
                       {stats.mismatch && stats.overNumber > 0 ? ` · Excede ${stats.over}` : ` · Pendiente ${stats.pending}`}
                     </div>
-                    {!partidasOpen ? (
+                    {!canOmitPartida && !partidasOpen ? (
                       <button type="button" onClick={() => openPartidas(index)} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={saving}>
-                        Indicar partidas
+                        {isRental ? "Indicar NS" : "Indicar partidas"}
                       </button>
                     ) : (
-                      !partidasRequired && !stats.hasRows && (
+                      !canOmitPartida && !partidasRequired && !stats.hasRows && (
                         <button type="button" onClick={() => closePartidas(index)} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={saving}>
-                          Ocultar partidas
+                          {isRental ? "Ocultar NS" : "Ocultar partidas"}
                         </button>
                       )
                     )}
                   </div>
                 </div>
-                {partidasRequired && !stats.hasRows && (
+                {partidasRequired && !stats.hasRows && !canOmitPartida && (
                   <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                    Complete las partidas faltantes para poder marcar la orden como preparada.
+                    {isRental ? "Faltan NS para poder preparar o emitir el RTA." : "Complete las partidas faltantes para poder marcar la orden como preparada."}
                   </div>
                 )}
                 {partidasOpen && (
@@ -1811,7 +1834,7 @@ export default function DeliveryOrderCreateForm({
                                 onChange={(event) => changePartidaValue(index, partidaIndex, event.target.value)}
                                 onKeyDown={(event) => handlePartidaScanKeyDown(event, index, partidaIndex, stockLots)}
                                 onBlur={() => handlePartidaBlur(index, partidaIndex, stockLots)}
-                                placeholder="Partida / serie"
+                                placeholder={isRental ? "NS" : "Partida / serie"}
                                 className={`h-10 w-full rounded border bg-white px-3 py-2 ${
                                   scanWarning ? "border-amber-400 focus:outline-amber-500" : ""
                                 }`}
@@ -1859,7 +1882,7 @@ export default function DeliveryOrderCreateForm({
                     </div>
                     <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                       <button type="button" onClick={() => addPartida(index)} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={saving}>
-                        Agregar partida
+                        {isRental ? "Agregar NS" : "Agregar partida"}
                       </button>
                       {item.articleCode && (
                         <button
@@ -1868,7 +1891,7 @@ export default function DeliveryOrderCreateForm({
                           className="rounded border border-sky-200 bg-white px-2 py-1 text-xs text-sky-800 hover:bg-sky-50"
                           disabled={saving || stockState?.loading}
                         >
-                          {stockState?.loading ? "Consultando..." : "Actualizar partidas sugeridas"}
+                          {stockState?.loading ? "Consultando..." : isRental ? "Actualizar NS sugeridos" : "Actualizar partidas sugeridas"}
                         </button>
                       )}
                     </div>
@@ -1876,7 +1899,7 @@ export default function DeliveryOrderCreateForm({
                       <div className="mt-2 rounded border border-sky-100 bg-sky-50 px-3 py-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div>
-                            <div className="text-xs font-medium uppercase text-sky-900">Partidas disponibles</div>
+                            <div className="text-xs font-medium uppercase text-sky-900">{isRental ? "NS disponibles" : "Partidas disponibles"}</div>
                             <div className="text-xs text-sky-700">Depósito {stockState?.depositCode || depositCode}</div>
                           </div>
                         </div>

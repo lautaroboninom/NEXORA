@@ -12,9 +12,9 @@ from .helpers import _set_audit_user, exec_returning, exec_void, q, require_role
 
 _PERIOD_UNITS = {"dias", "meses", "anios"}
 _ITEM_STATES = {"pendiente", "ok", "retirado", "no_controlado"}
-_PLAN_ROLES = ["jefe", "jefe_veedor", "admin"]
-_REVISION_ROLES = ["tecnico", "jefe", "jefe_veedor", "admin"]
-_VIEW_ROLES = ["tecnico", "jefe", "jefe_veedor", "admin"]
+_PLAN_ROLES = ["jefe", "jefe_veedor", "admin", "supervisor"]
+_REVISION_ROLES = ["tecnico", "jefe", "jefe_veedor", "admin", "supervisor"]
+_VIEW_ROLES = ["tecnico", "jefe", "jefe_veedor", "admin", "supervisor"]
 
 
 def _uid(request):

@@ -179,7 +179,7 @@ export default function JefePresupuestos() {
     const blob = await getBlob(remitosSalidaPath(ids));
     if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
     const opened = reservedWindow?.open ? reservedWindow.open(blob) : false;
-    if (!opened) throw new Error("El navegador bloqueó la apertura del remito.");
+    if (!opened) throw new Error("El navegador bloqueó la apertura de la orden de salida.");
     return ids;
   }
 
@@ -203,20 +203,20 @@ export default function JefePresupuestos() {
     let shouldPrint = false;
     if (askPrint && reparadoRows.length > 0) {
       shouldPrint = window.confirm(
-        confirmPrintMessage || "Este equipo ya está reparado. ¿Imprimir remito de salida?"
+        confirmPrintMessage || "Este equipo ya está reparado. ¿Imprimir orden de salida?"
       );
     }
 
     let reservedPrintWindow = null;
     if (shouldPrint) {
       reservedPrintWindow = reservePdfWindow({
-        title: reparadoRows.length > 1 ? "Remitos de salida" : "Remito de salida",
+        title: reparadoRows.length > 1 ? "Órdenes de salida" : "Orden de salida",
         message:
           reparadoRows.length > 1
-            ? "Preparando remitos de salida..."
-            : "Preparando remito de salida...",
+            ? "Preparando órdenes de salida..."
+            : "Preparando orden de salida...",
         fallbackMessage:
-          "NEXORA sigue preparando el PDF. Si ya terminó, puede cerrar esta pestaña y reintentar la impresión.",
+          "NEXORA sigue preparando el PDF de la orden de salida. Si ya terminó, puede cerrar esta pestaña y reintentar la impresión.",
       });
     }
 
@@ -272,7 +272,7 @@ export default function JefePresupuestos() {
       setBulkResultMsg("");
       const result = await approveRows([row], {
         askPrint: true,
-        confirmPrintMessage: "Este equipo ya está reparado. ¿Imprimir remito de salida?",
+        confirmPrintMessage: "Este equipo ya está reparado. ¿Imprimir orden de salida?",
       });
       await load();
 
@@ -283,7 +283,7 @@ export default function JefePresupuestos() {
       }
       if (result.printFailures.length > 0) {
         const detail = result.printFailures[0]?.error?.message;
-        setErr(detail || "No se pudo imprimir el remito de salida");
+        setErr(detail || "No se pudo imprimir la orden de salida");
       }
     } catch (e) {
       setErr(e?.message || "No se pudo aprobar el presupuesto");
@@ -329,7 +329,7 @@ export default function JefePresupuestos() {
       const summary = [
         `Total: ${selectedSnapshot.length}.`,
         `Aprobados OK: ${result.approvedIds.length}.`,
-        `Remitos impresos: ${result.printedIds.length}.`,
+        `Órdenes de salida impresas: ${result.printedIds.length}.`,
         `Fallos de aprobación: ${totalApprovalFailures}.`,
         `Fallos de impresión: ${result.printFailures.length}.`,
       ];

@@ -12,6 +12,7 @@ const CLOSED_STATES = new Set([
 const RELEASE_READY_STATES = new Set([
   "reparado",
   "controlado_sin_defecto",
+  "no_se_repara",
 ]);
 
 export function normalizeReleaseValue(value) {
@@ -26,6 +27,7 @@ export function releaseResolutionSuggestion(row = {}) {
   const presupuesto = normalizeReleaseValue(row?.presupuesto_estado);
 
   if (estado === "controlado_sin_defecto") return RESOLUCION.NO_SE_ENCONTRO_FALLA;
+  if (estado === "no_se_repara") return RESOLUCION.NO_REPARADO;
   if (presupuesto === "rechazado") return RESOLUCION.PRESUPUESTO_RECHAZADO;
   if (estado === "reparado") return RESOLUCION.REPARADO;
   return "";
@@ -47,8 +49,6 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
     blockedReason = "Es una venta pendiente de entrega. Completá la entrega de venta desde la hoja de servicio.";
   } else if (CLOSED_STATES.has(estado)) {
     blockedReason = `El equipo ya está en estado ${estadoLabel(estado)}.`;
-  } else if (needsResolution && estado === "controlado_sin_defecto" && !canManageResolution) {
-    blockedReason = "Falta definir la resolución. Debe hacerlo un jefe antes de liberar.";
   } else if (needsResolution && !RELEASE_READY_STATES.has(estado)) {
     blockedReason = "Todavía falta cerrar la reparación o definir una resolución de salida.";
   }

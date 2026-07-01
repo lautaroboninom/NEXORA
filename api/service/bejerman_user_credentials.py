@@ -15,7 +15,7 @@ BEJERMAN_CREDENTIALS_REQUIRED = (
 )
 
 TECHNICAL_ROLES = {"tecnico", "jefe", "jefe_veedor"}
-ADMINISTRATIVE_ROLES = {"admin", "ventas", "recepcion", "cobranzas"}
+ADMINISTRATIVE_ROLES = {"admin", "supervisor", "ventas", "recepcion", "cobranzas"}
 
 
 class BejermanUserCredentialsError(RuntimeError):

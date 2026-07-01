@@ -56,6 +56,28 @@ const TextArea = ({ className = "", ...p }) => (
   <textarea {...p} className={`${FIELD_BASE_CLASS} ${className}`} />
 );
 
+const CollapsibleSection = ({ title, open, onToggle, children }) => (
+  <fieldset className="border rounded p-0">
+    <legend className="ml-2 px-0">
+      <button
+        type="button"
+        className="flex items-center gap-2 px-2 py-1 text-left font-semibold text-gray-900 hover:text-blue-700"
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span
+          aria-hidden="true"
+          className="inline-flex h-5 w-5 items-center justify-center rounded border border-gray-300 text-xs font-bold"
+        >
+          {open ? "-" : "+"}
+        </span>
+        <span>{title}</span>
+      </button>
+    </legend>
+    {open && <div className="p-3 pt-1">{children}</div>}
+  </fieldset>
+);
+
 const TIPO_INGRESO = {
   CLIENTE: "cliente",
   PARTICULAR: "particular",
@@ -275,6 +297,7 @@ export default function NuevoIngreso() {
   const [risPreflightLoading, setRisPreflightLoading] = useState(false);
   const [risPreflightError, setRisPreflightError] = useState("");
   const [bejermanSuggestion, setBejermanSuggestion] = useState(null);
+  const [appliedBejermanSale, setAppliedBejermanSale] = useState(null);
   const [barcodeLoading, setBarcodeLoading] = useState(false);
   const [dupPrompt, setDupPrompt] = useState({ open: false, ingresoId: null, fechaIngreso: null, os: "" });
 
@@ -292,6 +315,19 @@ export default function NuevoIngreso() {
   const nsAutofillSnapshotRef = useRef(null);
   const nsAutoDesiredBrandRef = useRef(null);
   const nsAutoDesiredModelRef = useRef(null);
+  const [expandedSections, setExpandedSections] = useState({
+    cliente: false,
+    equipo: false,
+    ingreso: false,
+  });
+  const collapseDataSections = () =>
+    setExpandedSections({ cliente: false, equipo: false, ingreso: false });
+  const expandSection = (section) => {
+    setExpandedSections((prev) => (prev[section] ? prev : { ...prev, [section]: true }));
+  };
+  const toggleSection = (section) => {
+    setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
 
   // Helpers de clientes
   const clienteKey = (v) => String(v || "").trim().toLowerCase();
@@ -314,6 +350,7 @@ export default function NuevoIngreso() {
 
   function syncClienteFromInputs(rsVal, codVal) {
     const c = resolveCliente(rsVal, codVal);
+    if (rsVal || codVal) expandSection("cliente");
     setForm((f0) => {
       const f = clone(f0);
       f.cliente = {
@@ -546,6 +583,7 @@ export default function NuevoIngreso() {
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
     setBejermanSuggestion(null);
+    setAppliedBejermanSale(null);
     setRisPreflight(null);
     setRisPreflightError("");
     setRisMode("emit");
@@ -556,6 +594,7 @@ export default function NuevoIngreso() {
     nsAutoDesiredBrandRef.current = null;
     nsAutoDesiredModelRef.current = null;
     setEquipoAlquiladoOrigen(false);
+    collapseDataSections();
   };
 
   useEffect(() => {
@@ -606,6 +645,9 @@ export default function NuevoIngreso() {
     }
     const variantePrefill = prefill.variante || prefill.equipo_variante || "";
     if (variantePrefill) setVarianteTxt(variantePrefill);
+    if (prefill.marca_id || prefill.model_id || prefill.tipo_equipo || variantePrefill) {
+      expandSection("equipo");
+    }
     const prefillRentalCustomer = rentalReturnCustomerFromPayload(prefill);
     const prefillAlquilerA = prefill.alquilado ? cleanText(prefill.alquiler_a) : "";
     const prefillClienteNombre = prefillRentalCustomer?.name || prefillAlquilerA || prefill.customer_nombre || "";
@@ -622,6 +664,7 @@ export default function NuevoIngreso() {
     if (prefillClienteNombre) {
       setClienteRsInput(prefillClienteNombre);
       setClienteCodInput(prefillClienteCod);
+      expandSection("cliente");
     }
     if (prefillEsParticular && prefillTienePropietario) {
       setPropietario({
@@ -629,6 +672,7 @@ export default function NuevoIngreso() {
         contacto: prefill.propietario_contacto || "",
         doc: prefill.propietario_doc || "",
       });
+      expandSection("cliente");
     } else {
       setPropietario(PROPIETARIO_VACIO);
     }
@@ -655,6 +699,7 @@ export default function NuevoIngreso() {
     const exists = modelos.some((m) => String(m.id) === String(prefill.model_id));
     if (!exists) return;
     setForm((f0) => ({ ...f0, equipo: { ...f0.equipo, modelo_id: String(prefill.model_id) } }));
+    expandSection("equipo");
     prefillModelAppliedRef.current = true;
     nsAutoDesiredModelRef.current = null;
   }, [modelos]);
@@ -694,9 +739,20 @@ export default function NuevoIngreso() {
         if (res?.kind === "bejerman_sale" && res?.suggestion) {
           clearNsAutofillFields();
           setMgInactiveInfo(null);
-          setBejermanSuggestion(res.suggestion);
+          const suggestion = res.suggestion;
+          setBejermanSuggestion(suggestion);
+          setAppliedBejermanSale(null);
+          const localCustomerId = suggestion?.customer?.local_customer?.id;
+          if (localCustomerId && !(clientes || []).some((c) => Number(c.id) === Number(localCustomerId))) {
+            try {
+              const rows = await getClientes();
+              setClientes(rows || []);
+            } catch {
+              /* no bloquear el autocompletado */
+            }
+          }
+          applyBejermanSuggestionPayload(suggestion, { auto: true });
           setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
-          setNsAutofillInfo("Venta encontrada en Bejerman. Puede aplicar la sugerencia de equipo y decidir el cliente.");
           return;
         }
 
@@ -704,6 +760,12 @@ export default function NuevoIngreso() {
           clearNsAutofillFields();
           setMgInactiveInfo(null);
           setBejermanSuggestion(null);
+          setAppliedBejermanSale(null);
+          setNsAutofillInfo(
+            res?.bejerman_lookup_error
+              ? `No se encontró el equipo local. Bejerman no pudo responder: ${res.bejerman_lookup_error}`
+              : ""
+          );
           setMgLookup({ loading: false, notFound: true, checkedNs: lookupCode });
           return;
         }
@@ -711,7 +773,8 @@ export default function NuevoIngreso() {
         const device = res.device || {};
         const ingreso = res.ingreso || {};
         const flags = res.flags || {};
-        setBejermanSuggestion(null);
+        setBejermanSuggestion(res?.bejerman_sale ? { ...res.bejerman_sale, existingDeviceContext: true } : null);
+        setAppliedBejermanSale(null);
 
         const marcaIdFromDevice = toIntOrNull(device.marca_id);
         const modelIdFromDevice = toIntOrNull(device.model_id);
@@ -870,6 +933,12 @@ export default function NuevoIngreso() {
           (autofillEsParticular && propietarioDoc) ||
           mgInactiveBySale
         );
+        if (shouldAutofillCliente || autofillEsParticular) {
+          expandSection("cliente");
+        }
+        if (marcaIdFromDevice || modelIdFromDevice || tipoFromDevice || varianteFromDevice || tecnicoAutoId) {
+          expandSection("equipo");
+        }
         setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Puede editarlos.` : "");
         setNsAutofillClienteWarning(clienteWarning);
         setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
@@ -899,6 +968,7 @@ export default function NuevoIngreso() {
 
     const tecnicoFromModel = toIntOrNull(match?.tecnico_id);
     if (tecnicoFromModel) setTecnicoId(tecnicoFromModel);
+    expandSection("equipo");
     nsAutoDesiredModelRef.current = null;
   }, [modelos, marcaId]);
 
@@ -943,8 +1013,12 @@ export default function NuevoIngreso() {
         const r = await checkGarantiaFabrica(ns, marcaSel, {
           brand_id: marcaId || form.equipo.marca_id || null,
           model_id: form.equipo.modelo_id || null,
+          company_key: empresaBejerman || "SEPID",
         });
-        if (typeof r?.within_365_days !== "boolean") return;
+        if (typeof r?.within_365_days !== "boolean") {
+          setForm((f) => ({ ...f, equipo: { ...f.equipo, garantia: false } }));
+          return;
+        }
         const enGarantia = r.within_365_days;
         setForm((f) => ({ ...f, equipo: { ...f.equipo, garantia: enGarantia } }));
       } catch {
@@ -952,7 +1026,7 @@ export default function NuevoIngreso() {
       }
     }, 400);
     return () => clearTimeout(h);
-  }, [form.equipo.numero_serie, marcaId, form.equipo.marca_id, form.equipo.modelo_id, marcas]);
+  }, [form.equipo.numero_serie, marcaId, form.equipo.marca_id, form.equipo.modelo_id, marcas, empresaBejerman]);
 
   const tipoEquipoSel = useMemo(() => {
     const m = (modelos || []).find((x) => x.id === Number(form.equipo.modelo_id));
@@ -1150,6 +1224,7 @@ export default function NuevoIngreso() {
   const onNumeroSerieChange = (e) => {
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
     setBejermanSuggestion(null);
+    setAppliedBejermanSale(null);
     setEquipoAlquiladoOrigen(false);
     onChange("equipo.numero_serie")(e);
   };
@@ -1157,6 +1232,7 @@ export default function NuevoIngreso() {
   const onNumeroInternoChange = (e) => {
     setMgInactiveInfo(null);
     setMgLookup((s) => (s.notFound ? { ...s, notFound: false } : s));
+    setAppliedBejermanSale(null);
     setEquipoAlquiladoOrigen(false);
     onChange("equipo.numero_interno")(e);
   };
@@ -1231,9 +1307,35 @@ export default function NuevoIngreso() {
     syncClienteFromInputs(nextRs, nextCod);
   }
 
-  const applyBejermanSuggestion = () => {
-    const s = bejermanSuggestion || {};
+  const applyBejermanCustomerPayload = (s) => {
+    if (s?.existingDeviceContext) return false;
+    const local = s?.customer?.local_customer || s?.customer?.resolution?.local_customer;
+    if (!local?.id) return false;
+    setTipoIngreso(TIPO_INGRESO.CLIENTE);
+    setPropietario(PROPIETARIO_VACIO);
+    setClienteRsInput(local.razon_social || "");
+    setClienteCodInput(local.cod_empresa || "");
+    setForm((prev) => ({
+      ...prev,
+      cliente: {
+        id: local.id,
+        razon_social: local.razon_social || "",
+        cod_empresa: local.cod_empresa || "",
+        telefono: local.telefono || "",
+      },
+    }));
+    expandSection("cliente");
+    return true;
+  };
+
+  const applyBejermanSuggestionPayload = (s, { auto = false } = {}) => {
+    s = s || {};
+    if (s.existingDeviceContext) {
+      setNsAutofillInfo("Venta Bejerman disponible como referencia. Se mantiene el cliente del historial del equipo.");
+      return false;
+    }
     const equipment = s.equipment || {};
+    const highConfidence = equipment.confidence === "high";
     const suggestedMarcaId = toIntOrNull(equipment.marca_id);
     const suggestedModeloId = toIntOrNull(equipment.modelo_id);
     const serial = String(s.serial || form.equipo.numero_serie || "").trim();
@@ -1244,34 +1346,67 @@ export default function NuevoIngreso() {
     setForm((prev) => {
       const next = clone(prev);
       next.equipo.numero_serie = serial;
-      if (suggestedMarcaId) next.equipo.marca_id = String(suggestedMarcaId);
-      next.equipo.modelo_id = modelInCurrentList?.id ? String(modelInCurrentList.id) : "";
+      if (!auto || highConfidence) {
+        if (suggestedMarcaId) next.equipo.marca_id = String(suggestedMarcaId);
+        next.equipo.modelo_id = modelInCurrentList?.id ? String(modelInCurrentList.id) : "";
+      }
       if (typeof s?.warranty?.garantia === "boolean") {
         next.equipo.garantia = s.warranty.garantia;
       }
       return next;
     });
 
-    if (equipment.tipo_equipo) {
+    if ((!auto || highConfidence) && equipment.tipo_equipo) {
       prefillSkipTipoResetRef.current = true;
       setTipoSel(equipment.tipo_equipo);
     }
-    if (suggestedMarcaId) {
+    if ((!auto || highConfidence) && suggestedMarcaId) {
       setMarcaId(suggestedMarcaId);
       setMarcaTxt(equipment.marca || "");
     }
-    setVarianteTxt(equipment.variante || "");
-    nsAutoDesiredBrandRef.current = suggestedMarcaId;
-    nsAutoDesiredModelRef.current = modelInCurrentList?.id ? null : suggestedModeloId;
-    setNsAutofillInfo("Sugerencia Bejerman aplicada. Verifique cliente, motivo y accesorios antes de guardar.");
+    if (!auto || highConfidence) {
+      setVarianteTxt(equipment.variante || "");
+      nsAutoDesiredBrandRef.current = suggestedMarcaId;
+      nsAutoDesiredModelRef.current = modelInCurrentList?.id ? null : suggestedModeloId;
+    }
+    const customerApplied = applyBejermanCustomerPayload(s);
+    if (!auto || highConfidence) {
+      expandSection("equipo");
+    }
+    if (customerApplied || s?.customer?.name) {
+      expandSection("cliente");
+    }
+    const resolutionStatus = s?.customer?.resolution?.status || "";
+    if (auto) {
+      setNsAutofillInfo(
+        highConfidence
+          ? "Datos autocompletados desde venta Bejerman. Verifique motivo y accesorios antes de guardar."
+          : "Venta encontrada en Bejerman. El equipo requiere revisión porque el artículo no tiene mapeo confirmado."
+      );
+      setNsAutofillClienteWarning(
+        customerApplied || !s?.customer?.name
+          ? ""
+          : resolutionStatus === "conflict"
+            ? "El cliente de la venta Bejerman tiene datos ambiguos. Seleccione o revise el cliente antes de guardar."
+            : "El cliente de la venta Bejerman no pudo aplicarse automáticamente. Seleccione un cliente antes de guardar."
+      );
+    } else {
+      setNsAutofillInfo("Sugerencia Bejerman aplicada. Verifique cliente, motivo y accesorios antes de guardar.");
+    }
+    return true;
+  };
+
+  const applyBejermanSuggestion = () => {
+    const suggestion = bejermanSuggestion || {};
+    const applied = applyBejermanSuggestionPayload(suggestion, { auto: false });
+    if (applied) {
+      setAppliedBejermanSale(suggestion);
+      setBejermanSuggestion(null);
+    }
   };
 
   const applyBejermanCustomerSuggestion = () => {
-    const local = bejermanSuggestion?.customer?.local_customer;
-    if (!local?.id) return;
-    setTipoIngreso(TIPO_INGRESO.CLIENTE);
-    setPropietario(PROPIETARIO_VACIO);
-    setClienteCatalogo(local);
+    applyBejermanCustomerPayload(bejermanSuggestion || {});
   };
 
   const printSerialBarcode = async () => {
@@ -1292,7 +1427,7 @@ export default function NuevoIngreso() {
   };
 
   const bejermanSalePayloadForSubmit = () => {
-    const s = bejermanSuggestion;
+    const s = bejermanSuggestion || appliedBejermanSale;
     const serial = (form.equipo.numero_serie || "").trim();
     if (!s || !serial || normalizeSerialKey(s.serial) !== normalizeSerialKey(serial)) return null;
     return {
@@ -1302,7 +1437,12 @@ export default function NuevoIngreso() {
       articleDescription: s.article?.description || "",
       customerCode: s.customer?.code || "",
       customerName: s.customer?.name || "",
+      customerCuit: s.customer?.cuit || "",
       documentLabel: s.document?.label || "",
+      companyKey: s.companyKey || "",
+      comprobanteId: s.document?.comprobanteId || "",
+      cacheSaleItemId: s.cacheSaleItemId || "",
+      syncedAt: s.syncedAt || null,
     };
   };
 
@@ -1445,6 +1585,7 @@ export default function NuevoIngreso() {
             telefono: updated.telefono || prev?.cliente?.telefono || "",
           },
         }));
+        expandSection("cliente");
       }
       await runRisPreflight();
     } catch (error) {
@@ -1512,6 +1653,7 @@ export default function NuevoIngreso() {
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
     setBejermanSuggestion(null);
+    setAppliedBejermanSale(null);
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
     nsAutofillSnapshotRef.current = null;
@@ -1541,7 +1683,7 @@ export default function NuevoIngreso() {
       !!form.garantia_reparacion ||
       !!tecnicoId ||
       accItems.length > 0 ||
-      !!bejermanSuggestion ||
+      !!(bejermanSuggestion || appliedBejermanSale) ||
       !!equipoAlquiladoOrigen
     );
   };
@@ -1586,6 +1728,7 @@ export default function NuevoIngreso() {
         accItems: accItems.map((it) => ({ ...it })),
         tecnicoId,
         bejermanSuggestion,
+        appliedBejermanSale,
       },
     };
     const nextItems = editingItem
@@ -1659,10 +1802,13 @@ export default function NuevoIngreso() {
     setAccItems((editor.accItems || []).map((it) => ({ ...it })));
     setTecnicoId(editor.tecnicoId || null);
     setBejermanSuggestion(editor.bejermanSuggestion || null);
+    setAppliedBejermanSale(editor.appliedBejermanSale || null);
     setEquipoAlquiladoOrigen(!!editor.equipoAlquiladoOrigen);
     setEditingBatchItemId(itemId);
     setRisPreflight(null);
     setRisPreflightError("");
+    expandSection("equipo");
+    expandSection("ingreso");
     setNotice("Editando equipo de la lista. Guarde los cambios para actualizarlo.");
   };
 
@@ -2141,13 +2287,15 @@ export default function NuevoIngreso() {
                   {bejermanSuggestion.serial || "-"}
                 </div>
               </div>
-              <button
-                type="button"
-                className="rounded bg-sky-700 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-800"
-                onClick={applyBejermanSuggestion}
-              >
-                Aplicar equipo
-              </button>
+              {!bejermanSuggestion.existingDeviceContext && (
+                <button
+                  type="button"
+                  className="rounded bg-sky-700 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-800"
+                  onClick={applyBejermanSuggestion}
+                >
+                  Aplicar equipo
+                </button>
+              )}
             </div>
             <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
               <div>
@@ -2159,7 +2307,7 @@ export default function NuevoIngreso() {
                 <div className="text-[11px] font-semibold uppercase text-sky-700">Cliente facturado sugerido</div>
                 <div className="font-semibold">{bejermanSuggestion.customer?.name || "-"}</div>
                 <div className="text-xs text-sky-800">{bejermanSuggestion.customer?.code || "-"}</div>
-                {bejermanSuggestion.customer?.local_customer?.id ? (
+                {bejermanSuggestion.customer?.local_customer?.id && !bejermanSuggestion.existingDeviceContext ? (
                   <button
                     type="button"
                     className="mt-1 rounded border border-sky-300 bg-white px-2 py-1 text-xs font-semibold text-sky-800 hover:bg-sky-100"
@@ -2290,8 +2438,11 @@ export default function NuevoIngreso() {
         </fieldset>
 
         {/* Cliente */}
-        <fieldset className="border rounded p-3">
-          <legend className="px-2 font-semibold">Cliente</legend>
+        <CollapsibleSection
+          title="Cliente"
+          open={expandedSections.cliente}
+          onToggle={() => toggleSection("cliente")}
+        >
           {!clientesPerm && (
             <div className="text-xs text-gray-600 mb-2">No tiene permisos para listar clientes</div>
           )}
@@ -2371,41 +2522,40 @@ export default function NuevoIngreso() {
               El código no corresponde a la razón social seleccionada.
             </div>
           )}
-        </fieldset>
-
-        {isParticularIngreso && (
-          <div className="mt-4 border rounded p-3">
-            <h3 className="font-semibold mb-2">Propietario</h3>
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-4">
-                <label className={FIELD_LABEL_CLASS}>Nombre</label>
-                <Input
-                  value={propietario.nombre}
-                  onChange={(e) => setPropietario((p) => ({ ...p, nombre: e.target.value }))}
-                  placeholder="Nombre del propietario"
-                  required
-                />
-              </div>
-              <div className="md:col-span-4">
-                <label className={FIELD_LABEL_CLASS}>Contacto</label>
-                <Input
-                  value={propietario.contacto}
-                  onChange={(e) => setPropietario((p) => ({ ...p, contacto: e.target.value }))}
-                  placeholder="Contacto (opcional)"
-                />
-              </div>
-              <div className="md:col-span-4">
-                <label className={FIELD_LABEL_CLASS}>CUIT</label>
-                <Input
-                  value={propietario.doc}
-                  onChange={(e) => setPropietario((p) => ({ ...p, doc: e.target.value }))}
-                  placeholder="CUIT"
-                  required
-                />
+          {isParticularIngreso && (
+            <div className="mt-4 border rounded p-3">
+              <h3 className="font-semibold mb-2">Propietario</h3>
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                <div className="md:col-span-4">
+                  <label className={FIELD_LABEL_CLASS}>Nombre</label>
+                  <Input
+                    value={propietario.nombre}
+                    onChange={(e) => setPropietario((p) => ({ ...p, nombre: e.target.value }))}
+                    placeholder="Nombre del propietario"
+                    required
+                  />
+                </div>
+                <div className="md:col-span-4">
+                  <label className={FIELD_LABEL_CLASS}>Contacto</label>
+                  <Input
+                    value={propietario.contacto}
+                    onChange={(e) => setPropietario((p) => ({ ...p, contacto: e.target.value }))}
+                    placeholder="Contacto (opcional)"
+                  />
+                </div>
+                <div className="md:col-span-4">
+                  <label className={FIELD_LABEL_CLASS}>CUIT</label>
+                  <Input
+                    value={propietario.doc}
+                    onChange={(e) => setPropietario((p) => ({ ...p, doc: e.target.value }))}
+                    placeholder="CUIT"
+                    required
+                  />
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </CollapsibleSection>
 
         {/* Empresa Bejerman */}
         <div className="border rounded p-3">
@@ -2424,8 +2574,11 @@ export default function NuevoIngreso() {
         </div>
 
         {/* Equipo */}
-        <fieldset className="border rounded p-3">
-          <legend className="px-2 font-semibold">Equipo</legend>
+        <CollapsibleSection
+          title="Equipo"
+          open={expandedSections.equipo}
+          onToggle={() => toggleSection("equipo")}
+        >
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             {/* Tipo de equipo */}
             <div className="md:col-span-3">
@@ -2491,11 +2644,14 @@ export default function NuevoIngreso() {
               </Select>
             </div>
           </div>
-        </fieldset>
+        </CollapsibleSection>
 
         {/* Ingreso */}
-        <fieldset className="border rounded p-3">
-          <legend className="px-2 font-semibold">Ingreso</legend>
+        <CollapsibleSection
+          title="Ingreso"
+          open={expandedSections.ingreso}
+          onToggle={() => toggleSection("ingreso")}
+        >
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Fecha de ingreso</label>
@@ -2569,7 +2725,7 @@ export default function NuevoIngreso() {
               )}
             </div>
           </div>
-        </fieldset>
+        </CollapsibleSection>
 
         <div className="flex flex-col gap-3 border-t pt-4 md:flex-row md:items-center md:justify-between">
           <div className="text-sm text-gray-600">

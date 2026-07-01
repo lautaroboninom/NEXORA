@@ -1,4 +1,5 @@
 import { fetchWithAuth } from "./api";
+import { isRegisteredNoPdfCode, registeredNoPdfMessage } from "./remitos";
 
 export function openPdfBlob(blob, reservedWindow = null) {
   const url = URL.createObjectURL(blob);
@@ -48,15 +49,35 @@ function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
-function isPdfBytes(bytes) {
-  return (
-    bytes?.length >= 5 &&
-    bytes[0] === 37 &&
-    bytes[1] === 80 &&
-    bytes[2] === 68 &&
-    bytes[3] === 70 &&
-    bytes[4] === 45
-  );
+function hasOnlyPdfPadding(bytes, end) {
+  if (!bytes || end <= 0) return true;
+  let index = 0;
+  if (end >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) {
+    index = 3;
+  }
+  for (; index < end; index += 1) {
+    const value = bytes[index];
+    if (value !== 9 && value !== 10 && value !== 12 && value !== 13 && value !== 32) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pdfBytesFromResponse(bytes) {
+  const marker = [37, 80, 68, 70, 45];
+  const hasMarkerAt = (offset) =>
+    bytes?.length >= offset + marker.length &&
+    marker.every((value, index) => bytes[offset + index] === value);
+
+  if (hasMarkerAt(0)) return bytes;
+  const limit = Math.min(Math.max((bytes?.length || 0) - marker.length, 0), 16);
+  for (let offset = 1; offset <= limit; offset += 1) {
+    if (hasMarkerAt(offset) && hasOnlyPdfPadding(bytes, offset)) {
+      return bytes.subarray(offset);
+    }
+  }
+  return null;
 }
 
 function cacheBustedUrl(url) {
@@ -72,7 +93,11 @@ async function readResponsePayload(response) {
     return response.json().catch(() => ({}));
   }
   const text = await response.text().catch(() => "");
-  return { detail: text };
+  const trimmed = String(text || "").trimStart().toLowerCase();
+  return {
+    detail: text,
+    html: contentType.toLowerCase().includes("html") || trimmed.startsWith("<!doctype") || trimmed.startsWith("<html"),
+  };
 }
 
 function retryDelayFrom(response, payload, attempt) {
@@ -81,6 +106,24 @@ function retryDelayFrom(response, payload, attempt) {
   const retryAfterMs = Number(payload?.retry_after_ms || 0);
   if (retryAfterMs > 0) return retryAfterMs;
   return Math.min(900 + attempt * 250, 2000);
+}
+
+function normalizeLookupText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function isTransientPdfLookupMiss(response, payload) {
+  if (![404, 502, 503, 504].includes(Number(response?.status))) return false;
+  const text = normalizeLookupText(`${payload?.code || ""} ${payload?.detail || ""}`);
+  return (
+    text.includes("remito_document_not_found") ||
+    text.includes("no se encontro el comprobante asociado") ||
+    text.includes("no se encontro el pdf del comprobante") ||
+    text.includes("no se encontro en bejerman un remito")
+  );
 }
 
 function notifyProgress(onProgress, payload) {
@@ -92,11 +135,21 @@ function notifyProgress(onProgress, payload) {
 
 function responseErrorMessage(response, payload, label) {
   const detail = payload?.detail ? String(payload.detail) : "";
+  const code = payload?.code ? String(payload.code) : "";
   if (response.status === 401 || response.status === 403) {
     return `La sesión no tiene permiso para ver este ${label}.`;
   }
+  if (isRegisteredNoPdfCode(code)) {
+    return detail || registeredNoPdfMessage(label);
+  }
   if (response.status === 409) {
     return detail || `El ${label} todavía no está emitido o no tiene referencia de comprobante.`;
+  }
+  if (payload?.html && [502, 503, 504].includes(Number(response.status))) {
+    return `Bejerman no pudo devolver el PDF del ${label} en este momento. Probá de nuevo en unos minutos.`;
+  }
+  if (payload?.html) {
+    return `No se pudo obtener el PDF del ${label}.`;
   }
   return detail || `No se pudo obtener el PDF del ${label}.`;
 }
@@ -127,15 +180,16 @@ export async function waitForPdfBlob(pdfUrl, {
       const response = await fetchWithAuth(cacheBustedUrl(href), {
         method: "GET",
         cache: "no-store",
+        skipBejermanActivity: true,
         ...(controller ? { signal: controller.signal } : {}),
       });
       if (timeout) window.clearTimeout(timeout);
 
       if (response.ok) {
         const buffer = await response.arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-        if (!isPdfBytes(bytes)) {
-          const error = new Error("NEXORA recibió una respuesta que no es un PDF válido.");
+        const bytes = pdfBytesFromResponse(new Uint8Array(buffer));
+        if (!bytes) {
+          const error = new Error(`No se pudo obtener un PDF válido del ${label}. Probá de nuevo en unos minutos.`);
           error.terminal = true;
           throw error;
         }
@@ -156,6 +210,19 @@ export async function waitForPdfBlob(pdfUrl, {
           attempt,
           delayMs: waitMs,
           status: `${label} emitido. Bejerman todavía está preparando el PDF.`,
+          detail: payload?.detail || "NEXORA volverá a consultar automáticamente.",
+        });
+        await delay(waitMs);
+        continue;
+      }
+
+      if (isTransientPdfLookupMiss(response, payload)) {
+        const waitMs = retryDelayFrom(response, payload, attempt);
+        notifyProgress(onProgress, {
+          state: "pending",
+          attempt,
+          delayMs: waitMs,
+          status: `${label} emitido. Bejerman todavía no lo devuelve en la consulta.`,
           detail: payload?.detail || "NEXORA volverá a consultar automáticamente.",
         });
         await delay(waitMs);
@@ -188,6 +255,7 @@ export function openPrintablePdf(blob, {
   documentLabel = title,
   printDelayMs = 700,
   autoRevokeMs = 300000,
+  reservedWindow = null,
 } = {}) {
   if (!(blob instanceof Blob)) return { opened: false, reason: "invalid_blob" };
 
@@ -200,7 +268,7 @@ export function openPrintablePdf(blob, {
   let target = null;
 
   try {
-    target = window.open("", "_blank");
+    target = reservedWindow && !reservedWindow.closed ? reservedWindow : window.open("", "_blank");
     if (!target) {
       revoke();
       return { opened: false, reason: "blocked" };
@@ -346,6 +414,9 @@ export function reservePdfWindow({
   return {
     open(blob) {
       return openPdfBlob(blob, target);
+    },
+    openPrintable(blob, options = {}) {
+      return openPrintablePdf(blob, { ...options, reservedWindow: target });
     },
     openUrl(url) {
       const href = String(url || "").trim();

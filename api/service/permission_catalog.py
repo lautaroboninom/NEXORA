@@ -23,6 +23,7 @@ PERMISSION_CATALOG = [
     {"code": "page.bejerman_purchase_entries", "label": "Ver ingresos de mercadería Bejerman", "type": "page", "group": "Páginas"},
     {"code": "page.recepcion", "label": "Ver espacio de Recepción", "type": "page", "group": "NEXORA"},
     {"code": "page.delivery_orders", "label": "Ver órdenes de entrega", "type": "page", "group": "NEXORA"},
+    {"code": "page.route_sheet", "label": "Ver Hoja de ruta", "type": "page", "group": "NEXORA"},
     {"code": "page.billing", "label": "Ver facturación y remitos pendientes", "type": "page", "group": "NEXORA"},
     {"code": "action.ingreso.create", "label": "Ingresar equipo (crear ingreso)", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.edit_basics", "label": "Editar datos de ingreso", "type": "action", "group": "Ingresos"},
@@ -59,6 +60,9 @@ PERMISSION_CATALOG = [
     {"code": "action.delivery_order.update_remito_location", "label": "Actualizar ubicación de remitos", "type": "action", "group": "Cobranzas"},
     {"code": "action.delivery_order.generate_bejerman_remito", "label": "Generar remitos Bejerman", "type": "action", "group": "Ordenes de entrega"},
     {"code": "action.delivery_order.assign_articles", "label": "Asignar artículos y partidas", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.route_sheet.manage", "label": "Gestionar Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
+    {"code": "action.route_sheet.complete", "label": "Completar paradas de Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
+    {"code": "action.route_sheet.postpone", "label": "Posponer paradas de Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
     {"code": "action.billing.view", "label": "Consultar facturación Bejerman", "type": "action", "group": "Cobranzas"},
     {"code": "action.billing.register_os_invoice", "label": "Registrar factura de OS", "type": "action", "group": "Cobranzas"},
 ]
@@ -75,11 +79,13 @@ def _empty_role_defaults():
 ROLE_DEFAULTS = {
     "tecnico": _empty_role_defaults(),
     "admin": _empty_role_defaults(),
+    "supervisor": _empty_role_defaults(),
     "ventas": _empty_role_defaults(),
     "jefe": {code: True for code in PERMISSION_CODES},
     "jefe_veedor": _empty_role_defaults(),
     "recepcion": _empty_role_defaults(),
     "cobranzas": _empty_role_defaults(),
+    "logistica": _empty_role_defaults(),
 }
 
 
@@ -125,6 +131,7 @@ _grant(
     "page.spare_parts",
     "page.warranty",
     "page.recepcion",
+    "page.route_sheet",
     "page.bejerman_purchase_entries",
     "action.ingreso.create",
     "action.ingreso.edit_basics",
@@ -150,6 +157,8 @@ _grant(
     "action.delivery_order.deliver",
     "action.delivery_order.cancel",
     "action.delivery_order.update_remito_location",
+    "action.route_sheet.manage",
+    "action.route_sheet.complete",
 )
 
 # ventas
@@ -168,6 +177,7 @@ _grant(
     "page.warranty",
     "page.recepcion",
     "page.delivery_orders",
+    "page.route_sheet",
     "page.bejerman_purchase_entries",
     "action.ingreso.create",
     "action.ingreso.edit_basics",
@@ -196,6 +206,7 @@ _grant(
     "action.delivery_order.update_remito_location",
     "action.delivery_order.generate_bejerman_remito",
     "action.delivery_order.assign_articles",
+    "action.route_sheet.manage",
 )
 
 # jefe_veedor
@@ -264,6 +275,7 @@ _grant(
     "page.new_ingreso",
     "page.recepcion",
     "page.delivery_orders",
+    "page.route_sheet",
     "page.bejerman_purchase_entries",
     "action.ingreso.create",
     "action.ingreso.emit_ingress_order",
@@ -278,6 +290,8 @@ _grant(
     "action.delivery_order.update_remito_location",
     "action.delivery_order.generate_bejerman_remito",
     "action.delivery_order.assign_articles",
+    "action.route_sheet.manage",
+    "action.route_sheet.complete",
 )
 
 # cobranzas
@@ -290,6 +304,25 @@ _grant(
     "action.billing.view",
     "action.billing.register_os_invoice",
 )
+
+# logistica
+_grant(
+    "logistica",
+    "page.route_sheet",
+    "action.route_sheet.complete",
+    "action.route_sheet.postpone",
+    "action.delivery_order.deliver",
+)
+
+
+def _set_union_role_defaults(target_role, *source_roles):
+    target = ROLE_DEFAULTS[target_role]
+    for code in PERMISSION_CODES:
+        target[code] = any(ROLE_DEFAULTS[source].get(code, False) for source in source_roles)
+
+
+_set_union_role_defaults("supervisor", "admin", "ventas", "recepcion")
+_grant("supervisor", "action.route_sheet.postpone")
 
 
 def normalize_role(role):

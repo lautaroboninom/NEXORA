@@ -30,6 +30,7 @@ REQUIRED_COLUMNS = {
         "ingreso_id",
         "device_id",
         "article_code",
+        "article_requires_partida",
         "quantity",
         "unit_price",
         "discount_percent",
@@ -38,6 +39,8 @@ REQUIRED_COLUMNS = {
     "delivery_order_item_partidas": {
         "id",
         "order_item_id",
+        "ingreso_id",
+        "device_id",
         "partida",
         "assigned_quantity",
     },
@@ -157,7 +160,7 @@ class Command(BaseCommand):
                       CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental','demo')),
                       CONSTRAINT chk_delivery_orders_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
                       CONSTRAINT chk_delivery_orders_price_currency CHECK (price_currency IN ('ARS','USD')),
-                      CONSTRAINT chk_delivery_orders_status CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado')),
+                      CONSTRAINT chk_delivery_orders_status CHECK (status IN ('pendiente_stock','pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado')),
                       CONSTRAINT chk_delivery_orders_priority CHECK (priority IN ('normal','urgente')),
                       CONSTRAINT chk_delivery_orders_remito_location CHECK (remito_location IS NULL OR remito_location IN ('recepcion','oficina'))
                     )
@@ -236,7 +239,7 @@ class Command(BaseCommand):
                     """
                     ALTER TABLE delivery_orders
                     ADD CONSTRAINT chk_delivery_orders_status
-                    CHECK (status IN ('pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado'))
+                    CHECK (status IN ('pendiente_stock','pendiente_armado','armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado','cancelado'))
                     """
                 )
 
@@ -249,6 +252,7 @@ class Command(BaseCommand):
                       device_id                 INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL,
                       article_code              TEXT NULL,
                       article_name              TEXT NULL,
+                      article_requires_partida  BOOLEAN NULL,
                       description               TEXT NOT NULL DEFAULT '',
                       quantity                  NUMERIC NOT NULL DEFAULT 1,
                       unit_price                NUMERIC NULL,
@@ -279,6 +283,12 @@ class Command(BaseCommand):
                     """
                     ALTER TABLE delivery_order_items
                     ADD COLUMN IF NOT EXISTS device_id INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD COLUMN IF NOT EXISTS article_requires_partida BOOLEAN NULL
                     """
                 )
                 cur.execute(
@@ -341,6 +351,8 @@ class Command(BaseCommand):
                     CREATE TABLE IF NOT EXISTS delivery_order_item_partidas (
                       id                        TEXT PRIMARY KEY,
                       order_item_id             TEXT NOT NULL REFERENCES delivery_order_items(id) ON DELETE CASCADE,
+                      ingreso_id                INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL,
+                      device_id                 INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL,
                       partida                   TEXT NOT NULL,
                       assigned_quantity         NUMERIC NOT NULL DEFAULT 1,
                       partida_expiration_date   DATE NULL,
@@ -352,6 +364,18 @@ class Command(BaseCommand):
                       updated_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       CONSTRAINT chk_delivery_order_item_partidas_quantity CHECK (assigned_quantity > 0)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_item_partidas
+                    ADD COLUMN IF NOT EXISTS ingreso_id INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_item_partidas
+                    ADD COLUMN IF NOT EXISTS device_id INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL
                     """
                 )
 
@@ -388,6 +412,18 @@ class Command(BaseCommand):
                     """
                     ALTER TABLE bejerman_remito_groups
                     ADD COLUMN IF NOT EXISTS company_key TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS source_created_by_user_id TEXT NULL
                     """
                 )
                 cur.execute(
@@ -489,6 +525,8 @@ class Command(BaseCommand):
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_ingreso ON delivery_order_items(ingreso_id) WHERE ingreso_id IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_device ON delivery_order_items(device_id) WHERE device_id IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_item ON delivery_order_item_partidas(order_item_id, sort_order, created_at)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_ingreso ON delivery_order_item_partidas(ingreso_id) WHERE ingreso_id IS NOT NULL",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_device ON delivery_order_item_partidas(device_id) WHERE device_id IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_events_order ON delivery_order_events(order_id, created_at)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC)",

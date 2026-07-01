@@ -11,8 +11,11 @@ import {
   postCerrarReparacion,
   postHabilitarReparacionCotizacion,
   postMarcarControladoSinDefecto,
+  postMarcarNoSeRepara,
   postMarcarParaReparar,
   postMarcarReparado,
+  postQuitarEstadoFinalReparacion,
+  postQuitarReparar,
 } from "../../../lib/api";
 import { isSaleTicketState } from "../../../lib/ui-helpers";
 
@@ -93,6 +96,10 @@ export default function DiagnosticoTab({
   const [savingAll, setSavingAll] = useState(false);
   const [savingResol, setSavingResol] = useState(false);
   const [marcandoReparar, setMarcandoReparar] = useState(false);
+  const [quitandoReparar, setQuitandoReparar] = useState(false);
+  const [marcandoReparado, setMarcandoReparado] = useState(false);
+  const [marcandoNoSeRepara, setMarcandoNoSeRepara] = useState(false);
+  const [quitandoEstadoFinal, setQuitandoEstadoFinal] = useState(false);
   const [habilitandoReparacion, setHabilitandoReparacion] = useState(false);
   const [serialCambio, setSerialCambio] = useState("");
   const [fajaGarantiaInput, setFajaGarantiaInput] = useState(data?.faja_garantia || "");
@@ -104,6 +111,15 @@ export default function DiagnosticoTab({
 
   const estadoLower = (data?.estado || "").toLowerCase();
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
+  const estadosCierreSalida = new Set([
+    ESTADO.LIBERADO,
+    ESTADO.ENTREGADO,
+    ESTADO.BAJA,
+    ESTADO.ALQUILADO,
+    ESTADO.VENDIDO_PENDIENTE_ENTREGA,
+    ESTADO.VENDIDO_ENTREGADO,
+  ].map((value) => String(value || "").toLowerCase()));
+  const isEstadoCierreSalida = estadosCierreSalida.has(estadoLower) || isSaleTicketState(estadoLower);
   const estadosBloqueadosDiag = new Set([
     ESTADO.REPARADO,
     ESTADO.LIBERADO,
@@ -111,24 +127,28 @@ export default function DiagnosticoTab({
     ESTADO.BAJA,
     ESTADO.ALQUILADO,
     ESTADO.CONTROLADO_SIN_DEFECTO,
+    ESTADO.NO_SE_REPARA,
+    "controlado_sin_defecto",
+    "no_se_repara",
     ESTADO.VENDIDO_PENDIENTE_ENTREGA,
     ESTADO.VENDIDO_ENTREGADO,
   ].map((value) => String(value || "").toLowerCase()));
   const isEstadoBloqueadoDiag = estadosBloqueadosDiag.has(estadoLower);
-  const estadosBloqueadosReparado = new Set([
-    ESTADO.ENTREGADO,
-    ESTADO.BAJA,
-    ESTADO.ALQUILADO,
-    ESTADO.CONTROLADO_SIN_DEFECTO,
-    ESTADO.VENDIDO_PENDIENTE_ENTREGA,
-    ESTADO.VENDIDO_ENTREGADO,
-  ].map((value) => String(value || "").toLowerCase()));
-  const isEstadoBloqueadoReparado = estadosBloqueadosReparado.has(estadoLower);
+  const isEstadoBloqueadoReparado = isEstadoCierreSalida;
+  const isReparadoActual = estadoLower === String(ESTADO.REPARADO || "reparado").toLowerCase();
+  const isControladoSinDefectoActual = estadoLower === "controlado_sin_defecto"
+    || estadoLower === String(ESTADO.CONTROLADO_SIN_DEFECTO || "").toLowerCase();
+  const isNoSeReparaActual = estadoLower === "no_se_repara"
+    || estadoLower === String(ESTADO.NO_SE_REPARA || "").toLowerCase();
+  const accionTecnicaOcupada = savingAll || marcandoReparado || marcandoNoSeRepara || quitandoEstadoFinal;
   const reparacionBloqueadaCotizacion = !!isCotizacion && !permiteReparacion;
   const puedeReparar = !!canAutorizarReparar
     && estadoLower !== "reparar"
     && !isEstadoBloqueadoDiag
     && !reparacionBloqueadaCotizacion;
+  const puedeQuitarReparar = !!canAutorizarReparar
+    && estadoLower === "reparar"
+    && !isEstadoCierreSalida;
   const sinTecnicoAsignado = !data?.asignado_a;
 
   useEffect(() => {
@@ -261,6 +281,65 @@ export default function DiagnosticoTab({
     }
   }
 
+  async function marcarReparado() {
+    try {
+      setMarcandoReparado(true);
+      const resp = await postMarcarReparado(id);
+      await refreshIngreso();
+      if (typeof setShowReparadoToast === "function") {
+        setShowReparadoToast(true);
+        setTimeout(() => setShowReparadoToast(false), 2000);
+      }
+      if (resp && resp.auto_moved) {
+        const movedMsg = `Marcado como reparado. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || "Estantería de Alquiler"}`;
+        setToastMsg(movedMsg);
+        setTimeout(() => setToastMsg(""), 3000);
+      }
+      setErr("");
+    } catch (e) {
+      setErr(e?.message || "No se pudo marcar como reparado");
+    } finally {
+      setMarcandoReparado(false);
+    }
+  }
+
+  async function marcarNoSeRepara() {
+    try {
+      setMarcandoNoSeRepara(true);
+      await postMarcarNoSeRepara(id);
+      await refreshIngreso();
+      setToastMsg("Marcado como no se repara");
+      setTimeout(() => setToastMsg(""), 3000);
+      setErr("");
+    } catch (e) {
+      setErr(e?.message || "No se pudo marcar como no se repara");
+    } finally {
+      setMarcandoNoSeRepara(false);
+    }
+  }
+
+  async function quitarEstadoFinalReparacion() {
+    const estadoAntes = estadoLower;
+    const labels = {
+      reparado: "reparado",
+      controlado_sin_defecto: "controlado sin defecto",
+      no_se_repara: "no se repara",
+    };
+    try {
+      setQuitandoEstadoFinal(true);
+      const resp = await postQuitarEstadoFinalReparacion(id);
+      await refreshIngreso();
+      const nextEstado = String(resp?.estado || "").replaceAll("_", " ") || "diagnóstico";
+      setToastMsg(`Quitado ${labels[estadoAntes] || "estado final"}. La OS vuelve a ${nextEstado}`);
+      setTimeout(() => setToastMsg(""), 3000);
+      setErr("");
+    } catch (e) {
+      setErr(e?.message || "No se pudo quitar el estado final");
+    } finally {
+      setQuitandoEstadoFinal(false);
+    }
+  }
+
   async function marcarParaReparar() {
     try {
       setErr("");
@@ -276,6 +355,22 @@ export default function DiagnosticoTab({
       setErr(e?.message || "No se pudo marcar para reparar");
     } finally {
       setMarcandoReparar(false);
+    }
+  }
+
+  async function quitarReparar() {
+    try {
+      setErr("");
+      setQuitandoReparar(true);
+      const resp = await postQuitarReparar(id);
+      await refreshIngreso();
+      const nextEstado = String(resp?.estado || "").replaceAll("_", " ") || "diagnosticado";
+      setToastMsg(`Quitado reparar. La OS vuelve a ${nextEstado}`);
+      setTimeout(() => setToastMsg(""), 3000);
+    } catch (e) {
+      setErr(e?.message || "No se pudo quitar reparar");
+    } finally {
+      setQuitandoReparar(false);
     }
   }
 
@@ -497,46 +592,54 @@ export default function DiagnosticoTab({
               >
                 {savingResol ? "Guardando..." : "Guardar resolución"}
               </button>
+
+              {puedeQuitarReparar ? (
+                <button
+                  className="border border-amber-600 bg-white text-amber-700 px-3 py-2 rounded disabled:opacity-60"
+                  disabled={quitandoReparar}
+                  onClick={quitarReparar}
+                  type="button"
+                >
+                  {quitandoReparar ? "Guardando..." : "Quitar reparar"}
+                </button>
+              ) : null}
             </>
           ) : null}
 
           {(typeof canMarkReparado === "boolean" ? canMarkReparado : actAsTech) && !isEstadoBloqueadoReparado ? (
             <>
-              {!isEstadoBloqueadoDiag ? (
-                <button
-                  className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
-                  onClick={marcarControladoSinDefecto}
-                  type="button"
-                >
-                  {savingAll ? "Guardando..." : "Controlado sin defecto"}
-                </button>
-              ) : null}
+              <button
+                className={`${isReparadoActual ? "border border-emerald-600 bg-white text-emerald-700" : "bg-emerald-600 text-white"} px-3 py-2 rounded disabled:opacity-60`}
+                disabled={accionTecnicaOcupada}
+                onClick={isReparadoActual ? quitarEstadoFinalReparacion : marcarReparado}
+                type="button"
+              >
+                {isReparadoActual
+                  ? (quitandoEstadoFinal ? "Guardando..." : "Quitar reparado")
+                  : (marcandoReparado ? "Guardando..." : "Reparado")}
+              </button>
 
-              {!reparacionBloqueadaCotizacion ? (
-                <button
-                  className="bg-emerald-600 text-white px-3 py-2 rounded"
-                  onClick={async () => {
-                    try {
-                      const resp = await postMarcarReparado(id);
-                      await refreshIngreso();
-                      if (typeof setShowReparadoToast === "function") {
-                        setShowReparadoToast(true);
-                        setTimeout(() => setShowReparadoToast(false), 2000);
-                      }
-                      if (resp && resp.auto_moved) {
-                        const movedMsg = `Marcado como reparado. Movido a ${resp.ubicacion_nombre || resp.auto_moved_to || "Estantería de Alquiler"}`;
-                        setToastMsg(movedMsg);
-                        setTimeout(() => setToastMsg(""), 3000);
-                      }
-                    } catch (e) {
-                      setErr(e?.message || "No se pudo marcar como reparado");
-                    }
-                  }}
-                  type="button"
-                >
-                  Marcar reparado
-                </button>
-              ) : null}
+              <button
+                className={`${isControladoSinDefectoActual ? "border border-blue-600 bg-white text-blue-700" : "bg-blue-600 text-white"} px-3 py-2 rounded disabled:opacity-60`}
+                disabled={accionTecnicaOcupada}
+                onClick={isControladoSinDefectoActual ? quitarEstadoFinalReparacion : marcarControladoSinDefecto}
+                type="button"
+              >
+                {isControladoSinDefectoActual
+                  ? (quitandoEstadoFinal ? "Guardando..." : "Quitar controlado sin defecto")
+                  : (savingAll ? "Guardando..." : "Controlado sin defecto")}
+              </button>
+
+              <button
+                className={`${isNoSeReparaActual ? "border border-gray-700 bg-white text-gray-800" : "bg-gray-700 text-white"} px-3 py-2 rounded disabled:opacity-60`}
+                disabled={accionTecnicaOcupada}
+                onClick={isNoSeReparaActual ? quitarEstadoFinalReparacion : marcarNoSeRepara}
+                type="button"
+              >
+                {isNoSeReparaActual
+                  ? (quitandoEstadoFinal ? "Guardando..." : "Quitar no se repara")
+                  : (marcandoNoSeRepara ? "Guardando..." : "No se repara")}
+              </button>
             </>
           ) : null}
         </div>

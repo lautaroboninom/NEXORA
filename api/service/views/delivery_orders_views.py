@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from html import escape
+from urllib.parse import quote
 
 from django.db import connection
 from django.http import HttpResponse
@@ -13,10 +12,13 @@ from rest_framework.views import APIView
 from ..drive_delivery_sync import DriveDeliverySyncError, sync_delivery_orders_to_drive
 from ..permissions import MappedPermissionGuard
 from ..pdf import render_remito_salida_pdf
+from ..bejerman_documents import cobranzas_remito_pdf_metadata, retry_after_header_value
+from ..bejerman_sdk import decode_document_id
 from ..bejerman_delivery import (
     BillingError,
     generate_bejerman_remito,
     get_delivery_order_invoice_pdf,
+    get_delivery_order_remito_pdf,
     get_facturacion_pdf,
     get_remito_group_pdf,
     list_bejerman_article_stock,
@@ -26,6 +28,9 @@ from ..bejerman_delivery import (
     list_facturacion_from_bejerman,
     list_remitos_from_bejerman,
     list_rental_available_equipment,
+    registered_remito_no_pdf_error,
+    resolve_registered_ingreso_remito_for_document_id,
+    resolve_remito_group_for_document_id,
 )
 from ..delivery_orders import (
     DeliveryOrderError,
@@ -36,6 +41,7 @@ from ..delivery_orders import (
     list_remito_history,
     mark_delivered,
     mark_invoiced,
+    mark_not_billable,
     mark_prepared,
     update_delivery_order,
     update_item_article,
@@ -48,6 +54,7 @@ from ..service_order_billing import (
     register_service_order_invoice,
     render_service_order_billing_pdf,
 )
+from .pdf_wait_pages import render_bejerman_pdf_wait_page
 
 
 def _actor_id(request):
@@ -65,7 +72,7 @@ def _error_response(exc: Exception):
             status=getattr(exc, "status_code", 400) or 400,
         )
         if retry_after_ms:
-            response["Retry-After"] = str(max(1, (int(retry_after_ms) + 999) // 1000))
+            response["Retry-After"] = retry_after_header_value(retry_after_ms)
         return response
     raise exc
 
@@ -114,8 +121,8 @@ class DeliveryOrderDriveSyncView(APIView):
 
     def post(self, request):
         role = str(getattr(request.user, "rol", "") or "").strip().lower()
-        if role not in {"jefe", "admin", "ventas"}:
-            raise PermissionDenied("Solo jefe, admin o ventas pueden sincronizar órdenes de entrega con Google Drive.")
+        if role not in {"jefe", "admin", "supervisor", "ventas"}:
+            raise PermissionDenied("Solo jefe, admin, supervisor o ventas pueden sincronizar órdenes de entrega con Google Drive.")
         try:
             return Response(sync_delivery_orders_to_drive())
         except DriveDeliverySyncError as exc:
@@ -129,7 +136,7 @@ class DeliveryOrderDetailView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, order_id):
         try:
-            return Response(get_delivery_order(order_id))
+            return Response(get_delivery_order(order_id, actor_user_id=_actor_id(request), refresh_article_flags=True))
         except Exception as exc:
             return _error_response(exc)
 
@@ -184,6 +191,15 @@ class DeliveryOrderInvoicedView(DeliveryOrderPermissionMixin, APIView):
     def post(self, request, order_id):
         try:
             return Response(mark_invoiced(order_id, _actor_id(request), (request.data or {}).get("invoiceNumber")))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class DeliveryOrderNotBillableView(DeliveryOrderPermissionMixin, APIView):
+
+    def post(self, request, order_id):
+        try:
+            return Response(mark_not_billable(order_id, _actor_id(request), (request.data or {}).get("note")))
         except Exception as exc:
             return _error_response(exc)
 
@@ -354,155 +370,11 @@ def _remito_print_document_type(group_id: str) -> str:
     return str(profile.get("type") or summary.get("comprobanteTipo") or row[0] or "").strip().upper()
 
 
-def _remito_print_wait_page(group_id: str, document_type: str | None = None) -> str:
-    pdf_url = f"/api/ordenes-entrega/remito-bejerman/{group_id}/pdf/"
+def _remito_print_wait_page(group_id: str, document_type: str | None = None, *, pdf_url_override: str = "") -> str:
+    pdf_url = str(pdf_url_override or "").strip() or f"/api/ordenes-entrega/remito-bejerman/{group_id}/pdf/"
     clean_type = str(document_type or "").strip().upper()
     document_name = f"remito {clean_type}" if clean_type else "remito"
-    return f"""<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Remito Bejerman</title>
-  <style>
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #111827; }}
-    main {{ width: min(680px, calc(100vw - 32px)); padding: 32px; background: white; border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 18px 50px rgba(17, 24, 39, .08); text-align: center; }}
-    h1 {{ margin: 0 0 12px; font-size: 24px; }}
-    p {{ line-height: 1.55; }}
-    .spinner {{ display: inline-block; width: 30px; height: 30px; margin-bottom: 14px; border: 3px solid #bae6fd; border-top-color: #0369a1; border-radius: 999px; animation: spin .8s linear infinite; }}
-    .detail {{ margin-top: 8px; color: #4b5563; font-size: 14px; }}
-    .actions {{ display: none; gap: 12px; flex-wrap: wrap; margin-top: 20px; }}
-    .actions.visible {{ display: flex; justify-content: center; }}
-    button, a {{ border: 1px solid #9ca3af; border-radius: 8px; background: #111827; color: white; padding: 10px 14px; font: inherit; text-decoration: none; cursor: pointer; }}
-    a {{ background: white; color: #111827; }}
-    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-  </style>
-</head>
-<body>
-  <main>
-    <span class="spinner" aria-hidden="true"></span>
-    <h1>Preparando {escape(document_name)}</h1>
-    <p id="status">Esperando el PDF emitido por Bejerman...</p>
-    <p id="detail" class="detail">Esta pestaña se reemplazará por el PDF cuando esté disponible.</p>
-    <div id="actions" class="actions">
-      <button id="retry" type="button">Reintentar</button>
-      <a href="{escape(pdf_url)}" target="_self">Abrir PDF directo</a>
-      <button id="close" type="button">Cerrar pestaña</button>
-    </div>
-  </main>
-  <script>
-    const pdfUrl = {json.dumps(pdf_url)};
-    const documentName = {json.dumps(document_name)};
-    const statusEl = document.getElementById('status');
-    const detailEl = document.getElementById('detail');
-    const actionsEl = document.getElementById('actions');
-    const retryEl = document.getElementById('retry');
-    const closeEl = document.getElementById('close');
-    let attempts = 0;
-
-    function isPdf(bytes) {{
-      return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 && bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
-    }}
-
-    function showActions(visible) {{
-      actionsEl.classList.toggle('visible', visible);
-    }}
-
-    function fail(message, detail) {{
-      statusEl.textContent = message;
-      detailEl.textContent = detail || 'Puede reintentar o volver a la pantalla de órdenes.';
-      showActions(true);
-    }}
-
-    function retryDelayFrom(response, payload) {{
-      const retryAfter = Number(response.headers.get('Retry-After') || 0);
-      if (retryAfter > 0) return retryAfter * 1000;
-      const retryAfterMs = Number(payload && payload.retry_after_ms || 0);
-      if (retryAfterMs > 0) return retryAfterMs;
-      return Math.min(900 + attempts * 250, 2000);
-    }}
-
-    async function readResponsePayload(response) {{
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('application/json')) {{
-        return await response.json().catch(() => ({{}}));
-      }}
-      const text = await response.text().catch(() => '');
-      return {{ detail: text }};
-    }}
-
-    function scheduleNext(delayMs) {{
-      window.setTimeout(pollPdf, Math.max(1000, Number(delayMs) || 1500));
-    }}
-
-    async function pollPdf() {{
-      attempts += 1;
-      showActions(false);
-      statusEl.textContent = attempts === 1
-        ? 'Buscando el PDF del ' + documentName + ' emitido por Bejerman...'
-        : 'El ' + documentName + ' ya fue emitido. Esperando PDF...';
-      detailEl.textContent = 'Consultando Bejerman sin bloquear NEXORA.';
-
-      try {{
-        const separator = pdfUrl.includes('?') ? '&' : '?';
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 25000);
-        const response = await fetch(pdfUrl + separator + 't=' + Date.now(), {{
-          cache: 'no-store',
-          credentials: 'same-origin',
-          signal: controller.signal,
-        }});
-        window.clearTimeout(timeout);
-
-        if (response.ok) {{
-          const buffer = await response.arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          if (isPdf(bytes)) {{
-            const blob = new Blob([bytes], {{ type: 'application/pdf' }});
-            window.location.replace(URL.createObjectURL(blob));
-            return;
-          }}
-          fail('NEXORA recibió una respuesta que no es un PDF válido.', 'Reintente la impresión desde esta pestaña.');
-          return;
-        }}
-
-        const payload = await readResponsePayload(response);
-        const detail = payload && payload.detail ? String(payload.detail) : '';
-
-        if (response.status === 202) {{
-          statusEl.textContent = 'El ' + documentName + ' está emitido. Bejerman todavía está preparando el PDF.';
-          detailEl.textContent = detail || 'Esperando la disponibilidad del archivo para imprimir.';
-          scheduleNext(retryDelayFrom(response, payload));
-          return;
-        }}
-        if (response.status === 401 || response.status === 403) {{
-          fail('Tu sesión no tiene permiso para ver este remito.');
-          return;
-        }}
-        if (response.status === 409) {{
-          fail(detail || 'No se pudo preparar el PDF del remito.');
-          return;
-        }}
-        fail(detail || 'No se pudo obtener el PDF del remito.', 'Reintente la impresión. Si el problema persiste, revise el estado de Bejerman.');
-        return;
-      }} catch (error) {{
-        detailEl.textContent = error && error.name === 'AbortError'
-          ? 'La consulta del PDF tardó demasiado. Se reintentará automáticamente.'
-          : 'No se pudo consultar el PDF en este intento. Se reintentará automáticamente.';
-      }}
-
-      scheduleNext(Math.min(900 + attempts * 250, 2000));
-    }}
-
-    retryEl.addEventListener('click', () => {{
-      attempts = 0;
-      void pollPdf();
-    }});
-    closeEl.addEventListener('click', () => window.close());
-    void pollPdf();
-  </script>
-</body>
-</html>"""
+    return render_bejerman_pdf_wait_page(pdf_url=pdf_url, document_name=document_name)
 
 
 class DeliveryOrderBejermanRemitoPrintView(DeliveryOrderPermissionMixin, APIView):
@@ -513,6 +385,40 @@ class DeliveryOrderBejermanRemitoPrintView(DeliveryOrderPermissionMixin, APIView
             return Response({"detail": "Remito inválido."}, status=400)
         return HttpResponse(
             _remito_print_wait_page(normalized_group_id, _remito_print_document_type(normalized_group_id)),
+            content_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+class DeliveryOrderRemitoPdfView(DeliveryOrderPermissionMixin, APIView):
+
+    def get(self, request, order_id):
+        try:
+            bytes_, content_type, filename = get_delivery_order_remito_pdf(order_id, actor_user_id=_actor_id(request))
+        except Exception as exc:
+            return _error_response(exc)
+        response = HttpResponse(bytes_, content_type=content_type or "application/pdf")
+        response["Content-Disposition"] = f'inline; filename="{filename}"'
+        return response
+
+
+class DeliveryOrderRemitoPrintView(DeliveryOrderPermissionMixin, APIView):
+
+    def get(self, request, order_id):
+        normalized_order_id = str(order_id or "").strip()
+        if not normalized_order_id:
+            return Response({"detail": "Orden inválida."}, status=400)
+        try:
+            order = get_delivery_order(normalized_order_id, include_events=False)
+        except Exception as exc:
+            return _error_response(exc)
+        document_type = str(order.get("remitoNumber") or "").strip().split(" ", 1)[0].upper()
+        return HttpResponse(
+            _remito_print_wait_page(
+                "",
+                document_type,
+                pdf_url_override=f"/api/ordenes-entrega/{quote(normalized_order_id, safe='')}/remito/pdf/",
+            ),
             content_type="text/html; charset=utf-8",
             headers={"Cache-Control": "no-store"},
         )
@@ -565,23 +471,69 @@ class CobranzasRemitosView(DeliveryOrderPermissionMixin, APIView):
             return _error_response(exc)
 
 
+def _cobranzas_remito_pdf_url(document_id: str, request) -> str:
+    metadata = cobranzas_remito_pdf_metadata(
+        document_id,
+        customer_code=request.query_params.get("customerCode") or request.query_params.get("clienteCodigo"),
+        company_key=request.query_params.get("companyKey") or request.query_params.get("company_key"),
+    )
+    return metadata.get("pdfUrl") or f"/api/cobranzas/remitos/{quote(str(document_id or '').strip(), safe='')}/pdf/"
+
+
+def _cobranzas_remito_document_type(document_id: str) -> str:
+    try:
+        decoded = decode_document_id(document_id)
+    except Exception:
+        return ""
+    return str(decoded.get("t") or decoded.get("type") or "").strip().upper()
+
+
 class CobranzasRemitoPdfView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, document_id):
         customer_code = request.query_params.get("customerCode") or request.query_params.get("clienteCodigo")
         company_key = request.query_params.get("companyKey") or request.query_params.get("company_key")
         try:
-            bytes_, content_type = get_facturacion_pdf(
-                customer_code,
-                document_id,
-                actor_user_id=_actor_id(request),
-                company_key=company_key,
-            )
+            local_group = resolve_remito_group_for_document_id(document_id, company_key=company_key)
+            if local_group:
+                bytes_, content_type, filename = get_remito_group_pdf(local_group["id"], actor_user_id=_actor_id(request))
+            else:
+                registered_remito = resolve_registered_ingreso_remito_for_document_id(document_id, company_key=company_key)
+                if registered_remito:
+                    raise registered_remito_no_pdf_error(
+                        registered_remito.get("remito_number") or registered_remito.get("manual_remito_number")
+                    )
+                bytes_, content_type = get_facturacion_pdf(
+                    customer_code,
+                    document_id,
+                    interactive=True,
+                    actor_user_id=_actor_id(request),
+                    company_key=company_key,
+                )
+                filename = f"remito-{document_id}.pdf"
         except Exception as exc:
             return _error_response(exc)
         response = HttpResponse(bytes_, content_type=content_type or "application/pdf")
-        response["Content-Disposition"] = f'inline; filename="remito-{document_id}.pdf"'
+        response["Content-Disposition"] = f'inline; filename="{filename}"'
         return response
+
+
+class CobranzasRemitoPrintView(DeliveryOrderPermissionMixin, APIView):
+
+    def get(self, request, document_id):
+        normalized_document_id = str(document_id or "").strip()
+        if not normalized_document_id:
+            return Response({"detail": "Remito inválido."}, status=400)
+        document_type = _cobranzas_remito_document_type(normalized_document_id)
+        return HttpResponse(
+            _remito_print_wait_page(
+                "",
+                document_type,
+                pdf_url_override=_cobranzas_remito_pdf_url(normalized_document_id, request),
+            ),
+            content_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 class DeliveryOrderInvoicePdfView(DeliveryOrderPermissionMixin, APIView):
@@ -636,6 +588,7 @@ __all__ = [
     "DeliveryOrderPreparedView",
     "DeliveryOrderDeliveredView",
     "DeliveryOrderInvoicedView",
+    "DeliveryOrderNotBillableView",
     "DeliveryOrderCancelView",
     "DeliveryOrderRemitoLocationView",
     "DeliveryOrderItemArticleView",

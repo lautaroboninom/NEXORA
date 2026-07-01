@@ -29,11 +29,15 @@ SYNC_TYPE_STOCK_STR_TO_STC = "stock_str_to_stc"
 SYNC_TYPE_STOCK_STR_TO_VAL = "stock_str_to_val"
 SYNC_TYPE_STOCK_STR_TO_STCL = "stock_str_to_stcl"  # Alias legacy previo a STC.
 SYNC_TYPE_STOCK_EXIT_RTS = "stock_exit_rts"  # Nombre legacy; la salida física la gestiona Portal.
+SYNC_TYPE_STOCK_TO_DESGUACE = "stock_to_desguace"
+SYNC_TYPE_STOCK_FROM_DESGUACE = "stock_from_desguace"
 ARTICLE_RECONCILE_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STL,
     SYNC_TYPE_STOCK_STR_TO_STC,
     SYNC_TYPE_STOCK_STR_TO_VAL,
     SYNC_TYPE_STOCK_STR_TO_STCL,
+    SYNC_TYPE_STOCK_TO_DESGUACE,
+    SYNC_TYPE_STOCK_FROM_DESGUACE,
 )
 TARGET_STOCK_RESTORE_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STL,
@@ -109,6 +113,26 @@ def _stock_document_date() -> str:
     return timezone.localdate().isoformat()
 
 
+def _stock_baja_target_deposit() -> str:
+    return str(_setting("BEJERMAN_STOCK_BAJA_TARGET_DEPOSIT", "DES") or "DES").strip() or "DES"
+
+
+def _stock_baja_causa_emision() -> str:
+    return str(_setting("BEJERMAN_STOCK_BAJA_CAUSA_EMISION", "DES") or "DES").strip() or "DES"
+
+
+def _stock_alta_source_deposit() -> str:
+    return str(_setting("BEJERMAN_STOCK_ALTA_SOURCE_DEPOSIT", "DES") or "DES").strip() or "DES"
+
+
+def _stock_alta_target_deposit() -> str:
+    return str(_setting("BEJERMAN_STOCK_ALTA_TARGET_DEPOSIT", "STR") or "STR").strip() or "STR"
+
+
+def _stock_alta_causa_emision() -> str:
+    return str(_setting("BEJERMAN_STOCK_ALTA_CAUSA_EMISION", "ALQ") or "ALQ").strip() or "ALQ"
+
+
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
@@ -138,7 +162,12 @@ def _response_dict(xml_text: str) -> dict[str, str]:
 def _is_ok_response(response: dict[str, Any]) -> bool:
     resultado = str(response.get("Resultado") or "").strip().upper()
     error = str(response.get("ErrorMsg") or "").strip()
-    return resultado.startswith("OK") and not error
+    return resultado.startswith("OK") and (not error or _is_bejerman_success_message(error))
+
+
+def _is_bejerman_success_message(value: Any) -> bool:
+    text = _text_key(value)
+    return "comprobante se importo correctamente" in text
 
 
 def _parse_json_maybe(raw: Any) -> Any:
@@ -1081,6 +1110,41 @@ def enqueue_stock_exit_for_ingreso(
     )
 
 
+def enqueue_stock_baja_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    target_deposit = _stock_baja_target_deposit()
+    return _enqueue_stock_job(
+        ingreso_id=ingreso_id,
+        sync_type=SYNC_TYPE_STOCK_TO_DESGUACE,
+        source_deposit="AUTO",
+        target_deposit=target_deposit,
+        trigger="baja_desguace",
+        ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
+    )
+
+
+def enqueue_stock_alta_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    source_deposit = _stock_alta_source_deposit()
+    target_deposit = _stock_alta_target_deposit()
+    return _enqueue_stock_job(
+        ingreso_id=ingreso_id,
+        sync_type=SYNC_TYPE_STOCK_FROM_DESGUACE,
+        source_deposit=source_deposit,
+        target_deposit=target_deposit,
+        trigger="alta_desguace",
+        ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
+    )
+
+
 def _claim_job(max_attempts: int, job_id: int | None = None) -> dict[str, Any] | None:
     params: list[Any] = [max_attempts]
     job_filter = ""
@@ -1630,19 +1694,6 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
 
     response = client.obtener_articulos()
     candidates = _article_candidates(context, response)
-    if len(candidates) == 1:
-        candidate = candidates[0]
-        code = candidate["article_code"]
-        upsert_article_mapping(
-            model_id=int(context["model_id"]),
-            variante=context.get("variante") or "",
-            article_code=code,
-            article_description=candidate.get("article_description") or "",
-            match_source="auto",
-            source_payload=candidate.get("raw") or {},
-        )
-        _finish_job(job["id"], JOB_STATUS_RUNNING, response_payload={"article_match": candidate}, article_code=code)
-        return code
 
     payload = {
         "marca": context.get("marca") or "",
@@ -1653,6 +1704,10 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
     _finish_job(job["id"], JOB_STATUS_BLOCKED, response_payload=payload)
     if not candidates:
         raise BejermanBlockedError("No se encontró un artículo Bejerman único para este modelo/variante")
+    if len(candidates) == 1:
+        raise BejermanBlockedError(
+            "Hay un artículo Bejerman sugerido para este modelo/variante. Confirmalo manualmente antes de transferir stock."
+        )
     raise BejermanBlockedError("Hay más de un artículo Bejerman posible para este modelo/variante")
 
 
@@ -1703,12 +1758,409 @@ def build_stock_transfer_payload(job: dict[str, Any], article_code: str) -> list
     ]
 
 
+def build_stock_baja_out_payload(
+    job: dict[str, Any],
+    article_code: str,
+    source_deposit: str,
+) -> list[dict[str, Any]]:
+    comprobante = str(_setting("BEJERMAN_STOCK_BAJA_OUT_COMPROBANTE", "SAL") or "SAL").strip()
+    target_deposit = job.get("target_deposit") or _stock_baja_target_deposit()
+    causa = _stock_baja_causa_emision()
+    item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
+    item["Comprobante_CantidadUM1"] = -1
+    item["Comprobante_CantidadUM2"] = -1
+    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-SAL-{source_deposit}-{target_deposit}"
+    item["Comprobante_CodigoCausaEmision"] = causa
+    return [item]
+
+
+def build_stock_baja_in_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
+    target_deposit = job.get("target_deposit") or _stock_baja_target_deposit()
+    comprobante = str(_setting("BEJERMAN_STOCK_BAJA_IN_COMPROBANTE", "ENT") or "ENT").strip()
+    item = _base_stock_transfer_item(job, article_code, comprobante, target_deposit)
+    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-ENT-{target_deposit}"
+    return [item]
+
+
+def build_stock_alta_out_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
+    source_deposit = job.get("source_deposit") or _stock_alta_source_deposit()
+    target_deposit = job.get("target_deposit") or _stock_alta_target_deposit()
+    comprobante = str(_setting("BEJERMAN_STOCK_ALTA_OUT_COMPROBANTE", "SAL") or "SAL").strip()
+    causa = _stock_alta_causa_emision()
+    item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
+    item["Comprobante_CantidadUM1"] = -1
+    item["Comprobante_CantidadUM2"] = -1
+    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-SAL-{source_deposit}-{target_deposit}"
+    item["Comprobante_CodigoCausaEmision"] = causa
+    return [item]
+
+
+def build_stock_alta_in_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
+    target_deposit = job.get("target_deposit") or _stock_alta_target_deposit()
+    comprobante = str(_setting("BEJERMAN_STOCK_ALTA_IN_COMPROBANTE", "ENT") or "ENT").strip()
+    item = _base_stock_transfer_item(job, article_code, comprobante, target_deposit)
+    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-ENT-{target_deposit}"
+    return [item]
+
+
 def _process_stock_entry(job: dict[str, Any], client: BejermanSDKClient) -> str:
     raise BejermanBlockedError(NEXORA_STOCK_ENTRY_MESSAGE)
 
 
 def _process_stock_exit(job: dict[str, Any], client: BejermanSDKClient) -> str:
     raise BejermanBlockedError(PORTAL_STOCK_EXIT_MESSAGE)
+
+
+def _process_stock_to_desguace(job: dict[str, Any], client: BejermanSDKClient) -> str:
+    validate_bejerman_config()
+    validate_bejerman_config(comprobante="BEJERMAN_STOCK_BAJA_OUT_COMPROBANTE")
+    validate_bejerman_config(comprobante="BEJERMAN_STOCK_BAJA_IN_COMPROBANTE")
+    serial = (job.get("numero_serie") or "").strip()
+    if not serial:
+        raise BejermanBlockedError("Número de serie requerido para sincronizar Bejerman")
+
+    target = str(job.get("target_deposit") or _stock_baja_target_deposit()).strip() or _stock_baja_target_deposit()
+    target_norm = _norm(target)
+    request_payload = _dict_payload(job.get("request_payload"))
+    response_payload = _dict_payload(job.get("response_payload"))
+    sal_done = bool(request_payload.get("sal_done")) or request_payload.get("baja_phase") in {
+        TRANSFER_PHASE_SAL_DONE,
+        TRANSFER_PHASE_ENT_PENDING,
+        TRANSFER_PHASE_DONE,
+        TRANSFER_PHASE_TARGET_ENTRY_DONE,
+    }
+
+    stock_response = client.stock_by_deposit_partida("", serial)
+    positive_records = _records_for_partida(stock_response, serial)
+    target_records = [
+        record
+        for record in positive_records
+        if _norm(_deposit_from_record(record) or "") == target_norm
+    ]
+    stock_article_code = remember_article_mapping_from_stock_records(
+        job,
+        positive_records,
+        source="stock_baja_partida",
+    )
+    if target_records:
+        article_code = _extract_article_code(target_records) or stock_article_code or (job.get("article_code") or "")
+        _finish_job(
+            job["id"],
+            JOB_STATUS_SUCCEEDED,
+            request_payload={
+                **request_payload,
+                "idempotent": True,
+                "baja_to_desguace": True,
+                "numero_serie": serial,
+                "target_deposit": target,
+                "baja_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+            },
+            response_payload={**response_payload, "stock": stock_response},
+            article_code=article_code,
+        )
+        return JOB_STATUS_SUCCEEDED
+
+    source_records = [
+        record
+        for record in positive_records
+        if _norm(_deposit_from_record(record) or "") != target_norm
+    ]
+    source_deposits = sorted(
+        {
+            (_deposit_from_record(record) or "").strip()
+            for record in source_records
+            if (_deposit_from_record(record) or "").strip()
+        }
+    )
+    if not sal_done:
+        if not source_records:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            raise BejermanBlockedError(
+                f"No se encontró stock positivo para la partida {serial}; no se puede mover a {target}"
+            )
+        if len(source_deposits) != 1:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            deposits_label = ", ".join(source_deposits) if source_deposits else "-"
+            raise BejermanBlockedError(
+                f"Partida {serial} encontrada con stock positivo en múltiples depósitos ({deposits_label}); requiere conciliación"
+            )
+        source_deposit = source_deposits[0]
+    else:
+        source_deposit = str(request_payload.get("source_stock_deposit") or job.get("source_deposit") or "").strip()
+        if not source_deposit or _norm(source_deposit) == "AUTO":
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            raise BejermanBlockedError("No se pudo continuar la baja: falta el depósito origen ya descontado")
+
+    article_code = (
+        (job.get("article_code") or "").strip()
+        or str(request_payload.get("article_code") or "").strip()
+        or _extract_article_code(source_records)
+        or stock_article_code
+    )
+    if not article_code:
+        article_code = _resolve_article_for_job(job, client)
+
+    next_request_payload = {
+        **request_payload,
+        "article_code": article_code,
+        "baja_to_desguace": True,
+        "numero_serie": serial,
+        "source_stock_deposit": source_deposit,
+        "target_deposit": target,
+        "causa_emision": _stock_baja_causa_emision(),
+    }
+    next_response_payload = {**response_payload, "stock": stock_response}
+    if not sal_done:
+        sal_payload = build_stock_baja_out_payload(job, article_code, source_deposit)
+        sal_request_payload = {
+            **next_request_payload,
+            "baja_phase": "sal_pending",
+            "sal_comprobantes": sal_payload,
+        }
+        _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
+        sal_response = client.ingresar_lista_comprobantes_json(sal_payload)
+        next_request_payload = {
+            **sal_request_payload,
+            "sal_done": True,
+            "baja_phase": TRANSFER_PHASE_SAL_DONE,
+        }
+        next_response_payload = {**next_response_payload, "sal": sal_response}
+        _finish_job(
+            job["id"],
+            JOB_STATUS_RUNNING,
+            request_payload=next_request_payload,
+            response_payload=next_response_payload,
+            article_code=article_code,
+        )
+
+    ent_payload = build_stock_baja_in_payload(job, article_code)
+    ent_request_payload = {
+        **next_request_payload,
+        "baja_phase": TRANSFER_PHASE_ENT_PENDING,
+        "ent_comprobantes": ent_payload,
+        "target_stock_entry_deposit": target,
+    }
+    _finish_job(
+        job["id"],
+        JOB_STATUS_RUNNING,
+        request_payload=ent_request_payload,
+        response_payload=next_response_payload,
+        article_code=article_code,
+    )
+    ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    _finish_job(
+        job["id"],
+        JOB_STATUS_SUCCEEDED,
+        request_payload={
+            **ent_request_payload,
+            "target_stock_entry_done": True,
+            "baja_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+        },
+        response_payload={**next_response_payload, "target_stock_entry": ent_response},
+        article_code=article_code,
+    )
+    return JOB_STATUS_SUCCEEDED
+
+
+def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient) -> str:
+    validate_bejerman_config()
+    validate_bejerman_config(comprobante="BEJERMAN_STOCK_ALTA_OUT_COMPROBANTE")
+    validate_bejerman_config(comprobante="BEJERMAN_STOCK_ALTA_IN_COMPROBANTE")
+    serial = (job.get("numero_serie") or "").strip()
+    if not serial:
+        raise BejermanBlockedError("Número de serie requerido para sincronizar Bejerman")
+
+    source = str(job.get("source_deposit") or _stock_alta_source_deposit()).strip() or _stock_alta_source_deposit()
+    target = str(job.get("target_deposit") or _stock_alta_target_deposit()).strip() or _stock_alta_target_deposit()
+    source_norm = _norm(source)
+    target_norm = _norm(target)
+    request_payload = _dict_payload(job.get("request_payload"))
+    response_payload = _dict_payload(job.get("response_payload"))
+    sal_done = bool(request_payload.get("sal_done")) or request_payload.get("alta_phase") in {
+        TRANSFER_PHASE_SAL_DONE,
+        TRANSFER_PHASE_ENT_PENDING,
+        TRANSFER_PHASE_DONE,
+        TRANSFER_PHASE_TARGET_ENTRY_DONE,
+    }
+
+    stock_response = client.stock_by_deposit_partida("", serial)
+    positive_records = _records_for_partida(stock_response, serial)
+    stock_article_code = remember_article_mapping_from_stock_records(
+        job,
+        positive_records,
+        source="stock_alta_partida",
+    )
+    source_records = [
+        record
+        for record in positive_records
+        if _norm(_deposit_from_record(record) or "") == source_norm
+    ]
+    target_records = [
+        record
+        for record in positive_records
+        if _norm(_deposit_from_record(record) or "") == target_norm
+    ]
+    other_records = [
+        record
+        for record in positive_records
+        if _norm(_deposit_from_record(record) or "") not in {source_norm, target_norm}
+    ]
+    positive_deposits = sorted(
+        {
+            (_deposit_from_record(record) or "").strip()
+            for record in positive_records
+            if (_deposit_from_record(record) or "").strip()
+        }
+    )
+
+    if target_records and not source_records and not other_records:
+        article_code = _extract_article_code(target_records) or stock_article_code or (job.get("article_code") or "")
+        _finish_job(
+            job["id"],
+            JOB_STATUS_SUCCEEDED,
+            request_payload={
+                **request_payload,
+                "idempotent": True,
+                "alta_from_desguace": True,
+                "numero_serie": serial,
+                "source_deposit": source,
+                "target_deposit": target,
+                "alta_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+            },
+            response_payload={**response_payload, "stock": stock_response},
+            article_code=article_code,
+        )
+        return JOB_STATUS_SUCCEEDED
+
+    if not sal_done:
+        if not positive_records:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            raise BejermanBlockedError(
+                f"No se encontró stock positivo para la partida {serial}; no se puede mover a {target}"
+            )
+        if len(positive_deposits) != 1:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            deposits_label = ", ".join(positive_deposits) if positive_deposits else "-"
+            raise BejermanBlockedError(
+                f"Partida {serial} encontrada con stock positivo en múltiples depósitos ({deposits_label}); requiere conciliación"
+            )
+        if not source_records:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            deposit = positive_deposits[0] if positive_deposits else "-"
+            raise BejermanBlockedError(
+                f"Partida {serial} encontrada en depósito {deposit}; se esperaba {source} para alta a {target}"
+            )
+        source_deposit = source
+    else:
+        source_deposit = str(request_payload.get("source_stock_deposit") or job.get("source_deposit") or "").strip()
+        if not source_deposit:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "stock": stock_response},
+                article_code=stock_article_code,
+            )
+            raise BejermanBlockedError("No se pudo continuar el alta: falta el depósito origen ya descontado")
+
+    article_code = (
+        (job.get("article_code") or "").strip()
+        or str(request_payload.get("article_code") or "").strip()
+        or _extract_article_code(source_records)
+        or stock_article_code
+    )
+    if not article_code:
+        article_code = _resolve_article_for_job(job, client)
+
+    next_request_payload = {
+        **request_payload,
+        "article_code": article_code,
+        "alta_from_desguace": True,
+        "numero_serie": serial,
+        "source_stock_deposit": source_deposit,
+        "target_deposit": target,
+        "causa_emision": _stock_alta_causa_emision(),
+    }
+    next_response_payload = {**response_payload, "stock": stock_response}
+    if not sal_done:
+        sal_payload = build_stock_alta_out_payload(job, article_code)
+        sal_request_payload = {
+            **next_request_payload,
+            "alta_phase": "sal_pending",
+            "sal_comprobantes": sal_payload,
+        }
+        _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
+        sal_response = client.ingresar_lista_comprobantes_json(sal_payload)
+        next_request_payload = {
+            **sal_request_payload,
+            "sal_done": True,
+            "alta_phase": TRANSFER_PHASE_SAL_DONE,
+        }
+        next_response_payload = {**next_response_payload, "sal": sal_response}
+        _finish_job(
+            job["id"],
+            JOB_STATUS_RUNNING,
+            request_payload=next_request_payload,
+            response_payload=next_response_payload,
+            article_code=article_code,
+        )
+
+    ent_payload = build_stock_alta_in_payload(job, article_code)
+    ent_request_payload = {
+        **next_request_payload,
+        "alta_phase": TRANSFER_PHASE_ENT_PENDING,
+        "ent_comprobantes": ent_payload,
+        "target_stock_entry_deposit": target,
+    }
+    _finish_job(
+        job["id"],
+        JOB_STATUS_RUNNING,
+        request_payload=ent_request_payload,
+        response_payload=next_response_payload,
+        article_code=article_code,
+    )
+    ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    _finish_job(
+        job["id"],
+        JOB_STATUS_SUCCEEDED,
+        request_payload={
+            **ent_request_payload,
+            "target_stock_entry_done": True,
+            "alta_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+        },
+        response_payload={**next_response_payload, "target_stock_entry": ent_response},
+        article_code=article_code,
+    )
+    return JOB_STATUS_SUCCEEDED
 
 
 def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> str:
@@ -1876,6 +2328,10 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
             return _process_stock_entry(job, client)
         if sync_type == SYNC_TYPE_STOCK_EXIT_RTS:
             return _process_stock_exit(job, client)
+        if sync_type == SYNC_TYPE_STOCK_TO_DESGUACE:
+            return _process_stock_to_desguace(job, client)
+        if sync_type == SYNC_TYPE_STOCK_FROM_DESGUACE:
+            return _process_stock_from_desguace(job, client)
         if sync_type in (
             SYNC_TYPE_STOCK_STR_TO_STL,
             SYNC_TYPE_STOCK_STR_TO_STC,
@@ -1933,7 +2389,7 @@ def _job_deposits_for_article_reconcile(job: dict[str, Any]) -> list[str]:
     deposits: list[str] = []
     for key in ("source_deposit", "target_deposit"):
         deposit = str(job.get(key) or "").strip()
-        if not deposit or _norm(deposit) in {"NEXORA", "SALIDA"}:
+        if not deposit or _norm(deposit) in {"NEXORA", "SALIDA", "AUTO"}:
             continue
         if deposit not in deposits:
             deposits.append(deposit)
@@ -2101,6 +2557,51 @@ def restore_target_stock_for_job(job: dict[str, Any], client: BejermanSDKClient)
         [*source_all_records, *target_all_records],
         source="target_stock_restore_partida",
     )
+    positive_elsewhere = []
+    seen_positive_elsewhere: set[tuple[str, str, str]] = set()
+    for record in [
+        *_records_for_partida(target_response, serial),
+        *_records_for_partida(source_response, serial),
+    ]:
+        deposit = _deposit_from_record(record)
+        if deposit and _norm(deposit) == _norm(target):
+            continue
+        key = (_norm(deposit), _norm(_article_code_from_record(record)), _norm(_partida_from_record(record)))
+        if key in seen_positive_elsewhere:
+            continue
+        seen_positive_elsewhere.add(key)
+        positive_elsewhere.append(record)
+    if positive_elsewhere:
+        article_code = _extract_article_code(positive_elsewhere) or stock_article_code or (job.get("article_code") or "")
+        deposits = sorted({_deposit_from_record(record) or "-" for record in positive_elsewhere})
+        error = (
+            f"No se restaura stock en {target}: la partida {serial} ya tiene stock positivo "
+            f"en otro depósito ({', '.join(deposits)}); requiere conciliación."
+        )
+        _finish_job(
+            job["id"],
+            JOB_STATUS_BLOCKED,
+            error=error,
+            response_payload={
+                **response_payload,
+                "source": source_response,
+                "target": target_response,
+                "stock_restore_duplicate_guard": {
+                    "serial": serial,
+                    "target_deposit": target,
+                    "positive_elsewhere": _stock_records_summary(positive_elsewhere),
+                },
+            },
+            article_code=article_code,
+        )
+        return {
+            "status": "blocked",
+            "job_id": job.get("id"),
+            "serial": serial,
+            "target_deposit": target,
+            "article_code": article_code,
+            "error": error,
+        }
     article_code = (
         (job.get("article_code") or "").strip()
         or str(request_payload.get("article_code") or "").strip()
@@ -2253,11 +2754,43 @@ def restore_target_stock_from_jobs(
     return stats
 
 
-def run_bejerman_sync_loop(interval_seconds: int = 30, limit: int = 10):
+def run_bejerman_sync_loop(
+    interval_seconds: int = 30,
+    limit: int = 10,
+    sale_items_interval_seconds: int | None = None,
+):
+    sale_interval = (
+        int(sale_items_interval_seconds)
+        if sale_items_interval_seconds is not None
+        else int(getattr(settings, "BEJERMAN_SALE_ITEMS_LOOP_INTERVAL_SECONDS", 21600) or 0)
+    )
+    sale_days = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_DAYS", 365) or 365)
+    sale_max = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_MAX_COMPROBANTES", 500) or 500)
+    sale_company = getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEY", "SEPID") or "SEPID"
+    next_sale_sync_at = 0.0
     while True:
         try:
             stats = process_bejerman_jobs(limit=limit)
             logger.info("bejerman_sync_loop stats=%s", stats)
         except Exception:
             logger.exception("bejerman_sync_loop falló")
+        if sale_interval > 0 and time.monotonic() >= next_sale_sync_at:
+            try:
+                from .bejerman_sales import sync_bejerman_sale_items
+                from .bejerman_sdk import BejermanSDKClient as SalesBejermanSDKClient
+
+                client = SalesBejermanSDKClient(
+                    company_key=sale_company,
+                    allow_system_credentials=True,
+                )
+                sale_stats = sync_bejerman_sale_items(
+                    client,
+                    days=sale_days,
+                    max_comprobantes=sale_max,
+                )
+                logger.info("bejerman_sale_items_sync stats=%s", sale_stats)
+            except Exception:
+                logger.exception("bejerman_sale_items_sync fallÃ³")
+            finally:
+                next_sale_sync_at = time.monotonic() + sale_interval
         time.sleep(max(1, int(interval_seconds or 30)))

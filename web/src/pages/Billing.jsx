@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
+import { Navigate, useLocation } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, FileText, Loader2, Search, X } from "lucide-react";
 import {
+  billingRemitoPdfUrl,
   getBillingCustomers,
   getBillingDocumentPdfBlob,
   getBillingDocuments,
-  getBillingRemitoPdfBlob,
   getBillingRemitos,
   getDeliveryOrder,
   getDeliveryOrders,
-  getServiceOrderBillingPdfBlob,
-  getServiceOrdersToBill,
   postDeliveryOrderInvoiced,
-  postServiceOrderInvoice,
+  postDeliveryOrderNotBillable,
 } from "../lib/api";
+import { openPrintablePdf, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
+import { remitoDocumentNumber } from "../lib/remitos";
 import {
   deliveryOrderCommercialLabel,
   deliveryOrderCompanyLabel,
@@ -38,7 +39,7 @@ import {
   ResponsiveModalPanel,
 } from "../components/Responsive.jsx";
 
-const PENDING_BILLING_STATUS = "entregado_pendiente_facturacion";
+const BILLABLE_REMITO_TYPES = new Set(["RT"]);
 const BILLING_PAGE_SIZE = 25;
 const EMPTY_PAGINATION = {
   page: 1,
@@ -164,6 +165,22 @@ function normalizePendingBillingOrders(items) {
     });
 }
 
+function orderMatchesServiceOrderId(order, serviceOrderId) {
+  const requested = clean(serviceOrderId);
+  if (!requested) return false;
+  const numeric = /^\d+$/.test(requested) ? String(Number(requested)) : requested;
+  return [order?.ingresoId, order?.sourceReference]
+    .map((value) => clean(value))
+    .some((value) => value === requested || value === numeric || value === `OS-${numeric.padStart(5, "0")}`);
+}
+
+function serviceOrderSearchQuery(serviceOrderId) {
+  const requested = clean(serviceOrderId);
+  if (!requested) return "";
+  if (/^\d+$/.test(requested)) return `OS-${String(Number(requested)).padStart(5, "0")}`;
+  return requested;
+}
+
 function orderSubtitle(order) {
   return [
     clean(order?.orderNumber),
@@ -173,9 +190,33 @@ function orderSubtitle(order) {
     .join(" · ");
 }
 
+function customerCode(customer) {
+  return clean(customer?.bejermanCustomerCode);
+}
+
+function customerName(customer) {
+  return clean(customer?.name || customer?.razon_social || customer?.nombre);
+}
+
+function customerOptionLabel(customer) {
+  return [customerName(customer), customerCode(customer)].filter(Boolean).join(" · ");
+}
+
+function customerSearchKey(value) {
+  return clean(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function customerMatchesQuery(customer, query) {
+  if (!query) return true;
+  return customerSearchKey([customerName(customer), customerCode(customer)].filter(Boolean).join(" ")).includes(query);
+}
+
 function selectedCodeOption(selectedCode, selectedOrder, customers) {
   if (!selectedCode) return null;
-  if (customers.some((customer) => customer.bejermanCustomerCode === selectedCode)) return null;
+  if (customers.some((customer) => customerCode(customer) === selectedCode)) return null;
   return {
     id: `selected-${selectedCode}`,
     name: selectedOrder?.customerName || "Cliente seleccionado",
@@ -192,12 +233,20 @@ function remitoPrintUrl(order) {
   return clean(order?.bejermanRemitoGroup?.printUrl);
 }
 
-function safeFilenamePart(value, fallback = "documento") {
-  return clean(value).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || fallback;
+function remitoTypeFromOrder(order) {
+  const remitoType = clean(order?.remitoNumber).toUpperCase().split(/\s+/)[0];
+  return remitoType || clean(order?.bejermanRemitoGroup?.comprobanteTipo).toUpperCase();
 }
 
-function remitoDocumentNumber(item) {
-  return valueOf(item, ["documentNumber", "numero", "number", "comprobanteNumero"]) || "-";
+function hasPendingBilling(order) {
+  if (!clean(order?.remitoNumber) || clean(order?.invoiceNumber)) return false;
+  if (["facturado", "cancelado", "entregado_no_facturable"].includes(clean(order?.status))) return false;
+  const billingRequired = order?.bejermanRemitoGroup?.responseSummary?.billingRequired;
+  if (typeof billingRequired === "boolean") return billingRequired;
+  if (typeof billingRequired === "string" && ["true", "false"].includes(billingRequired.trim().toLowerCase())) {
+    return billingRequired.trim().toLowerCase() === "true";
+  }
+  return BILLABLE_REMITO_TYPES.has(remitoTypeFromOrder(order));
 }
 
 function remitoOperationLabel(item) {
@@ -205,6 +254,64 @@ function remitoOperationLabel(item) {
   const label = valueOf(item, ["operationLabel", "origin"]);
   if (code && label && !String(label).startsWith(code)) return `${code} - ${label}`;
   return label || code || "-";
+}
+
+function initialRemitoPdfState() {
+  return {
+    open: false,
+    loading: false,
+    documentLabel: "",
+    status: "",
+    detail: "",
+    error: "",
+    blob: null,
+  };
+}
+
+function RemitoPdfProgressModal({ state, onClose, onOpenPdf }) {
+  if (!state?.open) return null;
+  const canClose = !state.loading;
+  const hasReadyPdf = Boolean(state.blob);
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-950/45 px-4" role="alertdialog" aria-modal="true">
+      <div className="w-full max-w-sm rounded-lg border border-sky-200 bg-white p-5 shadow-xl">
+        <div className="flex items-start gap-4">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-sky-50 text-sky-700">
+            {state.loading ? (
+              <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+            ) : (
+              <FileText className="h-6 w-6" aria-hidden="true" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="text-base font-semibold text-gray-950">Preparando PDF</h2>
+              {canClose && (
+                <button type="button" onClick={onClose} className="text-gray-500 hover:text-gray-900" aria-label="Cerrar">
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            {state.documentLabel && <p className="mt-0.5 text-xs text-gray-500">{state.documentLabel}</p>}
+            <p className="mt-2 text-sm font-medium text-sky-800">{state.status || "Consultando Bejerman."}</p>
+            {state.detail && <p className="mt-2 text-sm text-gray-600">{state.detail}</p>}
+            {state.error && <p className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{state.error}</p>}
+            {hasReadyPdf && (
+              <button
+                type="button"
+                onClick={onOpenPdf}
+                className="mt-4 inline-flex items-center gap-2 rounded bg-sky-700 px-3 py-2 text-sm font-medium text-white hover:bg-sky-800"
+              >
+                <FileText className="h-4 w-4" aria-hidden="true" />
+                Abrir e imprimir PDF
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function DetailItem({ label, value, children }) {
@@ -359,54 +466,17 @@ function DeliveryOrderBillingDetails({ order, showItems = true }) {
   );
 }
 
-function ServiceOrderBillingDetails({ item }) {
-  if (!item) return null;
-  return (
-    <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <DetailItem label="OS" value={item.os} />
-        <DetailItem label="Cliente" value={item.cliente} />
-        <DetailItem label="Código Bejerman" value={item.bejermanCustomerCode || "sin código"} />
-        <DetailItem label="RSS" value={item.rss || "RSS pendiente"} />
-        <DetailItem label="Equipo" value={item.equipo} />
-        <DetailItem label="Serie" value={item.numeroSerie} />
-        <DetailItem label="Interno" value={item.numeroInterno} />
-        <DetailItem label="Fecha de liberación" value={formatDateTime(item.fechaLiberacion)} />
-        <DetailItem label="Concepto sugerido" value={`${item.conceptCode || "-"} - ${item.conceptDescription || "-"}`} />
-        <DetailItem label="Resolución" value={item.resolucion || "-"} />
-        <DetailItem label="Técnico" value={item.tecnico || "-"} />
-        <DetailItem label="Factura" value={item.facturaNumero || "-"} />
-      </div>
-      {(clean(item.descripcionProblema) || clean(item.trabajosRealizados)) && (
-        <div className="grid gap-3 lg:grid-cols-2">
-          {clean(item.descripcionProblema) && (
-            <div>
-              <div className="text-[11px] font-medium uppercase text-gray-500">Descripción</div>
-              <div className="mt-1 whitespace-pre-wrap rounded border bg-white px-3 py-2 text-sm text-gray-800">
-                {item.descripcionProblema}
-              </div>
-            </div>
-          )}
-          {clean(item.trabajosRealizados) && (
-            <div>
-              <div className="text-[11px] font-medium uppercase text-gray-500">Trabajos realizados</div>
-              <div className="mt-1 whitespace-pre-wrap rounded border bg-white px-3 py-2 text-sm text-gray-800">
-                {item.trabajosRealizados}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Billing() {
+  const location = useLocation();
+  const isRemitosRoute = location.pathname.endsWith("/remitos");
+  const shouldRedirectToFacturacion = isRemitosRoute && /\b(?:orderId|serviceOrderId)=/.test(location.search || "");
   const requestedOrderId = useMemo(initialOrderIdFromUrl, []);
   const requestedServiceOrderId = useMemo(initialServiceOrderIdFromUrl, []);
   const [customers, setCustomers] = useState([]);
   const [selectedCode, setSelectedCode] = useState("");
   const [customerQuery, setCustomerQuery] = useState("");
+  const [customerSuggestionsOpen, setCustomerSuggestionsOpen] = useState(false);
+  const [customerActiveIndex, setCustomerActiveIndex] = useState(0);
   const [filters, setFilters] = useState({ dateFrom: "", dateTo: "", search: "" });
   const [documents, setDocuments] = useState([]);
   const [pagination, setPagination] = useState(EMPTY_PAGINATION);
@@ -425,55 +495,60 @@ export default function Billing() {
   const [remitoPage, setRemitoPage] = useState(1);
   const [pendingOrders, setPendingOrders] = useState([]);
   const [selectedPendingOrderId, setSelectedPendingOrderId] = useState("");
-  const [serviceOrders, setServiceOrders] = useState([]);
-  const [selectedServiceOrderId, setSelectedServiceOrderId] = useState("");
+  const [pendingDetailOrder, setPendingDetailOrder] = useState(null);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [remitosLoading, setRemitosLoading] = useState(false);
   const [pendingLoading, setPendingLoading] = useState(false);
-  const [serviceOrdersLoading, setServiceOrdersLoading] = useState(false);
   const [savingInvoice, setSavingInvoice] = useState(false);
-  const [savingServiceInvoice, setSavingServiceInvoice] = useState(false);
   const [invoiceOrder, setInvoiceOrder] = useState(null);
-  const [serviceInvoiceOrder, setServiceInvoiceOrder] = useState(null);
   const [invoiceNumber, setInvoiceNumber] = useState("");
-  const [serviceInvoiceNumber, setServiceInvoiceNumber] = useState("");
   const [invoiceError, setInvoiceError] = useState("");
-  const [serviceInvoiceError, setServiceInvoiceError] = useState("");
   const [error, setError] = useState("");
+  const [documentsWarning, setDocumentsWarning] = useState("");
   const [remitoError, setRemitoError] = useState("");
-  const [serviceError, setServiceError] = useState("");
+  const [remitoWarning, setRemitoWarning] = useState("");
+  const [remitoPdf, setRemitoPdf] = useState(initialRemitoPdfState);
+  const [loadingDocumentPdfId, setLoadingDocumentPdfId] = useState("");
+  const [loadingRemitoPdfId, setLoadingRemitoPdfId] = useState("");
+  const [pendingError, setPendingError] = useState("");
+  const [savingNotBillableId, setSavingNotBillableId] = useState("");
 
   const selectedPendingOrder = useMemo(
     () => pendingOrders.find((order) => order.id === selectedPendingOrderId) || null,
     [pendingOrders, selectedPendingOrderId]
   );
 
-  const selectedServiceOrder = useMemo(
-    () => serviceOrders.find((item) => String(item.ingresoId || item.id) === String(selectedServiceOrderId)) || null,
-    [serviceOrders, selectedServiceOrderId]
-  );
-
-  const filteredCustomers = useMemo(() => {
-    const query = customerQuery.trim().toLowerCase();
-    if (!query) return customers;
-    return customers.filter((customer) =>
-      [customer.name, customer.bejermanCustomerCode]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(query)
-    );
-  }, [customers, customerQuery]);
-
-  const customersForSelect = useMemo(() => {
+  const customerSuggestions = useMemo(() => {
+    const query = customerSearchKey(customerQuery);
     const extra = selectedCodeOption(selectedCode, selectedPendingOrder, customers);
-    return extra ? [extra, ...filteredCustomers] : filteredCustomers;
-  }, [customers, filteredCustomers, selectedCode, selectedPendingOrder]);
+    const options = extra ? [extra, ...customers.filter((customer) => customerCode(customer) !== customerCode(extra))] : customers;
+    return options.filter((customer) => customerMatchesQuery(customer, query)).slice(0, 20);
+  }, [customers, customerQuery, selectedCode, selectedPendingOrder]);
+
+  const resolveCustomerCodeInput = () => {
+    const selected = clean(selectedCode);
+    if (selected) return selected;
+    const typed = clean(customerQuery);
+    if (!typed) return "";
+    const typedKey = customerSearchKey(typed);
+    const exact = customers.find((customer) =>
+      [customerCode(customer), customerName(customer), customerOptionLabel(customer)]
+        .map(customerSearchKey)
+        .some((value) => value === typedKey)
+    );
+    if (exact) return customerCode(exact);
+    if (customerSuggestions.length === 1) return customerCode(customerSuggestions[0]);
+    return typed;
+  };
 
   const remitoCustomerOptions = useMemo(
     () => customers.filter((customer) => clean(customer.bejermanCustomerCode)),
     [customers]
   );
+
+  useEffect(() => {
+    setCustomerActiveIndex((current) => Math.min(current, Math.max(customerSuggestions.length - 1, 0)));
+  }, [customerSuggestions.length]);
 
   const loadDocuments = async (customerCode = selectedCode, pageNumber = page) => {
     const code = clean(customerCode);
@@ -489,9 +564,11 @@ export default function Billing() {
       setDocuments(Array.isArray(data?.items) ? data.items : []);
       setPagination(data?.pagination || EMPTY_PAGINATION);
       setPage(data?.pagination?.page || pageNumber);
+      setDocumentsWarning(clean(data?.warning));
       setError("");
     } catch (err) {
       setError(err?.message || "No se pudo consultar facturación.");
+      setDocumentsWarning("");
       setDocuments([]);
       setPagination(EMPTY_PAGINATION);
     } finally {
@@ -514,8 +591,10 @@ export default function Billing() {
       setRemitosPagination(data?.pagination || EMPTY_PAGINATION);
       setRemitoPage(data?.pagination?.page || pageNumber);
       setRemitoError("");
+      setRemitoWarning(clean(data?.warning));
     } catch (err) {
       setRemitoError(err?.message || "No se pudieron consultar los remitos.");
+      setRemitoWarning("");
       setRemitos([]);
       setRemitosPagination(EMPTY_PAGINATION);
     } finally {
@@ -523,34 +602,39 @@ export default function Billing() {
     }
   };
 
-  const syncCustomerSelectionForOrder = (order) => {
-    const orderCode = clean(order?.bejermanCustomerCode);
-    setPage(1);
-    if (orderCode) {
-      setSelectedCode(orderCode);
-      setCustomerQuery("");
-      loadDocuments(orderCode, 1);
-      return;
-    }
-    setDocuments([]);
-    setPagination(EMPTY_PAGINATION);
-    setSelectedCode("");
-    setCustomerQuery(order?.customerName || "");
-  };
-
   const loadPendingOrders = async ({ preferredSelectedId = selectedPendingOrderId, allowRequestedSelection = true } = {}) => {
     setPendingLoading(true);
     try {
-      const data = await getDeliveryOrders({ status: PENDING_BILLING_STATUS, limit: 200 });
+      const data = await getDeliveryOrders({ pendingBilling: true, limit: 200 });
       let items = Array.isArray(data?.items) ? data.items : [];
       if (allowRequestedSelection && requestedOrderId && !items.some((order) => order.id === requestedOrderId)) {
         try {
           const requestedOrder = await getDeliveryOrder(requestedOrderId);
-          if (requestedOrder?.status === PENDING_BILLING_STATUS && !clean(requestedOrder?.invoiceNumber)) {
+          if (hasPendingBilling(requestedOrder)) {
             items = [requestedOrder, ...items];
           }
         } catch {
           // Si el vínculo ya no corresponde a un pendiente, la lista general sigue disponible.
+        }
+      }
+      if (
+        allowRequestedSelection &&
+        requestedServiceOrderId &&
+        !items.some((order) => orderMatchesServiceOrderId(order, requestedServiceOrderId))
+      ) {
+        try {
+          const serviceData = await getDeliveryOrders({
+            pendingBilling: true,
+            q: serviceOrderSearchQuery(requestedServiceOrderId),
+            limit: 20,
+          });
+          const serviceItems = Array.isArray(serviceData?.items) ? serviceData.items : [];
+          items = [
+            ...serviceItems.filter((order) => orderMatchesServiceOrderId(order, requestedServiceOrderId)),
+            ...items,
+          ];
+        } catch {
+          // Si el vínculo de OS no encuentra un remito pendiente, la lista general sigue disponible.
         }
       }
 
@@ -558,34 +642,17 @@ export default function Billing() {
       setPendingOrders(items);
       const preferredExists = preferredSelectedId && items.some((order) => order.id === preferredSelectedId);
       const requestedExists = allowRequestedSelection && requestedOrderId && items.some((order) => order.id === requestedOrderId);
-      const nextSelectedId = preferredExists ? preferredSelectedId : requestedExists ? requestedOrderId : "";
+      const requestedServiceOrder = allowRequestedSelection && requestedServiceOrderId
+        ? items.find((order) => orderMatchesServiceOrderId(order, requestedServiceOrderId))
+        : null;
+      const nextSelectedId = preferredExists ? preferredSelectedId : requestedExists ? requestedOrderId : requestedServiceOrder?.id || "";
       setSelectedPendingOrderId(nextSelectedId);
-      const nextOrder = items.find((order) => order.id === nextSelectedId);
-      if (nextOrder && nextSelectedId !== selectedPendingOrderId) {
-        syncCustomerSelectionForOrder(nextOrder);
-      }
+      setPendingError("");
     } catch {
       setPendingOrders([]);
+      setPendingError("No se pudieron cargar los remitos pendientes.");
     } finally {
       setPendingLoading(false);
-    }
-  };
-
-  const loadServiceOrders = async ({ preferredSelectedId = selectedServiceOrderId, allowRequestedSelection = true } = {}) => {
-    setServiceOrdersLoading(true);
-    try {
-      const data = await getServiceOrdersToBill({ limit: 200 });
-      const items = Array.isArray(data?.items) ? data.items : [];
-      setServiceOrders(items);
-      const preferredExists = preferredSelectedId && items.some((item) => String(item.ingresoId || item.id) === String(preferredSelectedId));
-      const requestedExists = allowRequestedSelection && requestedServiceOrderId && items.some((item) => String(item.ingresoId || item.id) === String(requestedServiceOrderId));
-      setSelectedServiceOrderId(preferredExists ? preferredSelectedId : requestedExists ? requestedServiceOrderId : "");
-      setServiceError("");
-    } catch (err) {
-      setServiceOrders([]);
-      setServiceError(err?.message || "No se pudieron cargar las OS a facturar.");
-    } finally {
-      setServiceOrdersLoading(false);
     }
   };
 
@@ -599,22 +666,27 @@ export default function Billing() {
   }, []);
 
   useEffect(() => {
+    if (isRemitosRoute) return;
     loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: true });
-    loadServiceOrders({ preferredSelectedId: "", allowRequestedSelection: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isRemitosRoute]);
 
   const selectPendingOrder = (order) => {
     setSelectedPendingOrderId(order.id);
-    syncCustomerSelectionForOrder(order);
+    setPendingDetailOrder(order);
   };
 
   const openInvoiceModal = (order) => {
-    selectPendingOrder(order);
+    setSelectedPendingOrderId(order.id);
+    setPendingDetailOrder(null);
     setInvoiceOrder(order);
     setInvoiceNumber("");
     setInvoiceError("");
     setError("");
+  };
+
+  const closePendingDetailModal = () => {
+    setPendingDetailOrder(null);
   };
 
   const closeInvoiceModal = () => {
@@ -622,21 +694,6 @@ export default function Billing() {
     setInvoiceOrder(null);
     setInvoiceNumber("");
     setInvoiceError("");
-  };
-
-  const openServiceInvoiceModal = (item) => {
-    setSelectedServiceOrderId(String(item.ingresoId || item.id || ""));
-    setServiceInvoiceOrder(item);
-    setServiceInvoiceNumber("");
-    setServiceInvoiceError("");
-    setServiceError("");
-  };
-
-  const closeServiceInvoiceModal = () => {
-    if (savingServiceInvoice) return;
-    setServiceInvoiceOrder(null);
-    setServiceInvoiceNumber("");
-    setServiceInvoiceError("");
   };
 
   const submitInvoice = async (event) => {
@@ -653,13 +710,11 @@ export default function Billing() {
     setError("");
     try {
       await postDeliveryOrderInvoiced(invoiceOrder.id, { invoiceNumber: invoice });
-      const codeToRefresh = clean(invoiceOrder.bejermanCustomerCode) || selectedCode;
       setInvoiceOrder(null);
       setInvoiceNumber("");
+      setPendingDetailOrder(null);
       setSelectedPendingOrderId("");
       await loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: false });
-      setPage(1);
-      await loadDocuments(codeToRefresh, 1);
     } catch (err) {
       setInvoiceError(err?.message || "No se pudo registrar la factura.");
     } finally {
@@ -667,41 +722,38 @@ export default function Billing() {
     }
   };
 
-  const submitServiceInvoice = async (event) => {
-    event.preventDefault();
-    const invoice = serviceInvoiceNumber.trim();
-    if (!invoice) {
-      setServiceInvoiceError("Ingrese el número de factura.");
-      return;
-    }
-    const ingresoId = serviceInvoiceOrder?.ingresoId || serviceInvoiceOrder?.id;
-    if (!ingresoId) return;
+  const markOrderNotBillable = async (order) => {
+    if (!order?.id || savingNotBillableId) return;
+    const label = order.remitoNumber || order.orderNumber || "este remito";
+    if (!window.confirm(`¿Marcar ${label} como no facturable?`)) return;
 
-    setSavingServiceInvoice(true);
-    setServiceInvoiceError("");
-    setServiceError("");
+    setSavingNotBillableId(order.id);
+    setPendingError("");
     try {
-      await postServiceOrderInvoice(ingresoId, { facturaNumero: invoice });
-      setServiceInvoiceOrder(null);
-      setServiceInvoiceNumber("");
-      setSelectedServiceOrderId("");
-      await loadServiceOrders({ preferredSelectedId: "", allowRequestedSelection: false });
+      await postDeliveryOrderNotBillable(order.id, { note: "No se factura" });
+      if (selectedPendingOrderId === order.id) setSelectedPendingOrderId("");
+      if (pendingDetailOrder?.id === order.id) setPendingDetailOrder(null);
+      await loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: false });
     } catch (err) {
-      setServiceInvoiceError(err?.message || "No se pudo registrar la factura de la OS.");
+      setPendingError(err?.message || "No se pudo marcar el remito como no facturable.");
     } finally {
-      setSavingServiceInvoice(false);
+      setSavingNotBillableId("");
     }
   };
 
   const openPdf = async (item) => {
     const documentId = valueOf(item, ["documentId", "id"]);
     const customerCode = valueOf(item, ["bejermanCustomerCode", "customerCode"]) || selectedCode;
-    if (!documentId) return;
+    if (!documentId || loadingDocumentPdfId) return;
+    setLoadingDocumentPdfId(documentId);
+    setError("");
     try {
       const blob = await getBillingDocumentPdfBlob(documentId, customerCode);
       openBlob(blob, `facturacion-${documentId}.pdf`);
     } catch (err) {
       setError(err?.message || "No se pudo abrir el PDF.");
+    } finally {
+      setLoadingDocumentPdfId("");
     }
   };
 
@@ -709,29 +761,115 @@ export default function Billing() {
     const documentId = valueOf(item, ["documentId", "id"]);
     const customerCode = valueOf(item, ["bejermanCustomerCode", "customerCode"]) || selectedRemitoCode;
     if (!documentId) return;
+    const documentLabel = remitoDocumentNumber(item);
+    const pdfUrl = valueOf(item, ["pdfUrl"]) || billingRemitoPdfUrl(documentId, {
+      customerCode,
+      companyKey: remitoFilters.companyKey,
+    });
+    const reservedWindow = reservePdfWindow({
+      title: "Remito Bejerman",
+      message: `Preparando PDF del ${documentLabel || "remito"}...`,
+      fallbackMessage:
+        "NEXORA sigue esperando el PDF de Bejerman. Si esta pestaña no cambia, puede cerrarla y reintentar desde Cobranzas.",
+    });
+    setRemitoError("");
+    setLoadingRemitoPdfId(documentId);
+    setRemitoPdf({
+      open: true,
+      loading: true,
+      documentLabel,
+      status: "Buscando PDF del remito...",
+      detail: "Consultando Bejerman sin abrir una nueva ventana.",
+      error: "",
+      blob: null,
+    });
     try {
-      const blob = await getBillingRemitoPdfBlob(documentId, {
-        customerCode,
-        companyKey: remitoFilters.companyKey,
+      const blob = await waitForPdfBlob(pdfUrl, {
+        label: documentLabel || "remito",
+        onProgress: (progress) => {
+          setRemitoPdf((current) => ({
+            ...current,
+            status: progress?.status || "Preparando PDF del remito...",
+            detail: progress?.detail || "Esperando el archivo de Bejerman.",
+          }));
+        },
       });
-      openBlob(blob, `remito-${safeFilenamePart(remitoDocumentNumber(item), documentId)}.pdf`);
+      setRemitoPdf((current) => ({
+        ...current,
+        status: "Abriendo impresión",
+        detail: "El PDF está listo. Intentando abrir la ventana de impresión.",
+      }));
+      const opened = reservedWindow.openPrintable(blob, {
+        title: "Remito Bejerman",
+        documentLabel: documentLabel || "Remito Bejerman",
+      }).opened;
+      if (opened) {
+        setRemitoPdf(initialRemitoPdfState());
+      } else {
+        setRemitoPdf((current) => ({
+          ...current,
+          loading: false,
+          status: "PDF listo",
+          detail: "El navegador bloqueó la ventana automática.",
+          error: "El PDF está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir PDF.",
+          blob,
+        }));
+      }
     } catch (err) {
-      setRemitoError(err?.message || "No se pudo abrir el PDF del remito.");
+      reservedWindow.close();
+      const message = err?.message || "No se pudo abrir el PDF del remito.";
+      setRemitoError(message);
+      setRemitoPdf((current) => ({
+        ...current,
+        loading: false,
+        status: "No se pudo abrir el PDF",
+        detail: "",
+        error: message,
+        blob: null,
+      }));
+    } finally {
+      setLoadingRemitoPdfId("");
     }
   };
 
-  const openServicePdf = async (item) => {
-    const ingresoId = item?.ingresoId || item?.id;
-    if (!ingresoId) return;
-    try {
-      const blob = await getServiceOrderBillingPdfBlob(ingresoId);
-      openBlob(blob, `OS-${item?.os || ingresoId}-facturacion.pdf`);
-    } catch (err) {
-      setServiceError(err?.message || "No se pudo abrir el PDF de la OS.");
+  const closeRemitoPdfModal = () => {
+    if (remitoPdf.loading) return;
+    setRemitoPdf(initialRemitoPdfState());
+  };
+
+  const openManualRemitoPdf = () => {
+    if (!remitoPdf.blob) return;
+    const opened = openPrintablePdf(remitoPdf.blob, {
+      title: "Remito Bejerman",
+      documentLabel: remitoPdf.documentLabel || "Remito Bejerman",
+    }).opened;
+    if (opened) {
+      setRemitoError("");
+      setRemitoPdf(initialRemitoPdfState());
     }
   };
 
-  const selectedHasCustomerCode = Boolean(clean(selectedPendingOrder?.bejermanCustomerCode));
+  const selectBillingCustomer = (customer, shouldLoad = true) => {
+    const code = customerCode(customer);
+    setSelectedCode(code);
+    setCustomerQuery(customerOptionLabel(customer));
+    setCustomerSuggestionsOpen(false);
+    setCustomerActiveIndex(0);
+    if (shouldLoad) {
+      setPage(1);
+      loadDocuments(code, 1);
+    }
+  };
+
+  const clearBillingCustomer = () => {
+    setSelectedCode("");
+    setCustomerQuery("");
+    setCustomerSuggestionsOpen(false);
+    setCustomerActiveIndex(0);
+    setPage(1);
+    loadDocuments("", 1);
+  };
+
   const currentPage = pagination?.page || page || 1;
   const totalPages = pagination?.totalPages || 1;
   const totalDocuments = pagination?.total || documents.length;
@@ -740,15 +878,40 @@ export default function Billing() {
   const totalRemitos = remitosPagination?.total || remitos.length;
 
   const runSearch = () => {
+    const customerCode = resolveCustomerCodeInput();
     setPage(1);
-    loadDocuments(selectedCode, 1);
+    setSelectedCode(customerCode);
+    loadDocuments(customerCode, 1);
   };
 
   const goToPage = (nextPage) => {
     const safePage = Math.max(1, Math.min(totalPages, nextPage));
     if (safePage === currentPage || documentsLoading) return;
     setPage(safePage);
-    loadDocuments(selectedCode, safePage);
+    loadDocuments(resolveCustomerCodeInput(), safePage);
+  };
+
+  const handleBillingCustomerKeyDown = (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setCustomerSuggestionsOpen(true);
+      if (!customerSuggestions.length) return;
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      setCustomerActiveIndex((current) => (current + delta + customerSuggestions.length) % customerSuggestions.length);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (customerSuggestionsOpen && customerSuggestions.length) {
+        selectBillingCustomer(customerSuggestions[Math.max(0, Math.min(customerActiveIndex, customerSuggestions.length - 1))]);
+      } else {
+        runSearch();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      setCustomerSuggestionsOpen(false);
+    }
   };
 
   const runRemitoSearch = () => {
@@ -763,252 +926,90 @@ export default function Billing() {
     loadRemitos(selectedRemitoCode, safePage);
   };
 
+  if (shouldRedirectToFacturacion) {
+    return <Navigate to={`/cobranzas/facturacion${location.search || ""}`} replace />;
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Cobranzas</h1>
-          <p className="text-sm text-gray-600">Facturación Bejerman y remitos pendientes.</p>
+          <h1 className="text-xl font-semibold">{isRemitosRoute ? "Remitos" : "Facturación"}</h1>
+          <p className="text-sm text-gray-600">
+            {isRemitosRoute ? "Consulta de remitos Bejerman." : "Consulta de facturación y remitos pendientes."}
+          </p>
         </div>
       </div>
 
-      <section className="order-4 border">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
-          <div>
-            <div className="text-sm font-semibold">OS a facturar</div>
-            <div className="text-xs text-gray-500">Reparaciones liberadas para facturar como concepto.</div>
-          </div>
-          <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700">{serviceOrders.length}</span>
-        </div>
-
-        {serviceError && <div className="border-b px-3 py-2 text-sm text-red-700">{serviceError}</div>}
-
-        {selectedServiceOrder && (
-          <div className="border-b bg-gray-50 px-3 py-3">
-            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-xs uppercase text-gray-500">OS seleccionada</div>
-                <div className="mt-0.5 text-base font-semibold text-gray-950">OS {selectedServiceOrder.os}</div>
-                <div className="mt-1 text-sm text-gray-600">{selectedServiceOrder.cliente || "-"}</div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => openServicePdf(selectedServiceOrder)}
-                  className="inline-flex h-9 items-center gap-2 rounded border px-3 text-sm hover:bg-white"
-                >
-                  <FileText className="h-4 w-4" aria-hidden="true" />
-                  PDF OS
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openServiceInvoiceModal(selectedServiceOrder)}
-                  className="inline-flex h-9 items-center gap-2 rounded bg-emerald-600 px-3 text-sm text-white hover:bg-emerald-700"
-                >
-                  <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                  Registrar factura OS
-                </button>
-              </div>
-            </div>
-            <ServiceOrderBillingDetails item={selectedServiceOrder} />
-          </div>
-        )}
-
-        <MobileDataList className="p-3">
-          {serviceOrdersLoading && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
-          {!serviceOrdersLoading &&
-            serviceOrders.map((item) => {
-              const itemId = String(item.ingresoId || item.id || "");
-              return (
-                <MobileDataCard key={itemId} className={selectedServiceOrderId === itemId ? "border-emerald-300 bg-emerald-50" : ""}>
-                  <button type="button" onClick={() => setSelectedServiceOrderId(itemId)} className="block w-full text-left">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-semibold text-gray-900">OS {item.os}</div>
-                        <div className="text-sm text-gray-600">{item.cliente || "-"}</div>
-                      </div>
-                      <div className="text-xs text-gray-500">{formatDateTime(item.fechaLiberacion)}</div>
-                    </div>
-                    <div className="mt-2 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                      <MobileDataField label="Equipo" value={item.equipo || "-"} />
-                      <MobileDataField label="Concepto" value={`${item.conceptCode || "-"} - ${item.conceptDescription || "-"}`} />
-                      <MobileDataField label="Serie" value={item.numeroSerie || "-"} />
-                      <MobileDataField label="RSS" value={item.rss || "RSS pendiente"} />
-                    </div>
-                  </button>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openServicePdf(item)}
-                      className="inline-flex h-9 items-center gap-1 rounded border px-2 text-xs hover:bg-gray-50"
-                    >
-                      <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                      PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openServiceInvoiceModal(item)}
-                      disabled={savingServiceInvoice}
-                      className="inline-flex h-9 items-center gap-1 rounded border px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      Registrar factura
-                    </button>
-                  </div>
-                </MobileDataCard>
-              );
-            })}
-          {!serviceOrdersLoading && !serviceOrders.length && <MobileDataCard className="text-center text-gray-500">Sin OS a facturar.</MobileDataCard>}
-        </MobileDataList>
-
-        <DesktopTableWrap>
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
-              <tr>
-                <th className="px-2 py-2">OS</th>
-                <th className="px-2 py-2">Cliente</th>
-                <th className="px-2 py-2">Equipo</th>
-                <th className="px-2 py-2">Concepto sugerido</th>
-                <th className="px-2 py-2">RSS</th>
-                <th className="px-2 py-2">Liberación</th>
-                <th className="px-2 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {serviceOrdersLoading ? (
-                <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-gray-500">
-                    Cargando...
-                  </td>
-                </tr>
-              ) : (
-                serviceOrders.map((item) => {
-                  const itemId = String(item.ingresoId || item.id || "");
-                  return (
-                    <tr key={itemId} className={`border-t align-top ${selectedServiceOrderId === itemId ? "bg-emerald-50" : ""}`}>
-                      <td className="px-2 py-2 font-medium">
-                        <button type="button" onClick={() => setSelectedServiceOrderId(itemId)} className="text-left text-blue-700 hover:underline">
-                          OS {item.os}
-                        </button>
-                      </td>
-                      <td className="px-2 py-2">{item.cliente || "-"}</td>
-                      <td className="px-2 py-2">{item.equipo || "-"}</td>
-                      <td className="px-2 py-2">
-                        <div className="font-medium">{item.conceptCode || "-"}</div>
-                        <div className="text-xs text-gray-600">{item.conceptDescription || "-"}</div>
-                      </td>
-                      <td className="px-2 py-2">{item.rss || "RSS pendiente"}</td>
-                      <td className="px-2 py-2">{formatDateTime(item.fechaLiberacion)}</td>
-                      <td className="px-2 py-2 text-right">
-                        <div className="flex justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openServicePdf(item)}
-                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50"
-                          >
-                            <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                            PDF
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => openServiceInvoiceModal(item)}
-                            disabled={savingServiceInvoice}
-                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
-                          >
-                            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                            Registrar
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-              {!serviceOrdersLoading && !serviceOrders.length && (
-                <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-gray-500">
-                    Sin OS a facturar.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </DesktopTableWrap>
-      </section>
-
-      <div className="contents">
+      <div className={isRemitosRoute ? "contents" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]"}>
+        {!isRemitosRoute && (
         <section className="border">
           <div className="border-b px-3 py-2 text-sm font-semibold">Consulta de facturación</div>
 
-          {false && selectedPendingOrder ? (
-            <div className="border-b bg-gray-50 px-3 py-3">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="text-xs uppercase text-gray-500">Remito seleccionado</div>
-                  <div className="mt-0.5 text-base font-semibold text-gray-950">
-                    {selectedPendingOrder.remitoNumber || selectedPendingOrder.orderNumber}
-                  </div>
-                  <div className="mt-1 text-sm text-gray-600">{selectedPendingOrder.customerName || "-"}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => openInvoiceModal(selectedPendingOrder)}
-                  className="inline-flex h-9 items-center gap-2 rounded bg-emerald-600 px-3 text-sm text-white hover:bg-emerald-700"
-                >
-                  <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                  Registrar factura
-                </button>
-              </div>
-
-              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <DetailItem label="Artículo" value={selectedSummary?.primary} />
-                <DetailItem label="Referencia" value={selectedSummary?.secondary} />
-                <DetailItem label="Total estimado" value={formatOrderTotalsAmount(selectedTotals, "total")} />
-                <DetailItem label="Fecha de entrega" value={formatDateTime(selectedPendingOrder.deliveredAt)} />
-              </div>
-
-              <div className="mt-3">
-                <DeliveryOrderBillingDetails order={selectedPendingOrder} />
-              </div>
-
-              {!selectedHasCustomerCode && (
-                <div className="mt-3 inline-flex items-start gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>
-                    Cliente sin código Bejerman. La consulta no está disponible para este remito; podés
-                    registrar la factura igual.
-                  </span>
-                </div>
-              )}
-            </div>
-          ) : null}
-
           <div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_150px_150px_minmax(180px,1fr)_auto] xl:items-end">
-            <label className="text-sm sm:col-span-2 xl:col-span-1">
+            <label className="relative text-sm sm:col-span-2 xl:col-span-1">
               <span className="mb-1 block text-xs uppercase text-gray-500">Cliente</span>
               <input
                 value={customerQuery}
-                onChange={(event) => setCustomerQuery(event.target.value)}
-                className="mb-2 h-9 w-full rounded border px-2"
-                placeholder="Buscar cliente o código"
-              />
-              <select
-                value={selectedCode}
-                onChange={(event) => {
-                  const nextCode = event.target.value;
-                  setPage(1);
-                  setSelectedCode(nextCode);
-                  loadDocuments(nextCode, 1);
+                onFocus={() => {
+                  setCustomerSuggestionsOpen(true);
+                  setCustomerActiveIndex(0);
                 }}
-                className="h-9 w-full rounded border px-2"
-              >
-                <option value="">Todas las facturaciones</option>
-                {customersForSelect.map((customer) => (
-                  <option key={customer.id} value={customer.bejermanCustomerCode}>
-                    {customer.name} · {customer.bejermanCustomerCode}
-                  </option>
-                ))}
-              </select>
+                onBlur={() => window.setTimeout(() => setCustomerSuggestionsOpen(false), 120)}
+                onKeyDown={handleBillingCustomerKeyDown}
+                onChange={(event) => {
+                  setCustomerQuery(event.target.value);
+                  setSelectedCode("");
+                  setCustomerActiveIndex(0);
+                  setCustomerSuggestionsOpen(true);
+                }}
+                className="h-9 w-full rounded border px-2 pr-8"
+                placeholder="Escriba cliente o código"
+                role="combobox"
+                aria-expanded={customerSuggestionsOpen}
+                aria-controls="billing-customer-options"
+                autoComplete="off"
+              />
+              {(customerQuery || selectedCode) && (
+                <button
+                  type="button"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={clearBillingCustomer}
+                  className="absolute right-1 top-6 inline-flex h-7 w-7 items-center justify-center rounded text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                  aria-label="Limpiar cliente"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+              {customerSuggestionsOpen && (
+                <div
+                  id="billing-customer-options"
+                  role="listbox"
+                  className="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto rounded border bg-white shadow-lg"
+                >
+                  {customerSuggestions.length ? (
+                    customerSuggestions.map((customer, index) => (
+                      <button
+                        key={customer.id || customerCode(customer)}
+                        type="button"
+                        role="option"
+                        aria-selected={index === customerActiveIndex}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onMouseEnter={() => setCustomerActiveIndex(index)}
+                        onClick={() => selectBillingCustomer(customer)}
+                        className={`w-full px-3 py-2 text-left text-sm ${
+                          index === customerActiveIndex ? "bg-slate-100" : "hover:bg-gray-50"
+                        }`}
+                      >
+                        <span className="block truncate font-medium">{customerName(customer) || "Cliente sin nombre"}</span>
+                        <span className="block truncate text-xs text-gray-500">{customerCode(customer) || "sin código Bejerman"}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-3 py-2 text-xs text-gray-500">Sin coincidencias.</div>
+                  )}
+                </div>
+              )}
             </label>
             <label className="text-sm">
               <span className="mb-1 block text-xs uppercase text-gray-500">Desde</span>
@@ -1053,12 +1054,14 @@ export default function Billing() {
           </div>
 
           {error && <div className="border-t px-3 py-2 text-sm text-red-700">{error}</div>}
+          {documentsWarning && <div className="border-t px-3 py-2 text-sm text-amber-800">{documentsWarning}</div>}
 
           <MobileDataList className="p-3">
             {documentsLoading && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
             {!documentsLoading &&
               documents.map((item, index) => {
                 const documentId = valueOf(item, ["documentId", "id"]);
+                const pdfLoading = loadingDocumentPdfId === documentId;
                 const total = valueOf(item, ["totalAmount", "total", "importeTotal", "amount"]);
                 return (
                   <MobileDataCard key={documentId || index} className="space-y-3">
@@ -1077,10 +1080,15 @@ export default function Billing() {
                       <button
                         type="button"
                         onClick={() => openPdf(item)}
-                        className="inline-flex h-9 w-full items-center justify-center gap-1 rounded border px-2 text-xs hover:bg-gray-50"
+                        disabled={Boolean(loadingDocumentPdfId)}
+                        className="inline-flex h-9 w-full items-center justify-center gap-1 rounded border px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
                       >
-                        <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                        PDF
+                        {pdfLoading ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                        {pdfLoading ? "Preparando..." : "PDF"}
                       </button>
                     )}
                   </MobileDataCard>
@@ -1110,6 +1118,7 @@ export default function Billing() {
                 ) : (
                   documents.map((item, index) => {
                     const documentId = valueOf(item, ["documentId", "id"]);
+                    const pdfLoading = loadingDocumentPdfId === documentId;
                     const total = valueOf(item, ["totalAmount", "total", "importeTotal", "amount"]);
                     return (
                       <tr key={documentId || index} className="border-t">
@@ -1123,10 +1132,15 @@ export default function Billing() {
                             <button
                               type="button"
                               onClick={() => openPdf(item)}
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+                              disabled={Boolean(loadingDocumentPdfId)}
+                              className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
                             >
-                              <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                              PDF
+                              {pdfLoading ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                              ) : (
+                                <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                              )}
+                              {pdfLoading ? "Preparando..." : "PDF"}
                             </button>
                           )}
                         </td>
@@ -1168,7 +1182,9 @@ export default function Billing() {
             </div>
           </div>
         </section>
+        )}
 
+        {!isRemitosRoute && (
         <section className="border">
           <div className="flex items-center justify-between border-b px-3 py-2 text-sm font-semibold">
             <span>Remitos pendientes</span>
@@ -1176,6 +1192,7 @@ export default function Billing() {
               {pendingOrders.length}
             </span>
           </div>
+          {pendingError && <div className="border-b px-3 py-2 text-sm text-red-700">{pendingError}</div>}
           <div className="max-h-[560px] overflow-y-auto">
             {pendingLoading ? (
               <div className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-gray-500">
@@ -1221,6 +1238,19 @@ export default function Billing() {
                       <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
                       Registrar factura
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => markOrderNotBillable(order)}
+                      disabled={savingNotBillableId === order.id}
+                      className="ml-2 mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {savingNotBillableId === order.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <X className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      No se factura
+                    </button>
                   </div>
                 );
               })
@@ -1230,8 +1260,10 @@ export default function Billing() {
             )}
           </div>
         </section>
+        )}
       </div>
 
+      {isRemitosRoute && (
       <section className="border">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
           <div>
@@ -1358,6 +1390,7 @@ export default function Billing() {
           </label>
         </div>
 
+        {remitoWarning && <div className="border-t px-3 py-2 text-sm text-amber-800">{remitoWarning}</div>}
         {remitoError && <div className="border-t px-3 py-2 text-sm text-red-700">{remitoError}</div>}
 
         <MobileDataList className="p-3">
@@ -1365,6 +1398,7 @@ export default function Billing() {
           {!remitosLoading &&
             remitos.map((item, index) => {
               const documentId = valueOf(item, ["documentId", "id"]);
+              const pdfLoading = loadingRemitoPdfId === documentId;
               return (
                 <MobileDataCard key={documentId || index} className="space-y-3">
                   <div className="flex items-start justify-between gap-3">
@@ -1386,10 +1420,15 @@ export default function Billing() {
                     <button
                       type="button"
                       onClick={() => openRemitoPdf(item)}
-                      className="inline-flex h-9 w-full items-center justify-center gap-1 rounded border px-2 text-xs hover:bg-gray-50"
+                      disabled={Boolean(loadingRemitoPdfId)}
+                      className="inline-flex h-9 w-full items-center justify-center gap-1 rounded border px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
                     >
-                      <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                      PDF
+                      {pdfLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      {pdfLoading ? "Preparando..." : "PDF"}
                     </button>
                   )}
                 </MobileDataCard>
@@ -1422,6 +1461,7 @@ export default function Billing() {
               ) : (
                 remitos.map((item, index) => {
                   const documentId = valueOf(item, ["documentId", "id"]);
+                  const pdfLoading = loadingRemitoPdfId === documentId;
                   const total = valueOf(item, ["totalAmount", "total", "importeTotal", "amount"]);
                   return (
                     <tr key={documentId || index} className="border-t">
@@ -1437,10 +1477,15 @@ export default function Billing() {
                           <button
                             type="button"
                             onClick={() => openRemitoPdf(item)}
-                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+                            disabled={Boolean(loadingRemitoPdfId)}
+                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
                           >
-                            <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                            PDF
+                            {pdfLoading ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            {pdfLoading ? "Preparando..." : "PDF"}
                           </button>
                         )}
                       </td>
@@ -1482,6 +1527,71 @@ export default function Billing() {
           </div>
         </div>
       </section>
+      )}
+
+      <RemitoPdfProgressModal
+        state={remitoPdf}
+        onClose={closeRemitoPdfModal}
+        onOpenPdf={openManualRemitoPdf}
+      />
+
+      {pendingDetailOrder && (
+        <ResponsiveModalOverlay className="bg-black/35">
+          <ResponsiveModalPanel className="max-w-5xl" role="dialog" aria-modal="true">
+            <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+              <div>
+                <h2 className="text-base font-semibold">Detalle del remito pendiente</h2>
+                <p className="mt-0.5 text-sm text-gray-600">
+                  {pendingDetailOrder.remitoNumber || pendingDetailOrder.orderNumber} · {pendingDetailOrder.customerName || "-"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closePendingDetailModal}
+                className="inline-flex h-8 w-8 items-center justify-center rounded border text-gray-700 hover:bg-gray-50"
+                aria-label="Cerrar"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="max-h-[calc(100vh-9rem)] space-y-4 overflow-y-auto p-4">
+              <DeliveryOrderBillingDetails order={pendingDetailOrder} />
+              {pendingError && <div className="text-sm text-red-700">{pendingError}</div>}
+            </div>
+            <div className="flex justify-end gap-2 border-t px-4 py-3">
+              <button
+                type="button"
+                onClick={closePendingDetailModal}
+                className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+              >
+                Cerrar
+              </button>
+              <button
+                type="button"
+                onClick={() => markOrderNotBillable(pendingDetailOrder)}
+                disabled={savingNotBillableId === pendingDetailOrder.id}
+                className="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+              >
+                {savingNotBillableId === pendingDetailOrder.id ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <X className="h-4 w-4" aria-hidden="true" />
+                )}
+                No se factura
+              </button>
+              <button
+                type="button"
+                onClick={() => openInvoiceModal(pendingDetailOrder)}
+                disabled={savingInvoice}
+                className="inline-flex items-center gap-2 rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                Registrar factura
+              </button>
+            </div>
+          </ResponsiveModalPanel>
+        </ResponsiveModalOverlay>
+      )}
 
       {invoiceOrder && (
         <ResponsiveModalOverlay className="bg-black/35">
@@ -1531,66 +1641,6 @@ export default function Billing() {
                   className="inline-flex items-center gap-2 rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
                 >
                   {savingInvoice ? (
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                  )}
-                  Guardar
-                </button>
-              </div>
-            </form>
-          </ResponsiveModalPanel>
-        </ResponsiveModalOverlay>
-      )}
-
-      {serviceInvoiceOrder && (
-        <ResponsiveModalOverlay className="bg-black/35">
-          <ResponsiveModalPanel className="max-w-4xl" role="dialog" aria-modal="true">
-            <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
-              <div>
-                <h2 className="text-base font-semibold">Registrar factura OS</h2>
-                <p className="mt-0.5 text-sm text-gray-600">
-                  OS {serviceInvoiceOrder.os || serviceInvoiceOrder.ingresoId} · {serviceInvoiceOrder.cliente || "-"}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closeServiceInvoiceModal}
-                disabled={savingServiceInvoice}
-                className="inline-flex h-8 w-8 items-center justify-center rounded border text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                aria-label="Cerrar"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />
-              </button>
-            </div>
-            <form onSubmit={submitServiceInvoice} className="max-h-[calc(100vh-9rem)] space-y-4 overflow-y-auto p-4">
-              <ServiceOrderBillingDetails item={serviceInvoiceOrder} />
-              <label className="block text-sm">
-                <span className="mb-1 block text-xs uppercase text-gray-500">Número de factura</span>
-                <input
-                  autoFocus
-                  value={serviceInvoiceNumber}
-                  onChange={(event) => setServiceInvoiceNumber(event.target.value)}
-                  className="h-9 w-full rounded border px-2"
-                  placeholder="FC A 0001-00000000"
-                />
-              </label>
-              {serviceInvoiceError && <div className="text-sm text-red-700">{serviceInvoiceError}</div>}
-              <div className="flex justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={closeServiceInvoiceModal}
-                  disabled={savingServiceInvoice}
-                  className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingServiceInvoice}
-                  className="inline-flex items-center gap-2 rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {savingServiceInvoice ? (
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                   ) : (
                     <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
