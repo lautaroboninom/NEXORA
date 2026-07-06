@@ -2599,6 +2599,55 @@ def _delivery_remito_pdf_email_details(
     return lines
 
 
+def _try_recover_missing_comprobante_numero(
+    group_id: str,
+    response: dict[str, Any],
+    compatibility: dict[str, Any],
+    actor_user_id: int | None,
+) -> str | None:
+    if _optional_text(response.get("comprobanteNumero")):
+        return None
+    tipo = _optional_text(response.get("comprobanteTipo")) or ""
+    pto_venta = _optional_text(response.get("comprobantePtoVenta")) or ""
+    if not tipo or not pto_venta:
+        return None
+    logger.info(
+        "bejerman_remito_recovering_missing_comprobante_numero",
+        extra={"group_id": group_id, "tipo": tipo, "pto_venta": pto_venta},
+    )
+    try:
+        client = BejermanSDKClient(
+            company_key=compatibility.get("companyKey"),
+            actor_user_id=actor_user_id,
+        )
+        today = timezone.localdate().isoformat()
+        filters = build_sales_filters(
+            compatibility.get("customerCode") or "",
+            today,
+            today,
+            tipo,
+            compatibility.get("profile", {}).get("operation") or "",
+        )
+        bejerman_response = client.list_comprobantes_ventas(filters)
+        records = records_from_response(bejerman_response)
+        for record in records:
+            record_numero = as_string(first_value(record, ("Comprobante_Numero", "comprobanteNumero", "numero")))
+            record_pto = as_string(first_value(record, ("Comprobante_PtoVenta", "comprobantePtoVenta")))
+            if record_numero and record_pto == pto_venta:
+                logger.info(
+                    "bejerman_remito_recovered_comprobante_numero",
+                    extra={"group_id": group_id, "numero": record_numero},
+                )
+                return record_numero
+    except Exception as exc:
+        logger.warning(
+            "bejerman_remito_recovery_failed",
+            extra={"group_id": group_id, "error": str(exc)},
+            exc_info=True,
+        )
+    return None
+
+
 def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     started_at = time.monotonic()
     ids = [str(item).strip() for item in (order_ids or []) if str(item).strip()]
@@ -2692,6 +2741,11 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
             },
         )
         response = parse_remito_response(raw_response)
+        recovered_numero = _try_recover_missing_comprobante_numero(
+            group_id, response, compatibility, actor_user_id
+        )
+        if recovered_numero and not _optional_text(response.get("comprobanteNumero")):
+            response["comprobanteNumero"] = recovered_numero
         bridge_data = {
             "remitoNumber": response.get("remitoNumber"),
             "response": response,
