@@ -202,6 +202,42 @@ def read_remote_pdf(directory_uri: Any, filename: str) -> bytes | None:
         client.close()
 
 
+def read_remote_pdf_candidates(directory_uri: Any, filenames: list[str], prefixes: list[str] | None = None) -> tuple[bytes, str] | tuple[None, str]:
+    """
+    Intenta leer un PDF remoto probando múltiples nombres de archivo y prefijos.
+    Retorna (bytes, path_label) si encontró algo, (None, "") si no.
+    """
+    windows_dir = remote_windows_path(directory_uri)
+    directory = _sftp_path(windows_dir).rstrip("/")
+    client = _connect()
+    try:
+        sftp = client.open_sftp()
+        try:
+            _remote_stat_dir(sftp, directory)
+            for filename in filenames or []:
+                path = posixpath.join(directory, filename)
+                content = _read_remote_bytes(sftp, path)
+                if content is not None:
+                    return content, path
+            if prefixes:
+                for prefix in prefixes:
+                    try:
+                        files = sftp.listdir(directory)
+                        for f in files:
+                            if f.startswith(prefix):
+                                path = posixpath.join(directory, f)
+                                content = _read_remote_bytes(sftp, path)
+                                if content is not None:
+                                    return content, path
+                    except Exception:
+                        pass
+            return None, ""
+        finally:
+            sftp.close()
+    finally:
+        client.close()
+
+
 def remove_remote_file_if_same(file_uri: Any, expected: bytes) -> bool:
     windows_file = remote_windows_path(file_uri)
     path = _sftp_path(windows_file)
