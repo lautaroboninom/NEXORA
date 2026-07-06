@@ -81,7 +81,7 @@ class Command(BaseCommand):
                       created_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       updated_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       CONSTRAINT chk_bejerman_ingreso_remitos_status
-                        CHECK (status IN ('pending','running','generated','failed')),
+                        CHECK (status IN ('pending','running','generated','failed','failed_review')),
                       CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
                         CHECK (pdf_status IN ('pending','ready','failed','not_applicable')),
                       CONSTRAINT chk_bejerman_ingreso_remitos_document_mode
@@ -129,6 +129,19 @@ class Command(BaseCommand):
                 )
                 cur.execute("ALTER TABLE bejerman_ingreso_remitos ALTER COLUMN document_mode SET DEFAULT 'emit'")
                 cur.execute("ALTER TABLE bejerman_ingreso_remitos ALTER COLUMN document_mode SET NOT NULL")
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      DROP CONSTRAINT IF EXISTS chk_bejerman_ingreso_remitos_status
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_ingreso_remitos
+                      ADD CONSTRAINT chk_bejerman_ingreso_remitos_status
+                      CHECK (status IN ('pending','running','generated','failed','failed_review'))
+                    """
+                )
                 cur.execute(
                     """
                     ALTER TABLE bejerman_ingreso_remitos

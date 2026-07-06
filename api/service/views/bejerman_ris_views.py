@@ -12,6 +12,7 @@ from ..bejerman_ris import (
     BejermanRisPdfPendingError,
     BejermanRisPreflightError,
     BejermanRisRegisteredNoPdfError,
+    BejermanRisReviewRequiredError,
     apply_article_fix_from_bejerman,
     apply_customer_fix_from_bejerman,
     emit_or_get_ris,
@@ -151,12 +152,15 @@ class IngresoRisEmitirView(APIView):
         _require_ris_print_permissions(request)
         _set_audit_user(request)
         user_id = _actor_id(request)
+        force_reviewed_reissue = request.data.get("forceReviewedReissue", False) if isinstance(request.data, dict) else False
         try:
-            row = emit_or_get_ris(ingreso_id, user_id=user_id)
+            row = emit_or_get_ris(ingreso_id, user_id=user_id, force_reviewed_reissue=force_reviewed_reissue)
         except BejermanRisPreflightError as exc:
             return Response({**exc.payload, **_ris_payload(ingreso_id)}, status=409)
         except BejermanRisBusyError as exc:
             return Response({"detail": str(exc), **_ris_payload(ingreso_id)}, status=409)
+        except BejermanRisReviewRequiredError as exc:
+            return Response({"detail": str(exc), "code": exc.code, **_ris_payload(ingreso_id)}, status=409)
         except BejermanSdkConfigError as exc:
             return Response({"detail": str(exc), **_ris_payload(ingreso_id)}, status=503)
         except BejermanRisError as exc:
@@ -181,6 +185,8 @@ class IngresoRisPdfView(APIView):
             return response
         except BejermanRisPdfError as exc:
             return Response({"detail": str(exc), **_ris_payload(ingreso_id)}, status=502)
+        except BejermanRisReviewRequiredError as exc:
+            return Response({"detail": str(exc), "code": exc.code, **_ris_payload(ingreso_id)}, status=409)
         except BejermanRisRegisteredNoPdfError as exc:
             return Response({"detail": str(exc), "code": exc.code, **_ris_payload(ingreso_id)}, status=409)
         except BejermanRisError as exc:

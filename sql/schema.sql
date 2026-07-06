@@ -1057,7 +1057,7 @@ CREATE TABLE IF NOT EXISTS bejerman_ingreso_remitos (
   created_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT chk_bejerman_ingreso_remitos_status
-    CHECK (status IN ('pending','running','generated','failed')),
+    CHECK (status IN ('pending','running','generated','failed','failed_review')),
   CONSTRAINT chk_bejerman_ingreso_remitos_pdf_status
     CHECK (pdf_status IN ('pending','ready','failed','not_applicable')),
   CONSTRAINT chk_bejerman_ingreso_remitos_document_mode

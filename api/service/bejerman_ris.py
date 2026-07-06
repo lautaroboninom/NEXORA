@@ -859,6 +859,32 @@ def _update_ris_failure(
         )
 
 
+def _update_ris_review_required(
+    ingreso_id: int,
+    error: str,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+) -> None:
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bejerman_ingreso_remitos
+               SET status = 'failed_review',
+                   last_error = %s,
+                   request_payload = COALESCE(%s::jsonb, request_payload),
+                   response_payload = COALESCE(%s::jsonb, response_payload),
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE ingreso_id = %s
+            """,
+            [
+                error[:2000],
+                _json_param(request_payload) if request_payload is not None else None,
+                _json_param(response_payload) if response_payload is not None else None,
+                ingreso_id,
+            ],
+        )
+
+
 def _update_ris_failure_many(
     ingreso_ids: list[int],
     error: str,
@@ -3076,10 +3102,17 @@ def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = Non
         raise BejermanRisError(str(exc)) from exc
 
 
-def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, Any]:
+def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_reissue: bool = False) -> dict[str, Any]:
     started_at = time.monotonic()
     _ensure_ris_row(ingreso_id, user_id)
     current = _row_for_ingreso(ingreso_id) or {}
+
+    if current.get("status") == "failed_review" and not force_reviewed_reissue:
+        raise BejermanRisReviewRequiredError(
+            "Este RIS requiere revisión manual antes de reintentar. "
+            "Por favor revise el error y reintente con force_reviewed_reissue=True."
+        )
+
     manual_remito_number = _clean(current.get("manual_remito_number")) or _clean(current.get("remito_number"))
     if (
         current.get("status") == "failed"
@@ -3137,6 +3170,22 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None) -> dict[str, An
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
         )
         payload = request_payload
+
+        if not _clean(response.get("remitoNumber")):
+            _update_ris_review_required(
+                ingreso_id,
+                "Bejerman no devolvió número de RIS - requiere revisión manual",
+                request_payload=payload,
+                response_payload=response.get("response"),
+            )
+            logger.warning(
+                "bejerman_ris_emit_no_remito_number",
+                extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
+            )
+            raise BejermanRisReviewRequiredError(
+                "El RIS se emitió pero Bejerman no devolvió número. Requiere revisión manual."
+            )
+
         row = _update_ris_generated(ingreso_id, payload, response)
         _notify_ingress_remito_pdf_email(row, [ingreso_id], payload, response, user_id)
         logger.info(
@@ -3270,6 +3319,10 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
     if (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER:
         raise BejermanRisRegisteredNoPdfError(row.get("remito_number") or row.get("manual_remito_number"))
     if row.get("status") != "generated" or not _clean(row.get("remito_number")):
+        if row.get("status") == "failed_review":
+            raise BejermanRisReviewRequiredError(
+                _clean(row.get("last_error")) or "El RIS requiere revisión manual antes de intentar obtener el PDF"
+            )
         if row.get("status") == "failed":
             raise BejermanRisError(_clean(row.get("last_error")) or "No se pudo emitir el RIS")
         raise BejermanRisPdfPendingError("El RIS todavía no fue emitido")
