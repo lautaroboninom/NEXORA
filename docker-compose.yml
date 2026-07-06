@@ -28,6 +28,7 @@ services:
       - PUBLIC_WEB_URL=${PUBLIC_WEB_URL:-http://localhost:5175}
       - DJANGO_ALLOWED_HOSTS=${DJANGO_DEV_ALLOWED_HOSTS:-localhost,127.0.0.1,api,100.91.53.60,nexora.tail7bb880.ts.net}
       - LOGO_PATH=${LOGO_PATH:-/app/staticfiles/branding/logo-app.png}
+      - BEJERMAN_PDF_INTERACTIVE_REQUEST_TIMEOUT=${BEJERMAN_PDF_INTERACTIVE_REQUEST_TIMEOUT:-12}
     depends_on:
       postgres:
         condition: service_healthy
