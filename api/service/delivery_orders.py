@@ -708,6 +708,21 @@ def service_release_references_from_order(order: dict[str, Any]) -> list[str]:
     return [service_order_reference(ingreso_id) for ingreso_id in service_release_ingreso_ids_from_order(order)]
 
 
+def service_release_max_items_per_order() -> int:
+    value = getattr(settings, "BEJERMAN_RSS_MAX_PRINT_LINES", 22)
+    try:
+        max_lines = int(value)
+    except (TypeError, ValueError):
+        max_lines = 22
+    max_lines = max(4, min(22, max_lines))
+    try:
+        item_lines = int(getattr(settings, "BEJERMAN_RSS_PRINT_LINES_PER_ITEM", 3))
+    except (TypeError, ValueError):
+        item_lines = 3
+    item_lines = max(1, item_lines)
+    return max(1, max_lines // item_lines)
+
+
 def delivery_order_number(row: dict[str, Any]) -> str:
     if row.get("delivery_type") == "service_release":
         service_references = service_release_references_from_order(
@@ -1317,7 +1332,9 @@ def _serialize_remito_group(
 ) -> dict[str, Any]:
     group_id = row.get("id")
     orders = orders_by_group.get(group_id, [])
-    generated = row.get("status") == "generated"
+    status = row.get("status") or ""
+    generated = status in {"generated", "reconciled"}
+    uncertain = status in {"sent_unknown", "failed_review"}
     response_summary = _decode_json(row.get("response_summary"), {}) or {}
     registered_mode = str(
         response_summary.get("documentMode")
@@ -1332,7 +1349,11 @@ def _serialize_remito_group(
         "comprobanteLetra": row.get("comprobante_letra") or "",
         "comprobantePtoVenta": row.get("comprobante_pto_venta") or "",
         "comprobanteNumero": row.get("comprobante_numero") or "",
-        "status": row.get("status") or "",
+        "status": status,
+        "generated": generated,
+        "reconciled": status == "reconciled",
+        "uncertain": uncertain,
+        "reviewRequired": status == "failed_review",
         "remitoNumber": row.get("remito_number") or "",
         "customerCode": row.get("customer_code") or "",
         "customerName": row.get("customer_name") or "",
@@ -1416,11 +1437,92 @@ def load_remito_groups_by_id(group_ids: list[str]) -> dict[str, dict[str, Any]]:
     return _serialize_remito_groups(group_rows)
 
 
-def list_remito_history(limit: Any = 20) -> list[dict[str, Any]]:
+def _history_param(filters: Any, *names: str) -> str:
+    if not hasattr(filters, "get"):
+        return ""
+    for name in names:
+        value = _optional_text(filters.get(name))
+        if value:
+            return value
+    return ""
+
+
+def _history_limit(filters: Any) -> int:
+    if hasattr(filters, "get"):
+        raw_limit = filters.get("limit") or filters.get("pageSize") or filters.get("page_size") or 20
+    else:
+        raw_limit = filters
     try:
-        safe_limit = max(1, min(100, int(limit or 20)))
+        return max(1, min(100, int(raw_limit or 20)))
     except (TypeError, ValueError):
-        safe_limit = 20
+        return 20
+
+
+def _history_match_text(group: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for key in (
+        "id",
+        "comprobanteTipo",
+        "comprobanteLetra",
+        "comprobantePtoVenta",
+        "comprobanteNumero",
+        "status",
+        "remitoNumber",
+        "customerCode",
+        "customerName",
+        "companyKey",
+        "sellerCode",
+        "paymentTermCode",
+        "operationCode",
+        "depositCode",
+    ):
+        chunks.append(_optional_text(group.get(key)))
+    response_summary = group.get("responseSummary")
+    if isinstance(response_summary, dict):
+        chunks.append(json.dumps(response_summary, ensure_ascii=False, default=str))
+    for order in group.get("orders") or []:
+        if not isinstance(order, dict):
+            continue
+        for key in (
+            "id",
+            "orderNumber",
+            "deliveryType",
+            "sourceReference",
+            "customerName",
+            "equipmentModel",
+            "equipmentSerial",
+            "rawPedido",
+        ):
+            chunks.append(_optional_text(order.get(key)))
+    return " ".join(chunk for chunk in chunks if chunk)
+
+
+def _history_matches(group: dict[str, Any], search: str, status: str, company_key: str) -> bool:
+    if status and _optional_text(group.get("status")).lower() != status.lower():
+        return False
+    if company_key and _optional_text(group.get("companyKey")).upper() != company_key.upper():
+        return False
+    if not search:
+        return True
+    haystack = _history_match_text(group).casefold()
+    needle = search.casefold()
+    if needle in haystack:
+        return True
+    compact_haystack = re.sub(r"[\s\-./]+", "", haystack)
+    compact_needle = re.sub(r"[\s\-./]+", "", needle)
+    if compact_needle and compact_needle in compact_haystack:
+        return True
+    digit_needle = re.sub(r"\D+", "", needle)
+    return bool(digit_needle and digit_needle in re.sub(r"\D+", "", haystack))
+
+
+def list_remito_history(limit: Any = 20) -> list[dict[str, Any]]:
+    filters = limit if hasattr(limit, "get") else None
+    safe_limit = _history_limit(limit)
+    search = _history_param(filters, "search", "q", "remito", "remitoNumber")
+    status = _history_param(filters, "status", "estado")
+    company_key = _history_param(filters, "companyKey", "company_key", "empresa")
+    query_limit = 500 if search or status or company_key else safe_limit
     with connection.cursor() as cur:
         cur.execute(
             """
@@ -1432,10 +1534,11 @@ def list_remito_history(limit: Any = 20) -> list[dict[str, Any]]:
             ORDER BY COALESCE(generated_at, created_at) DESC, id DESC
             LIMIT %s
             """,
-            [safe_limit],
+            [query_limit],
         )
         group_rows = _rows(cur)
-    return list(_serialize_remito_groups(group_rows).values())
+    groups = list(_serialize_remito_groups(group_rows).values())
+    return [group for group in groups if _history_matches(group, search, status, company_key)][:safe_limit]
 
 
 def create_event(
@@ -2516,22 +2619,51 @@ def mark_prepared(order_id: str, actor_user_id: int | None, remito_number: str |
         )
     if current["status"] not in PREPARABLE_STATUSES:
         raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "La orden ya está cerrada", status_code=409)
-    current = refresh_delivery_order_article_partida_flags(current, actor_user_id, strict=True, action="preparar")
-    _validate_order_partidas_ready(current)
-    if current.get("deliveryType") == "rental":
-        validate_rental_delivery_items_ready(
-            current.get("items") or [],
-            order_id=order_id,
-            company_key=current.get("companyKey") or "SEPID",
-            actor_user_id=actor_user_id,
-        )
     next_status = "armado_pendiente_entrega"
     effective_remito = _optional_text(remito_number)
+    current_group_id = _optional_text(current.get("bejermanRemitoGroupId"))
+    manual_recovery_group_id = ""
+    if effective_remito and not _optional_text(current.get("remitoNumber")) and current_group_id:
+        with connection.cursor() as cur:
+            cur.execute("SELECT status FROM bejerman_remito_groups WHERE id = %s", [current_group_id])
+            row = cur.fetchone()
+        group_status = _optional_text(row[0] if row else "")
+        if group_status in {"sent_unknown", "failed_review", "failed"}:
+            manual_recovery_group_id = current_group_id
+    should_register_manual_remito = (
+        bool(effective_remito)
+        and not _optional_text(current.get("remitoNumber"))
+        and (not current_group_id or bool(manual_recovery_group_id))
+    )
+    manual_remito_document: dict[str, Any] | None = None
+    manual_remito_is_existing = False
+    if should_register_manual_remito:
+        from .bejerman_delivery import normalize_delivery_order_manual_remito_number
+
+        manual_remito_document = normalize_delivery_order_manual_remito_number(current, effective_remito)
+        manual_remito_is_existing = manual_remito_document.get("documentMode") == "existing"
+
+    if not manual_remito_is_existing:
+        current = refresh_delivery_order_article_partida_flags(current, actor_user_id, strict=True, action="preparar")
+        _validate_order_partidas_ready(current)
+        if current.get("deliveryType") == "rental":
+            validate_rental_delivery_items_ready(
+                current.get("items") or [],
+                order_id=order_id,
+                company_key=current.get("companyKey") or "SEPID",
+                actor_user_id=actor_user_id,
+            )
     manual_remito_metadata: dict[str, Any] = {}
-    if effective_remito and not _optional_text(current.get("remitoNumber")) and not _optional_text(current.get("bejermanRemitoGroupId")):
+    if should_register_manual_remito:
         from .bejerman_delivery import register_delivery_order_manual_remito
 
-        manual_remito_metadata = register_delivery_order_manual_remito(current, actor_user_id, effective_remito)
+        manual_remito_metadata = register_delivery_order_manual_remito(
+            current,
+            actor_user_id,
+            effective_remito,
+            document=manual_remito_document,
+            group_id=manual_recovery_group_id or None,
+        )
         effective_remito = _optional_text(manual_remito_metadata.get("remitoNumber")) or effective_remito
     should_notify_billing = (
         bool(effective_remito)
@@ -2584,6 +2716,14 @@ def mark_delivered(order_id: str, actor_user_id: int | None, remito_number: str 
         )
     if current["status"] in CLOSED_STATUSES:
         raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "La orden ya está cerrada", status_code=409)
+    remito_group = current.get("bejermanRemitoGroup") if isinstance(current.get("bejermanRemitoGroup"), dict) else {}
+    remito_group_status = _optional_text(remito_group.get("status"))
+    if remito_group.get("uncertain") or remito_group_status in {"sent_unknown", "failed_review"}:
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REQUIRES_REVIEW",
+            "El remito Bejerman está en revisión. Verifique Bejerman antes de entregar la orden.",
+            status_code=409,
+        )
     effective_remito = _optional_text(remito_number) or _optional_text(current.get("remitoNumber"))
     if not effective_remito:
         raise DeliveryOrderError("REMITO_REQUIRED", "Para entregar la orden se necesita un remito")
@@ -3539,10 +3679,7 @@ def _service_release_equipment_label(row: dict[str, Any]) -> str:
 
 def _service_release_equipment_detail(row: dict[str, Any]) -> str:
     parts = [_service_release_equipment_label(row)]
-    service_order = service_order_reference(row.get("ingreso_id"))
     internal_number = _optional_text(row.get("equipment_internal_number"))
-    if service_order:
-        parts.append(service_order)
     if internal_number:
         parts.append(f"N° interno (MG) {internal_number}")
     return " - ".join(part for part in parts if part) or "Equipo"
@@ -3656,6 +3793,11 @@ def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str |
                AND COALESCE(o.company_key, 'SEPID') = %s
                AND LOWER(BTRIM(COALESCE(o.raw_pedido, ''))) = LOWER(BTRIM(%s))
                AND (
+                    SELECT COUNT(*)
+                      FROM delivery_order_items doi
+                     WHERE doi.order_id = o.id
+                   ) < %s
+               AND (
                     (%s <> '' AND UPPER(BTRIM(COALESCE(o.bejerman_customer_code, ''))) = UPPER(BTRIM(%s)))
                     OR (%s = '' AND %s IS NOT NULL AND o.customer_id = %s)
                    )
@@ -3663,7 +3805,16 @@ def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str |
              LIMIT 1
              FOR UPDATE
             """,
-            [company_key, raw_pedido, customer_code, customer_code, customer_code, customer_id, customer_id],
+            [
+                company_key,
+                raw_pedido,
+                service_release_max_items_per_order(),
+                customer_code,
+                customer_code,
+                customer_code,
+                customer_id,
+                customer_id,
+            ],
         )
         found = cur.fetchone()
     return found[0] if found else None

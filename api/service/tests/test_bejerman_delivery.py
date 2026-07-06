@@ -24,9 +24,13 @@ from service.bejerman_documents import (
 from service.bejerman_delivery import (
     BillingError,
     _assert_partidas_ready,
+    _bejerman_sql_database_for_company,
     _bridge_order,
+    _collapse_recovery_candidate_rows,
     _profile_for_order,
+    _recovery_record_matches_delivery_request,
     _remito_requires_billing,
+    _service_release_item_chunks,
     _validate_remito_orders,
     get_delivery_order_invoice_pdf,
     get_delivery_order_remito_pdf,
@@ -70,6 +74,7 @@ from service.bejerman_sdk import (
     build_sales_filters,
     build_service_ingress_comprobante,
     build_stock_rows,
+    _comprobante_pdf_filename_candidates,
     delivery_remito_config,
     extract_pdf_bytes,
     fetch_comprobante_pdf,
@@ -148,6 +153,44 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
                 "printUrl": "/api/cobranzas/remitos/abc%2F123/print/?customerCode=CLI&companyKey=SEPID",
             },
         )
+
+    @override_settings(BEJERMAN_RSS_MAX_PRINT_LINES=22, BEJERMAN_RSS_PRINT_LINES_PER_ITEM=3)
+    def test_rss_print_split_usa_tres_lineas_por_equipo_tmd(self):
+        order = {
+            "deliveryType": "service_release",
+            "items": [
+                {
+                    "id": f"item-{index}",
+                    "quantity": 1,
+                    "partidas": [{"partida": f"NS-{index:03d}", "quantity": 1}],
+                }
+                for index in range(46)
+            ],
+        }
+
+        chunks = _service_release_item_chunks(order)
+
+        self.assertEqual([len(chunk) for chunk in chunks], [7, 7, 7, 7, 7, 7, 4])
+
+    @override_settings(BEJERMAN_RSS_MAX_PRINT_LINES=22, BEJERMAN_RSS_PRINT_LINES_PER_ITEM=3)
+    def test_rss_print_split_cuarenta_y_ocho_equipos_en_siete_rss(self):
+        order = {
+            "deliveryType": "service_release",
+            "items": [
+                {
+                    "id": f"item-{index}",
+                    "quantity": 1,
+                    "partidas": [{"partida": f"NS-{index:03d}", "quantity": 1}],
+                }
+                for index in range(48)
+            ],
+        }
+
+        chunks = _service_release_item_chunks(order)
+
+        self.assertEqual(len(chunks), 7)
+        self.assertEqual([len(chunk) for chunk in chunks], [7, 7, 7, 7, 7, 7, 6])
+        self.assertTrue(all(len(chunk) <= 7 for chunk in chunks))
 
 
 class FakeSDKClient:
@@ -444,6 +487,37 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(client.consult_calls, 0)
         self.assertEqual(client.generate_calls, 0)
 
+    def test_fetch_comprobante_pdf_usa_copia_local_sin_cliente_en_nombre(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cached_pdf = b"%PDF-1.4\nhome air"
+            destination = Path(tmp) / "RTR00007-00000665.pdf"
+            destination.write_bytes(cached_pdf)
+            client = FakePdfClient([_pdf_response(b"%PDF-1.4\nfresh")])
+            client.company_key = "MGBIO"
+            reference = BejermanPdfReference(
+                type="RT",
+                number="00000665",
+                letter="R",
+                point_of_sale="00007",
+                issue_date="2026-07-02",
+                customer_code="HAIR",
+            )
+
+            self.assertIn("RTR00007-00000665.pdf", _comprobante_pdf_filename_candidates(reference))
+
+            with override_settings(BEJERMAN_PDF_MGBIO_REMITOS_DIR=tmp):
+                pdf_bytes, content_type = fetch_comprobante_pdf(
+                    client,
+                    reference,
+                    retry_attempts=1,
+                    retry_delay_ms=0,
+                )
+
+        self.assertEqual(content_type, "application/pdf")
+        self.assertEqual(pdf_bytes, cached_pdf)
+        self.assertEqual(client.consult_calls, 0)
+        self.assertEqual(client.generate_calls, 0)
+
     def test_fetch_comprobante_pdf_ignora_copia_local_invalida_y_consulta_sdk(self):
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "RTR00004-00004707-RES.pdf"
@@ -472,8 +546,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(client.generate_calls, 0)
 
     @patch("service.bejerman_sdk.write_remote_pdf")
-    @patch("service.bejerman_sdk.read_remote_pdf", return_value=b"%PDF-1.4\nremote")
-    def test_fetch_comprobante_pdf_usa_copia_remota_samtronic_sin_consultar_sdk(self, read_remote_pdf, write_remote_pdf):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(b"%PDF-1.4\nremote", r"C:\2. SEPID\PDF\REMITOS\RTR00004-00004707-RES.pdf"))
+    def test_fetch_comprobante_pdf_usa_copia_remota_samtronic_sin_consultar_sdk(self, read_remote_pdf_candidates, write_remote_pdf):
         client = FakePdfClient([_pdf_response(b"%PDF-1.4\nfresh")])
         client.company_key = "SEPID"
 
@@ -497,7 +571,11 @@ class BejermanPdfHelperTests(SimpleTestCase):
 
         self.assertEqual(content_type, "application/pdf")
         self.assertEqual(pdf_bytes, b"%PDF-1.4\nremote")
-        read_remote_pdf.assert_called_once_with(r"samtronic:C:\2. SEPID\PDF\REMITOS", "RTR00004-00004707-RES.pdf")
+        read_remote_pdf_candidates.assert_called_once_with(
+            r"samtronic:C:\2. SEPID\PDF\REMITOS",
+            ["RTR00004-00004707-RES.pdf", "RTR00004-00004707.pdf"],
+            ["RTR00004-00004707"],
+        )
         write_remote_pdf.assert_not_called()
         self.assertEqual(client.consult_calls, 0)
         self.assertEqual(client.generate_calls, 0)
@@ -1062,6 +1140,49 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         self.assertEqual(result["items"][0]["documentNumber"], "RSS R 00004-00004567")
         self.assertEqual(result["items"][0]["operationCode"], "REP")
 
+    def test_remitos_todas_las_empresas_encuentra_home_air_en_mgbio(self):
+        clients = {
+            "SEPID": FakeSDKClient(sales_records=[]),
+            "MGBIO": FakeSDKClient(
+                sales_records=[
+                    {
+                        "Comprobante_Tipo": "RT",
+                        "Comprobante_Letra": "R",
+                        "Comprobante_PtoVenta": "00007",
+                        "Comprobante_Numero": "00000665",
+                        "Comprobante_FechaEmision": "2026-07-02",
+                        "Cliente_Codigo": "HAIR",
+                        "Cliente_RazonSocial": "HOME AIR S.R.L.",
+                        "Comprobante_TipoOperacion": "MC",
+                        "Comprobante_ImporteTotal": 0,
+                    }
+                ]
+            ),
+        }
+
+        def client_factory(*, company_key=None, actor_user_id=None, **_kwargs):
+            return clients[company_key]
+
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient", side_effect=client_factory) as client_cls,
+            patch("service.bejerman_delivery.resolve_remito_group_for_document_id", return_value=None),
+        ):
+            result = list_remitos_from_bejerman(
+                "",
+                {"companyKey": "ALL", "search": "HOME AIR", "pageSize": "25"},
+                actor_user_id=1152,
+            )
+
+        self.assertEqual(result["companyKey"], "ALL")
+        self.assertEqual(result["companies"], ["SEPID", "MGBIO"])
+        self.assertEqual(result["pagination"]["total"], 1)
+        self.assertEqual(result["items"][0]["documentNumber"], "RT R 00007-00000665")
+        self.assertEqual(result["items"][0]["customerName"], "HOME AIR S.R.L.")
+        self.assertEqual(result["items"][0]["companyKey"], "MGBIO")
+        called_companies = [call.kwargs["company_key"] for call in client_cls.call_args_list]
+        self.assertIn("SEPID", called_companies)
+        self.assertIn("MGBIO", called_companies)
+
     def test_remitos_acepta_tipo_rd(self):
         client = FakeSDKClient(
             sales_records=[
@@ -1142,7 +1263,7 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         )
         with (
             patch("service.bejerman_delivery.BejermanSDKClient", return_value=client),
-            patch("service.bejerman_delivery._local_generated_rss_remito_items", return_value=[]),
+            patch("service.bejerman_delivery._local_generated_remito_items", return_value=[]),
         ):
             result = list_remitos_from_bejerman("", {"dateFrom": "2026-01-01", "dateTo": "2026-12-31"})
 
@@ -1157,7 +1278,7 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         client = FakeSDKClient(fail_sales_types={"RSS"})
         with (
             patch("service.bejerman_delivery.BejermanSDKClient", return_value=client),
-            patch("service.bejerman_delivery._local_generated_rss_remito_items", return_value=[]),
+            patch("service.bejerman_delivery._local_generated_remito_items", return_value=[]),
         ):
             result = list_remitos_from_bejerman("", {"remitoType": "RSS"})
 
@@ -1679,11 +1800,13 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         operation_code: str = "REP",
         issue_date: str = "2026-06-02",
         total: int | float = 0,
+        company_key: str = "SEPID",
+        point_of_sale: str = "00004",
     ):
         raw = {
             "Comprobante_Tipo": remito_type,
             "Comprobante_Letra": "R",
-            "Comprobante_PtoVenta": "00004",
+            "Comprobante_PtoVenta": point_of_sale,
             "Comprobante_Numero": number,
             "Comprobante_FechaEmision": issue_date,
             "Cliente_Codigo": customer_code,
@@ -1699,14 +1822,16 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
                     comprobante_numero, remito_number, customer_code, customer_name, seller_code,
                     payment_term_code, operation_code, deposit_code, order_ids, status, generated_at, response_summary
                 )
-                VALUES (%s, 'SEPID', %s, 'R', '00004', %s, %s, %s, %s, 'ADM', '30', %s, 'STC',
+                VALUES (%s, %s, %s, 'R', %s, %s, %s, %s, %s, 'ADM', '30', %s, 'STC',
                         '[]'::jsonb, 'generated', %s::timestamptz, %s::jsonb)
                 """,
                 [
                     group_id,
+                    company_key,
                     remito_type,
+                    point_of_sale,
                     number,
-                    f"{remito_type} R 00004-{number}",
+                    f"{remito_type} R {point_of_sale}-{number}",
                     customer_code,
                     customer_name,
                     operation_code,
@@ -1715,10 +1840,10 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
                         {
                             "comprobanteTipo": remito_type,
                             "comprobanteLetra": "R",
-                            "comprobantePtoVenta": "00004",
+                            "comprobantePtoVenta": point_of_sale,
                             "comprobanteNumero": number,
-                            "remitoNumber": f"{remito_type} R 00004-{number}",
-                            "companyKey": "SEPID",
+                            "remitoNumber": f"{remito_type} R {point_of_sale}-{number}",
+                            "companyKey": company_key,
                             "raw": raw,
                         }
                     ),
@@ -1746,6 +1871,96 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         self.assertEqual(result["items"][0]["pdfUrl"], "/api/ordenes-entrega/remito-bejerman/brg-rss-local/pdf/")
         self.assertEqual(result["partialErrors"][0]["remitoType"], "RSS")
         self.assertIn("RSS generados por NEXORA", result["warning"])
+
+    def test_remitos_rt_fallback_local_si_sdk_falla(self):
+        self._insert_remito_group(
+            "brg-rt-home-air",
+            remito_type="RT",
+            customer_code="HAIR",
+            customer_name="HOME AIR S.R.L.",
+            number="00000665",
+            operation_code="MC",
+            issue_date="2026-07-02",
+            company_key="MGBIO",
+            point_of_sale="00007",
+        )
+        client = FakeSDKClient(
+            customer_records=[{"Cliente_Codigo": "HAIR", "Cliente_RazonSocial": "HOME AIR S.R.L."}],
+            fail_sales_types={"RT"},
+        )
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client):
+            result = list_remitos_from_bejerman(
+                "HAIR",
+                {"remitoType": "RT", "dateFrom": "2026-07-01", "dateTo": "2026-07-03", "pageSize": "10"},
+                actor_user_id=1152,
+                company_key="MGBIO",
+            )
+
+        self.assertEqual(result["pagination"]["total"], 1)
+        self.assertEqual(result["items"][0]["documentNumber"], "RT R 00007-00000665")
+        self.assertEqual(result["items"][0]["remitoGroupId"], "brg-rt-home-air")
+        self.assertEqual(result["items"][0]["companyKey"], "MGBIO")
+        self.assertEqual(result["partialErrors"][0]["remitoType"], "RT")
+
+    def test_recuperacion_sql_remota_usa_base_por_empresa(self):
+        self.assertEqual(_bejerman_sql_database_for_company("SEPID"), "SBDASEP")
+        self.assertEqual(_bejerman_sql_database_for_company("MGBIO"), "SBDAMGBI")
+
+    def test_recuperacion_sql_colapsa_renglones_de_remito_multi_orden(self):
+        bridge_request = {
+            "orders": [
+                {
+                    "orderNumber": "OS-29342",
+                    "items": [{"articleCode": "1118002", "partida": "250100076"}],
+                },
+                {
+                    "orderNumber": "OS-29343",
+                    "items": [{"articleCode": "1118002", "partida": "2006120012"}],
+                },
+            ]
+        }
+        rows = [
+            {
+                "Comprobante_ID": "17970",
+                "Comprobante_Tipo": "RSS",
+                "Comprobante_Letra": "R",
+                "Comprobante_PtoVenta": "00004",
+                "Comprobante_Numero": "00004743",
+                "Recovery_Text": "NEXORA brg-old ASPIRADOR A BATERÍAS - OS-29342 1118002 250100076",
+                "Item_DescripArticulo": "ASPIRADOR A BATERÍAS | Yuwell | 7E-G - OS-29342",
+                "Item_CodigoArticulo": "1118002",
+                "Item_Partida": "250100076",
+            },
+            {
+                "Comprobante_ID": "17970",
+                "Comprobante_Tipo": "RSS",
+                "Comprobante_Letra": "R",
+                "Comprobante_PtoVenta": "00004",
+                "Comprobante_Numero": "00004743",
+                "Recovery_Text": "NEXORA brg-old ASPIRADOR A BATERÍAS - OS-29343 1118002 2006120012",
+                "Item_DescripArticulo": "ASPIRADOR A BATERÍAS | Yuwell | 7E-G - OS-29343",
+                "Item_CodigoArticulo": "1118002",
+                "Item_Partida": "2006120012",
+            },
+        ]
+
+        collapsed = _collapse_recovery_candidate_rows(rows)
+
+        self.assertEqual(len(collapsed), 1)
+        self.assertTrue(_recovery_record_matches_delivery_request(collapsed[0], bridge_request, "brg-new"))
+
+    def test_recuperacion_sql_acepta_group_id_truncado_en_mensaje_bejerman(self):
+        group_id = "brg-aa00173b-8520-4625-abda-3d12ca58c89d"
+        record = {
+            "Comprobante_Tipo": "RSS",
+            "Comprobante_Numero": "00004747",
+            "Comprobante_Mensaje": "NEXORA brg-aa00173b-8520-4625-abda-3d12c",
+            "Recovery_Text": "NEXORA brg-aa00173b-8520-4625-abda-3d12c 1111003 D6#1672",
+        }
+        bridge_request = {"orders": [{"orderNumber": "OS-29434 + 17 OS", "items": []}]}
+
+        self.assertTrue(_recovery_record_matches_delivery_request(record, bridge_request, group_id))
 
     def test_remito_group_pdf_registrado_informa_que_no_es_imprimible(self):
         self._insert_remito_group("brg-registered-local", remito_type="RIS", number="00026249")
@@ -1775,6 +1990,103 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertIn("registrado manualmente", str(ctx.exception))
         pdf_mock.assert_not_called()
+
+    def test_remito_group_pdf_permanece_disponible_en_revision_con_numero(self):
+        self._insert_remito_group("brg-rss-review-with-number", remito_type="RSS", number="00004741")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bejerman_remito_groups
+                   SET status = 'failed_review',
+                       response_summary = response_summary || %s::jsonb
+                 WHERE id = %s
+                """,
+                [
+                    json.dumps(
+                        {
+                            "error": "Bejerman requiere revision manual por posible duplicado.",
+                            "duplicateStockMovementDetected": True,
+                        }
+                    ),
+                    "brg-rss-review-with-number",
+                ],
+            )
+
+        with patch(
+            "service.bejerman_delivery.get_facturacion_pdf",
+            return_value=(b"%PDF-1.4", "application/pdf"),
+        ) as pdf_mock:
+            pdf_bytes, content_type, filename = get_remito_group_pdf("brg-rss-review-with-number", actor_user_id=1152)
+
+        pdf_mock.assert_called_once()
+        self.assertEqual(pdf_bytes, b"%PDF-1.4")
+        self.assertEqual(content_type, "application/pdf")
+        self.assertIn("00004741", filename)
+
+    def test_remito_group_pdf_devuelve_copia_operativa_si_bejerman_pdf_falla(self):
+        self._insert_remito_group("brg-rss-pdf-fallback", remito_type="RSS", number="00004743")
+
+        with patch(
+            "service.bejerman_delivery.get_facturacion_pdf",
+            side_effect=BillingError(
+                "BEJERMAN_BILLING_QUERY_BUSY",
+                "Bejerman no pudo completar la consulta porque dejó bloqueado expSinCuotasV1.",
+                status_code=502,
+            ),
+        ) as pdf_mock:
+            pdf_bytes, content_type, filename = get_remito_group_pdf("brg-rss-pdf-fallback", actor_user_id=1152)
+
+        pdf_mock.assert_called_once()
+        self.assertEqual(content_type, "application/pdf")
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
+        self.assertIn("remito-operativo", filename)
+
+    def test_remito_group_pdf_devuelve_copia_operativa_si_pdf_pendiente_esta_vencido(self):
+        self._insert_remito_group("brg-rss-pdf-pending-old", remito_type="RSS", number="00004743")
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE bejerman_remito_groups SET generated_at = CURRENT_TIMESTAMP - INTERVAL '5 minutes' WHERE id = %s",
+                ["brg-rss-pdf-pending-old"],
+            )
+
+        with patch(
+            "service.bejerman_delivery.get_facturacion_pdf",
+            side_effect=BillingError(
+                "BEJERMAN_PDF_PENDING",
+                "PDF pendiente de generación en Bejerman",
+                status_code=202,
+                retry_after_ms=1200,
+            ),
+        ) as pdf_mock:
+            pdf_bytes, content_type, filename = get_remito_group_pdf("brg-rss-pdf-pending-old", actor_user_id=1152)
+
+        pdf_mock.assert_called_once()
+        self.assertEqual(content_type, "application/pdf")
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
+        self.assertIn("remito-operativo", filename)
+
+    def test_remito_group_pdf_pendiente_reciente_no_devuelve_copia_operativa(self):
+        self._insert_remito_group("brg-rss-pdf-pending-recent", remito_type="RSS", number="00004744")
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE bejerman_remito_groups SET generated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                ["brg-rss-pdf-pending-recent"],
+            )
+
+        with patch(
+            "service.bejerman_delivery.get_facturacion_pdf",
+            side_effect=BillingError(
+                "BEJERMAN_PDF_PENDING",
+                "PDF pendiente de generación en Bejerman",
+                status_code=202,
+                retry_after_ms=1200,
+            ),
+        ):
+            with self.assertRaises(BillingError) as ctx:
+                get_remito_group_pdf("brg-rss-pdf-pending-recent", actor_user_id=1152)
+
+        self.assertEqual(ctx.exception.code, "BEJERMAN_PDF_PENDING")
+        self.assertEqual(ctx.exception.status_code, 202)
 
     def test_remitos_rss_fallback_local_respeta_filtros(self):
         self._insert_remito_group("brg-rss-match", customer_code="TMD", number="00004500", operation_code="REP", issue_date="2026-06-02")
@@ -1978,16 +2290,21 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
                     "stockDepositCode": "VAL",
                     "stockAvailableQuantity": "2",
                     "stockCheckedAt": "2026-06-17T10:00:00-03:00",
+                    "ingresoId": 29470,
+                    "deviceId": 315,
                 }
             ],
         )
 
         values = cur.execute.call_args.args[1]
-        self.assertEqual(values[2], "L-VAL-1")
-        self.assertEqual(values[4], "2030-12-31")
-        self.assertEqual(values[5], "VAL")
-        self.assertEqual(str(values[6]), "2")
-        self.assertEqual(values[7], "2026-06-17T10:00:00-03:00")
+        self.assertEqual(values[1], "doi-1")
+        self.assertEqual(values[2], 29470)
+        self.assertEqual(values[3], 315)
+        self.assertEqual(values[4], "L-VAL-1")
+        self.assertEqual(values[6], "2030-12-31")
+        self.assertEqual(values[7], "VAL")
+        self.assertEqual(str(values[8]), "2")
+        self.assertEqual(values[9], "2026-06-17T10:00:00-03:00")
 
 
 class BejermanIngressCompanyTests(SimpleTestCase):
@@ -2044,7 +2361,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
             "RD": -1,
             "RDN": -1,
             "RDA": -1,
-            "RIS": -1,
+            "RIS": 1,
             "RT": 1,
             "RTN": 1,
             "RTA": 1,
@@ -2136,7 +2453,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(comprobante["Cliente_RazonSocial"], "ALCLA SRL")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
         self.assertEqual(article_lines[0]["Item_CantidadUM2"], 0)
         self.assertEqual(article_lines[0]["Item_Partida"], " ")
 
@@ -2235,7 +2552,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(article_lines[0]["Item_DescripArticulo"], "CPAP | BMC | G3")
         self.assertEqual(article_lines[1]["Item_DescripArticulo"], "ResMed | AirSense 10")
         self.assertEqual(len(article_lines), 2)
-        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1, -1])
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1, 1])
         self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [0, 0])
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
 
@@ -2442,13 +2759,57 @@ class BejermanIngressCompanyTests(SimpleTestCase):
 
                 comprobante = built["comprobante"]
                 article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+                expected_quantity = 1 if document_type == "RIS" else -1
                 self.assertEqual(comprobante["Comprobante_Tipo"], document_type)
                 self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
-                self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
-                self.assertEqual(article_lines[0]["Item_CantidadUM2"], -1)
+                self.assertEqual(article_lines[0]["Item_CantidadUM1"], expected_quantity)
+                self.assertEqual(article_lines[0]["Item_CantidadUM2"], expected_quantity)
                 self.assertEqual(article_lines[0]["Item_Deposito"], "STR")
                 self.assertEqual(article_lines[0]["Item_Partida"], f"SN-{document_type}")
                 self.assertEqual(comprobante["Comprobante_ImporteTotal"], 0)
+
+    def test_ris_stock_ingress_sends_positive_quantity_for_new_equipment(self):
+        built = build_service_ingress_comprobante(
+            {
+                "requestId": "reparaciones-ingreso-ris-stock-29470",
+                "ingresoId": 29470,
+                "issueDate": "2026-07-02",
+                "customerCode": "MEDIBE",
+                "customerName": "MEDIBEL SA",
+                "sellerCode": "ADM",
+                "paymentTermCode": "30",
+                "documentProfile": {
+                    "key": "ris",
+                    "type": "RIS",
+                    "label": "RIS",
+                    "letter": "R",
+                    "reason": "Ingreso normal de servicio tecnico.",
+                    "deposit": "STR",
+                    "operation": "REP",
+                    "pointOfSale": "00004",
+                    "updateStock": True,
+                },
+                "equipment": {
+                    "articleCode": "1120002",
+                    "articleName": "Videolaringoscopio",
+                    "serial": "2511062",
+                    "equipmentType": "VIDEOLARINGOSCOPIO",
+                    "brand": "Coreray",
+                    "model": "CR-31",
+                    "repairReason": "urgente control",
+                },
+            },
+            {"Cliente_RazonSocial": "MEDIBEL SA"},
+        )
+
+        comprobante = built["comprobante"]
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RIS")
+        self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM2"], 1)
+        self.assertEqual(article_lines[0]["Item_Deposito"], "STR")
+        self.assertEqual(article_lines[0]["Item_Partida"], "2511062")
 
     def test_delivery_signed_sdk_quantity_does_not_invert_amounts(self):
         built = build_delivery_remito_comprobante(
@@ -2501,8 +2862,9 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
 
         self.assertEqual(
             detail,
-            "OXÍMETRO DE PULSO | Nellcor | N-595 - OS-29381 - N° interno (MG) MG 6697",
+            "OXÍMETRO DE PULSO | Nellcor | N-595 - N° interno (MG) MG 6697",
         )
+        self.assertNotIn("OS-29381", detail)
         self.assertNotIn("G0588065", detail)
 
     def test_nexora_order_payload_uses_equipment_serial_as_item_partida(self):
@@ -3327,8 +3689,8 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
                     for item in built["comprobante"]["Comprobante_Items"]
                     if item["Item_Tipo"] == "L"
                 ]
-                self.assertEqual(legend_lines[0], "------------------------------")
-                self.assertEqual(legend_lines[1], expected)
+                self.assertEqual(legend_lines[0], f"{expected} OS-29381")
+                self.assertEqual(legend_lines[1], "------------------------------")
 
     def test_service_release_rss_article_line_uses_equipment_detail(self):
         equipment_detail = "OXÍMETRO DE PULSO | Nellcor | N-595 - OS-29381 - N° interno (MG) MG 6697"
@@ -3365,10 +3727,75 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         )
 
         article_lines = [item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        legend_lines = [item["Item_DescripArticulo"] for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "L"]
         self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
-        self.assertEqual(article_lines[0]["Item_DescripArticulo"], equipment_detail)
+        self.assertEqual(article_lines[0]["Item_DescripArticulo"], "OXÍMETRO DE PULSO | Nellcor | N-595 - N° interno (MG) MG 6697")
+        self.assertEqual(legend_lines[0], "Se entrega reparado OS-29381")
+        self.assertEqual(legend_lines[-1], "------------------------------")
         self.assertNotIn("Liberación", article_lines[0]["Item_DescripArticulo"])
+        self.assertNotIn("OS-29381", article_lines[0]["Item_DescripArticulo"])
         self.assertNotIn("G0588065", article_lines[0]["Item_DescripArticulo"])
+
+    def test_service_release_rss_usa_tres_lineas_por_item(self):
+        built = build_delivery_remito_comprobante(
+            {
+                "groupId": "brg-test",
+                "issueDate": "2026-07-02",
+                "customerCode": "TMD",
+                "customerName": "TERAPIAS MEDICAS DOMICILIARIAS S.A.",
+                "sellerCode": "ADM",
+                "paymentTermCode": "30",
+                "orders": [
+                    {
+                        "orderNumber": "OS-29318",
+                        "deliveryType": "service_release",
+                        "sourceReference": "OS 29318",
+                        "serviceResolution": "reparado",
+                        "items": [
+                            {
+                                "ingresoId": 29318,
+                                "articleCode": "1111003",
+                                "articleName": "CALENTADOR HUMIDIFICADOR | Marbel | C-500A - OS-29318",
+                                "quantity": 1,
+                                "partida": "D5#1615",
+                            }
+                        ],
+                    },
+                    {
+                        "orderNumber": "OS-29319",
+                        "deliveryType": "service_release",
+                        "sourceReference": "OS 29319",
+                        "serviceResolution": "no_se_encontro_falla",
+                        "items": [
+                            {
+                                "ingresoId": 29319,
+                                "articleCode": "1111003",
+                                "articleName": "CALENTADOR HUMIDIFICADOR | Marbel | C-500A - OS-29319",
+                                "quantity": 1,
+                                "partida": "D5#1642",
+                            }
+                        ],
+                    },
+                ],
+            },
+            delivery_remito_config({"type": "RSS", "operation": "REP", "deposit": "STC", "pointOfSale": "00004"}),
+        )
+
+        items = built["comprobante"]["Comprobante_Items"]
+
+        self.assertEqual([item["Item_Tipo"] for item in items], ["L", "A", "L", "L", "A", "L"])
+        self.assertEqual(items[0]["Item_DescripArticulo"], "Se entrega reparado OS-29318")
+        self.assertEqual(items[1]["Item_DescripArticulo"], "CALENTADOR HUMIDIFICADOR | Marbel | C-500A")
+        self.assertEqual(items[2]["Item_DescripArticulo"], "------------------------------")
+        self.assertEqual(items[3]["Item_DescripArticulo"], "Se entrega controlado sin defecto OS-29319")
+        self.assertEqual(items[4]["Item_DescripArticulo"], "CALENTADOR HUMIDIFICADOR | Marbel | C-500A")
+        self.assertEqual(items[5]["Item_DescripArticulo"], "------------------------------")
+        self.assertEqual(items[1]["Item_Deposito"], "STC")
+        self.assertEqual(items[4]["Item_Deposito"], "STC")
+        self.assertEqual(items[1]["Item_CantidadUM2"], 0)
+        self.assertEqual(items[4]["Item_CantidadUM2"], 0)
+        self.assertNotIn("OS-", items[1]["Item_DescripArticulo"])
+        self.assertNotIn("OS-", items[4]["Item_DescripArticulo"])
 
     def test_print_wait_page_does_not_force_pdf_accept_header(self):
         html = _remito_print_wait_page("brg-test", "RT")

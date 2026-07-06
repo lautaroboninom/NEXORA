@@ -24,6 +24,7 @@ from .bejerman_documents import is_transient_pdf_lookup_message
 from .bejerman_pdf_remote import (
     is_remote_pdf_path,
     read_remote_pdf,
+    read_remote_pdf_candidates,
     remote_pdf_uri,
     remove_remote_file_if_same,
     write_remote_pdf,
@@ -137,6 +138,64 @@ def is_ok_response(response: dict[str, Any]) -> bool:
     resultado = _clean(response.get("Resultado")).upper()
     error = _clean(response.get("ErrorMsg"))
     return resultado.startswith("OK") and (not error or is_bejerman_success_message(error))
+
+
+# El SDK de Bejerman crea y borra vistas temporales (expCuotasV*, expSinCuotasV*)
+# por cada consulta; dos llamadas concurrentes chocan entre sí y una falla con
+# "Invalid object name ..." o "There is already an object named ...".
+_SDK_RACE_MARKERS = (
+    "expcuotas",
+    "expsincuotas",
+    "invalid object name",
+    "already an object named",
+)
+
+# Operaciones sin efectos (o idempotentes, como la generación de PDF) que es
+# seguro reintentar cuando la falla es la carrera de vistas temporales.
+_SDK_RETRYABLE_OPERATIONS = {
+    "WSLISTARCOMPROBANTESJSON",
+    "DETALLECOMPROBANTEJSON",
+    "WS_CONSULTARCOMPROBANTEPDF",
+    "WS_GENERARCOMPROBANTEPDF",
+    "OBTENERARTICULOS",
+    "OBTENERCLIENTES",
+    "OBTENERPROVEEDORES",
+    "OBTENERSTOCKPARTIDA",
+    "OBTENERSTOCKDEPOSITO",
+    "OBTENERDEPOSITOS",
+    "OBTENERPARTIDAS",
+}
+
+
+def is_bejerman_sdk_race_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _SDK_RACE_MARKERS)
+
+
+# La consulta interna de WSListarComprobantesJSON está rota en algunas
+# instalaciones de Bejerman (columnas inexistentes / ORDER BY con UNION).
+_SALES_QUERY_SCHEMA_MARKERS = ("IMPORTE_TOTAL", "ConvMonLocal", "CabVenta.", "ORDER BY items must appear")
+
+
+def is_bejerman_sales_query_schema_message(value: Any) -> bool:
+    text = as_string(value)
+    return any(marker in text for marker in _SALES_QUERY_SCHEMA_MARKERS)
+
+
+def _sdk_race_retry_attempts() -> int:
+    try:
+        value = int(_setting("BEJERMAN_SDK_RACE_RETRY_ATTEMPTS", 2) or 2)
+    except (TypeError, ValueError):
+        return 2
+    return value if value >= 0 else 2
+
+
+def _sdk_race_retry_delay_ms() -> int:
+    try:
+        value = int(_setting("BEJERMAN_SDK_RACE_RETRY_DELAY_MS", 1200) or 1200)
+    except (TypeError, ValueError):
+        return 1200
+    return value if value >= 0 else 1200
 
 
 def is_bejerman_success_message(value: Any) -> bool:
@@ -437,6 +496,21 @@ class BejermanSDKClient:
         return token
 
     def execute(self, circuito: str, operacion: str, *, params: list[Any] | None = None, params_json: Any = None) -> dict[str, str]:
+        retries = _sdk_race_retry_attempts() if _clean(operacion).upper() in _SDK_RETRYABLE_OPERATIONS else 0
+        for attempt in range(retries + 1):
+            try:
+                return self._execute_once(circuito, operacion, params=params, params_json=params_json)
+            except BejermanSdkResponseError as exc:
+                if attempt >= retries or not is_bejerman_sdk_race_message(exc):
+                    raise
+                logger.info(
+                    "bejerman_sdk_race_retry",
+                    extra={"bejerman_operacion": operacion, "attempt": attempt + 1, "error": str(exc)[:300]},
+                )
+                time.sleep(_sdk_race_retry_delay_ms() / 1000)
+        raise BejermanSdkUnavailable("Bejerman no respondió a la operación")  # inalcanzable
+
+    def _execute_once(self, circuito: str, operacion: str, *, params: list[Any] | None = None, params_json: Any = None) -> dict[str, str]:
         if not self.token:
             self.register()
         params_xml = '<a:Parametros i:nil="true" />'
@@ -528,6 +602,14 @@ class BejermanSDKClient:
         emite_reg: str = "E",
     ) -> dict[str, str]:
         return self.execute(circuito, operacion, params_json=[_json_param([comprobante]), numera_flex, emite_reg])
+
+    def ingresar_lista_comprobantes_stock_json(
+        self,
+        comprobantes: list[dict[str, Any]],
+        *,
+        numera_flex: str = "N",
+    ) -> dict[str, str]:
+        return self.execute("STOCK", "IngresarListaComprobantesJSON", params_json=[_json_param(comprobantes), numera_flex])
 
     def ingresar_lista_comprobantes_compras_json(
         self,
@@ -1294,6 +1376,30 @@ def _comprobante_pdf_filename(reference: BejermanPdfReference) -> str:
     return f"{stem}.pdf"
 
 
+def _comprobante_pdf_filename_candidates(reference: BejermanPdfReference) -> list[str]:
+    tipo = _safe_pdf_filename_part(reference.type, "COMP")
+    letter = _safe_pdf_filename_part(reference.letter)
+    point = _numeric_pdf_filename_part(reference.point_of_sale, 5)
+    number = _numeric_pdf_filename_part(reference.number, 8)
+    base = f"{tipo}{letter}{point}-{number}" if point or number else tipo
+    candidates = [_comprobante_pdf_filename(reference)]
+    if base:
+        candidates.append(f"{base}.pdf")
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def _comprobante_pdf_filename_prefix(reference: BejermanPdfReference) -> str:
+    tipo = _safe_pdf_filename_part(reference.type, "COMP")
+    letter = _safe_pdf_filename_part(reference.letter)
+    point = _numeric_pdf_filename_part(reference.point_of_sale, 5)
+    number = _numeric_pdf_filename_part(reference.number, 8)
+    return f"{tipo}{letter}{point}-{number}" if point or number else tipo
+
+
 def _reference_issue_date_for_sdk_filename(reference: BejermanPdfReference) -> str:
     raw = as_string(reference.issue_date)
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y%m%d"):
@@ -1419,15 +1525,32 @@ def _load_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdf
     if not output_dir:
         return None
 
-    filename = _comprobante_pdf_filename(reference)
+    filenames = _comprobante_pdf_filename_candidates(reference)
+    prefix = _comprobante_pdf_filename_prefix(reference)
     try:
         if is_remote_pdf_path(output_dir):
-            raw = read_remote_pdf(output_dir, filename)
-            path_label = output_dir.rstrip("\\/") + "\\" + filename
+            raw, path_label = read_remote_pdf_candidates(output_dir, filenames, [prefix])
         else:
-            path = Path(output_dir) / filename
-            path_label = str(path)
-            raw = path.read_bytes() if path.exists() else None
+            folder = Path(output_dir)
+            raw = None
+            path_label = ""
+            for filename in filenames:
+                path = folder / filename
+                if path.exists():
+                    path_label = str(path)
+                    raw = path.read_bytes()
+                    break
+            if raw is None and prefix:
+                matches = sorted(
+                    folder.glob(f"{prefix}*.pdf"),
+                    key=lambda item: item.stat().st_mtime if item.exists() else 0,
+                    reverse=True,
+                )
+                for path in matches:
+                    path_label = str(path)
+                    raw = path.read_bytes()
+                    if raw:
+                        break
     except Exception as exc:
         logger.warning(
             "bejerman_pdf_copy_read_failed",
@@ -1660,6 +1783,46 @@ def service_release_legend(order: dict[str, Any]) -> str:
     return f"Se entrega {service_release_resolution_label(resolution)}"
 
 
+def service_release_order_reference(order: dict[str, Any], item: dict[str, Any] | None = None) -> str:
+    item = item or {}
+    candidates = (
+        item.get("ingresoId"),
+        item.get("ingreso_id"),
+        item.get("sourceReference"),
+        item.get("source_reference"),
+        order.get("ingresoId"),
+        order.get("ingreso_id"),
+        order.get("sourceReference"),
+        order.get("source_reference"),
+        order.get("orderNumber"),
+        order.get("order_number"),
+    )
+    for candidate in candidates:
+        text = as_string(candidate)
+        if not text:
+            continue
+        try:
+            return f"OS-{int(text):05d}"
+        except (TypeError, ValueError):
+            pass
+        match = re.search(r"\bOS[\s-]*(\d+)\b", text, re.IGNORECASE)
+        if match:
+            return f"OS-{int(match.group(1)):05d}"
+    return ""
+
+
+def service_release_item_legend(order: dict[str, Any], item: dict[str, Any]) -> str:
+    reference = service_release_order_reference(order, item)
+    return " ".join(part for part in (service_release_legend(order), reference) if part)
+
+
+def service_release_equipment_line(value: Any, fallback: Any = "") -> str:
+    text = as_string(value) or as_string(fallback) or "Equipo"
+    text = re.sub(r"\s*-\s*OS[\s-]*\d+\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s{2,}", " ", text).strip(" -")
+    return text or "Equipo"
+
+
 def item_common(tipo: str, letter: str, point: str, issue_date: str, customer_code: str, sort_order: int) -> dict[str, Any]:
     return {
         "Comprobante_Tipo": tipo,
@@ -1721,9 +1884,10 @@ def accessory_legend_lines(accessories: Any) -> list[str]:
     return [f"Accesorios: {part}" for part in parts]
 
 
-# Bejerman's ventas SDK represents these stock-ingress remitos with negative
-# item quantities. Amount and total calculations must keep using magnitudes.
-DEFAULT_SDK_NEGATIVE_QUANTITY_TYPES = "RD,RDN,RDA,RIS"
+# Bejerman's ventas SDK represents some stock-ingress remitos with negative
+# item quantities. RIS is a service ingress and must add stock, so it stays
+# positive; otherwise Bejerman treats it as an exit and asks for prior stock.
+DEFAULT_SDK_NEGATIVE_QUANTITY_TYPES = "RD,RDN,RDA"
 DEFAULT_EMISSION_NEGATIVE_QUANTITY_TYPES = DEFAULT_SDK_NEGATIVE_QUANTITY_TYPES
 
 
@@ -2306,22 +2470,21 @@ def build_delivery_remito_comprobante(
     total = 0.0
     tax_total = 0.0
     for order in orders:
-        items.append(
-            item_separator_line(
-                item_common(
-                    profile["type"],
-                    config["letter"],
-                    profile["pointOfSale"],
-                    issue_date,
-                    request.get("customerCode"),
-                    sort_order,
+        is_service_release = order.get("deliveryType") == "service_release"
+        if not is_service_release:
+            items.append(
+                item_separator_line(
+                    item_common(
+                        profile["type"],
+                        config["letter"],
+                        profile["pointOfSale"],
+                        issue_date,
+                        request.get("customerCode"),
+                        sort_order,
+                    )
                 )
             )
-        )
-        sort_order += 1
-        if order.get("deliveryType") == "service_release":
-            legend = service_release_legend(order)
-        else:
+            sort_order += 1
             legend = " - ".join(
                 part
                 for part in (
@@ -2332,8 +2495,8 @@ def build_delivery_remito_comprobante(
                 )
                 if part
             )
-        items.append(legend_line(item_common(profile["type"], config["letter"], profile["pointOfSale"], issue_date, request.get("customerCode"), sort_order), legend))
-        sort_order += 1
+            items.append(legend_line(item_common(profile["type"], config["letter"], profile["pointOfSale"], issue_date, request.get("customerCode"), sort_order), legend))
+            sort_order += 1
         for item in order.get("items") or []:
             article_code = as_string(item.get("articleCode"))
             quantity = _positive_quantity(item.get("quantity"))
@@ -2345,6 +2508,8 @@ def build_delivery_remito_comprobante(
             partida = "" if omit_partida else as_string(explicit_partida or item.get("equipmentSerial") or order.get("equipmentSerial"))
             item_deposit = as_string(item.get("stockDepositCode")) or profile["deposit"]
             article_name = as_string(item.get("articleName")) or as_string(item.get("description")) or article_code
+            if is_service_release:
+                article_name = service_release_equipment_line(article_name, item.get("description") or article_code)
             line_defs: list[tuple[float, str, str]] = []
             for partida_item in item.get("partidas") or []:
                 if not isinstance(partida_item, dict):
@@ -2366,6 +2531,21 @@ def build_delivery_remito_comprobante(
             if not line_defs:
                 line_defs = [(quantity, partida, item_deposit)]
             for line_quantity, line_partida, line_deposit in line_defs:
+                if is_service_release:
+                    items.append(
+                        legend_line(
+                            item_common(
+                                profile["type"],
+                                config["letter"],
+                                profile["pointOfSale"],
+                                issue_date,
+                                request.get("customerCode"),
+                                sort_order,
+                            ),
+                            service_release_item_legend(order, item),
+                        )
+                    )
+                    sort_order += 1
                 signed_line_quantity = sdk_signed_article_quantity(profile["type"], line_quantity)
                 gross_amount = line_quantity * unit_price
                 discount_amount = gross_amount * discount_percent / 100
@@ -2422,6 +2602,20 @@ def build_delivery_remito_comprobante(
                                 sort_order,
                             ),
                             _delivery_discount_legend(discount_percent, final_unit_price, amount, item_currency, line_quantity),
+                        )
+                    )
+                    sort_order += 1
+                if is_service_release:
+                    items.append(
+                        item_separator_line(
+                            item_common(
+                                profile["type"],
+                                config["letter"],
+                                profile["pointOfSale"],
+                                issue_date,
+                                request.get("customerCode"),
+                                sort_order,
+                            )
                         )
                     )
                     sort_order += 1
