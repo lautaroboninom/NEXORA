@@ -98,6 +98,10 @@ class BejermanRisPreflightError(BejermanRisError):
 class BejermanRisRegisteredNoPdfError(BejermanRisError):
     code = RIS_REGISTERED_NO_PDF_CODE
 
+
+class BejermanRisReviewRequiredError(BejermanRisError):
+    code = "BEJERMAN_RIS_REQUIRES_REVIEW"
+
     def __init__(self, remito_number: Any = ""):
         super().__init__(registered_remito_no_pdf_detail(remito_number))
         self.remito_number = _clean(remito_number)
@@ -3010,9 +3014,7 @@ def _service_ingress_response(
     raw_response: dict[str, Any],
 ) -> dict[str, Any]:
     summary = parse_remito_response(raw_response)
-    remito_number = _clean(summary.get("remitoNumber"))
-    if not remito_number:
-        raise BejermanSdkResponseError("Bejerman no devolvió número de RIS")
+    remito_number = _clean(summary.get("remitoNumber")) or ""
     return {
         "success": True,
         "requestId": request_payload["requestId"],
