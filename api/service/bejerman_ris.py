@@ -38,6 +38,7 @@ from .bejerman_sdk import (
     first_record,
     first_value,
     format_remito_number,
+    is_ok_response,
     normalize_serial_for_lookup,
     parse_remito_response,
     records_from_response,
@@ -2814,8 +2815,11 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
                 next_item["Item_Partida"] = partida or " "
                 next_item["Item_CantidadUM2"] = quantity
             else:
-                next_item["Item_Deposito"] = next_item.get("Item_Deposito")
-                next_item["Item_Partida"] = next_item.get("Item_Partida") or " "
+                # Registración: el documento va con ActualizaStock=N, pero el
+                # importador de VENTAS rechaza la partida si no está informada y
+                # presente en el depósito (el alta la hizo el ENT previo).
+                next_item["Item_Deposito"] = _clean(next_item.get("Item_Deposito")) or deposit
+                next_item["Item_Partida"] = partida if partida.strip() else (next_item.get("Item_Partida") or " ")
                 next_item["Item_CantidadUM2"] = next_item.get("Item_CantidadUM2") or 0
             article_index += 1
         items.append(next_item)
@@ -2933,6 +2937,180 @@ def _local_registered_ris_duplicate(document: dict[str, str], company_key: str, 
     )
 
 
+def _register_target_deposit(payload: dict[str, Any]) -> str:
+    profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
+    return (_clean(profile.get("deposit")) or _clean(getattr(settings, "BEJERMAN_RIS_DEPOSIT", "STR")) or "STR").upper()
+
+
+def _stock_partida_present(client: BejermanSDKClient, partida: str, deposit: str) -> bool:
+    if not _clean(partida):
+        return False
+    try:
+        response = client.obtener_stock_partida(partida)
+    except Exception:
+        return False
+    return bool(_records_for_partida_any_quantity(response, partida, deposit))
+
+
+def _stock_entry_number_for_equipment(equipment: dict[str, Any], fallback: int) -> str:
+    for key in ("ingresoId", "osLabel"):
+        digits = _digits_only(equipment.get(key))
+        if digits:
+            return digits.zfill(8)
+    return str(fallback).zfill(8)
+
+
+def _register_stock_entry_item(
+    equipment: dict[str, Any], *, partida: str, deposit: str, issue_date: str, number: str
+) -> dict[str, Any]:
+    article = _clean(equipment.get("articleCode")) or _clean(equipment.get("Comprobante_Art_CodGen"))
+    return {
+        "Comprobante_FechaEmision": issue_date,
+        "Comprobante_Tipo": _clean(getattr(settings, "BEJERMAN_STOCK_ENTRY_COMPROBANTE", "ENT")) or "ENT",
+        "Comprobante_Letra": "",
+        "Comprobante_PtoVenta": "",
+        "Comprobante_Numero": number,
+        "Comprobante_Art_CodGen": article,
+        "Comprobante_ArtPartida": partida,
+        "Comprobante_DescArticulo": f"NEXORA {partida}"[:50],
+        "Comprobante_ArtCodTipo": "1",
+        "Comprobante_ArtDeposito": deposit,
+        "Comprobante_CantidadUM1": 1,
+        "Comprobante_CantidadUM2": 1,
+        "Comprobante_PrecioTotalMonLocal": 0,
+        "Comprobante_IdOrigen": f"NEXORA-ING-{number}"[:50],
+        "Partida_Observaciones": f"NEXORA {number}"[:20],
+    }
+
+
+def _verify_register_stock_entries(client: BejermanSDKClient, partidas: list[str], deposit: str) -> None:
+    attempts = max(1, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS", 3) or 3))
+    delay_ms = max(0, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS", 1500) or 0))
+    pending = list(dict.fromkeys(_clean(partida) for partida in partidas if _clean(partida)))
+    for attempt in range(attempts):
+        pending = [partida for partida in pending if not _stock_partida_present(client, partida, deposit)]
+        if not pending:
+            return
+        if attempt < attempts - 1 and delay_ms:
+            time.sleep(delay_ms / 1000)
+    raise BejermanRisError(
+        "No se envió el RIS: no se pudo confirmar el alta de stock de "
+        + ", ".join(pending)
+        + f" en el depósito {deposit}."
+    )
+
+
+def _ensure_register_stock_entries(
+    client: BejermanSDKClient, payload: dict[str, Any], ingreso_ids: list[int]
+) -> None:
+    """Da de alta por circuito STOCK las partidas que aún no existen en el depósito
+    destino y verifica que el importador de Bejerman las haya reflejado antes de
+    mandar el comprobante (que va con ActualizaStock=N y partida informada). El
+    importador de VENTAS no crea partidas: sin este ENT el comprobante fallaría con
+    'Partida inexistente y/o no informada'."""
+    equipments = _payload_equipment_items(payload)
+    if not equipments:
+        return
+    deposit = _register_target_deposit(payload)
+    issue_date = _date_iso(payload.get("issueDate")) or timezone.localdate().isoformat()
+    entries: list[dict[str, Any]] = []
+    pending_partidas: list[str] = []
+    used_numbers: set[str] = set()
+    for index, equipment in enumerate(equipments):
+        partida = _clean(resolve_equipment_partida(equipment))
+        if not partida or _stock_partida_present(client, partida, deposit):
+            continue
+        fallback = ingreso_ids[index] if index < len(ingreso_ids) else (index + 1)
+        number = _stock_entry_number_for_equipment(equipment, fallback)
+        while number in used_numbers:
+            fallback += 1
+            number = str(fallback).zfill(8)
+        used_numbers.add(number)
+        entries.append(
+            _register_stock_entry_item(
+                equipment, partida=partida, deposit=deposit, issue_date=issue_date, number=number
+            )
+        )
+        pending_partidas.append(partida)
+    if not entries:
+        return
+    numera_flex = _clean(getattr(settings, "BEJERMAN_STOCK_NUMERA_FLEX", "N")) or "N"
+    response = client.ingresar_lista_comprobantes_stock_json(entries, numera_flex=numera_flex)
+    if not is_ok_response(response):
+        detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
+        raise BejermanRisError(f"No se envió el RIS: Bejerman rechazó el alta de stock. {detail}")
+    _verify_register_stock_entries(client, pending_partidas, deposit)
+
+
+def _is_partida_rejection_message(message: Any) -> bool:
+    text = _clean_upper(message)
+    if "PARTIDA" not in text:
+        return False
+    return any(token in text for token in ("INEXISTENTE", "NO INFORMADA", "NO SE IMPORT", "NO INFORMO", "NO INFORMÓ"))
+
+
+def _comprobante_import_with_partidas(
+    comprobante: dict[str, Any], payload: dict[str, Any], deposit: str
+) -> dict[str, Any]:
+    out = dict(comprobante or {})
+    out["Comprobante_ActualizaStock"] = "N"
+    equipments = _payload_equipment_items(payload)
+    article_index = 0
+    items: list[dict[str, Any]] = []
+    for item in out.get("Comprobante_Items") or []:
+        next_item = dict(item)
+        if next_item.get("Item_Tipo") == "A":
+            equipment = equipments[min(article_index, max(len(equipments) - 1, 0))] if equipments else {}
+            partida = _clean(resolve_equipment_partida(equipment))
+            if partida:
+                next_item["Item_Partida"] = partida
+            next_item["Item_Deposito"] = _clean(next_item.get("Item_Deposito")) or deposit
+            for qty_key in ("Item_CantidadUM1", "Item_CantidadUM2"):
+                value = next_item.get(qty_key)
+                if isinstance(value, (int, float)) and value:
+                    next_item[qty_key] = abs(value)
+            if not next_item.get("Item_CantidadUM1"):
+                next_item["Item_CantidadUM1"] = 1
+            article_index += 1
+        items.append(next_item)
+    out["Comprobante_Items"] = items
+    return out
+
+
+def _recover_emit_partida_rejection(
+    client: BejermanSDKClient,
+    payload: dict[str, Any],
+    built: dict[str, Any],
+    *,
+    operation: str,
+    numera_flex: str,
+    emite_reg: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fallback cuando el WS procesa la 'emisión' como importador y rechaza la
+    partida (pasa en MGBIO y también en SEPID según el comprobante): da de alta por
+    ENT y reintenta el mismo documento con ActualizaStock=N, partida informada y
+    cantidad positiva. El importador con numera_flex=S autonumera igual."""
+    deposit = _register_target_deposit(payload)
+    _ensure_register_stock_entries(client, payload, _payload_ingreso_ids(payload))
+    comprobante = _comprobante_import_with_partidas(built["comprobante"], payload, deposit)
+    raw_response = client.ingresar_comprobante_ventas_json(
+        comprobante,
+        circuito="VENTAS",
+        operacion=operation,
+        numera_flex=numera_flex,
+        emite_reg=emite_reg,
+    )
+    request_payload = {
+        **payload,
+        "comprobante": comprobante,
+        "operation": operation,
+        "numeraFlex": numera_flex,
+        "emiteReg": emite_reg,
+        "partidaRejectionRecovered": True,
+    }
+    return request_payload, _service_ingress_response(request_payload, built, raw_response)
+
+
 def _register_payload_to_bejerman(
     payload: dict[str, Any],
     manual_remito_number: Any,
@@ -2964,9 +3142,14 @@ def _register_payload_to_bejerman(
                 raise BejermanSdkResponseError(f"Bejerman ya registra el remito {document['remitoNumber']}")
             _ensure_equipment_remito_not_duplicated(payload, ingreso_ids, client)
         customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
-        compact_payload = {**payload, "compactServiceIngressLegends": True}
+        compact_payload = {**payload, "compactServiceIngressLegends": True, "preserveRegisteredDocumentStockFlag": True}
+        compact_payload["documentProfile"] = {
+            **(compact_payload.get("documentProfile") if isinstance(compact_payload.get("documentProfile"), dict) else {}),
+            "updateStock": False,
+        }
+        _ensure_register_stock_entries(client, compact_payload, ingreso_ids)
         built = build_service_ingress_comprobante(compact_payload, customer_fields)
-        comprobante = _apply_registered_document(built["comprobante"], payload, document)
+        comprobante = _apply_registered_document(built["comprobante"], compact_payload, document)
         profile = {**(built.get("profile") or {}), "pointOfSale": document["point"], "type": document["type"]}
         request_payload = {
             **compact_payload,
@@ -3072,13 +3255,29 @@ def _send_service_ingress_comprobante(
         numera_flex=numera_flex,
         emite_reg=emite_reg,
     )
-    raw_response = client.ingresar_comprobante_ventas_json(
-        built["comprobante"],
-        circuito="VENTAS",
-        operacion=operation,
-        numera_flex=numera_flex,
-        emite_reg=emite_reg,
-    )
+    try:
+        raw_response = client.ingresar_comprobante_ventas_json(
+            built["comprobante"],
+            circuito="VENTAS",
+            operacion=operation,
+            numera_flex=numera_flex,
+            emite_reg=emite_reg,
+        )
+    except BejermanSdkResponseError as exc:
+        if not _is_partida_rejection_message(str(exc)):
+            raise
+        logger.warning(
+            "bejerman_ris_emit_partida_rejection_fallback",
+            extra={"error": str(exc), "ingreso_ids": _payload_ingreso_ids(payload)},
+        )
+        return _recover_emit_partida_rejection(
+            client,
+            payload,
+            built,
+            operation=operation,
+            numera_flex=numera_flex,
+            emite_reg=emite_reg,
+        )
     return request_payload, _service_ingress_response(request_payload, built, raw_response)
 
 

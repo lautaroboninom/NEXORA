@@ -8,7 +8,7 @@ from service.bejerman_ris import (
     _emit_payload_to_bejerman,
     _register_payload_to_bejerman,
 )
-from service.bejerman_sdk import build_service_ingress_comprobante
+from service.bejerman_sdk import BejermanSdkResponseError, build_service_ingress_comprobante
 
 
 CUSTOMER_FIELDS = {
@@ -76,6 +76,21 @@ class FakeRemitoContractClient:
                     }
                 )
         return {"Resultado": "OK", "DatosJSON": json.dumps(comprobantes or [])}
+
+
+class PartidaRejectionClient(FakeRemitoContractClient):
+    """Simula el WS que procesa la 'emisión' (S) como importador y rechaza la
+    partida en el primer intento; tras el ENT acepta el documento con N."""
+
+    def __init__(self, *, number="00004778"):
+        super().__init__(number=number)
+
+    def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+        if comprobante.get("Comprobante_ActualizaStock") == "S":
+            self.comprobantes.append(comprobante)
+            self.ingresar_kwargs.append(kwargs)
+            raise BejermanSdkResponseError("El comprobante no se importó. Partida inexistente.")
+        return super().ingresar_comprobante_ventas_json(comprobante, **kwargs)
 
 
 def _payload(*, company_key="SEPID", bejerman_company="SEP", point="00004", update_stock=True, serial="SN-RIS-001"):
@@ -239,6 +254,37 @@ class BejermanRemitoContractsTests(SimpleTestCase):
 
         self.assertEqual(len(fake.stock_comprobantes), 1)
         self.assertEqual(fake.ingresar_calls, 0)
+
+    def test_emision_rda_con_partida_rechazada_cae_a_ent_mas_documento_n(self):
+        payload = _payload(serial="SN-RDA-REJECT")
+        payload["documentProfile"] = {
+            **payload["documentProfile"],
+            "key": "rda",
+            "type": "RDA",
+            "label": "RDA",
+            "operation": "ALQ",
+            "reason": "Baja de alquiler.",
+        }
+        fake = PartidaRejectionClient(number="00004778")
+        with (
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=CUSTOMER_FIELDS),
+            patch("service.bejerman_ris._ensure_equipment_remito_not_duplicated"),
+        ):
+            _, response = _emit_payload_to_bejerman(payload)
+
+        self.assertEqual(response["remitoNumber"], "RDA R 00004-00004778")
+        # 1er intento (S) rechazado -> ENT por circuito STOCK -> 2do intento con N y partida
+        self.assertEqual(len(fake.stock_comprobantes), 1)
+        stock_items = fake.stock_comprobantes[0]["comprobantes"]
+        self.assertEqual([item["Comprobante_Tipo"] for item in stock_items], ["ENT"])
+        self.assertEqual(stock_items[0]["Comprobante_ArtPartida"], "SN-RDA-REJECT")
+        self.assertEqual(len(fake.comprobantes), 2)
+        segundo = fake.comprobantes[1]
+        self.assertEqual(segundo["Comprobante_ActualizaStock"], "N")
+        article_lines = [item for item in segundo["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_Partida"], "SN-RDA-REJECT")
+        self.assertGreater(article_lines[0]["Item_CantidadUM1"], 0)
 
     def test_mgbio_conserva_punto_00007_donde_aplica(self):
         payload = _payload(company_key="MGBIO", bejerman_company="MGBI", point="00007", serial="SN-MGBIO-0007")
