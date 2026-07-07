@@ -535,7 +535,12 @@ export default function NuevoIngreso() {
       return;
     }
     const nonce = ++lookupRequestSeqRef.current;
-    setLookupRequest({ nonce, source, code });
+    setLookupRequest({
+      nonce,
+      source,
+      code,
+      company_key: (empresaBejerman || "SEPID").toUpperCase(),
+    });
   };
 
   const formatFechaIngreso = (val) => {
@@ -727,13 +732,14 @@ export default function NuevoIngreso() {
     if (!lookupRequest?.nonce) return;
     const lookupByInterno = lookupRequest.source === "interno";
     const lookupCode = String(lookupRequest.code || "").trim();
+    const lookupCompanyKey = String(lookupRequest.company_key || "SEPID").trim().toUpperCase() || "SEPID";
     const lookupLabel = lookupByInterno ? "número interno" : "N/S";
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
     const seq = ++mgLookupSeqRef.current;
     (async () => {
       setMgLookup((s) => ({ ...s, loading: true, notFound: false, checkedNs: lookupCode }));
       try {
-        const res = await lookupScan(lookupCode);
+        const res = await lookupScan(lookupCode, { company_key: lookupCompanyKey });
         if (mgLookupSeqRef.current !== seq) return;
 
         if (res?.kind === "bejerman_sale" && res?.suggestion) {

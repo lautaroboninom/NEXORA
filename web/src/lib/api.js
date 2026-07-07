@@ -830,8 +830,13 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const buscarAccesorioPorRef = (ref) =>
     api.get(`/api/accesorios/buscar/?ref=${encodeURIComponent(ref||"")}`);
   // Lectura de QR / código de barras
-  export const lookupScan = (code) =>
-    api.get(`/api/scan/lookup/?code=${encodeURIComponent(code||"")}`);
+  export const lookupScan = (code, opts = {}) => {
+    const params = new URLSearchParams();
+    params.set("code", code || "");
+    const companyKey = opts?.company_key || opts?.companyKey || "";
+    if (companyKey) params.set("company_key", companyKey);
+    return api.get(`/api/scan/lookup/?${params.toString()}`);
+  };
   // Entregar (requiere remito; opcional factura y fecha; si resolucion=cambio: serial_confirm requerido)
   export const postEntregarIngreso = (ingresoId, payload) =>
     api.post(`/api/ingresos/${ingresoId}/entregar/`, payload);

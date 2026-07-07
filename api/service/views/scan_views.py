@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 
 from .helpers import q, require_roles, _set_audit_user
 from .mg_state import resolve_mg_flags
+from ..bejerman_companies import company_for_key
 from ..bejerman_sales import bejerman_sale_response, find_latest_sale_by_serial, lookup_and_cache_sale_by_serial
 from ..bejerman_sdk import BejermanSDKClient
 
@@ -318,12 +319,28 @@ def _fetch_last_ingreso(device_id: int):
     ))
 
 
-def _find_sale_for_new_device(serial: str, user_id: int | None = None):
-    sale_payload = find_latest_sale_by_serial(serial)
+def _company_key_from_request(request) -> str:
+    raw = (
+        request.GET.get("company_key")
+        or request.GET.get("companyKey")
+        or request.GET.get("empresa_bejerman")
+        or ""
+    )
+    company = company_for_key(raw, default="SEPID")
+    return company.key if company else "SEPID"
+
+
+def _find_sale_for_new_device(serial: str, user_id: int | None = None, company_key: str | None = None):
+    company = company_for_key(company_key, default="SEPID")
+    normalized_company_key = company.key if company else "SEPID"
+    sale_payload = find_latest_sale_by_serial(serial, company_key=normalized_company_key)
     if sale_payload.get("found"):
         return sale_payload
     try:
-        return lookup_and_cache_sale_by_serial(BejermanSDKClient(actor_user_id=user_id), serial)
+        return lookup_and_cache_sale_by_serial(
+            BejermanSDKClient(company_key=normalized_company_key, actor_user_id=user_id),
+            serial,
+        )
     except Exception as exc:
         return {
             "found": False,
@@ -341,6 +358,7 @@ class ScanLookupView(APIView):
         code = (request.GET.get("code") or "").strip()
         if not code:
             return Response({"detail": "code requerido"}, status=400)
+        company_key = _company_key_from_request(request)
 
         ingreso_id, source = _parse_ingreso_id(code)
         if ingreso_id:
@@ -385,12 +403,13 @@ class ScanLookupView(APIView):
         device, ns_key = _fetch_device_by_code(code, mg_select_sql)
         if not device:
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-            sale_payload = _find_sale_for_new_device(code, user_id=user_id)
+            sale_payload = _find_sale_for_new_device(code, user_id=user_id, company_key=company_key)
             sale_response = bejerman_sale_response(code, ns_key, sale_payload or {}, create_customer=True)
             if sale_response:
                 return Response(sale_response)
             return Response({
                 "kind": "none",
+                "companyKey": company_key,
                 "source": source or "serial",
                 "raw": code,
                 "normalized": code,
@@ -409,7 +428,7 @@ class ScanLookupView(APIView):
         mg_owner_id = mg_owner["id"] if mg_owner else None
         flags = resolve_mg_flags(device, mg_owner_id)
 
-        sale_payload = find_latest_sale_by_serial(device.get("numero_serie") or code)
+        sale_payload = find_latest_sale_by_serial(device.get("numero_serie") or code, company_key=company_key)
         sale_response = bejerman_sale_response(
             device.get("numero_serie") or code,
             ns_key,
@@ -419,6 +438,7 @@ class ScanLookupView(APIView):
 
         return Response({
             "kind": "device",
+            "companyKey": company_key,
             "source": source or "serial",
             "raw": code,
             "normalized": code,
