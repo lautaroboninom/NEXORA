@@ -624,9 +624,12 @@ class BejermanPdfHelperTests(SimpleTestCase):
             with self.assertRaises(BejermanPdfOutputSettingsError):
                 validate_pdf_output_dir(r"Z:\MG BIO\Remitos BEJERMAN")
 
-    @patch("service.bejerman_sdk.remove_remote_file_if_same", return_value=True)
+    @patch(
+        "service.bejerman_sdk.remove_remote_pdf_candidates_if_same",
+        return_value=[r"C:\2. SEPID\PDF\FACTURAS\V-RT -R-00004-00004707-26062026-RES   .pdf"],
+    )
     @patch("service.bejerman_sdk.write_remote_pdf")
-    def test_fetch_comprobante_pdf_copia_remito_a_samtronic_y_limpia_facturas(self, write_remote_pdf, remove_remote_file):
+    def test_fetch_comprobante_pdf_copia_remito_a_samtronic_y_limpia_facturas(self, write_remote_pdf, remove_remote_candidates):
         write_remote_pdf.return_value = Mock(path=r"C:\2. SEPID\PDF\REMITOS\RTR00004-00004707-RES.pdf")
         client = FakePdfClient([_pdf_response()])
         client.company_key = "SEPID"
@@ -655,8 +658,14 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(write_remote_pdf.call_args.args[0], r"samtronic:C:\2. SEPID\PDF\REMITOS")
         self.assertEqual(write_remote_pdf.call_args.args[1], "RTR00004-00004707-RES.pdf")
         self.assertEqual(write_remote_pdf.call_args.args[2], pdf_bytes)
-        remove_remote_file.assert_called_once_with(
-            r"samtronic:C:\2. SEPID\PDF\FACTURAS\V-RT -R-00004-00004707-26062026-RES   .pdf",
+        remove_remote_candidates.assert_called_once_with(
+            r"samtronic:C:\2. SEPID\PDF\FACTURAS",
+            [
+                "V-RT -R-00004-00004707-26062026-RES   .pdf",
+                "RTR00004-00004707-RES.pdf",
+                "RTR00004-00004707.pdf",
+            ],
+            ["V-RT -R-00004-00004707-", "RTR00004-00004707"],
             pdf_bytes,
         )
 
@@ -2455,7 +2464,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
         self.assertEqual(article_lines[0]["Item_CantidadUM2"], 0)
-        self.assertEqual(article_lines[0]["Item_Partida"], " ")
+        self.assertEqual(article_lines[0]["Item_Partida"], "SN-1")
 
     @override_settings(BEJERMAN_RIS_UPDATE_STOCK="0")
     def test_ris_comprobante_article_line_uses_equipment_details(self):
@@ -2491,10 +2500,10 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(article_lines[0]["Item_DescripArticulo"], "OXÍMETRO DE PULSO | Nellcor | N-595")
         self.assertEqual(legend_lines[0], "------------------------------")
-        self.assertIn("Ingreso a servicio técnico", legend_lines)
-        self.assertIn("OS 29382", legend_lines)
-        self.assertIn("N/S: G0588065", legend_lines)
+        self.assertIn("Ingreso a servicio técnico OS 29382", legend_lines)
+        self.assertIn("Motivo de ingreso: Reparación", legend_lines)
         self.assertIn("Interno: MG 6697", legend_lines)
+        self.assertEqual(article_lines[0]["Item_Partida"], "G0588065")
         self.assertFalse(any("OXÍMETRO" in line for line in legend_lines))
 
     @override_settings(BEJERMAN_RIS_UPDATE_STOCK="0")
@@ -2544,7 +2553,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(legend_lines[0], "Se recibe para servicio técnico:")
         self.assertEqual(legend_lines.count("------------------------------"), 2)
-        self.assertTrue(any("SN-1" in line for line in legend_lines))
+        self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-1", "SN-2"])
         self.assertIn("Motivo de ingreso: No enciende", legend_lines)
         self.assertIn("Accesorios: Bolso (ref: B-1)", legend_lines)
         self.assertIn("Accesorios: batería (ref: 2046-01)", legend_lines)
@@ -2635,7 +2644,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
             for item in built["comprobante"]["Comprobante_Items"]
             if item["Item_Tipo"] == "L"
         ]
-        self.assertIn("N/S: G3GB4000030", legend_lines)
+        self.assertIn("Ingreso a servicio técnico OS 1", legend_lines)
         self.assertIn("Motivo de ingreso: Ingreso de equipo MG activo desde alquiler.", legend_lines)
 
         comprobante = _apply_registered_document(

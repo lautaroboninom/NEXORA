@@ -1964,18 +1964,14 @@ def service_ingress_reason_legend(
     return f"Motivo de ingreso: {reason}" if reason else ""
 
 
-def service_ingress_equipment_legend_lines(equipment: dict[str, Any] | None, *, os_text: Any = "", partida: Any = "") -> list[str]:
+def service_ingress_equipment_legend_lines(equipment: dict[str, Any] | None, *, os_text: Any = "", partida: Any = "", reason: str = "") -> list[str]:
     equipment = equipment or {}
     serial = as_string(equipment.get("serial"))
     internal = as_string(equipment.get("internalNumber"))
     identifier = as_string(partida) or resolve_equipment_partida(equipment)
     lines: list[str] = []
-    os_value = as_string(os_text)
-    if os_value:
-        lines.append(f"OS {os_value}")
-    if identifier:
-        label = "N/S" if serial and identifier == serial else "Partida"
-        lines.append(f"{label}: {identifier}")
+    if reason:
+        lines.append(reason)
     if internal and internal != identifier:
         lines.append(f"Interno: {internal}")
     return lines
@@ -2016,22 +2012,28 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
     raw_equipments = payload.get("equipments")
     equipments = [item for item in raw_equipments if isinstance(item, dict)] if isinstance(raw_equipments, list) else []
     partida = _service_ingress_partida_or_error(tipo, article_code, deposit, equipment) if update_stock and not equipments else ""
+    serial_for_column = resolve_equipment_partida(equipment) if not partida else ""
     article_quantity = sdk_signed_article_quantity(tipo)
+    ingreso_id_text = as_string(payload.get("ingresoId"))
+    ingreso_line = "Ingreso a servicio técnico"
+    if ingreso_id_text:
+        ingreso_line = f"{ingreso_line} OS {ingreso_id_text}"
     items = [
         item_separator_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 1)),
-        legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 2), "Ingreso a servicio técnico"),
+        legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 2), ingreso_line),
     ]
     sort_order = 3
-    for detail_line in service_ingress_equipment_legend_lines(
-        equipment,
-        os_text=payload.get("ingresoId"),
-        partida=partida,
-    ):
-        items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), detail_line))
-        sort_order += 1
     reason_line = service_ingress_reason_legend(equipment, payload=payload, profile=profile_payload)
     if reason_line:
         items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), reason_line))
+        sort_order += 1
+    for detail_line in service_ingress_equipment_legend_lines(
+        equipment,
+        os_text="",
+        partida=partida,
+        reason="",
+    ):
+        items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), detail_line))
         sort_order += 1
     items.append(
         {
@@ -2059,7 +2061,7 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             "Item_CodigoDescPorLinea": None,
             "Item_ImporteDescPorLinea": 0,
             "Item_Deposito": deposit if update_stock else None,
-            "Item_Partida": partida if update_stock else " ",
+            "Item_Partida": partida if update_stock else (serial_for_column or " "),
             "Item_TasaDescPorItem": 0,
             "Item_Importe": 0,
             "Item_FechaEntrega": issue_date,
@@ -2082,6 +2084,7 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
                 if update_stock
                 else ""
             )
+            item_serial = resolve_equipment_partida(equipment_item) if not item_partida else ""
             return {
                 **common,
                 "Item_Tipo": "A",
@@ -2104,7 +2107,7 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
                 "Item_CodigoDescPorLinea": None,
                 "Item_ImporteDescPorLinea": 0,
                 "Item_Deposito": deposit if update_stock else None,
-                "Item_Partida": item_partida if update_stock else " ",
+                "Item_Partida": item_partida if update_stock else (item_serial or " "),
                 "Item_TasaDescPorItem": 0,
                 "Item_Importe": 0,
                 "Item_FechaEntrega": issue_date,
