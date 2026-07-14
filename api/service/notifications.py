@@ -79,6 +79,23 @@ NOTIFICATION_CATALOG = [
         "allowed_roles": BILLING_NOTIFICATION_ROLES,
     },
     {
+        "key": "billing_remito_postponement_due",
+        "label": "Remito pospuesto disponible",
+        "description": "Un remito pospuesto volvió a la cola de facturación.",
+        "group": "Cobranzas",
+        "default_roles": ["cobranzas"],
+        "allowed_roles": BILLING_NOTIFICATION_ROLES,
+        "channels": ("bell",),
+    },
+    {
+        "key": "sales_order_commercial_terms_updated",
+        "label": "Corrección comercial de entrega",
+        "description": "Precio o plazo corregido en una orden ya entregada con remito.",
+        "group": "Cobranzas",
+        "default_roles": ["cobranzas"],
+        "allowed_roles": BILLING_NOTIFICATION_ROLES,
+    },
+    {
         "key": "service_order_ready_to_bill",
         "label": "OS lista para facturar",
         "description": "Orden de servicio liberada para facturar como concepto.",

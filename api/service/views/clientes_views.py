@@ -435,6 +435,7 @@ class CustomersListView(APIView):
                 "page.home_search",
                 "action.ingreso.edit_basics",
                 "action.ingreso.create",
+                "action.ingreso.force_historical",
                 "page.new_ingreso",
                 "action.delivery_order.create",
             ],

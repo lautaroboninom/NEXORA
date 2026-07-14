@@ -79,6 +79,51 @@ import ReleaseOrderModal from "../components/ReleaseOrderModal.jsx";
 const TAB_VALUES = ["principal", "diagnostico", "test", "presupuesto", "derivaciones", "historial", "archivos"];
 const isValidTab = (value) => TAB_VALUES.includes((value || "").toString().trim());
 
+const HISTORICAL_ACTIONS = {
+  entrega: {
+    label: "Entrega",
+    summary: "Registrar una entrega que ya ocurrió y no quedó asentada correctamente.",
+    nexora: "Marca la OS como entregada, guarda remito, factura y fecha, y actualiza la ubicación del equipo.",
+    bejerman: "Registra la referencia del remito existente. No emite un comprobante nuevo con fecha retroactiva.",
+    button: "Registrar entrega histórica",
+  },
+  alta_alquiler: {
+    label: "Alta de alquiler",
+    summary: "Reconstruir un alquiler ya realizado seleccionando un cliente real del catálogo.",
+    nexora: "Marca la OS y el equipo como alquilados, y guarda cliente, RTA y fecha de alquiler.",
+    bejerman: "Registra la referencia del RTA existente. El alta operativa nueva debe emitirse desde Órdenes de entrega.",
+    button: "Registrar alta de alquiler",
+  },
+  baja_alquiler: {
+    label: "Baja de alquiler",
+    summary: "Registrar la devolución histórica de un equipo que figuraba alquilado.",
+    nexora: "Quita el alquiler de la OS y del equipo; si estaba alquilado, vuelve la OS a ingresado y al Taller.",
+    bejerman: "Registra la referencia del RDA existente. No emite una devolución nueva desde esta corrección.",
+    button: "Registrar baja de alquiler",
+  },
+  baja_ingreso: {
+    label: "Baja de ingreso",
+    summary: "Dar de baja históricamente una OS y corregir el stock patrimonial cuando corresponda.",
+    nexora: "Marca la OS como baja, la mueve fuera del Taller y registra el evento y la auditoría.",
+    bejerman: "Para equipos propios MG, encola el movimiento de stock al depósito de baja o desguace.",
+    button: "Registrar baja de ingreso",
+  },
+  alta_ingreso: {
+    label: "Alta de ingreso",
+    summary: "Reactivar históricamente una OS dada de baja y recuperar su stock patrimonial.",
+    nexora: "Marca la OS como ingresada, la devuelve al Taller y registra el evento y la auditoría.",
+    bejerman: "Para equipos propios MG, encola el movimiento inverso desde baja o desguace.",
+    button: "Registrar alta de ingreso",
+  },
+};
+
+const historicalCustomerLabel = (customer) => {
+  if (!customer) return "";
+  const name = String(customer.razon_social || customer.nombre || "").trim();
+  const alias = String(customer.alias_interno || "").trim();
+  return alias ? `${alias} · ${name}` : name;
+};
+
 const Tabs = ({ value, onChange, items, extraRight }) => (
   <div className="border-b mb-4 flex items-center">
     <div className="flex gap-2">
@@ -569,6 +614,12 @@ export default function ServiceSheet() {
   });
   const [histModalOpen, setHistModalOpen] = useState(false);
   const [histSaving, setHistSaving] = useState(false);
+  const [histError, setHistError] = useState("");
+  const [histResult, setHistResult] = useState(null);
+  const [histClientesLoading, setHistClientesLoading] = useState(false);
+  const [histClientesError, setHistClientesError] = useState("");
+  const [histCustomerSearchOpen, setHistCustomerSearchOpen] = useState(false);
+  const [histCustomerActiveIndex, setHistCustomerActiveIndex] = useState(0);
   const [histForm, setHistForm] = useState({
     accion: "entrega",
     fecha_efectiva: toDateInputStr(new Date()),
@@ -577,9 +628,11 @@ export default function ServiceSheet() {
     remito_salida: "",
     factura_numero: "",
     fecha_entrega: "",
-    alquiler_a: "",
+    alquiler_customer_id: "",
+    alquiler_customer_search: "",
     alquiler_remito: "",
     alquiler_fecha: "",
+    remito_baja_alquiler: "",
   });
   const [mgForm, setMgForm] = useState({
     factura_numero: "",
@@ -604,6 +657,24 @@ export default function ServiceSheet() {
         .replace(/\s+/g, " "),
     [],
   );
+  const histFilteredCustomers = useMemo(() => {
+    const needle = normalizeClientText(histForm.alquiler_customer_search);
+    const rows = Array.isArray(clientes) ? clientes : [];
+    if (!needle) return rows.slice(0, 30);
+    return rows
+      .filter((customer) => normalizeClientText([
+        customer?.razon_social,
+        customer?.alias_interno,
+        customer?.cod_empresa,
+        customer?.cuit,
+      ].filter(Boolean).join(" ")).includes(needle))
+      .slice(0, 30);
+  }, [clientes, histForm.alquiler_customer_search, normalizeClientText]);
+  const histSelectedCustomer = useMemo(
+    () => (clientes || []).find((customer) => String(customer?.id || "") === String(histForm.alquiler_customer_id || "")) || null,
+    [clientes, histForm.alquiler_customer_id],
+  );
+  const histActionInfo = HISTORICAL_ACTIONS[histForm.accion] || HISTORICAL_ACTIONS.entrega;
   const hasClienteCodCatalog = useMemo(
     () => (clientes || []).some((c) => String(c?.cod_empresa || "").trim() !== ""),
     [clientes],
@@ -1449,17 +1520,80 @@ export default function ServiceSheet() {
       remito_salida: "",
       factura_numero: "",
       fecha_entrega: "",
-      alquiler_a: "",
+      alquiler_customer_id: "",
+      alquiler_customer_search: "",
       alquiler_remito: "",
       alquiler_fecha: "",
+      remito_baja_alquiler: "",
     });
   }
 
   function abrirCorreccionHistorica() {
     if (!canForceHistorical) return;
     resetHistForm("entrega");
+    setHistError("");
+    setHistResult(null);
+    setHistClientesError("");
+    setHistCustomerSearchOpen(false);
+    setHistCustomerActiveIndex(0);
     setHistModalOpen(true);
     setActionsOpen(false);
+    if (!clientes.length) {
+      setHistClientesLoading(true);
+      loadClientesCatalogo()
+        .catch((error) => {
+          setHistClientesError(error?.message || "No se pudo cargar la lista de clientes.");
+        })
+        .finally(() => setHistClientesLoading(false));
+    }
+  }
+
+  function seleccionarClienteAlquiler(customer) {
+    if (!customer) return;
+    setHistForm((current) => ({
+      ...current,
+      alquiler_customer_id: String(customer.id || ""),
+      alquiler_customer_search: historicalCustomerLabel(customer),
+    }));
+    setHistCustomerSearchOpen(false);
+    setHistCustomerActiveIndex(0);
+    setHistError("");
+  }
+
+  function manejarTecladoClienteAlquiler(event) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setHistCustomerSearchOpen(true);
+      setHistCustomerActiveIndex((current) => (
+        histFilteredCustomers.length ? (current + 1) % histFilteredCustomers.length : 0
+      ));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setHistCustomerSearchOpen(true);
+      setHistCustomerActiveIndex((current) => (
+        histFilteredCustomers.length
+          ? (current - 1 + histFilteredCustomers.length) % histFilteredCustomers.length
+          : 0
+      ));
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setHistCustomerSearchOpen(false);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (histCustomerSearchOpen && histFilteredCustomers.length) {
+        seleccionarClienteAlquiler(histFilteredCustomers[histCustomerActiveIndex] || histFilteredCustomers[0]);
+      }
+      return;
+    }
+    if (event.key === "Tab" && histCustomerSearchOpen && histFilteredCustomers.length) {
+      seleccionarClienteAlquiler(histFilteredCustomers[histCustomerActiveIndex] || histFilteredCustomers[0]);
+    }
   }
 
   async function guardarCorreccionHistorica() {
@@ -1468,15 +1602,19 @@ export default function ServiceSheet() {
     const motivo = String(histForm.motivo || "").trim();
     const fechaEfectiva = String(histForm.fecha_efectiva || "").trim();
     if (!accion) {
-      setErr("Debe seleccionar una acción.");
+      setHistError("Debe seleccionar una acción.");
       return;
     }
     if (!fechaEfectiva) {
-      setErr("Debe indicar la fecha efectiva.");
+      setHistError("Debe indicar la fecha efectiva.");
       return;
     }
     if (!motivo) {
-      setErr("Debe indicar el motivo.");
+      setHistError("Debe indicar el motivo.");
+      return;
+    }
+    if (accion === "alta_alquiler" && !histForm.alquiler_customer_id) {
+      setHistError("Debe buscar y seleccionar un cliente de la lista para el alta de alquiler.");
       return;
     }
 
@@ -1491,19 +1629,27 @@ export default function ServiceSheet() {
       payload.factura_numero = String(histForm.factura_numero || "").trim() || null;
       payload.fecha_entrega = String(histForm.fecha_entrega || "").trim() || null;
     } else if (accion === "alta_alquiler") {
-      payload.alquiler_a = String(histForm.alquiler_a || "").trim() || null;
+      payload.alquiler_customer_id = Number(histForm.alquiler_customer_id);
       payload.alquiler_remito = String(histForm.alquiler_remito || "").trim() || null;
       payload.alquiler_fecha = String(histForm.alquiler_fecha || "").trim() || null;
+    } else if (accion === "baja_alquiler") {
+      payload.remito_baja_alquiler = String(histForm.remito_baja_alquiler || "").trim() || null;
     }
 
     try {
       setHistSaving(true);
-      await postIngresoCorreccionHistorica(id, payload);
-      await refreshIngreso({ strong: 1 });
-      setErr("");
-      setHistModalOpen(false);
+      setHistError("");
+      setHistResult(null);
+      const result = await postIngresoCorreccionHistorica(id, payload);
+      setHistResult(result);
+      try {
+        await refreshIngreso({ strong: 1 });
+        setErr("");
+      } catch (refreshError) {
+        setErr(refreshError?.message || "La corrección se aplicó, pero no se pudo refrescar la hoja de servicio.");
+      }
     } catch (e) {
-      setErr(e?.message || "No se pudo registrar la corrección histórica.");
+      setHistError(e?.data?.detail || e?.message || "No se pudo registrar la corrección histórica.");
     } finally {
       setHistSaving(false);
     }
@@ -1651,7 +1797,7 @@ export default function ServiceSheet() {
     (async () => { try { const list = await getMotivos(); setMotivos(Array.isArray(list) ? list : []); } catch { setMotivos([]); } })();
   }, [canEditBasics]);
   useEffect(() => {
-    if (!canEditBasics && !canEditAlquiler) return;
+    if (!canEditBasics && !canEditAlquiler && !canForceHistorical) return;
     if (clientesLoadedRef.current) return;
     clientesLoadedRef.current = true;
     (async () => {
@@ -1661,7 +1807,7 @@ export default function ServiceSheet() {
         setClientesPerm(false);
       }
     })();
-  }, [canEditAlquiler, canEditBasics, loadClientesCatalogo]);
+  }, [canEditAlquiler, canEditBasics, canForceHistorical, loadClientesCatalogo]);
   useEffect(() => {
     if (!editBasics) return;
     if (!marcaIdSel) { setModelos([]); setModeloIdSel(null); setVarSugeridas([]); return; }
@@ -2421,8 +2567,11 @@ export default function ServiceSheet() {
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
                 <h2 className="text-lg font-semibold">Corrección histórica</h2>
-                <div className="text-sm text-gray-600">
-                  OS: {formatOSHelper(data, id)} - NS: {serialLabel}
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-600">
+                  <span>OS: {formatOSHelper(data, id)} · NS: {serialLabel}</span>
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">
+                    Estado actual: {estadoLabel(data?.estado) || data?.estado || "-"}
+                  </span>
                 </div>
               </div>
               <button
@@ -2435,7 +2584,44 @@ export default function ServiceSheet() {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            {histError && (
+              <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">
+                {histError}
+              </div>
+            )}
+
+            {histResult && (
+              <div className="mb-4 space-y-2 rounded border border-emerald-200 bg-emerald-50 p-3 text-sm">
+                <div className="font-semibold text-emerald-900">Corrección aplicada</div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <div className="rounded bg-white/80 p-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">NEXORA</div>
+                    <div className="mt-1 text-gray-800">{histResult?.nexora?.detail || "La corrección quedó registrada."}</div>
+                  </div>
+                  <div className={`rounded p-2 ${["not_queued", "blocked", "reference_missing"].includes(histResult?.bejerman?.status) ? "bg-amber-50 text-amber-900" : "bg-white/80 text-gray-800"}`}>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Bejerman</div>
+                    <div className="mt-1">{histResult?.bejerman?.detail || "Sin acción informada."}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="mb-4 rounded border border-indigo-100 bg-indigo-50 p-3 text-sm">
+              <div className="font-semibold text-indigo-950">{histActionInfo.label}</div>
+              <div className="mt-1 text-indigo-900">{histActionInfo.summary}</div>
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                <div className="rounded bg-white/75 p-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-indigo-700">En NEXORA</div>
+                  <div className="mt-1 text-gray-700">{histActionInfo.nexora}</div>
+                </div>
+                <div className="rounded bg-white/75 p-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-indigo-700">En Bejerman</div>
+                  <div className="mt-1 text-gray-700">{histActionInfo.bejerman}</div>
+                </div>
+              </div>
+            </div>
+
+            <fieldset disabled={histSaving || !!histResult} className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 disabled:opacity-70">
               <label className="block">
                 <div className="text-xs text-gray-600 mb-1">Acción</div>
                 <select
@@ -2444,6 +2630,9 @@ export default function ServiceSheet() {
                   onChange={(e) => {
                     const next = e.target.value;
                     setHistForm((s) => ({ ...s, accion: next, notificar: true }));
+                    setHistError("");
+                    setHistResult(null);
+                    setHistCustomerSearchOpen(false);
                   }}
                   disabled={histSaving}
                 >
@@ -2503,17 +2692,67 @@ export default function ServiceSheet() {
 
               {histForm.accion === "alta_alquiler" && (
                 <>
-                  <label className="block md:col-span-2">
-                    <div className="text-xs text-gray-600 mb-1">Alquiler a</div>
+                  <label className="relative block md:col-span-2">
+                    <div className="mb-1 text-xs font-medium text-gray-700">Cliente del alquiler (obligatorio)</div>
                     <input
-                      className="border rounded p-2 w-full"
-                      value={histForm.alquiler_a}
-                      onChange={(e) => setHistForm((s) => ({ ...s, alquiler_a: e.target.value }))}
-                      disabled={histSaving}
+                      className={`w-full rounded border p-2 ${histForm.alquiler_customer_id ? "border-emerald-400 bg-emerald-50" : "border-gray-300"}`}
+                      value={histForm.alquiler_customer_search}
+                      placeholder={histClientesLoading ? "Cargando clientes..." : "Escriba razón social, alias, código o CUIT"}
+                      autoComplete="off"
+                      onFocus={() => {
+                        setHistCustomerSearchOpen(true);
+                        setHistCustomerActiveIndex(0);
+                      }}
+                      onKeyDown={manejarTecladoClienteAlquiler}
+                      onChange={(e) => {
+                        setHistForm((current) => ({
+                          ...current,
+                          alquiler_customer_id: "",
+                          alquiler_customer_search: e.target.value,
+                        }));
+                        setHistCustomerActiveIndex(0);
+                        setHistCustomerSearchOpen(true);
+                        setHistError("");
+                      }}
+                      disabled={histSaving || histClientesLoading}
                     />
+                    {histCustomerSearchOpen && !histClientesLoading && (
+                      <div className="absolute z-40 mt-1 max-h-64 w-full overflow-y-auto rounded border bg-white shadow-lg">
+                        {histFilteredCustomers.length ? (
+                          histFilteredCustomers.map((customer, customerIndex) => (
+                            <button
+                              key={customer.id}
+                              type="button"
+                              onMouseDown={(event) => event.preventDefault()}
+                              onMouseEnter={() => setHistCustomerActiveIndex(customerIndex)}
+                              onClick={() => seleccionarClienteAlquiler(customer)}
+                              className={`w-full px-3 py-2 text-left ${customerIndex === histCustomerActiveIndex ? "bg-indigo-50" : "hover:bg-gray-50"}`}
+                            >
+                              <span className="block font-medium text-gray-900">{customer.razon_social || customer.nombre || "Sin nombre"}</span>
+                              <span className="block text-xs text-gray-500">
+                                {[
+                                  customer.alias_interno ? `Alias ${customer.alias_interno}` : "",
+                                  customer.cod_empresa ? `Código ${customer.cod_empresa}` : "Sin código Bejerman",
+                                  customer.cuit ? `CUIT ${customer.cuit}` : "",
+                                ].filter(Boolean).join(" · ")}
+                              </span>
+                            </button>
+                          ))
+                        ) : (
+                          <div className="px-3 py-3 text-gray-500">No hay clientes que coincidan con la búsqueda.</div>
+                        )}
+                      </div>
+                    )}
+                    {histClientesError && <div className="mt-1 text-xs text-red-700">{histClientesError}</div>}
+                    {histSelectedCustomer && (
+                      <div className="mt-1 text-xs text-emerald-700">
+                        Cliente seleccionado: {histSelectedCustomer.razon_social}
+                        {histSelectedCustomer.cod_empresa ? ` · Código Bejerman ${histSelectedCustomer.cod_empresa}` : " · Sin código Bejerman"}
+                      </div>
+                    )}
                   </label>
                   <label className="block">
-                    <div className="text-xs text-gray-600 mb-1">Remito alquiler</div>
+                    <div className="text-xs text-gray-600 mb-1">RTA de alquiler (si ya existe)</div>
                     <input
                       className="border rounded p-2 w-full"
                       value={histForm.alquiler_remito}
@@ -2522,7 +2761,7 @@ export default function ServiceSheet() {
                     />
                   </label>
                   <label className="block">
-                    <div className="text-xs text-gray-600 mb-1">Fecha alquiler</div>
+                    <div className="text-xs text-gray-600 mb-1">Fecha del alquiler</div>
                     <input
                       type="date"
                       className="border rounded p-2 w-full"
@@ -2533,6 +2772,20 @@ export default function ServiceSheet() {
                     />
                   </label>
                 </>
+              )}
+
+              {histForm.accion === "baja_alquiler" && (
+                <label className="block md:col-span-2">
+                  <div className="mb-1 text-xs text-gray-600">RDA de devolución (si ya existe)</div>
+                  <input
+                    className="w-full rounded border p-2"
+                    value={histForm.remito_baja_alquiler}
+                    onChange={(e) => setHistForm((s) => ({ ...s, remito_baja_alquiler: e.target.value }))}
+                    placeholder="Ej.: RDA R 00001-00012345"
+                    disabled={histSaving}
+                  />
+                  <div className="mt-1 text-xs text-gray-500">La baja usa la fecha efectiva indicada arriba.</div>
+                </label>
               )}
 
               {(histForm.accion === "baja_ingreso" || histForm.accion === "alta_ingreso") && (
@@ -2556,7 +2809,7 @@ export default function ServiceSheet() {
                   disabled={histSaving}
                 />
               </label>
-            </div>
+            </fieldset>
 
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
@@ -2565,16 +2818,23 @@ export default function ServiceSheet() {
                 onClick={() => setHistModalOpen(false)}
                 disabled={histSaving}
               >
-                Cancelar
+                {histResult ? "Cerrar" : "Cancelar"}
               </button>
-              <button
-                type="button"
-                className="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
-                onClick={guardarCorreccionHistorica}
-                disabled={histSaving || !String(histForm.motivo || "").trim() || !String(histForm.fecha_efectiva || "").trim()}
-              >
-                {histSaving ? "Guardando..." : "Guardar corrección"}
-              </button>
+              {!histResult && (
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                  onClick={guardarCorreccionHistorica}
+                  disabled={
+                    histSaving
+                    || !String(histForm.motivo || "").trim()
+                    || !String(histForm.fecha_efectiva || "").trim()
+                    || (histForm.accion === "alta_alquiler" && !histForm.alquiler_customer_id)
+                  }
+                >
+                  {histSaving ? "Aplicando..." : histActionInfo.button}
+                </button>
+              )}
             </div>
           </div>
         </div>

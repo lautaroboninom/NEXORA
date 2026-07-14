@@ -16,6 +16,7 @@ import { openPrintablePdf, waitForPdfBlob } from "../lib/pdf";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import DeliveryOrderCreateForm from "../components/DeliveryOrderCreateForm.jsx";
+import DeliveryOrderCommercialCorrectionModal from "../components/DeliveryOrderCommercialCorrectionModal.jsx";
 import DeliveryOrderRemitoModal from "../components/DeliveryOrderRemitoModal.jsx";
 import {
   deliveryOrderCompanyLabel,
@@ -113,6 +114,20 @@ function canEditItemDiscounts(user) {
 
 function canEditCommercialFields(user) {
   return ["admin", "supervisor", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
+}
+
+function safeReturnPath(value) {
+  const path = String(value || "").trim();
+  return path.startsWith("/") && !path.startsWith("//") ? path : "";
+}
+
+function canCorrectCommercialTerms(user, order) {
+  return (
+    String(user?.rol || "").trim().toLowerCase() === "supervisor" &&
+    order?.status === "entregado_pendiente_facturacion" &&
+    Boolean(String(order?.remitoNumber || "").trim()) &&
+    !String(order?.invoiceNumber || "").trim()
+  );
 }
 
 function canPrintInvoiceForOrder(user, order) {
@@ -271,7 +286,9 @@ export default function DeliveryOrders() {
   const [manualInvoicePrint, setManualInvoicePrint] = useState(null);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [reviewReturnTo, setReviewReturnTo] = useState("");
   const [detailOrder, setDetailOrder] = useState(null);
+  const [commercialCorrectionOrder, setCommercialCorrectionOrder] = useState(null);
   const [partidasOrder, setPartidasOrder] = useState(null);
   const [remitoModalOpen, setRemitoModalOpen] = useState(false);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
@@ -414,6 +431,8 @@ export default function DeliveryOrders() {
     if (!user) return;
     const params = new URLSearchParams(location.search);
     const orderId = String(params.get("orderId") || "").trim();
+    const editRequested = params.get("edit") === "1";
+    const returnTo = safeReturnPath(params.get("returnTo"));
     if (!orderId || handledRouteOrderRef.current === orderId) return;
     handledRouteOrderRef.current = orderId;
 
@@ -421,11 +440,27 @@ export default function DeliveryOrders() {
       .then((order) => {
         if (!order?.id) throw new Error("No se encontró la orden de entrega.");
         setError("");
-        setDetailOrder(order);
+        if (editRequested && canAssignArticles && isEditableOrder(order)) {
+          setReviewReturnTo(returnTo);
+          setDetailOrder(null);
+          setEditingOrder(order);
+        } else {
+          setDetailOrder(order);
+          if (editRequested) {
+            setError(
+              !canAssignArticles
+                ? "No tiene permiso para modificar los artículos de esta orden."
+                : "La orden todavía está bloqueada. Primero debe verificarse que el RT no se importó.",
+            );
+          }
+        }
       })
       .catch((err) => setError(err?.message || "No se pudo abrir la orden de entrega."))
       .finally(() => {
         params.delete("orderId");
+        params.delete("edit");
+        params.delete("reviewGroupId");
+        params.delete("returnTo");
         const nextSearch = params.toString();
         navigate(
           {
@@ -435,7 +470,7 @@ export default function DeliveryOrders() {
           { replace: true }
         );
       });
-  }, [location.pathname, location.search, navigate, user]);
+  }, [canAssignArticles, location.pathname, location.search, navigate, user]);
 
   const updateFilter = (field) => (event) => {
     setFilters((prev) => ({ ...prev, [field]: event.target.value }));
@@ -561,6 +596,31 @@ export default function DeliveryOrders() {
   const openEditOrder = (order) => {
     setDetailOrder(null);
     setEditingOrder(order);
+  };
+
+  const openCommercialCorrection = async (order) => {
+    if (!order?.id) return;
+    setSaving(true);
+    try {
+      const refreshed = await refreshOrderForDisplay(order);
+      setDetailOrder(null);
+      setCommercialCorrectionOrder(refreshed);
+      setError("");
+    } catch (err) {
+      setError(err?.message || "No se pudo abrir la corrección comercial.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCommercialCorrectionSaved = (saved) => {
+    setError("");
+    setCommercialCorrectionOrder(null);
+    if (saved?.id) {
+      mergeRefreshedOrders([saved]);
+      setDetailOrder(saved);
+    }
+    load();
   };
 
   const openRouteSheetForOrder = (order) => {
@@ -1069,12 +1129,20 @@ export default function DeliveryOrders() {
         order={detailOrder}
         canEdit={canEditCommercialFields(user) && isEditableOrder(detailOrder)}
         canEditPartidas={canAssignArticles && isEditableOrder(detailOrder)}
+        canCorrectCommercialTerms={canCorrectCommercialTerms(user, detailOrder)}
         canPrintInvoice={canPrintInvoiceForOrder(user, detailOrder)}
         onEdit={() => openEditOrder(detailOrder)}
         onEditPartidas={() => setPartidasOrder(detailOrder)}
+        onCorrectCommercialTerms={() => openCommercialCorrection(detailOrder)}
         onPrintInvoice={() => handlePrintInvoice(detailOrder)}
         onPrintExitOrder={openExitRemito}
         onClose={() => setDetailOrder(null)}
+      />
+      <DeliveryOrderCommercialCorrectionModal
+        open={Boolean(commercialCorrectionOrder)}
+        order={commercialCorrectionOrder}
+        onClose={() => setCommercialCorrectionOrder(null)}
+        onSaved={handleCommercialCorrectionSaved}
       />
       <NewDeliveryOrderModal
         open={createModalOpen}
@@ -1088,12 +1156,19 @@ export default function DeliveryOrders() {
       <NewDeliveryOrderModal
         open={Boolean(editingOrder)}
         order={editingOrder}
-        onClose={() => setEditingOrder(null)}
+        onClose={() => {
+          setEditingOrder(null);
+          if (reviewReturnTo) navigate(reviewReturnTo);
+        }}
         formProps={{ canEditItemDiscounts: canEditItemDiscounts(user) }}
         onCreated={() => {
           setError("");
           setEditingOrder(null);
-          load();
+          if (reviewReturnTo) {
+            navigate(reviewReturnTo);
+          } else {
+            load();
+          }
         }}
       />
       <NewDeliveryOrderModal
@@ -1135,9 +1210,11 @@ function DeliveryOrderDetailModal({
   order,
   canEdit,
   canEditPartidas,
+  canCorrectCommercialTerms,
   canPrintInvoice,
   onEdit,
   onEditPartidas,
+  onCorrectCommercialTerms,
   onPrintInvoice,
   onPrintExitOrder,
   onClose,
@@ -1194,6 +1271,16 @@ function DeliveryOrderDetailModal({
               >
                 <Pencil className="h-4 w-4" aria-hidden="true" />
                 Editar orden
+              </button>
+            )}
+            {canCorrectCommercialTerms && (
+              <button
+                type="button"
+                onClick={onCorrectCommercialTerms}
+                className="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm hover:bg-gray-50"
+              >
+                <Pencil className="h-4 w-4" aria-hidden="true" />
+                Corregir precio/plazo
               </button>
             )}
             <button type="button" className="text-sm text-gray-500 hover:text-gray-900" onClick={onClose}>

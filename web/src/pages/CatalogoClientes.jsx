@@ -908,8 +908,8 @@ export default function CatalogoClientes() {
           aria-modal="true"
           onClick={() => !savingEdit && setEdit(null)}
         >
-          <div className="w-full max-w-4xl rounded bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="flex max-h-[calc(100dvh-2rem)] w-full max-w-4xl flex-col overflow-hidden rounded bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
               <div>
                 <h2 className="text-lg font-semibold text-gray-950">Editar cliente</h2>
                 <div className="text-xs text-gray-500">ID {edit.id}</div>
@@ -923,7 +923,7 @@ export default function CatalogoClientes() {
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
-            <form onSubmit={saveEdit} className="p-4">
+            <form onSubmit={saveEdit} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
               <div className="mb-3 rounded border border-sky-200 bg-sky-50 p-3">
                 <label className="block max-w-sm">
                   <Label>Código Bejerman</Label>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, FileText, Loader2, Search, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, FileText, Loader2, Pencil, Search, X } from "lucide-react";
 import {
   billingRemitoPdfUrl,
   getBillingCustomers,
@@ -9,10 +9,14 @@ import {
   getBillingRemitos,
   getDeliveryOrder,
   getDeliveryOrders,
+  postDeliveryOrderBillingPostponement,
+  postDeliveryOrderBillingReactivation,
   postDeliveryOrderInvoiced,
   postDeliveryOrderNotBillable,
 } from "../lib/api";
 import { openPrintablePdf, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
+import { useAuth } from "../context/AuthContext";
+import DeliveryOrderCommercialCorrectionModal from "../components/DeliveryOrderCommercialCorrectionModal.jsx";
 import { remitoDocumentNumber } from "../lib/remitos";
 import {
   deliveryOrderCommercialLabel,
@@ -136,6 +140,22 @@ function formatDateTime(value) {
   });
 }
 
+function tomorrowDateInputValue() {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isBillingPostponed(order) {
+  const value = clean(order?.billingPostponedUntil);
+  if (!value) return false;
+  const dueAt = new Date(value);
+  return !Number.isNaN(dueAt.getTime()) && dueAt.getTime() > Date.now();
+}
+
 function pendingRemitoEmissionRaw(order) {
   return (
     clean(order?.bejermanRemitoGroup?.generatedAt) ||
@@ -247,6 +267,15 @@ function hasPendingBilling(order) {
     return billingRequired.trim().toLowerCase() === "true";
   }
   return BILLABLE_REMITO_TYPES.has(remitoTypeFromOrder(order));
+}
+
+function canCorrectCommercialTerms(user, order) {
+  return (
+    clean(user?.rol).toLowerCase() === "supervisor" &&
+    order?.status === "entregado_pendiente_facturacion" &&
+    Boolean(clean(order?.remitoNumber)) &&
+    !clean(order?.invoiceNumber)
+  );
 }
 
 function remitoOperationLabel(item) {
@@ -468,6 +497,7 @@ function DeliveryOrderBillingDetails({ order, showItems = true }) {
 
 export default function Billing() {
   const location = useLocation();
+  const { user } = useAuth();
   const isRemitosRoute = location.pathname.endsWith("/remitos");
   const shouldRedirectToFacturacion = isRemitosRoute && /\b(?:orderId|serviceOrderId)=/.test(location.search || "");
   const requestedOrderId = useMemo(initialOrderIdFromUrl, []);
@@ -494,13 +524,16 @@ export default function Billing() {
   const [remitosPagination, setRemitosPagination] = useState(EMPTY_PAGINATION);
   const [remitoPage, setRemitoPage] = useState(1);
   const [pendingOrders, setPendingOrders] = useState([]);
+  const [postponedOrders, setPostponedOrders] = useState([]);
   const [selectedPendingOrderId, setSelectedPendingOrderId] = useState("");
   const [pendingDetailOrder, setPendingDetailOrder] = useState(null);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [remitosLoading, setRemitosLoading] = useState(false);
   const [pendingLoading, setPendingLoading] = useState(false);
+  const [postponedLoading, setPostponedLoading] = useState(false);
   const [savingInvoice, setSavingInvoice] = useState(false);
   const [invoiceOrder, setInvoiceOrder] = useState(null);
+  const [commercialCorrectionOrder, setCommercialCorrectionOrder] = useState(null);
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [invoiceError, setInvoiceError] = useState("");
   const [error, setError] = useState("");
@@ -512,6 +545,12 @@ export default function Billing() {
   const [loadingRemitoPdfId, setLoadingRemitoPdfId] = useState("");
   const [pendingError, setPendingError] = useState("");
   const [savingNotBillableId, setSavingNotBillableId] = useState("");
+  const [postponementOrder, setPostponementOrder] = useState(null);
+  const [postponementDate, setPostponementDate] = useState("");
+  const [postponementError, setPostponementError] = useState("");
+  const [savingPostponement, setSavingPostponement] = useState(false);
+  const [savingReactivationId, setSavingReactivationId] = useState("");
+  const [postponedOpen, setPostponedOpen] = useState(false);
 
   const selectedPendingOrder = useMemo(
     () => pendingOrders.find((order) => order.id === selectedPendingOrderId) || null,
@@ -610,7 +649,7 @@ export default function Billing() {
       if (allowRequestedSelection && requestedOrderId && !items.some((order) => order.id === requestedOrderId)) {
         try {
           const requestedOrder = await getDeliveryOrder(requestedOrderId);
-          if (hasPendingBilling(requestedOrder)) {
+          if (hasPendingBilling(requestedOrder) && !isBillingPostponed(requestedOrder)) {
             items = [requestedOrder, ...items];
           }
         } catch {
@@ -656,6 +695,19 @@ export default function Billing() {
     }
   };
 
+  const loadPostponedOrders = async () => {
+    setPostponedLoading(true);
+    try {
+      const data = await getDeliveryOrders({ postponedBilling: true, limit: 200 });
+      setPostponedOrders(Array.isArray(data?.items) ? data.items : []);
+    } catch (err) {
+      setPendingError(err?.message || "No se pudieron cargar los remitos pospuestos.");
+      setPostponedOrders([]);
+    } finally {
+      setPostponedLoading(false);
+    }
+  };
+
   useEffect(() => {
     getBillingCustomers()
       .then((data) => {
@@ -668,6 +720,7 @@ export default function Billing() {
   useEffect(() => {
     if (isRemitosRoute) return;
     loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: true });
+    loadPostponedOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRemitosRoute]);
 
@@ -687,6 +740,93 @@ export default function Billing() {
 
   const closePendingDetailModal = () => {
     setPendingDetailOrder(null);
+  };
+
+  const openPostponementModal = (order) => {
+    if (!order?.id) return;
+    setPostponementOrder(order);
+    setPostponementDate(tomorrowDateInputValue());
+    setPostponementError("");
+    setPendingError("");
+  };
+
+  const closePostponementModal = () => {
+    if (savingPostponement) return;
+    setPostponementOrder(null);
+    setPostponementDate("");
+    setPostponementError("");
+  };
+
+  const submitPostponement = async (event) => {
+    event.preventDefault();
+    if (!postponementOrder?.id) return;
+    if (!postponementDate) {
+      setPostponementError("Seleccione una fecha para reanudar la facturación.");
+      return;
+    }
+    setSavingPostponement(true);
+    setPostponementError("");
+    try {
+      await postDeliveryOrderBillingPostponement(postponementOrder.id, { returnDate: postponementDate });
+      if (selectedPendingOrderId === postponementOrder.id) setSelectedPendingOrderId("");
+      if (pendingDetailOrder?.id === postponementOrder.id) setPendingDetailOrder(null);
+      setPostponementOrder(null);
+      setPostponementDate("");
+      await Promise.all([
+        loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: false }),
+        loadPostponedOrders(),
+      ]);
+    } catch (err) {
+      setPostponementError(err?.message || "No se pudo posponer el remito.");
+    } finally {
+      setSavingPostponement(false);
+    }
+  };
+
+  const reactivatePostponedOrder = async (order) => {
+    if (!order?.id || savingReactivationId) return;
+    setSavingReactivationId(order.id);
+    setPendingError("");
+    try {
+      await postDeliveryOrderBillingReactivation(order.id);
+      await Promise.all([
+        loadPendingOrders({ preferredSelectedId: order.id, allowRequestedSelection: false }),
+        loadPostponedOrders(),
+      ]);
+    } catch (err) {
+      setPendingError(err?.message || "No se pudo reactivar el remito.");
+    } finally {
+      setSavingReactivationId("");
+    }
+  };
+
+  const openCommercialCorrection = async (order) => {
+    if (!order?.id) return;
+    setPendingError("");
+    try {
+      const refreshed = await getDeliveryOrder(order.id);
+      setSelectedPendingOrderId(refreshed?.id || order.id);
+      setPendingDetailOrder(null);
+      setCommercialCorrectionOrder(refreshed);
+    } catch (err) {
+      setPendingError(err?.message || "No se pudo abrir la corrección comercial.");
+    }
+  };
+
+  const closeCommercialCorrection = () => {
+    setCommercialCorrectionOrder(null);
+  };
+
+  const handleCommercialCorrectionSaved = async (saved) => {
+    setCommercialCorrectionOrder(null);
+    if (saved?.id) {
+      setSelectedPendingOrderId(saved.id);
+      setPendingDetailOrder(saved);
+    }
+    await loadPendingOrders({
+      preferredSelectedId: saved?.id || selectedPendingOrderId,
+      allowRequestedSelection: false,
+    });
   };
 
   const closeInvoiceModal = () => {
@@ -1185,7 +1325,8 @@ export default function Billing() {
         )}
 
         {!isRemitosRoute && (
-        <section className="border">
+          <aside className="flex min-w-0 flex-col gap-4">
+            <section className="border">
           <div className="flex items-center justify-between border-b px-3 py-2 text-sm font-semibold">
             <span>Remitos pendientes</span>
             <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-normal text-gray-700">
@@ -1229,14 +1370,37 @@ export default function Billing() {
                         Sin código Bejerman
                       </div>
                     )}
+                    {canCorrectCommercialTerms(user, order) && (
+                      <button
+                        type="button"
+                        onClick={() => openCommercialCorrection(order)}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+                      >
+                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                        Corregir precio/plazo
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => openInvoiceModal(order)}
                       disabled={savingInvoice}
-                      className="mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+                      className={`${canCorrectCommercialTerms(user, order) ? "ml-2" : ""} mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50`}
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
                       Registrar factura
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openPostponementModal(order)}
+                      disabled={savingPostponement}
+                      className="ml-2 mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {savingPostponement && postponementOrder?.id === order.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      Posponer
                     </button>
                     <button
                       type="button"
@@ -1259,7 +1423,57 @@ export default function Billing() {
               <div className="px-3 py-8 text-center text-sm text-gray-500">Sin remitos pendientes.</div>
             )}
           </div>
-        </section>
+            </section>
+            <section className="border">
+            <button
+              type="button"
+              onClick={() => setPostponedOpen((open) => !open)}
+              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-semibold hover:bg-gray-50"
+              aria-expanded={postponedOpen}
+            >
+              <span>Pospuestos</span>
+              <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-normal text-gray-700">
+                {postponedOrders.length}
+              </span>
+            </button>
+            {postponedOpen && (
+              <div className="max-h-[360px] overflow-y-auto border-t">
+                {postponedLoading ? (
+                  <div className="flex items-center justify-center gap-2 px-3 py-6 text-sm text-gray-500">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    Cargando...
+                  </div>
+                ) : (
+                  postponedOrders.map((order) => (
+                    <div key={order.id} className="border-b px-3 py-2 text-sm">
+                      <div className="font-medium text-gray-950">{order.remitoNumber || order.orderNumber}</div>
+                      <div className="text-gray-600">{order.customerName}</div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        Vuelve a Pendientes: {formatDateTime(order.billingPostponedUntil)}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => reactivatePostponedOrder(order)}
+                        disabled={savingReactivationId === order.id}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {savingReactivationId === order.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                        Reactivar
+                      </button>
+                    </div>
+                  ))
+                )}
+                {!postponedLoading && !postponedOrders.length && (
+                  <div className="px-3 py-6 text-center text-sm text-gray-500">Sin remitos pospuestos.</div>
+                )}
+              </div>
+            )}
+            </section>
+          </aside>
         )}
       </div>
 
@@ -1566,6 +1780,25 @@ export default function Billing() {
               >
                 Cerrar
               </button>
+              {canCorrectCommercialTerms(user, pendingDetailOrder) && (
+                <button
+                  type="button"
+                  onClick={() => openCommercialCorrection(pendingDetailOrder)}
+                  className="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm hover:bg-gray-50"
+                >
+                  <Pencil className="h-4 w-4" aria-hidden="true" />
+                  Corregir precio/plazo
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => openPostponementModal(pendingDetailOrder)}
+                disabled={savingPostponement}
+                className="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+              >
+                <Clock3 className="h-4 w-4" aria-hidden="true" />
+                Posponer
+              </button>
               <button
                 type="button"
                 onClick={() => markOrderNotBillable(pendingDetailOrder)}
@@ -1592,6 +1825,73 @@ export default function Billing() {
           </ResponsiveModalPanel>
         </ResponsiveModalOverlay>
       )}
+
+      {postponementOrder && (
+        <ResponsiveModalOverlay className="bg-black/35">
+          <ResponsiveModalPanel className="max-w-lg" role="dialog" aria-modal="true">
+            <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+              <div>
+                <h2 className="text-base font-semibold">Posponer remito</h2>
+                <p className="mt-0.5 text-sm text-gray-600">
+                  {postponementOrder.remitoNumber || postponementOrder.orderNumber} · {postponementOrder.customerName || "-"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closePostponementModal}
+                disabled={savingPostponement}
+                className="inline-flex h-8 w-8 items-center justify-center rounded border text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                aria-label="Cerrar"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <form onSubmit={submitPostponement} className="space-y-4 p-4">
+              <p className="text-sm text-gray-700">
+                El remito dejará de figurar en Pendientes y volverá a las 09:00 de la fecha elegida.
+              </p>
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs uppercase text-gray-500">Fecha de reanudación</span>
+                <input
+                  type="date"
+                  value={postponementDate}
+                  min={tomorrowDateInputValue()}
+                  onChange={(event) => setPostponementDate(event.target.value)}
+                  className="h-9 w-full rounded border px-2"
+                  autoFocus
+                  required
+                />
+              </label>
+              {postponementError && <div className="text-sm text-red-700">{postponementError}</div>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closePostponementModal}
+                  disabled={savingPostponement}
+                  className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingPostponement}
+                  className="inline-flex items-center gap-2 rounded bg-gray-900 px-3 py-2 text-sm text-white hover:bg-black disabled:opacity-50"
+                >
+                  {savingPostponement && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                  Posponer
+                </button>
+              </div>
+            </form>
+          </ResponsiveModalPanel>
+        </ResponsiveModalOverlay>
+      )}
+
+      <DeliveryOrderCommercialCorrectionModal
+        open={Boolean(commercialCorrectionOrder)}
+        order={commercialCorrectionOrder}
+        onClose={closeCommercialCorrection}
+        onSaved={handleCommercialCorrectionSaved}
+      />
 
       {invoiceOrder && (
         <ResponsiveModalOverlay className="bg-black/35">

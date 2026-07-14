@@ -57,6 +57,7 @@ export const PERMISSION_CODES = {
   ACTION_DELIVERY_ORDER_UPDATE_REMITO_LOCATION: "action.delivery_order.update_remito_location",
   ACTION_DELIVERY_ORDER_GENERATE_BEJERMAN_REMITO: "action.delivery_order.generate_bejerman_remito",
   ACTION_DELIVERY_ORDER_ASSIGN_ARTICLES: "action.delivery_order.assign_articles",
+  ACTION_DELIVERY_ORDER_CORRECT_COMMERCIAL_TERMS: "action.delivery_order.correct_commercial_terms",
   ACTION_ROUTE_SHEET_MANAGE: "action.route_sheet.manage",
   ACTION_ROUTE_SHEET_COMPLETE: "action.route_sheet.complete",
   ACTION_ROUTE_SHEET_POSTPONE: "action.route_sheet.postpone",
@@ -270,6 +271,7 @@ ROLE_DEFAULT_PERMISSIONS.supervisor = new Set([
   ...ROLE_DEFAULT_PERMISSIONS.ventas,
   ...ROLE_DEFAULT_PERMISSIONS.recepcion,
   PERMISSION_CODES.ACTION_ROUTE_SHEET_POSTPONE,
+  PERMISSION_CODES.ACTION_DELIVERY_ORDER_CORRECT_COMMERCIAL_TERMS,
 ]);
 
 export function normalizePermissionsMap(raw) {

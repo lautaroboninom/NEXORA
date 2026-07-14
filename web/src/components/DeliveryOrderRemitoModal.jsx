@@ -144,6 +144,38 @@ function orderIssues(order) {
   return { missingArticle, missingPartidas };
 }
 
+function remitoGroupDetail(group) {
+  const summary = group?.responseSummary && typeof group.responseSummary === "object" ? group.responseSummary : {};
+  return (
+    clean(group?.lastError) ||
+    clean(summary.error) ||
+    clean(summary.detail) ||
+    clean(summary.message) ||
+    clean(summary.originalEmitError)
+  );
+}
+
+function remitoGroupIssue(order) {
+  if (!clean(order?.bejermanRemitoGroupId)) return "";
+  const group = order?.bejermanRemitoGroup && typeof order.bejermanRemitoGroup === "object" ? order.bejermanRemitoGroup : {};
+  const status = clean(group.status).toLowerCase();
+  const label = clean(order?.orderNumber) || "La orden";
+  const detail = remitoGroupDetail(group);
+  if (status === "failed_review") {
+    return `${label}: la emisión Bejerman quedó en revisión${detail ? `: ${detail}` : "."}`;
+  }
+  if (status === "sent_unknown") {
+    return `${label}: Bejerman no confirmó si emitió el remito${detail ? `: ${detail}` : "."}`;
+  }
+  if (status === "failed") {
+    return `${label}: la emisión Bejerman falló${detail ? `: ${detail}` : "."}`;
+  }
+  if (status === "reserved" || status === "sending" || status === "pending" || !status) {
+    return `${label}: hay una emisión Bejerman en curso.`;
+  }
+  return `${label}: ya tiene una emisión Bejerman asociada${detail ? `: ${detail}` : "."}`;
+}
+
 function compatibilityIssues(orders) {
   if (!orders.length) return ["Seleccione al menos una orden."];
   const customerCodes = new Set(orders.map((order) => clean(order.bejermanCustomerCode)));
@@ -161,9 +193,7 @@ function compatibilityIssues(orders) {
   if (orders.some((order) => order.remitoNumber || order.status === "facturado" || order.status === "cancelado")) {
     issues.push("No se pueden emitir órdenes cerradas, canceladas o con remito.");
   }
-  if (orders.some((order) => clean(order.bejermanRemitoGroupId))) {
-    issues.push("Hay una orden con emisión Bejerman en curso.");
-  }
+  orders.map(remitoGroupIssue).filter(Boolean).forEach((issue) => issues.push(issue));
   orders.forEach((order) => {
     const issuesForOrder = orderIssues(order);
     if (issuesForOrder.missingArticle) issues.push(`${order.orderNumber}: falta artículo Bejerman.`);

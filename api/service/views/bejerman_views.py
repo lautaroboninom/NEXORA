@@ -5,7 +5,11 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..bejerman_delivery import generate_bejerman_remito
+from ..bejerman_delivery import (
+    generate_bejerman_remito,
+    reissue_corrected_bejerman_remito_review,
+    verify_bejerman_remito_review,
+)
 from ..bejerman_ris import (
     BejermanRisBusyError,
     BejermanRisError,
@@ -40,7 +44,7 @@ from ..bejerman_pdf_settings import (
     update_pdf_output_settings,
 )
 from ..delivery_orders import DeliveryOrderError
-from ..permissions import require_any_permission, require_permission
+from ..permissions import require_any_permission, require_permission, user_has_permission
 from .helpers import q
 
 
@@ -246,7 +250,7 @@ def _remito_error_message(payload, fallback=""):
 
 
 def _sort_remito_processes(rows):
-    status_priority = {"failed": 1, "running": 2, "pending": 3, "generated": 4}
+    status_priority = {"failed_review": 1, "failed": 2, "running": 3, "pending": 4, "generated": 5}
 
     def timestamp(row):
         value = row.get("updated_at") or row.get("generated_at") or row.get("created_at")
@@ -341,7 +345,40 @@ def _ingreso_remito_processes():
     return out
 
 
-def _delivery_remito_processes():
+def _delivery_review_diagnostic(row, response_summary):
+    error = _remito_error_message(response_summary, row.get("last_error"))
+    code = _clean_filter(response_summary.get("diagnosticCode"))
+    normalized_error = error.lower()
+    if not code and ("máximo para ajustar diferencias" in normalized_error or "maximo para ajustar diferencias" in normalized_error):
+        code = "BEJERMAN_REMITO_AMOUNT_MISMATCH"
+    if code == "BEJERMAN_REMITO_AMOUNT_MISMATCH":
+        return {
+            "code": code,
+            "explanation": "Bejerman rechazó el RT porque la suma de los renglones no coincidió con el encabezado.",
+            "technicalDetail": error,
+            "solutions": [
+                "Verificar que el comprobante no se haya importado.",
+                "Abrir la orden, revisar sus artículos y guardar la corrección.",
+                "Reemitir con el cálculo fiscal corregido y confirmación humana.",
+            ],
+        }
+    explanations = {
+        "BEJERMAN_REMITO_LOOKUP_UNAVAILABLE": "No se pudo completar una consulta confiable en Bejerman.",
+        "BEJERMAN_REMITO_LOOKUP_AMBIGUOUS": "Se encontraron varios comprobantes posibles y ninguno puede adoptarse automáticamente.",
+        "BEJERMAN_REMITO_PAYLOAD_UNCHANGED": "El comprobante actual no presenta cambios frente al intento rechazado.",
+    }
+    return {
+        "code": code or "BEJERMAN_REMITO_REQUIRES_REVIEW",
+        "explanation": explanations.get(code) or "La emisión necesita una verificación segura antes de continuar.",
+        "technicalDetail": error,
+        "solutions": [
+            "Ejecutar la verificación contra Bejerman.",
+            "No reemitir mientras el resultado sea ambiguo o la consulta falle.",
+        ],
+    }
+
+
+def _delivery_remito_processes(action_permissions=None):
     if not _table_exists("bejerman_remito_groups"):
         return []
     rows = q(
@@ -349,7 +386,8 @@ def _delivery_remito_processes():
         SELECT id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
                comprobante_numero, remito_number, customer_code, customer_name,
                seller_code, payment_term_code, operation_code, deposit_code,
-               status, order_ids, response_summary, created_at, generated_at
+               status, order_ids, response_summary, attempt_count, last_attempt_at,
+               next_retry_at, last_error, created_at, generated_at
           FROM bejerman_remito_groups
         """,
     ) or []
@@ -388,9 +426,51 @@ def _delivery_remito_processes():
         ]
         first_order = orders[0] if orders else {}
         company = _company_payload(row.get("company_key"))
-        last_error = _remito_error_message(response_summary)
-        generated = row.get("status") == "generated"
-        attempted_at = row.get("generated_at") or row.get("created_at")
+        last_error = _remito_error_message(response_summary, row.get("last_error"))
+        generated = row.get("status") in {"generated", "reconciled"}
+        status = row.get("status") or ""
+        review_state = _clean_filter(response_summary.get("reviewState"))
+        if status == "failed_review" and not review_state:
+            review_state = "requires_verification"
+        failure_certainty = _clean_filter(response_summary.get("failureCertainty")) or "unknown"
+        superseded = review_state == "superseded"
+        permissions_for_actions = action_permissions or {}
+        can_manage = bool(permissions_for_actions.get("manage", True))
+        can_edit = bool(permissions_for_actions.get("edit", True))
+        can_generate = bool(permissions_for_actions.get("generate", True))
+        blocked_reason = _clean_filter(response_summary.get("blockedReason"))
+        if review_state == "blocked" and not blocked_reason:
+            blocked_reason = "La verificación no produjo un resultado seguro."
+        actions = {
+            "verify": {
+                "visible": status == "failed_review" and not superseded,
+                "allowed": status == "failed_review" and not superseded and can_manage,
+                "blockedReason": "No tiene permiso para verificar comprobantes en Bejerman." if not can_manage else "",
+            },
+            "edit": {
+                "visible": status == "failed_review" and not superseded,
+                "allowed": review_state in {"ready_for_correction", "ready_to_reissue"} and can_edit,
+                "blockedReason": (
+                    "Primero debe verificarse que el comprobante no se importó."
+                    if review_state not in {"ready_for_correction", "ready_to_reissue"}
+                    else "No tiene permiso para modificar los artículos de la orden."
+                    if not can_edit
+                    else ""
+                ),
+            },
+            "reissue": {
+                "visible": status == "failed_review" and not superseded,
+                "allowed": review_state == "ready_to_reissue" and can_manage and can_generate,
+                "blockedReason": (
+                    "Debe abrir, revisar y guardar la orden antes de reemitir."
+                    if review_state != "ready_to_reissue"
+                    else "No tiene todos los permisos necesarios para reemitir el RT."
+                    if not (can_manage and can_generate)
+                    else ""
+                ),
+            },
+        }
+        attempted_at = row.get("last_attempt_at") or row.get("generated_at") or row.get("created_at")
         out.append(
             {
                 **row,
@@ -402,7 +482,7 @@ def _delivery_remito_processes():
                 "ingreso_id": first_order.get("ingresoId"),
                 "document_mode": "emit",
                 "pdf_status": "pending" if generated else "",
-                "attempts": 1,
+                "attempts": int(row.get("attempt_count") or 0),
                 "last_error": last_error,
                 "request_payload": {"orderIds": order_ids},
                 "response_payload": response_summary,
@@ -417,7 +497,18 @@ def _delivery_remito_processes():
                 "cliente": row.get("customer_name") or "",
                 "title": row.get("remito_number") or "Remito de entrega",
                 "operation_label": "Emitir remito",
-                "retryable": row.get("status") == "failed" and bool(order_ids),
+                "retryable": (
+                    row.get("status") in {"failed", "failed_review"}
+                    and bool(order_ids)
+                    and not superseded
+                ),
+                "retry_mode": "reconcile" if row.get("status") == "failed_review" else "retry",
+                "reviewState": review_state,
+                "failureCertainty": failure_certainty,
+                "hasPayloadChanges": response_summary.get("hasPayloadChanges"),
+                "diagnostic": _delivery_review_diagnostic(row, response_summary) if status == "failed_review" else None,
+                "actions": actions,
+                "blockedReason": blocked_reason,
                 "pdf_url": f"/api/ordenes-entrega/remito-bejerman/{row.get('id')}/pdf/" if generated else None,
                 "print_url": f"/api/ordenes-entrega/remito-bejerman/{row.get('id')}/print/" if generated else None,
             }
@@ -425,13 +516,13 @@ def _delivery_remito_processes():
     return out
 
 
-def _list_remito_processes(params, *, include_status=True):
+def _list_remito_processes(params, *, include_status=True, action_permissions=None):
     source = _clean_filter(params.get("source") or params.get("origen")).lower()
     rows = []
     if source in {"", "ingreso"}:
         rows.extend(_ingreso_remito_processes())
     if source in {"", "orden_entrega"}:
-        rows.extend(_delivery_remito_processes())
+        rows.extend(_delivery_remito_processes(action_permissions=action_permissions))
     return _sort_remito_processes(_filter_remito_processes(rows, params, include_status=include_status))
 
 
@@ -610,8 +701,13 @@ class BejermanRemitoProcessesView(APIView):
 
     def get(self, request):
         require_permission(request, "page.bejerman_sync")
-        rows = _list_remito_processes(request.GET, include_status=True)[:250]
-        counter_rows = _list_remito_processes(request.GET, include_status=False)
+        action_permissions = {
+            "manage": user_has_permission(request, "action.bejerman_sync.manage"),
+            "edit": user_has_permission(request, "action.delivery_order.assign_articles"),
+            "generate": user_has_permission(request, "action.delivery_order.generate_bejerman_remito"),
+        }
+        rows = _list_remito_processes(request.GET, include_status=True, action_permissions=action_permissions)[:250]
+        counter_rows = _list_remito_processes(request.GET, include_status=False, action_permissions=action_permissions)
         counters = {}
         for row in counter_rows:
             status = row.get("status") or "pending"
@@ -639,8 +735,8 @@ class BejermanRemitoProcessRetryView(APIView):
             )
             if not row:
                 return Response({"detail": "Proceso de remito no encontrado"}, status=404)
-            if row.get("status") != "failed":
-                return Response({"detail": "Solo se pueden reintentar remitos fallidos"}, status=409)
+            if row.get("status") not in {"failed", "failed_review"}:
+                return Response({"detail": "Solo se pueden reintentar remitos fallidos o pendientes de revisión"}, status=409)
             try:
                 if (row.get("document_mode") or "emit") == "register":
                     manual = row.get("manual_remito_number") or row.get("remito_number")
@@ -661,7 +757,7 @@ class BejermanRemitoProcessRetryView(APIView):
         if source == "orden_entrega":
             row = q(
                 """
-                SELECT id, status, order_ids
+                SELECT id, status, order_ids, response_summary
                   FROM bejerman_remito_groups
                  WHERE id = %s
                 """,
@@ -670,13 +766,36 @@ class BejermanRemitoProcessRetryView(APIView):
             )
             if not row:
                 return Response({"detail": "Proceso de remito no encontrado"}, status=404)
-            if row.get("status") != "failed":
-                return Response({"detail": "Solo se pueden reintentar remitos fallidos"}, status=409)
             order_ids = _json_value(row.get("order_ids"), [])
             if not isinstance(order_ids, list) or not order_ids:
                 return Response({"detail": "El proceso fallido no conserva órdenes para reintentar"}, status=409)
             try:
-                result = generate_bejerman_remito(order_ids, actor_id, request.data or {})
+                retry_payload = dict(request.data or {})
+                action = _clean_filter(retry_payload.get("action")).lower()
+                if row.get("status") == "failed_review":
+                    if action == "verify":
+                        result = verify_bejerman_remito_review(process_id, actor_id)
+                    elif action == "reissue_corrected":
+                        require_permission(request, "action.delivery_order.generate_bejerman_remito")
+                        if retry_payload.get("confirm") is not True:
+                            return Response(
+                                {"detail": "Debe confirmar expresamente la reemisión corregida.", "code": "BEJERMAN_REMITO_REISSUE_CONFIRMATION_REQUIRED"},
+                                status=400,
+                            )
+                        result = reissue_corrected_bejerman_remito_review(process_id, actor_id, retry_payload)
+                    else:
+                        return Response(
+                            {"detail": "Indique action=verify o action=reissue_corrected para un proceso en revisión."},
+                            status=400,
+                        )
+                elif row.get("status") == "failed":
+                    if action not in {"", "retry"}:
+                        return Response({"detail": "Acción inválida para un proceso fallido."}, status=400)
+                    for key in ("forceReviewedReissue", "forcePrintSplitReissue", "retryConfirmedNotImported", "action", "confirm"):
+                        retry_payload.pop(key, None)
+                    result = generate_bejerman_remito(order_ids, actor_id, retry_payload)
+                else:
+                    return Response({"detail": "Solo se pueden operar remitos fallidos o pendientes de revisión."}, status=409)
             except DeliveryOrderError as exc:
                 return Response({"detail": str(exc), "code": exc.code}, status=getattr(exc, "status_code", 400) or 400)
             return Response({"ok": True, "source": source, "result": result})
@@ -794,7 +913,7 @@ class BejermanArticlesView(APIView):
                     one=True,
                 )
                 if not job:
-                    raise BejermanBlockedError("OperaciÃ³n Bejerman no encontrada")
+                    raise BejermanBlockedError("Operación Bejerman no encontrada")
                 client = BejermanSDKClient(
                     company_key=job.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY,
                     actor_user_id=_actor_id(request),

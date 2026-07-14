@@ -8,6 +8,7 @@ TABLES = [
     "delivery_order_item_partidas",
     "bejerman_remito_groups",
     "delivery_order_events",
+    "bejerman_integration_attempts",
 ]
 
 REQUIRED_COLUMNS = {
@@ -21,6 +22,10 @@ REQUIRED_COLUMNS = {
         "status",
         "remito_number",
         "invoice_number",
+        "billing_postponed_until",
+        "billing_postponed_by_user_id",
+        "billing_postponed_at",
+        "billing_postponement_notified_at",
         "source_system",
         "source_external_id",
     },
@@ -51,8 +56,27 @@ REQUIRED_COLUMNS = {
         "customer_code",
         "order_ids",
         "response_summary",
+        "correlation_key",
+        "attempt_count",
+        "last_attempt_at",
+        "next_retry_at",
+        "last_error",
     },
     "delivery_order_events": {"id", "order_id", "event_type", "metadata"},
+    "bejerman_integration_attempts": {
+        "id",
+        "group_id",
+        "order_ids",
+        "actor_user_id",
+        "phase",
+        "status",
+        "attempt_number",
+        "request_payload",
+        "response_payload",
+        "error_message",
+        "recovery_payload",
+        "created_at",
+    },
 }
 
 
@@ -140,6 +164,10 @@ class Command(BaseCommand):
                       remito_location_updated_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                       remito_location_updated_at      TIMESTAMPTZ NULL,
                       invoice_number                  TEXT NULL,
+                      billing_postponed_until         TIMESTAMPTZ NULL,
+                      billing_postponed_by_user_id    INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                      billing_postponed_at            TIMESTAMPTZ NULL,
+                      billing_postponement_notified_at TIMESTAMPTZ NULL,
                       imported_delivered_flag         BOOLEAN NULL,
                       created_by_user_id              INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                       prepared_by_user_id             INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
@@ -177,6 +205,30 @@ class Command(BaseCommand):
                     """
                     ALTER TABLE delivery_orders
                     ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS'
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS billing_postponed_until TIMESTAMPTZ NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS billing_postponed_by_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS billing_postponed_at TIMESTAMPTZ NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS billing_postponement_notified_at TIMESTAMPTZ NULL
                     """
                 )
                 cur.execute(
@@ -403,7 +455,7 @@ class Command(BaseCommand):
                       created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       generated_at               TIMESTAMPTZ NULL,
                       CONSTRAINT chk_bejerman_remito_groups_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
-                      CONSTRAINT chk_bejerman_remito_groups_status CHECK (status IN ('pending','generated','failed'))
+                      CONSTRAINT chk_bejerman_remito_groups_status CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'))
                     )
                     """
                 )
@@ -437,6 +489,67 @@ class Command(BaseCommand):
                     ALTER TABLE bejerman_remito_groups
                     ADD CONSTRAINT chk_bejerman_remito_groups_company_key
                     CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO'))
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS correlation_key TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD COLUMN IF NOT EXISTS last_error TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    DROP CONSTRAINT IF EXISTS chk_bejerman_remito_groups_status
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_remito_groups
+                    ADD CONSTRAINT chk_bejerman_remito_groups_status
+                    CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'))
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bejerman_integration_attempts (
+                      id                BIGSERIAL PRIMARY KEY,
+                      group_id          TEXT NOT NULL REFERENCES bejerman_remito_groups(id) ON DELETE CASCADE,
+                      order_ids         JSONB NOT NULL DEFAULT '[]'::jsonb,
+                      actor_user_id     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                      phase             TEXT NOT NULL,
+                      status            TEXT NOT NULL DEFAULT 'recorded',
+                      attempt_number    INTEGER NOT NULL DEFAULT 1,
+                      request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      error_message     TEXT NULL,
+                      recovery_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
                     """
                 )
                 cur.execute(
@@ -520,6 +633,7 @@ class Command(BaseCommand):
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_delivery_type ON delivery_orders(delivery_type, status, order_date DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_remito_group ON delivery_orders(bejerman_remito_group_id)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_orders_ingreso ON delivery_orders(ingreso_id) WHERE ingreso_id IS NOT NULL",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_orders_billing_postponed_until ON delivery_orders(billing_postponed_until) WHERE billing_postponed_until IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_order ON delivery_order_items(order_id, sort_order)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_article ON delivery_order_items(article_code)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_items_ingreso ON delivery_order_items(ingreso_id) WHERE ingreso_id IS NOT NULL",
@@ -531,6 +645,9 @@ class Command(BaseCommand):
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_customer ON bejerman_remito_groups(customer_code, created_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS ix_bejerman_integration_attempts_group ON bejerman_integration_attempts(group_id, created_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS ix_bejerman_integration_attempts_phase ON bejerman_integration_attempts(phase, created_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS ix_bejerman_integration_attempts_created_at ON bejerman_integration_attempts(created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_users_bejerman_seller_code ON users(bejerman_seller_code)",
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_bejerman_seller_code_ci ON users ((UPPER(TRIM(bejerman_seller_code)))) WHERE NULLIF(TRIM(bejerman_seller_code), '') IS NOT NULL",
                 ):
@@ -591,6 +708,31 @@ class Command(BaseCommand):
                         raise RuntimeError(
                             f"No se aplicaron columnas requeridas en {table_name}: {', '.join(missing_columns)}"
                         )
+
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(oid)
+                      FROM pg_constraint
+                     WHERE conrelid = 'bejerman_remito_groups'::regclass
+                       AND conname = 'chk_bejerman_remito_groups_status'
+                    """
+                )
+                status_constraint = str((cur.fetchone() or [""])[0] or "").lower()
+                required_statuses = {
+                    "pending",
+                    "reserved",
+                    "sending",
+                    "sent_unknown",
+                    "reconciled",
+                    "failed_review",
+                    "generated",
+                    "failed",
+                }
+                missing_statuses = sorted(status for status in required_statuses if status not in status_constraint)
+                if missing_statuses:
+                    raise RuntimeError(
+                        "El constraint chk_bejerman_remito_groups_status no contempla: " + ", ".join(missing_statuses)
+                    )
 
                 cur.execute(
                     """

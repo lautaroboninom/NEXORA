@@ -38,6 +38,7 @@ from .bejerman_sdk import (
     first_record,
     first_value,
     format_remito_number,
+    is_bejerman_sales_query_schema_message,
     is_ok_response,
     normalize_serial_for_lookup,
     parse_remito_response,
@@ -98,6 +99,10 @@ class BejermanRisPreflightError(BejermanRisError):
 
 class BejermanRisRegisteredNoPdfError(BejermanRisError):
     code = RIS_REGISTERED_NO_PDF_CODE
+
+    def __init__(self, remito_number: Any = ""):
+        super().__init__(registered_remito_no_pdf_detail(remito_number))
+        self.remito_number = _clean(remito_number)
 
 
 class BejermanRisReviewRequiredError(BejermanRisError):
@@ -904,6 +909,7 @@ def _update_ris_failure_many(
         )
 
 
+@transaction.atomic
 def _update_ris_generated(
     ingreso_id: int,
     payload: dict[str, Any],
@@ -983,6 +989,25 @@ def _update_ris_generated(
     return dict(zip(cols, row)) if row else (_row_for_ingreso(ingreso_id) or {})
 
 
+def _sync_missing_ingreso_remitos(ingreso_ids: list[int], remito_number: Any) -> int:
+    clean_remito = _clean(remito_number)
+    clean_ids = list(dict.fromkeys(int(ingreso_id) for ingreso_id in ingreso_ids if int(ingreso_id) > 0))
+    if not clean_remito or not clean_ids:
+        return 0
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingresos
+               SET remito_ingreso = %s
+             WHERE id = ANY(%s)
+               AND NULLIF(BTRIM(COALESCE(remito_ingreso, '')), '') IS NULL
+            """,
+            [clean_remito, clean_ids],
+        )
+        return cur.rowcount
+
+
+@transaction.atomic
 def _update_ris_generated_many(ingreso_ids: list[int], payload: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
     first_row: dict[str, Any] | None = None
     for ingreso_id in ingreso_ids:
@@ -1625,34 +1650,115 @@ def _record_matches_equipment_identifier(record: dict[str, Any], identifier: str
     return False
 
 
+def _ingress_duplicate_sql_literal(value: Any) -> str:
+    return "N'" + _clean(value).replace("'", "''") + "'"
+
+
+def _remote_ingress_equipment_remito_duplicate_via_sql(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Consulta mínima para instalaciones donde WSListarComprobantesJSON falla
+    por diferencias de esquema internas de Bejerman."""
+    identifiers = _payload_equipment_identifiers(payload)
+    if not identifiers:
+        return None
+    profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
+    document_types = _ingress_duplicate_document_types(profile)
+    issue_date = _date_iso(payload.get("issueDate")) or timezone.localdate().isoformat()
+    type_values = ", ".join(_ingress_duplicate_sql_literal(item) for item in document_types)
+    identifier_values = ", ".join(_ingress_duplicate_sql_literal(item) for item in identifiers)
+    text_conditions = " OR ".join(
+        "CONCAT(COALESCE(c.scv_Mens, ''), ' ', COALESCE(d.sdv_Desc, '')) "
+        f"LIKE N'%{_clean(identifier).replace("'", "''").replace("%", "[%]").replace("_", "[_]")}%'"
+        for identifier in identifiers
+    )
+    sql = f"""
+SET NOCOUNT ON;
+SELECT TOP 1
+  CONVERT(varchar(20), c.scv_ID) AS Comprobante_ID,
+  LTRIM(RTRIM(t.spvtco_Cod)) AS Comprobante_Tipo,
+  LTRIM(RTRIM(t.spv_Letra)) AS Comprobante_Letra,
+  LTRIM(RTRIM(t.spv_CodPvt)) AS Comprobante_PtoVenta,
+  LTRIM(RTRIM(t.spv_Nro)) AS Comprobante_Numero,
+  CONVERT(varchar(10), c.scv_FEmision, 23) AS Comprobante_FechaEmision,
+  LTRIM(RTRIM(COALESCE(d.sdvstp_Partida, ''))) AS Item_Partida,
+  LTRIM(RTRIM(COALESCE(d.sdv_Desc, ''))) AS Item_DescripArticulo
+FROM dbo.SegCabV c
+JOIN dbo.SegTiposV t ON t.spvscv_ID = c.scv_ID
+LEFT JOIN dbo.SegDetV d ON d.sdvscv_ID = c.scv_ID
+WHERE c.scv_FEmision >= CONVERT(datetime, {_ingress_duplicate_sql_literal(issue_date)}, 120)
+  AND c.scv_FEmision < DATEADD(day, 1, CONVERT(datetime, {_ingress_duplicate_sql_literal(issue_date)}, 120))
+  AND LTRIM(RTRIM(t.spvtco_Cod)) IN ({type_values})
+  AND (
+    LTRIM(RTRIM(COALESCE(d.sdvstp_Partida, ''))) IN ({identifier_values})
+    {f"OR {text_conditions}" if text_conditions else ""}
+  )
+ORDER BY c.scv_FEmision DESC, c.scv_ID DESC, d.sdv_NReng DESC;
+""".strip()
+    try:
+        from .bejerman_delivery import _remote_bejerman_sql_csv
+
+        outcome: dict[str, Any] = {}
+        rows = _remote_bejerman_sql_csv(
+            sql,
+            company_key=_clean(payload.get("companyKey")) or "SEPID",
+            outcome=outcome,
+        )
+    except Exception as exc:
+        raise BejermanSdkUnavailable(f"Falló la consulta alternativa de remitos en Bejerman: {exc}") from exc
+    if outcome.get("status") != "success":
+        raise BejermanSdkUnavailable("No se pudo consultar los remitos existentes en Bejerman.")
+    if not rows:
+        return None
+    row = rows[0]
+    matched_identifier = _clean(row.get("Item_Partida"))
+    if matched_identifier not in identifiers:
+        combined_text = " ".join(_clean(row.get(key)) for key in ("Item_Partida", "Item_DescripArticulo"))
+        matched_identifier = next(
+            (identifier for identifier in identifiers if normalize_serial_for_lookup(identifier) in normalize_serial_for_lookup(combined_text)),
+            identifiers[0],
+        )
+    return {
+        "source": "remote_sql_fallback",
+        "identifier": matched_identifier,
+        "issueDate": issue_date,
+        "remitoNumber": _record_document_label(row),
+        "raw": row,
+    }
+
+
 def _remote_ingress_equipment_remito_duplicate(payload: dict[str, Any], client: BejermanSDKClient) -> dict[str, Any] | None:
     identifiers = _payload_equipment_identifiers(payload)
     if not identifiers:
         return None
     profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
     issue_date = _date_iso(payload.get("issueDate")) or timezone.localdate().isoformat()
-    for document_type in _ingress_duplicate_document_types(profile):
-        filters = [
-            bejerman_filter("Comprobante_Tipo", "IGUAL", document_type),
-            bejerman_filter("Comprobante_FechaEmision", "MAYOR O IGUAL", issue_date),
-            bejerman_filter("Comprobante_FechaEmision", "MENOR O IGUAL", issue_date),
-        ]
-        response = client.list_comprobantes_ventas(filters)
-        for header in records_from_response(response):
-            detail = _detail_record_for_sales_header(client, header)
-            record_type = _clean_upper(first_value(detail, ("Comprobante_Tipo", "TipoComprobante", "Tipo")))
-            if record_type and record_type != document_type:
-                continue
-            for identifier in identifiers:
-                if not _record_matches_equipment_identifier(detail, identifier):
+    try:
+        for document_type in _ingress_duplicate_document_types(profile):
+            filters = [
+                bejerman_filter("Comprobante_Tipo", "IGUAL", document_type),
+                bejerman_filter("Comprobante_FechaEmision", "MAYOR O IGUAL", issue_date),
+                bejerman_filter("Comprobante_FechaEmision", "MENOR O IGUAL", issue_date),
+            ]
+            response = client.list_comprobantes_ventas(filters)
+            for header in records_from_response(response):
+                detail = _detail_record_for_sales_header(client, header)
+                record_type = _clean_upper(first_value(detail, ("Comprobante_Tipo", "TipoComprobante", "Tipo")))
+                if record_type and record_type != document_type:
                     continue
-                return {
-                    "source": "remote",
-                    "identifier": identifier,
-                    "issueDate": issue_date,
-                    "remitoNumber": _record_document_label(detail) or _record_document_label(header),
-                    "raw": detail,
-                }
+                for identifier in identifiers:
+                    if not _record_matches_equipment_identifier(detail, identifier):
+                        continue
+                    return {
+                        "source": "remote",
+                        "identifier": identifier,
+                        "issueDate": issue_date,
+                        "remitoNumber": _record_document_label(detail) or _record_document_label(header),
+                        "raw": detail,
+                    }
+    except (BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
+        if not is_bejerman_sales_query_schema_message(str(exc)):
+            raise
+        logger.warning("bejerman_ris_duplicate_lookup_sql_fallback", extra={"error": str(exc)[:500]})
+        return _remote_ingress_equipment_remito_duplicate_via_sql(payload)
     return None
 
 
@@ -2072,16 +2178,9 @@ def _combined_payload(payloads: list[dict[str, Any]], issues: list[dict[str, Any
     }
 
 
-def _stock_article_candidates(
-    serial: str,
-    *,
-    limit: int = 5,
-    actor_user_id: int | None = None,
+def _stock_article_candidates_from_response(
+    response: dict[str, Any], serial: str, *, limit: int = 5
 ) -> list[dict[str, Any]]:
-    if not serial:
-        return []
-    client = SyncBejermanSDKClient(actor_user_id=actor_user_id)
-    response = client.stock_by_deposit_partida("", serial)
     by_code: dict[str, dict[str, Any]] = {}
     for record in _records_for_partida_any_quantity(response, serial):
         code = _clean(_article_code_from_record(record))
@@ -2095,6 +2194,76 @@ def _stock_article_candidates(
             "source": "stock_partida",
         }
     return list(by_code.values())[:limit]
+
+
+def _stock_article_candidates(
+    serial: str,
+    *,
+    limit: int = 5,
+    actor_user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    if not serial:
+        return []
+    client = SyncBejermanSDKClient(actor_user_id=actor_user_id)
+    response = client.stock_by_deposit_partida("", serial)
+    return _stock_article_candidates_from_response(response, serial, limit=limit)
+
+
+def _apply_bejerman_partida_articles(payload: dict[str, Any], client: BejermanSDKClient) -> dict[str, Any]:
+    """Para ingresos que suman stock, prioriza el artículo al que Bejerman ya
+    vinculó la partida, aunque la cantidad actual sea cero."""
+    if not _is_stock_ingress_payload(payload):
+        return payload
+    original_items = _payload_equipment_items(payload)
+    if not original_items:
+        return payload
+    resolved_items: list[dict[str, Any]] = []
+    for original in original_items:
+        equipment = dict(original)
+        partida = _clean(resolve_equipment_partida(equipment))
+        if not partida:
+            resolved_items.append(equipment)
+            continue
+        try:
+            response = client.obtener_stock_partida(partida)
+        except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
+            raise BejermanRisError(
+                f"No se pudo consultar el artículo Bejerman de la partida {partida}: {exc}"
+            ) from exc
+        candidates = _stock_article_candidates_from_response(response, partida)
+        codes = list(dict.fromkeys(_clean(item.get("article_code")) for item in candidates if _clean(item.get("article_code"))))
+        current_code = _clean(equipment.get("articleCode"))
+        if len(codes) > 1 and current_code not in codes:
+            raise BejermanRisError(
+                f"La partida {partida} está vinculada a más de un artículo en Bejerman ({', '.join(codes)}). "
+                "Debe corregirse antes de emitir el remito."
+            )
+        if len(codes) == 1:
+            resolved_code = codes[0]
+            candidate = candidates[0]
+            equipment.update(
+                {
+                    "articleCode": resolved_code,
+                    "articleSource": "stock_partida",
+                    "articleMapped": True,
+                    "mappingRequired": False,
+                    "articleResolution": {
+                        "source": "stock_partida",
+                        "partida": partida,
+                        "previousArticleCode": current_code,
+                        "articleCode": resolved_code,
+                    },
+                }
+            )
+            description = _clean(candidate.get("article_description"))
+            if description:
+                equipment["mappedArticleName"] = description
+        resolved_items.append(equipment)
+    out = dict(payload)
+    out["equipment"] = resolved_items[0]
+    if isinstance(payload.get("equipments"), list):
+        out["equipments"] = resolved_items
+    return out
 
 
 def _stock_article_candidates_for_payload(
@@ -2376,6 +2545,27 @@ def _preflight_from_contexts(
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     payloads = _payloads_from_contexts(contexts, issues)
+    stock_clients: dict[str, BejermanSDKClient] = {}
+    for index, payload in enumerate(payloads):
+        if not _is_stock_ingress_payload(payload):
+            continue
+        company_key = _clean(payload.get("companyKey")) or "SEPID"
+        try:
+            client = stock_clients.get(company_key)
+            if client is None:
+                client = BejermanSDKClient(company_key=company_key, actor_user_id=user_id)
+                stock_clients[company_key] = client
+            payloads[index] = _apply_bejerman_partida_articles(payload, client)
+        except BejermanRisError as exc:
+            issues.append(
+                _issue(
+                    "BEJERMAN_PARTIDA_ARTICLE_UNAVAILABLE",
+                    str(exc),
+                    scope="articulo",
+                    field="equipo.numero_serie",
+                    item_index=index if len(payloads) > 1 else None,
+                )
+            )
     combined = _combined_payload(payloads, issues)
     client_cache: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
     customer_fields = None
@@ -2820,7 +3010,7 @@ def _apply_registered_document(comprobante: dict[str, Any], payload: dict[str, A
                 # presente en el depósito (el alta la hizo el ENT previo).
                 next_item["Item_Deposito"] = _clean(next_item.get("Item_Deposito")) or deposit
                 next_item["Item_Partida"] = partida if partida.strip() else (next_item.get("Item_Partida") or " ")
-                next_item["Item_CantidadUM2"] = next_item.get("Item_CantidadUM2") or 0
+                next_item["Item_CantidadUM2"] = quantity
             article_index += 1
         items.append(next_item)
     out["Comprobante_Items"] = items
@@ -3136,6 +3326,7 @@ def _register_payload_to_bejerman(
             if _is_digital_registered_document(document, payload):
                 return _registered_document_association_response(payload, document)
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
+        payload = _apply_bejerman_partida_articles(payload, client)
         if not skip_duplicate_checks:
             duplicate_remote = _remote_ris_duplicate(document, payload["companyKey"], client)
             if duplicate_remote:
@@ -3287,6 +3478,7 @@ def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = Non
     emite_reg = _clean(getattr(settings, "BEJERMAN_RIS_EMITE_REG", "E")) or "E"
     try:
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
+        payload = _apply_bejerman_partida_articles(payload, client)
         _ensure_equipment_remito_not_duplicated(payload, _payload_ingreso_ids(payload), client)
         customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
         return _send_service_ingress_comprobante(
@@ -3354,6 +3546,7 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
         raise
     try:
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
+        payload = _apply_bejerman_partida_articles(payload, client)
         _ensure_equipment_remito_not_duplicated(payload, [ingreso_id], client)
         customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
         request_payload, response = _send_service_ingress_comprobante(
@@ -3392,6 +3585,9 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
         )
         return row
+    except BejermanRisError as exc:
+        _update_ris_failure(ingreso_id, str(exc), pdf_error=False, request_payload=request_payload or payload or None)
+        raise
     except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
         logger.warning(
             "bejerman_ris_emit_failed",
@@ -3475,6 +3671,7 @@ def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_i
         is_same_registered_document(row)
         for row in rows
     ):
+        _sync_missing_ingreso_remitos(clean_ids, document["remitoNumber"])
         return rows[0]
     if any(
         row.get("status") == "generated"

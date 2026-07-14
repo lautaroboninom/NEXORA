@@ -60,6 +60,7 @@ PERMISSION_CATALOG = [
     {"code": "action.delivery_order.update_remito_location", "label": "Actualizar ubicación de remitos", "type": "action", "group": "Cobranzas"},
     {"code": "action.delivery_order.generate_bejerman_remito", "label": "Generar remitos Bejerman", "type": "action", "group": "Ordenes de entrega"},
     {"code": "action.delivery_order.assign_articles", "label": "Asignar artículos y partidas", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.correct_commercial_terms", "label": "Corregir precio y plazo post-remito", "type": "action", "group": "Cobranzas"},
     {"code": "action.route_sheet.manage", "label": "Gestionar Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
     {"code": "action.route_sheet.complete", "label": "Completar paradas de Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
     {"code": "action.route_sheet.postpone", "label": "Posponer paradas de Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
@@ -323,6 +324,7 @@ def _set_union_role_defaults(target_role, *source_roles):
 
 _set_union_role_defaults("supervisor", "admin", "ventas", "recepcion")
 _grant("supervisor", "action.route_sheet.postpone")
+_grant("supervisor", "action.delivery_order.correct_commercial_terms")
 
 
 def normalize_role(role):

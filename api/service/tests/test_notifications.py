@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest import skipUnless
@@ -12,19 +13,28 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from service.auth import issue_token
-from service.bejerman_delivery import generate_bejerman_remito, list_rental_available_equipment
+from service.bejerman_delivery import (
+    generate_bejerman_remito,
+    list_rental_available_equipment,
+    reissue_corrected_bejerman_remito_review,
+    verify_bejerman_remito_review,
+)
 from service.delivery_orders import (
     DeliveryOrderError,
     cancel_order,
     create_delivery_order,
     delivery_order_billing_totals,
     ensure_service_release_order_for_ingreso,
+    get_delivery_order,
     list_delivery_orders,
     mark_delivered,
     mark_invoiced,
     mark_not_billable,
     mark_prepared,
     notify_delivery_order_created,
+    postpone_delivery_order_billing,
+    process_due_delivery_order_billing_postponements,
+    reactivate_delivery_order_billing,
     list_remito_history,
     update_delivery_order,
     update_item_partidas,
@@ -339,6 +349,81 @@ class NotificationsAPITest(TestCase):
 
     def _enable_liberado_for_tecnico(self):
         self._enable_notification(self.tecnico, "ingreso_liberado", True)
+
+    def _create_commercial_correction_order(
+        self,
+        order_id: str = "do-commercial-correction",
+        *,
+        status: str = "entregado_pendiente_facturacion",
+        remito_number: str = "RT R 00004-00012345",
+        invoice_number: str | None = None,
+    ) -> dict:
+        order = create_delivery_order(
+            {
+                "id": order_id,
+                "orderNumber": f"OE-{order_id}",
+                "customerId": self.customer_id,
+                "bejermanCustomerCode": "CLI-NOTIF",
+                "customerName": "Clínica Notificaciones",
+                "deliveryType": "sale",
+                "companyKey": "SEPID",
+                "sellerName": "Ventas",
+                "commercialDeadline": "15 días",
+                "status": status,
+                "remitoNumber": remito_number,
+                "invoiceNumber": invoice_number or "",
+                "items": [
+                    {
+                        "articleCode": "ART-001",
+                        "description": "Equipo de prueba",
+                        "quantity": 2,
+                        "unitPrice": "1000.00",
+                        "priceCurrency": "ARS",
+                        "discountPercent": "0",
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+        if remito_number:
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO bejerman_remito_groups(
+                        id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
+                        comprobante_numero, remito_number, customer_code, customer_name, seller_code,
+                        payment_term_code, operation_code, deposit_code, status, order_ids, response_summary,
+                        generated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, CURRENT_TIMESTAMP)
+                    """,
+                    [
+                        f"brg-{order_id}",
+                        "SEPID",
+                        "RT",
+                        "R",
+                        "00004",
+                        "00012345",
+                        remito_number,
+                        "CLI-NOTIF",
+                        "Clínica Notificaciones",
+                        "ADM",
+                        "30",
+                        "MC",
+                        "VAL",
+                        "generated",
+                        json.dumps([order_id]),
+                        json.dumps({"billingRequired": True}),
+                    ],
+                )
+                cur.execute(
+                    "UPDATE delivery_orders SET bejerman_remito_group_id = %s WHERE id = %s",
+                    [f"brg-{order_id}", order_id],
+                )
+        if invoice_number:
+            with connection.cursor() as cur:
+                cur.execute("UPDATE delivery_orders SET invoice_number = %s WHERE id = %s", [invoice_number, order_id])
+        return get_delivery_order(order_id)
 
     def _insert_push_subscription(self, user, endpoint="https://push.notif.test/sub-1"):
         with connection.cursor() as cur:
@@ -1500,6 +1585,18 @@ class NotificationsAPITest(TestCase):
                     ]
                 }
 
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "ART-MANUAL",
+                            "Articulo_Descripcion": "Artículo manual",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
+                        }
+                    ]
+                }
+
             def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
                 sent_comprobantes.append(comprobante)
                 sent_kwargs.append(kwargs)
@@ -1528,6 +1625,8 @@ class NotificationsAPITest(TestCase):
         article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(article_lines[0]["Item_Deposito"], "VAL")
         self.assertEqual(article_lines[0]["Item_Partida"], "P-do-manual-pv1")
+        self.assertEqual(article_lines[0]["Item_TipoIVA"], "1")
+        self.assertEqual(article_lines[0]["Item_TasaIVAInscrip"], 21)
 
         with connection.cursor() as cur:
             cur.execute(
@@ -1853,6 +1952,7 @@ class NotificationsAPITest(TestCase):
             "sales_order_remito_ready",
             "billing_pending_summary",
             "service_order_ready_to_bill",
+            "sales_order_commercial_terms_updated",
             "remito_pdf_rt",
             "remito_pdf_rd",
             "remito_pdf_rta",
@@ -3506,6 +3606,7 @@ class NotificationsAPITest(TestCase):
                 generate_bejerman_remito([order["id"]], self.jefe.id, {"issueDate": "2026-07-01"})
 
         self.assertEqual(ctx.exception.code, "BEJERMAN_REMITO_REQUIRES_REVIEW")
+        self.assertIn("Stock insuficiente en deposito VAL", str(ctx.exception))
         self.assertEqual(fake_client.ingresar_count, 1)
         self.assertEqual(fake_client.lookup_count, 1)
         with connection.cursor() as cur:
@@ -3546,6 +3647,301 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(retry_ctx.exception.code, "BEJERMAN_REMITO_REQUIRES_REVIEW")
         self.assertEqual(fake_client.ingresar_count, 1)
         self.assertEqual(fake_client.lookup_count, 2)
+
+    def test_revision_verifica_sin_emitir_corrige_y_reconcilia_de_nuevo_antes_de_reemitir(self):
+        with self._delivery_partida_stock_patch(
+            [{"articleCode": "1202014", "depositCode": "VAL", "partida": "D2507112H", "availableQuantity": 20}]
+        ):
+            order = create_delivery_order(
+                {
+                    "id": "do-remito-safe-review",
+                    "orderNumber": "OE-00105",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": "MGBIO",
+                    "sellerName": "Ventas",
+                    "sellerCode": "EZE",
+                    "status": "armado_pendiente_entrega",
+                    "items": [
+                        {
+                            "articleCode": "1202014",
+                            "articleName": "Mascara buconasal",
+                            "articleRequiresPartida": True,
+                            "description": "Mascara buconasal",
+                            "quantity": 1,
+                            "unitPrice": "29",
+                            "partidas": [{"partida": "D2507112H", "assignedQuantity": 1, "stockDepositCode": "VAL"}],
+                        }
+                    ],
+                },
+                self.jefe.id,
+            )
+
+        class SafeReviewClient:
+            def __init__(self):
+                self.ingresar_count = 0
+                self.lookup_count = 0
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clinica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_SitIVA": "6",
+                        }
+                    ]
+                }
+
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "1202014",
+                            "Articulo_Descripcion": "Mascara buconasal",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
+                        }
+                    ]
+                }
+
+            def list_comprobantes_ventas(self, filters):
+                self.lookup_count += 1
+                return {"DatosJSON": []}
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                self.ingresar_count += 1
+                if self.ingresar_count == 1:
+                    raise BejermanSdkResponseError(
+                        "El comprobante no se importó. Se ha superado el Máximo para Ajustar diferencias permitido."
+                    )
+                return {
+                    "Resultado": "OK",
+                    "DatosJSON": {
+                        "Comprobante_Tipo": "RT",
+                        "Comprobante_Letra": "R",
+                        "Comprobante_PtoVenta": "00007",
+                        "Comprobante_Numero": "00000106",
+                    },
+                }
+
+        fake_client = SafeReviewClient()
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=fake_client):
+            with self.assertRaises(DeliveryOrderError):
+                generate_bejerman_remito([order["id"]], self.jefe.id, {"issueDate": "2026-07-13"})
+            with connection.cursor() as cur:
+                cur.execute("SELECT bejerman_remito_group_id FROM delivery_orders WHERE id = %s", [order["id"]])
+                old_group_id = cur.fetchone()[0]
+
+            verify_result = verify_bejerman_remito_review(old_group_id, self.jefe.id)
+            self.assertEqual(verify_result["reviewState"], "ready_for_correction")
+            self.assertEqual(fake_client.ingresar_count, 1)
+
+            with self.assertRaises(DeliveryOrderError) as unchanged_ctx:
+                reissue_corrected_bejerman_remito_review(
+                    old_group_id,
+                    self.jefe.id,
+                    {"confirm": True, "issueDate": "2026-07-13"},
+                )
+            self.assertEqual(unchanged_ctx.exception.code, "BEJERMAN_REMITO_PAYLOAD_UNCHANGED")
+            self.assertEqual(fake_client.ingresar_count, 1)
+
+            editable = get_delivery_order(order["id"], include_events=False)
+            edited_items = [{**item, "unitPrice": "30"} for item in editable["items"]]
+            with self._delivery_partida_stock_patch(
+                [{"articleCode": "1202014", "depositCode": "VAL", "partida": "D2507112H", "availableQuantity": 20}]
+            ):
+                update_delivery_order(order["id"], {**editable, "items": edited_items}, self.jefe.id)
+
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE bejerman_remito_groups
+                       SET response_summary = response_summary || %s::jsonb
+                     WHERE id = %s
+                    """,
+                    [
+                        json.dumps(
+                            {
+                                "reissueInProgress": True,
+                                "reissueClaimedAt": timezone.now().isoformat(),
+                            }
+                        ),
+                        old_group_id,
+                    ],
+                )
+            with self.assertRaises(DeliveryOrderError) as concurrent_ctx:
+                reissue_corrected_bejerman_remito_review(
+                    old_group_id,
+                    self.jefe.id,
+                    {"confirm": True, "issueDate": "2026-07-13"},
+                )
+            self.assertEqual(concurrent_ctx.exception.code, "BEJERMAN_REMITO_REISSUE_CONFLICT")
+            self.assertEqual(fake_client.ingresar_count, 1)
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE bejerman_remito_groups
+                       SET response_summary = response_summary || %s::jsonb
+                     WHERE id = %s
+                    """,
+                    [
+                        json.dumps({"reissueClaimedAt": (timezone.now() - timedelta(minutes=16)).isoformat()}),
+                        old_group_id,
+                    ],
+                )
+
+            result = reissue_corrected_bejerman_remito_review(
+                old_group_id,
+                self.jefe.id,
+                {"confirm": True, "issueDate": "2026-07-13"},
+            )
+
+        self.assertEqual(fake_client.lookup_count, 4)
+        self.assertEqual(fake_client.ingresar_count, 2)
+        self.assertEqual(result["remitoNumber"], "RT R 00007-00000106")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT response_summary ->> 'reviewState',
+                       response_summary ->> 'replacementGroupId',
+                       response_summary ->> 'replacementRemitoNumber',
+                       response_summary ->> 'reissueInProgress'
+                  FROM bejerman_remito_groups
+                 WHERE id = %s
+                """,
+                [old_group_id],
+            )
+            old_group = cur.fetchone()
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM delivery_order_events
+                 WHERE order_id = %s
+                   AND event_type IN ('bejerman_remito_correction_saved', 'bejerman_remito_reissued_after_review')
+                """,
+                [order["id"]],
+            )
+            audit_events = int(cur.fetchone()[0])
+        self.assertEqual(old_group[0], "superseded")
+        self.assertTrue(old_group[1])
+        self.assertEqual(old_group[2], "RT R 00007-00000106")
+        self.assertEqual(old_group[3], "false")
+        self.assertEqual(audit_events, 2)
+
+    def test_revision_acepta_fallback_sql_exitoso_sin_candidatos_y_habilita_correccion(self):
+        with self._delivery_partida_stock_patch(
+            [{"articleCode": "1202014", "depositCode": "VAL", "partida": "D2507112H", "availableQuantity": 20}]
+        ):
+            order = create_delivery_order(
+                {
+                    "id": "do-remito-review-sql-empty",
+                    "orderNumber": "OE-REVIEW-SQL-EMPTY",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": "MGBIO",
+                    "sellerName": "Ventas",
+                    "sellerCode": "EZE",
+                    "status": "armado_pendiente_entrega",
+                    "items": [
+                        {
+                            "articleCode": "1202014",
+                            "articleName": "Máscara buconasal",
+                            "articleRequiresPartida": True,
+                            "description": "Máscara buconasal",
+                            "quantity": 1,
+                            "unitPrice": "29",
+                            "partidas": [
+                                {
+                                    "partida": "D2507112H",
+                                    "assignedQuantity": 1,
+                                    "stockDepositCode": "VAL",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                self.jefe.id,
+            )
+
+        class BrokenSdkLookupClient:
+            def __init__(self):
+                self.ingresar_count = 0
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clínica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_SitIVA": "6",
+                        }
+                    ]
+                }
+
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "1202014",
+                            "Articulo_Descripcion": "Máscara buconasal",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
+                        }
+                    ]
+                }
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                self.ingresar_count += 1
+                raise BejermanSdkResponseError(
+                    "El comprobante no se importó. Se ha superado el Máximo para Ajustar diferencias permitido."
+                )
+
+            def list_comprobantes_ventas(self, filters):
+                raise BejermanSdkResponseError("Invalid column name 'cvetop_Cod'.")
+
+        def successful_empty_remote_lookup(*args, lookup_outcome=None, **kwargs):
+            if lookup_outcome is not None:
+                lookup_outcome.update({"status": "success", "rowCount": 0})
+            return []
+
+        fake_client = BrokenSdkLookupClient()
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=fake_client):
+            with patch(
+                "service.bejerman_delivery._remote_sales_recovery_records",
+                side_effect=successful_empty_remote_lookup,
+            ):
+                with self.assertRaises(DeliveryOrderError):
+                    generate_bejerman_remito([order["id"]], self.jefe.id, {"issueDate": "2026-07-13"})
+                with connection.cursor() as cur:
+                    cur.execute("SELECT bejerman_remito_group_id FROM delivery_orders WHERE id = %s", [order["id"]])
+                    group_id = cur.fetchone()[0]
+
+                result = verify_bejerman_remito_review(group_id, self.jefe.id)
+
+        self.assertEqual(result["reviewState"], "ready_for_correction")
+        self.assertEqual(result["failureCertainty"], "confirmed_not_imported")
+        self.assertEqual(fake_client.ingresar_count, 1)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT o.bejerman_remito_group_id,
+                       g.status,
+                       g.response_summary->>'reviewState',
+                       g.response_summary->>'failureCertainty'
+                  FROM delivery_orders o
+                  CROSS JOIN bejerman_remito_groups g
+                 WHERE o.id = %s
+                   AND g.id = %s
+                """,
+                [order["id"], group_id],
+            )
+            state = cur.fetchone()
+        self.assertEqual(state, (None, "failed_review", "ready_for_correction", "confirmed_not_imported"))
 
     def test_remito_bejerman_revision_bloquea_reemision_forzada_sin_perder_auditoria(self):
         with self._delivery_partida_stock_patch(
@@ -4074,6 +4470,183 @@ class NotificationsAPITest(TestCase):
 
         mark_delivered(order["id"], self.jefe.id, "RT 0002-00012345")
         self.assertEqual(len(mail.outbox), 1)
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        PUBLIC_WEB_URL="https://nexora.test",
+        DEFAULT_FROM_EMAIL="noreply@nexora.test",
+    )
+    def test_supervisor_corrige_precio_plazo_post_remito_y_notifica_cobranzas(self):
+        order = self._create_commercial_correction_order()
+        mail.outbox = []
+        item = order["items"][0]
+        self.client.force_authenticate(user=self.supervisor)
+
+        with patch(
+            "service.delivery_orders.perform_bejerman_remito_price_fix",
+            return_value={"backupName": "NEXORA_BKP_TEST", "lineCount": 1, "rows": [{"estado": "APLICADO"}]},
+        ) as price_fix:
+            resp = self.client.patch(
+                f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                {
+                    "commercialDeadline": "30 días",
+                    "items": [
+                        {
+                            "id": item["id"],
+                            "unitPrice": "1500.00",
+                            "priceCurrency": "ARS",
+                            "discountPercent": "10",
+                        }
+                    ],
+                },
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        price_fix.assert_called_once()
+        self.assertEqual(resp.data["commercialDeadline"], "30 días")
+        self.assertEqual(Decimal(str(resp.data["items"][0]["unitPrice"])), Decimal("1500.00"))
+        self.assertEqual(Decimal(str(resp.data["items"][0]["discountPercent"])), Decimal("10.00"))
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT commercial_deadline, price_currency
+                  FROM delivery_orders
+                 WHERE id = %s
+                """,
+                [order["id"]],
+            )
+            self.assertEqual(cur.fetchone(), ("30 días", "ARS"))
+            cur.execute(
+                """
+                SELECT unit_price, discount_percent, price_currency
+                  FROM delivery_order_items
+                 WHERE id = %s
+                """,
+                [item["id"]],
+            )
+            unit_price, discount_percent, currency = cur.fetchone()
+            self.assertEqual(unit_price, Decimal("1500.00"))
+            self.assertEqual(discount_percent, Decimal("10.00"))
+            self.assertEqual(currency, "ARS")
+            cur.execute(
+                """
+                SELECT metadata
+                  FROM delivery_order_events
+                 WHERE order_id = %s
+                   AND event_type = 'delivery_order_commercial_correction'
+                """,
+                [order["id"]],
+            )
+            metadata = cur.fetchone()[0]
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            cur.execute(
+                """
+                SELECT user_id, title, href
+                  FROM notifications
+                 WHERE notification_key = 'sales_order_commercial_terms_updated'
+                """,
+            )
+            notification_rows = cur.fetchall()
+        self.assertEqual(metadata["previousDeadline"], "15 días")
+        self.assertEqual(metadata["newDeadline"], "30 días")
+        self.assertEqual(metadata["bejerman"]["backupName"], "NEXORA_BKP_TEST")
+        self.assertEqual(
+            notification_rows,
+            [(self.cobranzas.id, f"Corrección comercial en {order['orderNumber']}", f"/cobranzas/facturacion?orderId={order['id']}")],
+        )
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["cobranzas@notif.test"])
+        self.assertIn(order["remitoNumber"], message.body)
+        self.assertIn("30 días", message.body)
+        self.assertIn("https://nexora.test/cobranzas/facturacion?orderId=do-commercial-correction", message.body)
+
+    def test_correccion_comercial_rechaza_roles_no_supervisor(self):
+        roles = [self.admin, self.jefe, self.ventas, self.recepcion, self.cobranzas]
+        for user in roles:
+            with self.subTest(role=user.rol):
+                order = self._create_commercial_correction_order(order_id=f"do-commercial-role-{user.rol}")
+                item = order["items"][0]
+                self.client.force_authenticate(user=user)
+                with patch("service.delivery_orders.perform_bejerman_remito_price_fix") as price_fix:
+                    resp = self.client.patch(
+                        f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                        {
+                            "commercialDeadline": "30 días",
+                            "items": [
+                                {
+                                    "id": item["id"],
+                                    "unitPrice": "1500.00",
+                                    "priceCurrency": "ARS",
+                                    "discountPercent": "0",
+                                }
+                            ],
+                        },
+                        format="json",
+                    )
+                self.assertEqual(resp.status_code, 403, resp.data)
+                price_fix.assert_not_called()
+
+    def test_correccion_comercial_rechaza_orden_facturada_o_sin_remito(self):
+        cases = [
+            ("do-commercial-invoiced", "entregado_pendiente_facturacion", "RT R 00004-00012345", "FC A 00004-00000001"),
+            ("do-commercial-no-remito", "entregado_pendiente_facturacion", "", None),
+            ("do-commercial-cancelled", "cancelado", "RT R 00004-00012345", None),
+        ]
+        self.client.force_authenticate(user=self.supervisor)
+        for order_id, status, remito_number, invoice_number in cases:
+            with self.subTest(order_id=order_id):
+                order = self._create_commercial_correction_order(
+                    order_id=order_id,
+                    status=status,
+                    remito_number=remito_number,
+                    invoice_number=invoice_number,
+                )
+                item = order["items"][0]
+                with patch("service.delivery_orders.perform_bejerman_remito_price_fix") as price_fix:
+                    resp = self.client.patch(
+                        f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                        {
+                            "commercialDeadline": "30 días",
+                            "items": [
+                                {
+                                    "id": item["id"],
+                                    "unitPrice": "1500.00",
+                                    "priceCurrency": "ARS",
+                                    "discountPercent": "0",
+                                }
+                            ],
+                        },
+                        format="json",
+                    )
+                self.assertEqual(resp.status_code, 409, resp.data)
+                price_fix.assert_not_called()
+
+    def test_correccion_comercial_rechaza_cambios_fuera_de_precio_plazo(self):
+        order = self._create_commercial_correction_order()
+        item = order["items"][0]
+        self.client.force_authenticate(user=self.supervisor)
+        with patch("service.delivery_orders.perform_bejerman_remito_price_fix") as price_fix:
+            resp = self.client.patch(
+                f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                {
+                    "commercialDeadline": "30 días",
+                    "items": [
+                        {
+                            "id": item["id"],
+                            "unitPrice": "1500.00",
+                            "priceCurrency": "ARS",
+                            "discountPercent": "0",
+                            "quantity": "99",
+                        }
+                    ],
+                },
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 409, resp.data)
+        price_fix.assert_not_called()
 
     @override_settings(
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
@@ -5078,6 +5651,96 @@ class NotificationsAPITest(TestCase):
             mark_invoiced(order["id"], self.cobranzas.id, "")
 
         self.assertEqual(ctx.exception.code, "INVOICE_REQUIRED")
+
+    def test_postergar_remito_lo_oculta_hasta_reactivarlo(self):
+        order = self._create_commercial_correction_order("do-billing-postponed")
+        return_date = (timezone.localdate() + timedelta(days=2)).isoformat()
+
+        postponed = postpone_delivery_order_billing(order["id"], self.cobranzas.id, return_date)
+
+        self.assertEqual(postponed["billingPostponedAt"][:10], timezone.localdate().isoformat())
+        due_at = datetime.fromisoformat(postponed["billingPostponedUntil"])
+        self.assertEqual(timezone.localtime(due_at).strftime("%H:%M"), "09:00")
+        self.assertNotIn(order["id"], [item["id"] for item in list_delivery_orders({"pendingBilling": True, "limit": 10})["items"]])
+        self.assertIn(order["id"], [item["id"] for item in list_delivery_orders({"postponedBilling": True, "limit": 10})["items"]])
+
+        reactivated = reactivate_delivery_order_billing(order["id"], self.cobranzas.id)
+
+        self.assertIsNone(reactivated["billingPostponedUntil"])
+        self.assertIn(order["id"], [item["id"] for item in list_delivery_orders({"pendingBilling": True, "limit": 10})["items"]])
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT event_type FROM delivery_order_events WHERE order_id = %s ORDER BY id",
+                [order["id"]],
+            )
+            event_types = [row[0] for row in cur.fetchall()]
+        self.assertIn("delivery_order_billing_postponed", event_types)
+        self.assertIn("delivery_order_billing_reactivated", event_types)
+
+    def test_postergar_remito_requiere_fecha_futura(self):
+        order = self._create_commercial_correction_order("do-billing-postponed-date")
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            postpone_delivery_order_billing(order["id"], self.cobranzas.id, timezone.localdate().isoformat())
+
+        self.assertEqual(ctx.exception.code, "POSTPONEMENT_DATE_MUST_BE_FUTURE")
+
+    def test_postergar_y_reactivar_remito_usan_permiso_de_facturacion(self):
+        order = self._create_commercial_correction_order("do-billing-postponed-api")
+        self.client.force_authenticate(user=self.cobranzas)
+        return_date = (timezone.localdate() + timedelta(days=1)).isoformat()
+
+        postponed = self.client.post(
+            f"/api/ordenes-entrega/{order['id']}/posponer-facturacion/",
+            {"returnDate": return_date},
+            format="json",
+        )
+        self.assertEqual(postponed.status_code, 200, postponed.data)
+        self.assertTrue(postponed.data["billingPostponedUntil"])
+
+        reactivated = self.client.post(
+            f"/api/ordenes-entrega/{order['id']}/reactivar-facturacion/",
+            {},
+            format="json",
+        )
+        self.assertEqual(reactivated.status_code, 200, reactivated.data)
+        self.assertIsNone(reactivated.data["billingPostponedUntil"])
+
+    def test_vencimiento_de_remito_pospuesto_notifica_una_sola_vez_sin_email(self):
+        order = self._create_commercial_correction_order("do-billing-postponed-notification")
+        return_date = (timezone.localdate() + timedelta(days=1)).isoformat()
+        postpone_delivery_order_billing(order["id"], self.cobranzas.id, return_date)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET billing_postponed_until = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+                 WHERE id = %s
+                """,
+                [order["id"]],
+            )
+
+        with patch("service.delivery_orders.send_mail") as send_mail_mock:
+            first = process_due_delivery_order_billing_postponements()
+            second = process_due_delivery_order_billing_postponements()
+
+        self.assertEqual(first["due"], 1)
+        self.assertEqual(second["due"], 0)
+        self.assertEqual(first["notifications"], 1)
+        send_mail_mock.assert_not_called()
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT notification_key, href
+                  FROM notifications
+                 WHERE user_id = %s
+                   AND notification_key = 'billing_remito_postponement_due'
+                 ORDER BY id
+                """,
+                [self.cobranzas.id],
+            )
+            rows = cur.fetchall()
+        self.assertEqual(rows, [("billing_remito_postponement_due", f"/cobranzas/facturacion?orderId={order['id']}")])
 
     def test_facturacion_solo_acepta_remitos_pendientes(self):
         order = create_delivery_order(

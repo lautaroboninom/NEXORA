@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
@@ -16,6 +17,11 @@ from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.utils import timezone
 
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
+from .bejerman_remito_price_fix import (
+    BejermanRemitoPriceFixError,
+    perform_bejerman_remito_price_fix,
+    targets_from_delivery_order,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +55,7 @@ DELIVERY_TYPE_LABELS = {
     "demo": "Demo",
 }
 BILLABLE_REMITO_TYPES = {"RT"}
+BILLING_POSTPONEMENT_NOTIFICATION_KEY = "billing_remito_postponement_due"
 SELLER_CODE_MAX_LENGTH = 4
 RENTAL_SELLER_CODE = "ADM"
 SELLER_LABELS = {
@@ -245,6 +252,24 @@ def _nullable_bool(value: Any) -> bool | None:
     if text in {"0", "n", "no", "false", "f", "off"}:
         return False
     return None
+
+
+def _user_role(user_id: int | None) -> str:
+    if not user_id:
+        return ""
+    with connection.cursor() as cur:
+        cur.execute("SELECT rol FROM users WHERE id = %s AND activo = TRUE", [user_id])
+        row = cur.fetchone()
+    return _clean_text(row[0] if row else "").lower()
+
+
+def _require_supervisor(actor_user_id: int | None) -> None:
+    if _user_role(actor_user_id) != "supervisor":
+        raise DeliveryOrderError(
+            "SUPERVISOR_REQUIRED",
+            "Solo el rol supervisor puede corregir precio o plazo de una orden entregada.",
+            status_code=403,
+        )
 
 
 def _item_article_requires_partida(item: dict[str, Any]) -> bool | None:
@@ -1122,6 +1147,10 @@ def serialize_order(row: dict[str, Any]) -> dict[str, Any]:
         "bejermanRemitoGroupId": row.get("bejerman_remito_group_id") or "",
         "remitoLocation": row.get("remito_location") or "",
         "invoiceNumber": row.get("invoice_number") or "",
+        "billingPostponedUntil": _iso(row.get("billing_postponed_until")),
+        "billingPostponedByUserId": row.get("billing_postponed_by_user_id"),
+        "billingPostponedAt": _iso(row.get("billing_postponed_at")),
+        "billingPostponementNotifiedAt": _iso(row.get("billing_postponement_notified_at")),
         "ingresoId": row.get("ingreso_id"),
         "deviceId": row.get("device_id"),
         "sourceSystem": row.get("source_system") or "",
@@ -1753,6 +1782,48 @@ def _send_delivery_order_billing_email(order: dict[str, Any], users: list[dict[s
         return 0
 
 
+def _send_delivery_order_commercial_correction_email(
+    order: dict[str, Any],
+    users: list[dict[str, Any]],
+    correction: dict[str, Any],
+) -> int:
+    recipients = notification_email_recipients_for_users(users)
+    if not recipients:
+        return 0
+    subject = f"Corrección comercial en {order.get('orderNumber') or order.get('id') or ''}".strip()
+    body = _email_append_footer_text(
+        "\n".join(
+            [
+                "Se modificaron precio o plazo de una orden ya entregada con remito.",
+                "",
+                f"Orden: {order.get('orderNumber') or '-'}",
+                f"Remito: {order.get('remitoNumber') or '-'}",
+                f"Cliente: {order.get('customerName') or '-'}",
+                f"Plazo anterior: {correction.get('previousDeadline') or '-'}",
+                f"Plazo nuevo: {correction.get('newDeadline') or '-'}",
+                f"Total anterior: {correction.get('previousTotalLabel') or '-'}",
+                f"Total nuevo: {correction.get('newTotalLabel') or '-'}",
+                "",
+                f"Ver en NEXORA: {delivery_order_billing_url(order)}",
+            ]
+        )
+    )
+    try:
+        return int(
+            send_mail(
+                subject,
+                body,
+                getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                recipients,
+                fail_silently=True,
+            )
+            or 0
+        )
+    except Exception:
+        logger.exception("delivery_order_commercial_correction_email_failed", extra={"order_id": order.get("id")})
+        return 0
+
+
 def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind: str) -> int:
     try:
         order = get_delivery_order(order_id, include_events=False)
@@ -1847,6 +1918,80 @@ def notify_delivery_order_remito_ready(order_id: str, actor_user_id: int | None 
     return _delivery_order_notification(order_id, actor_user_id, "remito_ready")
 
 
+def notify_delivery_order_commercial_correction(
+    order_id: str,
+    actor_user_id: int | None,
+    correction: dict[str, Any],
+) -> int:
+    notification_key = "sales_order_commercial_terms_updated"
+    roles = ["cobranzas"]
+    try:
+        order = get_delivery_order(order_id, include_events=False)
+        title = f"Corrección comercial en {order.get('orderNumber') or order_id}"
+        body = (
+            f"{order.get('customerName') or '-'} - remito {order.get('remitoNumber') or '-'}. "
+            f"Plazo: {correction.get('previousDeadline') or '-'} -> {correction.get('newDeadline') or '-'}. "
+            f"Total: {correction.get('previousTotalLabel') or '-'} -> {correction.get('newTotalLabel') or '-'}. "
+            "Revisar antes de facturar."
+        )
+        recipient_users = active_users_for_notification(notification_key, roles=roles, channel="any")
+        recipients = [int(row["id"]) for row in recipient_users]
+        if not recipient_users:
+            create_event(
+                order_id,
+                actor_user_id,
+                "notification_failed",
+                metadata={"kind": "commercial_correction", "roles": roles, "reason": "no_active_recipients"},
+            )
+            return 0
+        inserted = emit_notification(
+            notification_key,
+            user_ids=recipients,
+            title=title,
+            body=body,
+            href=_billing_order_path(order_id),
+            severity="warning",
+            entity_type="delivery_order",
+            entity_id=order_id,
+            dedupe_key=f"{notification_key}:sales_order:{order_id}:{uuid4()}",
+            payload={
+                "orderId": order_id,
+                "orderNumber": order.get("orderNumber"),
+                "customerName": order.get("customerName"),
+                "remitoNumber": order.get("remitoNumber"),
+                "previousDeadline": correction.get("previousDeadline"),
+                "newDeadline": correction.get("newDeadline"),
+                "previousTotalLabel": correction.get("previousTotalLabel"),
+                "newTotalLabel": correction.get("newTotalLabel"),
+                "billingUrl": delivery_order_billing_url(order),
+            },
+            push=True,
+        )
+        email_sent = 0
+        if inserted:
+            email_users = active_users_for_notification(notification_key, roles=roles, channel="email", require_email=True)
+            email_sent = _send_delivery_order_commercial_correction_email(order, email_users, correction)
+        create_event(
+            order_id,
+            actor_user_id,
+            "notification_sent" if inserted else "notification_skipped",
+            metadata={"kind": "commercial_correction", "roles": roles, "recipients": inserted, "emailSent": email_sent},
+        )
+        return inserted
+    except Exception:
+        logger.exception("delivery_order_commercial_correction_notification_failed", extra={"order_id": order_id})
+        try:
+            create_event(
+                order_id,
+                actor_user_id,
+                "notification_failed",
+                metadata={"kind": "commercial_correction", "reason": "exception"},
+            )
+        except Exception:
+            pass
+        return 0
+
+
 def _billing_suppressed(order_id: str) -> bool:
     with connection.cursor() as cur:
         cur.execute(
@@ -1860,6 +2005,173 @@ def _billing_suppressed(order_id: str) -> bool:
             [order_id],
         )
         return bool(cur.fetchone())
+
+
+def _billing_postponement_due_at(return_date: Any) -> tuple[date, datetime]:
+    raw_date = _clean_text(return_date)
+    try:
+        selected_date = date.fromisoformat(raw_date)
+    except (TypeError, ValueError):
+        raise DeliveryOrderError("INVALID_POSTPONEMENT_DATE", "La fecha de postergación no es válida")
+    if raw_date != selected_date.isoformat():
+        raise DeliveryOrderError("INVALID_POSTPONEMENT_DATE", "La fecha de postergación debe tener formato AAAA-MM-DD")
+    if selected_date <= timezone.localdate():
+        raise DeliveryOrderError(
+            "POSTPONEMENT_DATE_MUST_BE_FUTURE",
+            "La fecha de postergación debe ser posterior a hoy.",
+        )
+    due_at = timezone.make_aware(datetime.combine(selected_date, time(hour=9)), timezone.get_current_timezone())
+    return selected_date, due_at
+
+
+def _assert_billing_postponable(order: dict[str, Any]) -> None:
+    if (
+        not order_requires_billing(order)
+        or _optional_text(order.get("invoiceNumber"))
+        or order.get("status") in CLOSED_STATUSES
+        or _billing_suppressed(str(order.get("id") or ""))
+    ):
+        raise DeliveryOrderError(
+            "INVALID_BILLING_POSTPONEMENT_STATE",
+            "Solo se puede posponer un remito facturable pendiente.",
+            status_code=409,
+        )
+
+
+@transaction.atomic
+def postpone_delivery_order_billing(order_id: str, actor_user_id: int | None, return_date: Any) -> dict[str, Any]:
+    current = get_delivery_order(order_id, include_events=False, for_update=True)
+    _assert_billing_postponable(current)
+    selected_date, due_at = _billing_postponement_due_at(return_date)
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE delivery_orders
+               SET billing_postponed_until = %s,
+                   billing_postponed_by_user_id = %s,
+                   billing_postponed_at = CURRENT_TIMESTAMP,
+                   billing_postponement_notified_at = NULL
+             WHERE id = %s
+            """,
+            [due_at, actor_user_id, order_id],
+        )
+    create_event(
+        order_id,
+        actor_user_id,
+        "delivery_order_billing_postponed",
+        metadata={"returnDate": selected_date.isoformat(), "returnAt": due_at.isoformat()},
+    )
+    return get_delivery_order(order_id)
+
+
+@transaction.atomic
+def reactivate_delivery_order_billing(order_id: str, actor_user_id: int | None) -> dict[str, Any]:
+    current = get_delivery_order(order_id, include_events=False, for_update=True)
+    _assert_billing_postponable(current)
+    if not current.get("billingPostponedUntil"):
+        raise DeliveryOrderError(
+            "BILLING_POSTPONEMENT_NOT_FOUND",
+            "El remito no está postergado.",
+            status_code=409,
+        )
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE delivery_orders
+               SET billing_postponed_until = NULL,
+                   billing_postponed_by_user_id = NULL,
+                   billing_postponed_at = NULL,
+                   billing_postponement_notified_at = NULL
+             WHERE id = %s
+            """,
+            [order_id],
+        )
+    create_event(order_id, actor_user_id, "delivery_order_billing_reactivated")
+    return get_delivery_order(order_id)
+
+
+def process_due_delivery_order_billing_postponements(limit: int = 100) -> dict[str, int]:
+    safe_limit = max(1, min(500, int(limit or 100)))
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT o.id, o.billing_postponed_until
+                  FROM delivery_orders o
+                  LEFT JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id
+                 WHERE o.billing_postponed_until IS NOT NULL
+                   AND o.billing_postponed_until <= CURRENT_TIMESTAMP
+                   AND o.billing_postponement_notified_at IS NULL
+                   AND NULLIF(BTRIM(COALESCE(o.remito_number, '')), '') IS NOT NULL
+                   AND NULLIF(BTRIM(COALESCE(o.invoice_number, '')), '') IS NULL
+                   AND o.status NOT IN ('facturado', 'cancelado', 'entregado_no_facturable')
+                   AND NOT EXISTS (
+                     SELECT 1
+                       FROM delivery_order_events e
+                      WHERE e.order_id = o.id
+                        AND e.event_type = 'delivery_order_not_billable'
+                   )
+                   AND (
+                     COALESCE(g.response_summary ->> 'billingRequired', '') = 'true'
+                     OR UPPER(SPLIT_PART(BTRIM(COALESCE(o.remito_number, '')), ' ', 1)) = ANY(%s)
+                   )
+                 ORDER BY o.billing_postponed_until ASC, o.id ASC
+                 LIMIT %s
+                 FOR UPDATE OF o SKIP LOCKED
+                """,
+                [sorted(BILLABLE_REMITO_TYPES), safe_limit],
+            )
+            due_rows = _rows(cur)
+
+        recipients = active_users_for_notification(
+            BILLING_POSTPONEMENT_NOTIFICATION_KEY,
+            roles=["cobranzas"],
+            channel="bell",
+        )
+        recipient_ids = [int(user["id"]) for user in recipients]
+        inserted = 0
+        for row in due_rows:
+            order_id = str(row["id"])
+            order = get_delivery_order(order_id, include_events=False)
+            due_at = row["billing_postponed_until"]
+            notification_key = f"{BILLING_POSTPONEMENT_NOTIFICATION_KEY}:{order_id}:{_iso(due_at)}"
+            inserted_for_order = emit_notification(
+                BILLING_POSTPONEMENT_NOTIFICATION_KEY,
+                user_ids=recipient_ids,
+                title=f"Remito pendiente para facturar {order.get('remitoNumber') or order.get('orderNumber') or order_id}",
+                body=f"{order.get('customerName') or '-'}: la postergación venció y el remito volvió a Pendientes.",
+                href=_billing_order_path(order_id),
+                severity="warning",
+                entity_type="delivery_order",
+                entity_id=order_id,
+                dedupe_key=notification_key,
+                payload={
+                    "orderId": order_id,
+                    "orderNumber": order.get("orderNumber"),
+                    "remitoNumber": order.get("remitoNumber"),
+                    "customerName": order.get("customerName"),
+                    "billingPostponedUntil": _iso(due_at),
+                },
+            )
+            inserted += inserted_for_order
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_orders
+                       SET billing_postponement_notified_at = CURRENT_TIMESTAMP
+                     WHERE id = %s
+                       AND billing_postponed_until = %s
+                       AND billing_postponement_notified_at IS NULL
+                    """,
+                    [order_id, due_at],
+                )
+            create_event(
+                order_id,
+                None,
+                "delivery_order_billing_postponement_due",
+                metadata={"returnAt": _iso(due_at), "recipients": inserted_for_order},
+            )
+    return {"due": len(due_rows), "notifications": inserted}
 
 
 def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1959,8 +2271,11 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
         params.extend([like] * (len(order_search_expressions) + len(item_search_expressions)))
 
     pending_billing_filter = str(filters.get("pending_billing") or filters.get("pendingBilling") or "").lower() in ("1", "true", "yes")
-    pending_billing_requested = normalized_statuses == ["entregado_pendiente_facturacion"] or pending_billing_filter
-    if pending_billing_filter:
+    postponed_billing_filter = str(filters.get("postponed_billing") or filters.get("postponedBilling") or "").lower() in ("1", "true", "yes")
+    if pending_billing_filter and postponed_billing_filter:
+        raise DeliveryOrderError("INVALID_BILLING_FILTER", "No se pueden consultar pendientes y pospuestos al mismo tiempo.")
+    pending_billing_requested = normalized_statuses == ["entregado_pendiente_facturacion"] or pending_billing_filter or postponed_billing_filter
+    if pending_billing_filter or postponed_billing_filter:
         where.append("NULLIF(BTRIM(COALESCE(o.remito_number, '')), '') IS NOT NULL")
         where.append("o.status NOT IN ('facturado', 'cancelado', 'entregado_no_facturable')")
         where.append(
@@ -1982,6 +2297,10 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
             """
         )
         params.append(sorted(BILLABLE_REMITO_TYPES))
+        if pending_billing_filter:
+            where.append("(o.billing_postponed_until IS NULL OR o.billing_postponed_until <= CURRENT_TIMESTAMP)")
+        else:
+            where.append("o.billing_postponed_until > CURRENT_TIMESTAMP")
     if pending_billing_requested:
         where.append("NULLIF(BTRIM(COALESCE(o.invoice_number, '')), '') IS NULL")
 
@@ -2326,10 +2645,156 @@ def _assert_order_editable(order: dict[str, Any]) -> None:
         )
 
 
+def _review_group_for_order_correction(order_id: str) -> dict[str, Any] | None:
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, response_summary
+              FROM bejerman_remito_groups
+             WHERE status = 'failed_review'
+               AND order_ids @> %s::jsonb
+               AND COALESCE(response_summary->>'reviewState', '') IN ('ready_for_correction', 'ready_to_reissue')
+             ORDER BY created_at DESC
+             LIMIT 1
+             FOR UPDATE
+            """,
+            [_json_param([order_id])],
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    summary = row[1] if isinstance(row[1], dict) else {}
+    return {"id": str(row[0]), "responseSummary": summary}
+
+
+def _review_correction_snapshot(order: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in order.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "id": _optional_text(item.get("id")),
+                "article": _optional_text(item.get("articleCode")),
+                "quantity": str(item.get("quantity") or ""),
+                "unitPrice": str(item.get("unitPrice") or ""),
+                "currency": _optional_text(item.get("priceCurrency")),
+                "discount": str(item.get("discountPercent") or ""),
+                "partida": _optional_text(item.get("partida")),
+                "deposit": _optional_text(item.get("stockDepositCode")),
+                "partidas": [
+                    {
+                        "partida": _optional_text(partida.get("partida")),
+                        "quantity": str(partida.get("assignedQuantity") or ""),
+                        "deposit": _optional_text(partida.get("stockDepositCode")),
+                    }
+                    for partida in item.get("partidas") or []
+                    if isinstance(partida, dict)
+                ],
+            }
+        )
+    return {
+        "customer": {
+            "id": order.get("customerId"),
+            "code": _optional_text(order.get("bejermanCustomerCode")),
+            "name": _optional_text(order.get("customerName")),
+        },
+        "company": _optional_text(order.get("companyKey")),
+        "seller": _optional_text(order.get("sellerCode")),
+        "commercial": {
+            "currency": _optional_text(order.get("priceCurrency")),
+            "exchangeRate": _optional_text(order.get("commercialExchangeRate")),
+            "condition": _optional_text(order.get("commercialCondition")),
+            "deadline": _optional_text(order.get("commercialDeadline")),
+        },
+        "items": items,
+    }
+
+
+def _review_correction_signature(snapshot: dict[str, Any]) -> str:
+    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _review_correction_categories(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    categories = []
+    for key, label in (("customer", "cliente"), ("company", "empresa"), ("seller", "vendedor"), ("commercial", "condiciones_comerciales")):
+        if before.get(key) != after.get(key):
+            categories.append(label)
+    before_items = before.get("items") or []
+    after_items = after.get("items") or []
+    if [item.get("article") for item in before_items] != [item.get("article") for item in after_items]:
+        categories.append("artículos")
+    if [item.get("quantity") for item in before_items] != [item.get("quantity") for item in after_items]:
+        categories.append("cantidades")
+    price_keys = ("unitPrice", "currency", "discount")
+    if [[item.get(key) for key in price_keys] for item in before_items] != [[item.get(key) for key in price_keys] for item in after_items]:
+        categories.append("precios")
+    stock_keys = ("partida", "deposit", "partidas")
+    if [[item.get(key) for key in stock_keys] for item in before_items] != [[item.get(key) for key in stock_keys] for item in after_items]:
+        categories.append("partidas_y_depósitos")
+    return categories
+
+
+def _record_review_order_correction(
+    review_group: dict[str, Any],
+    order_id: str,
+    actor_user_id: int | None,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    group_id = review_group["id"]
+    summary = review_group.get("responseSummary") if isinstance(review_group.get("responseSummary"), dict) else {}
+    previous_snapshot = _review_correction_snapshot(before)
+    new_snapshot = _review_correction_snapshot(after)
+    previous_signature = _review_correction_signature(previous_snapshot)
+    new_signature = _review_correction_signature(new_snapshot)
+    categories = _review_correction_categories(previous_snapshot, new_snapshot)
+    corrections = summary.get("orderCorrections") if isinstance(summary.get("orderCorrections"), dict) else {}
+    corrections = {
+        **corrections,
+        order_id: {
+            "savedAt": timezone.now().isoformat(),
+            "actorUserId": actor_user_id,
+            "previousSignature": previous_signature,
+            "newSignature": new_signature,
+            "categories": categories,
+        },
+    }
+    patch = {
+        "reviewState": "ready_to_reissue",
+        "operatorCorrectionRecorded": True,
+        "correctionSavedAt": timezone.now().isoformat(),
+        "hasPayloadChanges": None,
+        "orderCorrections": corrections,
+    }
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bejerman_remito_groups
+               SET response_summary = COALESCE(response_summary, '{}'::jsonb) || %s::jsonb
+             WHERE id = %s AND status = 'failed_review'
+            """,
+            [_json_param(patch), group_id],
+        )
+    create_event(
+        order_id,
+        actor_user_id,
+        "bejerman_remito_correction_saved",
+        metadata={
+            "previousGroupId": group_id,
+            "previousSignature": previous_signature,
+            "newSignature": new_signature,
+            "categories": categories,
+        },
+    )
+
+
 @transaction.atomic
 def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id: int | None) -> dict[str, Any]:
     current = get_delivery_order(order_id, include_events=False, for_update=True)
     _assert_order_editable(current)
+    review_group = _review_group_for_order_correction(order_id)
 
     delivery_type = normalize_delivery_type(payload.get("deliveryType") or current.get("deliveryType"))
     if "status" in payload or "estado" in payload:
@@ -2566,12 +3031,222 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
             cur.execute("DELETE FROM delivery_order_item_partidas WHERE order_item_id = ANY(%s)", [delete_ids])
             cur.execute("DELETE FROM delivery_order_items WHERE order_id = %s AND id = ANY(%s)", [order_id, delete_ids])
 
+    updated = get_delivery_order(order_id, include_events=False)
     create_event(
         order_id,
         actor_user_id,
         "delivery_order_updated",
         metadata={"itemCount": len(items), "previousStatus": current.get("status")},
     )
+    if review_group:
+        _record_review_order_correction(review_group, order_id, actor_user_id, current, updated)
+    return get_delivery_order(order_id)
+
+
+COMMERCIAL_CORRECTION_TOP_LEVEL_KEYS = {"commercialDeadline", "items"}
+COMMERCIAL_CORRECTION_ITEM_KEYS = {"id", "unitPrice", "priceCurrency", "discountPercent"}
+
+
+def _assert_commercial_correction_state(order: dict[str, Any]) -> None:
+    if order.get("status") != "entregado_pendiente_facturacion":
+        raise DeliveryOrderError(
+            "INVALID_COMMERCIAL_CORRECTION_STATE",
+            "Solo se corrigen pedidos entregados pendientes de facturación.",
+            status_code=409,
+        )
+    if not _optional_text(order.get("remitoNumber")):
+        raise DeliveryOrderError("REMITO_REQUIRED", "La orden necesita remito para corregir precio o plazo.", status_code=409)
+    if _optional_text(order.get("invoiceNumber")):
+        raise DeliveryOrderError(
+            "DELIVERY_ORDER_INVOICED",
+            "No se puede corregir una orden que ya tiene factura.",
+            status_code=409,
+        )
+    group = order.get("bejermanRemitoGroup") if isinstance(order.get("bejermanRemitoGroup"), dict) else {}
+    if _optional_text(group.get("status")) not in {"generated", "reconciled"}:
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_NOT_READY",
+            "El remito Bejerman debe estar generado o reconciliado para corregir precio.",
+            status_code=409,
+        )
+
+
+def _commercial_item_payload_by_id(payload: dict[str, Any], current_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise DeliveryOrderError("INVALID_COMMERCIAL_CORRECTION_PAYLOAD", "Payload inválido")
+    invalid_keys = sorted(set(payload) - COMMERCIAL_CORRECTION_TOP_LEVEL_KEYS)
+    if invalid_keys:
+        raise DeliveryOrderError(
+            "INVALID_COMMERCIAL_CORRECTION_PAYLOAD",
+            "La corrección solo acepta plazo comercial e ítems de precio.",
+        )
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise DeliveryOrderError("ITEMS_REQUIRED", "La corrección necesita ítems de precio")
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise DeliveryOrderError("INVALID_ITEM", "Cada renglón debe ser un objeto")
+        invalid_item_keys = sorted(set(item) - COMMERCIAL_CORRECTION_ITEM_KEYS)
+        if invalid_item_keys:
+            raise DeliveryOrderError(
+                "INVALID_COMMERCIAL_CORRECTION_PAYLOAD",
+                "La corrección no permite cambiar datos técnicos, cantidades, artículos ni partidas.",
+                status_code=409,
+            )
+        item_id = _optional_text(item.get("id"))
+        if not item_id:
+            raise DeliveryOrderError("DELIVERY_ORDER_ITEM_REQUIRED", "Cada renglón necesita id")
+        if item_id in by_id:
+            raise DeliveryOrderError("DELIVERY_ORDER_ITEM_DUPLICATED", "Hay renglones repetidos en la corrección")
+        by_id[item_id] = item
+    current_ids = {str(item.get("id")) for item in current_items if item.get("id")}
+    if set(by_id) != current_ids:
+        raise DeliveryOrderError(
+            "DELIVERY_ORDER_ITEMS_MISMATCH",
+            "La corrección debe incluir exactamente los renglones existentes.",
+            status_code=409,
+        )
+    return by_id
+
+
+def _commercial_correction_next_items(order: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
+    current_items = [item for item in (order.get("items") or []) if isinstance(item, dict)]
+    by_id = _commercial_item_payload_by_id(payload, current_items)
+    next_items: list[dict[str, Any]] = []
+    for item in current_items:
+        item_payload = by_id[str(item.get("id"))]
+        unit_price = _decimal_or_none(item_payload.get("unitPrice"))
+        if unit_price is None or unit_price < 0:
+            raise DeliveryOrderError("INVALID_DECIMAL", "Precio inválido")
+        current_currency = delivery_order_item_price_currency(item, _price_currency(order.get("priceCurrency")))
+        next_currency = _price_currency(item_payload.get("priceCurrency"), current_currency)
+        if next_currency != current_currency:
+            raise DeliveryOrderError(
+                "DELIVERY_ORDER_CURRENCY_LOCKED",
+                "No se puede cambiar la moneda de un remito ya emitido desde esta corrección.",
+                status_code=409,
+            )
+        discount_percent = _discount_percent(item_payload.get("discountPercent"))
+        next_items.append(
+            {
+                **item,
+                "unitPrice": unit_price,
+                "priceCurrency": next_currency,
+                "discountPercent": discount_percent,
+            }
+        )
+    return next_items
+
+
+def _commercial_correction_metadata(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    bejerman_result: dict[str, Any],
+) -> dict[str, Any]:
+    def decimal_text(value: Any) -> str:
+        parsed = _decimal_or_none(value)
+        return "" if parsed is None else str(parsed)
+
+    before_totals = delivery_order_billing_totals(before)
+    after_totals = delivery_order_billing_totals(after)
+    before_items = {str(item.get("id")): item for item in before.get("items") or [] if isinstance(item, dict)}
+    item_changes = []
+    for item in after.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        previous = before_items.get(str(item.get("id"))) or {}
+        item_changes.append(
+            {
+                "id": item.get("id"),
+                "articleCode": item.get("articleCode"),
+                "description": item.get("articleName") or item.get("description"),
+                "previousUnitPrice": decimal_text(previous.get("unitPrice")),
+                "newUnitPrice": decimal_text(item.get("unitPrice")),
+                "previousDiscountPercent": str(_discount_percent(previous.get("discountPercent"))),
+                "newDiscountPercent": str(_discount_percent(item.get("discountPercent"))),
+                "priceCurrency": delivery_order_item_price_currency(item, _price_currency(after.get("priceCurrency"))),
+            }
+        )
+    return {
+        "previousDeadline": before.get("commercialDeadline") or "",
+        "newDeadline": after.get("commercialDeadline") or "",
+        "previousTotal": str(before_totals.get("total")),
+        "newTotal": str(after_totals.get("total")),
+        "previousTotalLabel": _totals_money_label(before_totals, "total"),
+        "newTotalLabel": _totals_money_label(after_totals, "total"),
+        "items": item_changes,
+        "bejerman": {
+            "backupName": bejerman_result.get("backupName"),
+            "lineCount": bejerman_result.get("lineCount"),
+            "rows": bejerman_result.get("rows") or [],
+        },
+    }
+
+
+@transaction.atomic
+def correct_delivery_order_commercial_terms(order_id: str, payload: dict[str, Any], actor_user_id: int | None) -> dict[str, Any]:
+    _require_supervisor(actor_user_id)
+    current = get_delivery_order(order_id, include_events=False, for_update=True)
+    _assert_commercial_correction_state(current)
+
+    next_deadline = _optional_text(
+        payload.get("commercialDeadline") if "commercialDeadline" in payload else current.get("commercialDeadline")
+    )
+    next_items = _commercial_correction_next_items(current, payload)
+    next_order_for_bejerman = {**current, "commercialDeadline": next_deadline, "items": next_items}
+
+    try:
+        targets = targets_from_delivery_order(next_order_for_bejerman, next_items)
+        bejerman_result = perform_bejerman_remito_price_fix(
+            targets,
+            company_key=current.get("companyKey") or "SEPID",
+            apply=True,
+        )
+    except BejermanRemitoPriceFixError as exc:
+        raise DeliveryOrderError(exc.code, str(exc), status_code=409) from exc
+    except Exception as exc:
+        logger.exception("delivery_order_commercial_correction_bejerman_failed", extra={"order_id": order_id})
+        raise DeliveryOrderError(
+            "BEJERMAN_PRICE_FIX_FAILED",
+            "No se pudo aplicar la corrección de precio en Bejerman.",
+            status_code=409,
+        ) from exc
+
+    header_currency = delivery_order_item_price_currency(next_items[0], _price_currency(current.get("priceCurrency"))) if next_items else _price_currency(current.get("priceCurrency"))
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE delivery_orders
+               SET commercial_deadline = %s,
+                   price_currency = %s
+             WHERE id = %s
+            """,
+            [next_deadline, header_currency, order_id],
+        )
+        for item in next_items:
+            cur.execute(
+                """
+                UPDATE delivery_order_items
+                   SET unit_price = %s,
+                       price_currency = %s,
+                       discount_percent = %s
+                 WHERE id = %s AND order_id = %s
+                """,
+                [
+                    item.get("unitPrice"),
+                    item.get("priceCurrency"),
+                    item.get("discountPercent"),
+                    item.get("id"),
+                    order_id,
+                ],
+            )
+
+    updated = get_delivery_order(order_id, include_events=False)
+    metadata = _commercial_correction_metadata(current, updated, bejerman_result=bejerman_result)
+    create_event(order_id, actor_user_id, "delivery_order_commercial_correction", metadata=metadata)
+    notify_delivery_order_commercial_correction(order_id, actor_user_id, metadata)
     return get_delivery_order(order_id)
 
 
@@ -2772,7 +3447,11 @@ def mark_invoiced(order_id: str, actor_user_id: int | None, invoice_number: str)
             SET status = %s,
                 invoice_number = %s,
                 invoiced_by_user_id = %s,
-                invoiced_at = CURRENT_TIMESTAMP
+                invoiced_at = CURRENT_TIMESTAMP,
+                billing_postponed_until = NULL,
+                billing_postponed_by_user_id = NULL,
+                billing_postponed_at = NULL,
+                billing_postponement_notified_at = NULL
             WHERE id = %s
             """,
             [next_status, invoice, actor_user_id, order_id],
@@ -2801,7 +3480,11 @@ def mark_not_billable(order_id: str, actor_user_id: int | None, note: str | None
         cur.execute(
             """
             UPDATE delivery_orders
-            SET status = %s
+            SET status = %s,
+                billing_postponed_until = NULL,
+                billing_postponed_by_user_id = NULL,
+                billing_postponed_at = NULL,
+                billing_postponement_notified_at = NULL
             WHERE id = %s
             """,
             [next_status, order_id],

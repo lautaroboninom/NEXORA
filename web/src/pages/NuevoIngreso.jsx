@@ -93,6 +93,7 @@ const RENTAL_RETURN_MOTIVOS = new Set([
   MOTIVO.REPARACION_ALQUILER,
   MOTIVO.OTROS,
 ]);
+const MG_OWNED_BLOCKED_MOTIVOS = new Set([MOTIVO.REPARACION, MOTIVO.COTIZACION_EQUIPO]);
 
 function scrollPageTop() {
   try {
@@ -246,6 +247,7 @@ export default function NuevoIngreso() {
   const [varianteTxt, setVarianteTxt] = useState("");
   const [varianteSugeridas, setVarianteSugeridas] = useState([]);
   const [equipoAlquiladoOrigen, setEquipoAlquiladoOrigen] = useState(false);
+  const [esEquipoPropioMg, setEsEquipoPropioMg] = useState(false);
 
   // Form principal
   const [form, setForm] = useState({
@@ -399,15 +401,27 @@ export default function NuevoIngreso() {
   );
   const motivosIngreso = useMemo(() => {
     const options = Array.isArray(motivos) ? motivos : [];
-    if (!equipoAlquiladoOrigen) return options;
-    return options.filter((m) => RENTAL_RETURN_MOTIVOS.has(String(m?.value || "").trim()));
-  }, [motivos, equipoAlquiladoOrigen]);
+    let filtered = options;
+    if (equipoAlquiladoOrigen) {
+      filtered = filtered.filter((m) => RENTAL_RETURN_MOTIVOS.has(String(m?.value || "").trim()));
+    }
+    if (esEquipoPropioMg) {
+      filtered = filtered.filter((m) => !MG_OWNED_BLOCKED_MOTIVOS.has(String(m?.value || "").trim()));
+    }
+    return filtered;
+  }, [motivos, equipoAlquiladoOrigen, esEquipoPropioMg]);
 
   useEffect(() => {
     if (!equipoAlquiladoOrigen || !form.motivo) return;
     if (RENTAL_RETURN_MOTIVOS.has(String(form.motivo || "").trim())) return;
     setForm((prev) => ({ ...prev, motivo: "" }));
   }, [equipoAlquiladoOrigen, form.motivo]);
+
+  useEffect(() => {
+    if (!esEquipoPropioMg || !form.motivo) return;
+    if (!MG_OWNED_BLOCKED_MOTIVOS.has(String(form.motivo || "").trim())) return;
+    setForm((prev) => ({ ...prev, motivo: "" }));
+  }, [esEquipoPropioMg, form.motivo]);
 
   function setClienteCatalogo(c) {
     const razonSocial = c?.razon_social || "";
@@ -518,6 +532,7 @@ export default function NuevoIngreso() {
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
     setEquipoAlquiladoOrigen(false);
+    setEsEquipoPropioMg(false);
   };
 
   const triggerLookupRequest = (source, rawValue) => {
@@ -789,6 +804,12 @@ export default function NuevoIngreso() {
         const varianteFromDevice = String(device.variante || "").trim();
         const mgFromDevice = String(device.numero_interno || "").trim();
         const mgInactiveBySale = !!flags.mg_inactivo_venta;
+        const propioMg = !mgInactiveBySale && (
+          flags.es_propietario_mg === true ||
+          flags.es_cliente_mg_owner === true ||
+          device.es_propietario_mg === true ||
+          device.es_cliente_mg_owner === true
+        );
 
         const ingresoAlquilado =
           !!ingreso.alquilado || String(ingreso.estado || "").trim().toLowerCase() === "alquilado";
@@ -877,6 +898,7 @@ export default function NuevoIngreso() {
           return next;
         });
         setEquipoAlquiladoOrigen(alquilerOrigen);
+        setEsEquipoPropioMg(propioMg);
 
         prefillSkipTipoResetRef.current = true;
         setTipoSel(tipoFromDevice || "");
@@ -1232,6 +1254,7 @@ export default function NuevoIngreso() {
     setBejermanSuggestion(null);
     setAppliedBejermanSale(null);
     setEquipoAlquiladoOrigen(false);
+    setEsEquipoPropioMg(false);
     onChange("equipo.numero_serie")(e);
   };
 
@@ -1240,6 +1263,7 @@ export default function NuevoIngreso() {
     setMgLookup((s) => (s.notFound ? { ...s, notFound: false } : s));
     setAppliedBejermanSale(null);
     setEquipoAlquiladoOrigen(false);
+    setEsEquipoPropioMg(false);
     onChange("equipo.numero_interno")(e);
   };
 
@@ -1727,6 +1751,7 @@ export default function NuevoIngreso() {
           garantia_reparacion: form.garantia_reparacion,
         },
         equipoAlquiladoOrigen,
+        esEquipoPropioMg,
         marcaTxt,
         marcaId,
         tipoSel,
@@ -1810,6 +1835,7 @@ export default function NuevoIngreso() {
     setBejermanSuggestion(editor.bejermanSuggestion || null);
     setAppliedBejermanSale(editor.appliedBejermanSale || null);
     setEquipoAlquiladoOrigen(!!editor.equipoAlquiladoOrigen);
+    setEsEquipoPropioMg(!!editor.esEquipoPropioMg);
     setEditingBatchItemId(itemId);
     setRisPreflight(null);
     setRisPreflightError("");

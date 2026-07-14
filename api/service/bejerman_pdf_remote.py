@@ -238,6 +238,58 @@ def read_remote_pdf_candidates(directory_uri: Any, filenames: list[str], prefixe
         client.close()
 
 
+def _remote_candidate_names(sftp, directory: str, filenames: list[str], prefixes: list[str] | None = None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(value: Any) -> None:
+        name = _clean(value).replace("\\", "/").split("/")[-1]
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    for filename in filenames or []:
+        add_name(filename)
+
+    clean_prefixes = [_clean(prefix) for prefix in (prefixes or []) if _clean(prefix)]
+    if clean_prefixes:
+        for name in sftp.listdir(directory):
+            if any(name.startswith(prefix) for prefix in clean_prefixes):
+                add_name(name)
+
+    return names
+
+
+def remove_remote_pdf_candidates_if_same(
+    directory_uri: Any,
+    filenames: list[str],
+    prefixes: list[str] | None,
+    expected: bytes,
+) -> list[str]:
+    if not expected:
+        return []
+    windows_dir = remote_windows_path(directory_uri)
+    directory = _sftp_path(windows_dir).rstrip("/")
+    removed: list[str] = []
+    client = _connect()
+    try:
+        sftp = client.open_sftp()
+        try:
+            _remote_stat_dir(sftp, directory)
+            for filename in _remote_candidate_names(sftp, directory, filenames, prefixes):
+                path = posixpath.join(directory, filename)
+                existing = _read_remote_bytes(sftp, path)
+                if existing is None or existing != expected:
+                    continue
+                sftp.remove(path)
+                removed.append(_join_windows(windows_dir, filename))
+        finally:
+            sftp.close()
+    finally:
+        client.close()
+    return removed
+
+
 def remove_remote_file_if_same(file_uri: Any, expected: bytes) -> bool:
     windows_file = remote_windows_path(file_uri)
     path = _sftp_path(windows_file)

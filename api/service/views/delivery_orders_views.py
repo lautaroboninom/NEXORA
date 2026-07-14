@@ -21,6 +21,7 @@ from ..bejerman_delivery import (
     get_delivery_order_remito_pdf,
     get_facturacion_pdf,
     get_remito_group_pdf,
+    get_unpriced_rt_document_pdf,
     list_bejerman_article_stock,
     list_bejerman_articles,
     list_bejerman_depositos,
@@ -35,6 +36,7 @@ from ..bejerman_delivery import (
 from ..delivery_orders import (
     DeliveryOrderError,
     cancel_order,
+    correct_delivery_order_commercial_terms,
     create_delivery_order,
     get_delivery_order,
     list_delivery_orders,
@@ -43,6 +45,8 @@ from ..delivery_orders import (
     mark_invoiced,
     mark_not_billable,
     mark_prepared,
+    postpone_delivery_order_billing,
+    reactivate_delivery_order_billing,
     update_delivery_order,
     update_item_article,
     update_item_partidas,
@@ -204,6 +208,26 @@ class DeliveryOrderNotBillableView(DeliveryOrderPermissionMixin, APIView):
             return _error_response(exc)
 
 
+class DeliveryOrderBillingPostponementView(DeliveryOrderPermissionMixin, APIView):
+
+    def post(self, request, order_id):
+        try:
+            return Response(
+                postpone_delivery_order_billing(order_id, _actor_id(request), (request.data or {}).get("returnDate"))
+            )
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class DeliveryOrderBillingReactivationView(DeliveryOrderPermissionMixin, APIView):
+
+    def post(self, request, order_id):
+        try:
+            return Response(reactivate_delivery_order_billing(order_id, _actor_id(request)))
+        except Exception as exc:
+            return _error_response(exc)
+
+
 class DeliveryOrderCancelView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
@@ -218,6 +242,18 @@ class DeliveryOrderRemitoLocationView(DeliveryOrderPermissionMixin, APIView):
     def patch(self, request, order_id):
         try:
             return Response(update_remito_location(order_id, _actor_id(request), (request.data or {}).get("remitoLocation")))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class DeliveryOrderCommercialCorrectionView(DeliveryOrderPermissionMixin, APIView):
+
+    def patch(self, request, order_id):
+        role = str(getattr(request.user, "rol", "") or "").strip().lower()
+        if role != "supervisor":
+            raise PermissionDenied("Solo el rol supervisor puede corregir precio o plazo de una orden entregada.")
+        try:
+            return Response(correct_delivery_order_commercial_terms(order_id, request.data or {}, _actor_id(request)))
         except Exception as exc:
             return _error_response(exc)
 
@@ -503,14 +539,22 @@ class CobranzasRemitoPdfView(DeliveryOrderPermissionMixin, APIView):
                     raise registered_remito_no_pdf_error(
                         registered_remito.get("remito_number") or registered_remito.get("manual_remito_number")
                     )
-                bytes_, content_type = get_facturacion_pdf(
-                    customer_code,
-                    document_id,
-                    interactive=True,
-                    actor_user_id=_actor_id(request),
-                    company_key=company_key,
-                )
-                filename = f"remito-{document_id}.pdf"
+                if _cobranzas_remito_document_type(document_id) == "RT":
+                    bytes_, content_type, filename = get_unpriced_rt_document_pdf(
+                        customer_code,
+                        document_id,
+                        actor_user_id=_actor_id(request),
+                        company_key=company_key,
+                    )
+                else:
+                    bytes_, content_type = get_facturacion_pdf(
+                        customer_code,
+                        document_id,
+                        interactive=True,
+                        actor_user_id=_actor_id(request),
+                        company_key=company_key,
+                    )
+                    filename = f"remito-{document_id}.pdf"
         except Exception as exc:
             return _error_response(exc)
         response = HttpResponse(bytes_, content_type=content_type or "application/pdf")
@@ -589,8 +633,11 @@ __all__ = [
     "DeliveryOrderDeliveredView",
     "DeliveryOrderInvoicedView",
     "DeliveryOrderNotBillableView",
+    "DeliveryOrderBillingPostponementView",
+    "DeliveryOrderBillingReactivationView",
     "DeliveryOrderCancelView",
     "DeliveryOrderRemitoLocationView",
+    "DeliveryOrderCommercialCorrectionView",
     "DeliveryOrderItemArticleView",
     "DeliveryOrderItemPartidasView",
     "DeliveryOrderBejermanRemitoView",

@@ -10,6 +10,7 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -26,7 +27,7 @@ from .bejerman_pdf_remote import (
     read_remote_pdf,
     read_remote_pdf_candidates,
     remote_pdf_uri,
-    remove_remote_file_if_same,
+    remove_remote_pdf_candidates_if_same,
     write_remote_pdf,
 )
 from .bejerman_pdf_settings import BejermanPdfOutputSettingsError, configured_pdf_output_dir
@@ -759,7 +760,7 @@ def _normalize_vat_code(value: Any) -> str:
 
 
 def _delivery_vat_rate_code_map() -> dict[str, float]:
-    raw = as_string(_setting("BEJERMAN_REMITO_VAT_RATE_CODES", "01:21,03:10.5"))
+    raw = as_string(_setting("BEJERMAN_REMITO_VAT_RATE_CODES", "01:21,03:10.5,04:0"))
     mapping: dict[str, float] = {}
     for chunk in re.split(r"[;,]", raw):
         if not chunk.strip() or not re.search(r"[:=]", chunk):
@@ -1424,16 +1425,37 @@ def _sdk_customer_filename_part(value: Any) -> str:
     return text[:6].ljust(6)
 
 
-def _samtronic_sdk_remito_facturas_uri(reference: BejermanPdfReference) -> str:
+def _samtronic_sdk_remito_facturas_dir_uri() -> str:
     directory = as_string(getattr(settings, "BEJERMAN_PDF_SAMTRONIC_FACTURAS_DIR", "")) or r"C:\2. SEPID\PDF\FACTURAS"
+    directory = directory.rstrip("\\/")
+    if re.fullmatch(r"[A-Za-z]:", directory):
+        directory += "\\"
+    return remote_pdf_uri(directory)
+
+
+def _samtronic_sdk_remito_facturas_filename(reference: BejermanPdfReference) -> str:
     tipo = as_string(reference.type).strip().upper()[:3].ljust(3)
     letter = as_string(reference.letter).strip().upper()[:1].ljust(1)
     point = _numeric_pdf_filename_part(reference.point_of_sale, 5)[:5].ljust(5)
     number = _numeric_pdf_filename_part(reference.number, 8)[-8:]
     issue_date = _reference_issue_date_for_sdk_filename(reference)
     customer = _sdk_customer_filename_part(reference.customer_code)
-    filename = f"V-{tipo}-{letter}-{point}-{number}-{issue_date}-{customer}.pdf"
-    return remote_pdf_uri(directory.rstrip("\\/") + "\\" + filename)
+    return f"V-{tipo}-{letter}-{point}-{number}-{issue_date}-{customer}.pdf"
+
+
+def _samtronic_sdk_remito_facturas_prefix(reference: BejermanPdfReference) -> str:
+    tipo = as_string(reference.type).strip().upper()[:3].ljust(3)
+    letter = as_string(reference.letter).strip().upper()[:1].ljust(1)
+    point = _numeric_pdf_filename_part(reference.point_of_sale, 5)[:5].ljust(5)
+    number = _numeric_pdf_filename_part(reference.number, 8)[-8:]
+    return f"V-{tipo}-{letter}-{point}-{number}-"
+
+
+def _samtronic_facturas_remito_cleanup_targets(reference: BejermanPdfReference) -> tuple[str, list[str], list[str]]:
+    filenames = [_samtronic_sdk_remito_facturas_filename(reference)]
+    filenames.extend(_comprobante_pdf_filename_candidates(reference))
+    prefixes = [_samtronic_sdk_remito_facturas_prefix(reference), _comprobante_pdf_filename_prefix(reference)]
+    return _samtronic_sdk_remito_facturas_dir_uri(), filenames, prefixes
 
 
 def _cleanup_samtronic_facturas_remito_copy(reference: BejermanPdfReference, pdf: bytes) -> None:
@@ -1443,11 +1465,12 @@ def _cleanup_samtronic_facturas_remito_copy(reference: BejermanPdfReference, pdf
     if enabled in {"0", "false", "no", "n", "off"}:
         return
     try:
-        removed = remove_remote_file_if_same(_samtronic_sdk_remito_facturas_uri(reference), pdf)
-        if removed:
+        directory_uri, filenames, prefixes = _samtronic_facturas_remito_cleanup_targets(reference)
+        removed_paths = remove_remote_pdf_candidates_if_same(directory_uri, filenames, prefixes, pdf)
+        for path in removed_paths:
             logger.info(
                 "bejerman_pdf_facturas_remito_copy_removed",
-                extra=_pdf_log_context(reference, interactive=False),
+                extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_path": path},
             )
     except Exception as exc:
         logger.warning(
@@ -1730,6 +1753,8 @@ def resolve_customer_document_fields(client: BejermanSDKClient, customer_code: s
         raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_NOT_FOUND")
     if not fields.get("Cliente_SitIVA"):
         raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_VAT_MISSING")
+    if not fields.get("Cliente_NroDocumento"):
+        raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_DOCUMENT_MISSING")
     return fields
 
 
@@ -1972,6 +1997,12 @@ def service_ingress_equipment_legend_lines(equipment: dict[str, Any] | None, *, 
     lines: list[str] = []
     if reason:
         lines.append(reason)
+    os_value = as_string(os_text)
+    if os_value:
+        lines.append(f"OS {os_value}")
+        if identifier:
+            label = "N/S" if serial and identifier == serial else "Partida"
+            lines.append(f"{label}: {identifier}")
     if internal and internal != identifier:
         lines.append(f"Interno: {internal}")
     return lines
@@ -2382,7 +2413,7 @@ def _delivery_item_sales_vat(
     article_tax_by_code: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any]:
     catalog_vat = _lookup_article_sales_vat(article_code, article_tax_by_code)
-    sources = [item, catalog_vat]
+    sources = [catalog_vat, item]
     vat_type = as_string(
         _first_sales_vat_value(
             sources,
@@ -2440,6 +2471,60 @@ def _delivery_vat_amount(amount: float, vat_rate: float) -> float:
     return round(amount * vat_rate / 100, 2)
 
 
+DELIVERY_MONEY_QUANT = Decimal("0.01")
+DELIVERY_UNIT_PRICE_QUANT = Decimal("0.000001")
+
+
+def _delivery_decimal(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value or 0))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def _delivery_money(value: Any) -> Decimal:
+    return _delivery_decimal(value).quantize(DELIVERY_MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _delivery_money_number(value: Any) -> float:
+    return float(_delivery_money(value))
+
+
+def _delivery_unit_price_number(value: Any) -> float:
+    return float(_delivery_decimal(value).quantize(DELIVERY_UNIT_PRICE_QUANT, rounding=ROUND_HALF_UP))
+
+
+def _delivery_rt_uses_tax_included_amounts(profile: dict[str, Any], customer_fields: dict[str, str]) -> bool:
+    if as_string(profile.get("type")).upper() != "RT":
+        return False
+    customer_vat_status = as_string(customer_fields.get("Cliente_SitIVA")).upper()
+    return bool(customer_vat_status and customer_vat_status != "1")
+
+
+def _validate_delivery_comprobante_amounts(comprobante: dict[str, Any]) -> None:
+    article_items = [
+        item
+        for item in comprobante.get("Comprobante_Items") or []
+        if isinstance(item, dict) and as_string(item.get("Item_Tipo")).upper() == "A"
+    ]
+    calculated = sum(
+        (
+            _delivery_decimal(item.get("Item_ImporteTotal"))
+            + _delivery_decimal(item.get("Item_ImporteIVAInscrip"))
+            + _delivery_decimal(item.get("Item_ImporteIVANoInscrip"))
+            + _delivery_decimal(item.get("Item_ImporteIVANoGravado"))
+        )
+        for item in article_items
+    )
+    calculated = _delivery_money(calculated)
+    declared = _delivery_money(comprobante.get("Comprobante_ImporteTotal"))
+    if calculated != declared:
+        raise BejermanSdkResponseError(
+            "DELIVERY_REMITO_AMOUNT_MISMATCH: "
+            f"el total del encabezado ({declared}) no coincide con los renglones ({calculated})"
+        )
+
+
 def build_delivery_remito_comprobante(
     request: dict[str, Any],
     config: dict[str, Any],
@@ -2457,6 +2542,7 @@ def build_delivery_remito_comprobante(
         raise BejermanSdkResponseError("INVALID_SELLER_CODE_LENGTH")
     first_type = orders[0].get("deliveryType") or "sale"
     profile = _profile_for_delivery_type(first_type, config)
+    tax_included_rt = _delivery_rt_uses_tax_included_amounts(profile, customer_fields)
     issue_date = normalize_date(request.get("issueDate")) or timezone.localdate().isoformat()
     item_price_currencies = _delivery_item_price_currencies(request, orders)
     if len(item_price_currencies) != 1:
@@ -2470,8 +2556,8 @@ def build_delivery_remito_comprobante(
     )
     items: list[dict[str, Any]] = []
     sort_order = 1
-    total = 0.0
-    tax_total = 0.0
+    total = Decimal("0")
+    tax_total = Decimal("0")
     for order in orders:
         is_service_release = order.get("deliveryType") == "service_release"
         if not is_service_release:
@@ -2550,13 +2636,27 @@ def build_delivery_remito_comprobante(
                     )
                     sort_order += 1
                 signed_line_quantity = sdk_signed_article_quantity(profile["type"], line_quantity)
-                gross_amount = line_quantity * unit_price
-                discount_amount = gross_amount * discount_percent / 100
-                amount = gross_amount - discount_amount
-                final_unit_price = unit_price * (1 - discount_percent / 100)
                 vat = _delivery_item_sales_vat(item, article_code, article_tax_by_code) if article_code else {"type": "1", "rate": 0}
-                vat_rate = vat["rate"]
-                vat_amount = _delivery_vat_amount(amount, vat_rate)
+                quantity_decimal = _delivery_decimal(line_quantity)
+                unit_price_decimal = _delivery_decimal(unit_price)
+                discount_decimal = _delivery_decimal(discount_percent)
+                vat_rate_decimal = _delivery_decimal(vat["rate"])
+                if tax_included_rt:
+                    item_unit_price = unit_price_decimal * (Decimal("1") + vat_rate_decimal / Decimal("100"))
+                    gross_amount = quantity_decimal * item_unit_price
+                    discount_amount = _delivery_money(gross_amount * discount_decimal / Decimal("100"))
+                    amount = _delivery_money(gross_amount - discount_amount)
+                    final_unit_price = item_unit_price * (Decimal("1") - discount_decimal / Decimal("100"))
+                    item_vat_rate = Decimal("0")
+                    vat_amount = Decimal("0")
+                else:
+                    item_unit_price = unit_price_decimal
+                    gross_amount = quantity_decimal * item_unit_price
+                    discount_amount = _delivery_money(gross_amount * discount_decimal / Decimal("100"))
+                    amount = _delivery_money(gross_amount - discount_amount)
+                    final_unit_price = item_unit_price * (Decimal("1") - discount_decimal / Decimal("100"))
+                    item_vat_rate = vat_rate_decimal
+                    vat_amount = _delivery_money(amount * vat_rate_decimal / Decimal("100"))
                 total += amount
                 tax_total += vat_amount
                 items.append(
@@ -2567,12 +2667,12 @@ def build_delivery_remito_comprobante(
                         "Item_CantidadUM1": signed_line_quantity if article_code else 0,
                         "Item_CantidadUM2": 0,
                         "Item_DescripArticulo": article_name[:250],
-                        "Item_PrecioUnitario": unit_price,
-                        "Item_TasaIVAInscrip": vat_rate,
+                        "Item_PrecioUnitario": _delivery_unit_price_number(item_unit_price),
+                        "Item_TasaIVAInscrip": float(item_vat_rate),
                         "Item_TasaIVANoInscrip": 0,
-                        "Item_ImporteIVAInscrip": vat_amount,
+                        "Item_ImporteIVAInscrip": _delivery_money_number(vat_amount),
                         "Item_ImporteIVANoInscrip": 0,
-                        "Item_ImporteTotal": amount,
+                        "Item_ImporteTotal": _delivery_money_number(amount),
                         "Item_ImporteDescComercial": 0,
                         "Item_ImporteDescFinanciero": 0,
                         "Item_ImporteDescGeneral": 0,
@@ -2580,11 +2680,11 @@ def build_delivery_remito_comprobante(
                         "Item_ImporteIVANoGravado": 0,
                         "Item_TipoIVA": vat["type"],
                         "Item_CodigoDescPorLinea": None,
-                        "Item_ImporteDescPorLinea": discount_amount,
+                        "Item_ImporteDescPorLinea": _delivery_money_number(discount_amount),
                         "Item_Deposito": (line_deposit or profile["deposit"]) if article_code else None,
                         "Item_Partida": line_partida or " ",
                         "Item_TasaDescPorItem": discount_percent,
-                        "Item_Importe": amount,
+                        "Item_Importe": _delivery_money_number(amount),
                         "Item_FechaEntrega": issue_date,
                         "Item_Kit": None,
                         "Item_RenglonKit": 0,
@@ -2604,7 +2704,13 @@ def build_delivery_remito_comprobante(
                                 request.get("customerCode"),
                                 sort_order,
                             ),
-                            _delivery_discount_legend(discount_percent, final_unit_price, amount, item_currency, line_quantity),
+                            _delivery_discount_legend(
+                                discount_percent,
+                                float(final_unit_price),
+                                float(amount),
+                                item_currency,
+                                line_quantity,
+                            ),
                         )
                     )
                     sort_order += 1
@@ -2623,8 +2729,7 @@ def build_delivery_remito_comprobante(
                     )
                     sort_order += 1
     notes = "\n".join(part for part in (as_string(request.get("notes")), f"NEXORA {request.get('groupId')}", f"Órdenes {', '.join(as_string(order.get('orderNumber')) for order in orders)}") if part)
-    return {
-        "comprobante": {
+    comprobante = {
             "Comprobante_Tipo": profile["type"],
             "Comprobante_Letra": config["letter"],
             "Comprobante_PtoVenta": profile["pointOfSale"],
@@ -2637,7 +2742,7 @@ def build_delivery_remito_comprobante(
             "Vendedor_Codigo": seller,
             "Comprobante_CondVenta": request.get("paymentTermCode"),
             "Comprobante_FechaVencimiento": issue_date,
-            "Comprobante_ImporteTotal": round(total + tax_total, 2),
+            "Comprobante_ImporteTotal": _delivery_money_number(total + tax_total),
             "Comprobante_Mensaje": notes[:250] or " ",
             "Comprobante_ActualizaStock": "S",
             "Comprobante_ListaPrecios": config["priceListCode"],
@@ -2652,9 +2757,13 @@ def build_delivery_remito_comprobante(
             "Comprobante_RegEspeciales": [],
             "Comprobante_DatosAdicionales": None,
             "Comprobante_Cuotas": None,
-        },
+        }
+    _validate_delivery_comprobante_amounts(comprobante)
+    return {
+        "comprobante": comprobante,
         "profile": profile,
         "lineCount": len(items),
+        "amountMode": "tax_included" if tax_included_rt else "tax_discriminated",
     }
 
 

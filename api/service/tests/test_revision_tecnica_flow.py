@@ -213,6 +213,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
                 """
             )
         call_command("apply_revision_tecnica_schema", verbosity=0)
+        call_command("apply_mg_sale_schema", verbosity=0)
         super().setUpClass()
 
     @classmethod
@@ -223,6 +224,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
     @classmethod
     def setUpTestData(cls):
         with connection.cursor() as cur:
+            cur.execute("DELETE FROM device_mg_events")
             cur.execute("DELETE FROM user_permission_overrides")
             cur.execute("DELETE FROM ingresos")
             cur.execute("DELETE FROM devices")
@@ -292,7 +294,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
     def _auth(self, token):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
-    def _crear_equipo(self, *, numero_serie="NS-RT-100", numero_interno="", customer_id=None):
+    def _crear_equipo(self, *, numero_serie="NS-RT-100", numero_interno="", customer_id=None, mg_estado=None):
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -301,7 +303,18 @@ class IngresoConvertirPropioMgAPITest(TestCase):
                 """,
                 [customer_id or self.customer_cli_id, self.marca_id, self.model_id, numero_serie, numero_interno],
             )
-            return self._last_id(cur)
+            device_id = self._last_id(cur)
+            if mg_estado is not None:
+                cur.execute(
+                    """
+                    UPDATE devices
+                       SET mg_estado = %s,
+                           mg_inactivo_desde = CASE WHEN %s = 'inactivo_venta' THEN now() ELSE NULL END
+                     WHERE id = %s
+                    """,
+                    [mg_estado, mg_estado, device_id],
+                )
+            return device_id
 
     def _crear_ingreso(self, *, device_id, motivo="Revisión Técnica"):
         with connection.cursor() as cur:
@@ -511,6 +524,44 @@ class IngresoConvertirPropioMgAPITest(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.data.get("conflict_type"), "EQUIPO_YA_PROPIO_MG")
+
+    def test_alta_mg_reactiva_historico_ya_asociado_a_mg(self):
+        device_id = self._crear_equipo(
+            numero_serie="NS-RT-104B",
+            numero_interno="MG 7140",
+            customer_id=self.customer_mg_id,
+            mg_estado="inactivo_venta",
+        )
+        ingreso_id = self._crear_ingreso(device_id=device_id, motivo="baja alquiler")
+
+        resp = self.client.post(self._url(ingreso_id), {"numero_interno": "MG 7140"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["device"]["customer_id"], self.customer_mg_id)
+        self.assertEqual(resp.data["device"]["mg_estado"], "activo")
+        self.assertFalse(resp.data["device"]["mg_inactivo_venta"])
+        with connection.cursor() as cur:
+            cur.execute("SELECT customer_id, mg_estado, mg_inactivo_desde FROM devices WHERE id=%s", [device_id])
+            row = cur.fetchone()
+        self.assertEqual(row[0], self.customer_mg_id)
+        self.assertEqual(row[1], "activo")
+        self.assertIsNone(row[2])
+
+    def test_alta_mg_reactiva_historico_asociado_a_cliente(self):
+        device_id = self._crear_equipo(
+            numero_serie="NS-RT-104C",
+            numero_interno="MG 7141",
+            customer_id=self.customer_cli_id,
+            mg_estado="inactivo_venta",
+        )
+        ingreso_id = self._crear_ingreso(device_id=device_id, motivo="baja alquiler")
+
+        resp = self.client.post(self._url(ingreso_id), {"numero_interno": "MG 7141"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["device"]["customer_id"], self.customer_mg_id)
+        self.assertEqual(resp.data["device"]["mg_estado"], "activo")
+        self.assertTrue(resp.data["device"]["es_propietario_mg"])
 
     def test_rechaza_si_no_existe_cliente_mg_bio(self):
         device_id = self._crear_equipo(numero_serie="NS-RT-105")

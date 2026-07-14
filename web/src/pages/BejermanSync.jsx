@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   CheckCircle2,
   ChevronDown,
@@ -39,6 +39,7 @@ const STATUS_LABELS = {
   succeeded: "Correcta",
   generated: "Generado",
   failed: "Fallida",
+  failed_review: "Revisión requerida",
   blocked: "Bloqueada",
 };
 
@@ -48,6 +49,7 @@ const STATUS_CLASS = {
   succeeded: "bg-emerald-50 text-emerald-700 border-emerald-200",
   generated: "bg-emerald-50 text-emerald-700 border-emerald-200",
   failed: "bg-rose-50 text-rose-700 border-rose-200",
+  failed_review: "bg-orange-50 text-orange-800 border-orange-200",
   blocked: "bg-amber-50 text-amber-800 border-amber-200",
 };
 
@@ -76,7 +78,7 @@ const PROCESS_KIND_LABELS = {
   stock: "Stock",
 };
 
-const PROCESS_STATUSES = ["failed", "blocked", "running", "pending", "generated", "succeeded"];
+const PROCESS_STATUSES = ["failed_review", "failed", "blocked", "running", "pending", "generated", "succeeded"];
 
 const AUTO_REFRESH_MS = 5000;
 
@@ -682,6 +684,9 @@ function JobActions({ row, canManage, onEdit, onRetry, className = "" }) {
 
 function remitoMessage(row) {
   if (row?.last_error) return row.last_error;
+  if (row?.status === "failed_review") {
+    return "La emisión quedó sin confirmación. Verifique si el remito existe en Bejerman antes de volver a emitir.";
+  }
   if (row?.status === "generated") {
     return row?.document_mode === "register"
       ? "Remito registrado correctamente."
@@ -788,12 +793,24 @@ function RemitoPdfAction({ row }) {
   );
 }
 
-function RemitoActions({ row, canManage, onRetry, className = "" }) {
-  const canRetry = canManage && row?.retryable;
+function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRetry, className = "" }) {
+  const needsReview = row?.status === "failed_review";
+  const reviewState = row?.reviewState || (needsReview ? "requires_verification" : "");
+  const actions = row?.actions || {};
+  const canRetry = !needsReview && canManage && row?.retryable;
   const printUrl = row?.print_url || row?.printUrl;
   const pdfUrl = row?.pdf_url || row?.pdfUrl;
   const hasPdfState = Boolean(printUrl || pdfUrl || remitoPdfUnavailableReason(row));
-  if (!canRetry && !hasPdfState) return null;
+  const firstOrderId = row?.orders?.[0]?.id;
+  const processId = row?.process_id || `${row?.source || "orden_entrega"}:${row?.id || ""}`;
+  const returnTo = `/bejerman?processId=${encodeURIComponent(processId)}`;
+  const editHref = firstOrderId
+    ? `/ordenes-entrega?orderId=${encodeURIComponent(firstOrderId)}&edit=1&reviewGroupId=${encodeURIComponent(row?.group_id || row?.id || "")}&returnTo=${encodeURIComponent(returnTo)}`
+    : "";
+  const verifyAllowed = actions?.verify?.allowed ?? (canManage && needsReview);
+  const editAllowed = actions?.edit?.allowed ?? (canEditOrders && ["ready_for_correction", "ready_to_reissue"].includes(reviewState));
+  const reissueAllowed = actions?.reissue?.allowed ?? (canManage && canGenerateRemito && reviewState === "ready_to_reissue");
+  if (!canRetry && !needsReview && !hasPdfState) return null;
   return (
     <div className={`flex flex-wrap items-center gap-2 ${className}`.trim()}>
       {hasPdfState && <RemitoPdfAction row={row} />}
@@ -801,10 +818,55 @@ function RemitoActions({ row, canManage, onRetry, className = "" }) {
         <button
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
-          onClick={() => onRetry(row)}
+          onClick={() => onRetry(row, "retry")}
+          title="Reintentar el proceso"
         >
           <RotateCcw className="h-3.5 w-3.5" />
           Reintentar
+        </button>
+      )}
+      {needsReview && (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => onRetry(row, "verify")}
+          disabled={!verifyAllowed}
+          title={actions?.verify?.blockedReason || "Buscar el comprobante en Bejerman sin emitir"}
+        >
+          <Search className="h-3.5 w-3.5" />
+          Verificar en Bejerman
+        </button>
+      )}
+      {needsReview && editHref && (editAllowed ? (
+        <Link
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
+          to={editHref}
+          title="Abrir la orden, corregirla y regresar a este proceso"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Abrir y corregir
+        </Link>
+      ) : (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+          disabled
+          title={actions?.edit?.blockedReason || "Primero debe verificarse que el comprobante no se importó"}
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Abrir y corregir
+        </button>
+      ))}
+      {needsReview && (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-orange-300 bg-orange-50 px-2 text-xs text-orange-900 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => onRetry(row, "reissue_corrected")}
+          disabled={!reissueAllowed}
+          title={actions?.reissue?.blockedReason || "Requiere confirmación y una nueva verificación antes de emitir"}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Emitir remito corregido
         </button>
       )}
     </div>
@@ -821,8 +883,10 @@ function RemitoReference({ row }) {
   }
   const orders = Array.isArray(row?.orders) ? row.orders : [];
   const orderLabel = orders.map((order) => order.orderNumber || order.id).filter(Boolean).slice(0, 3).join(", ");
+  const firstOrderId = orders[0]?.id;
+  const target = firstOrderId ? `/ordenes-entrega?orderId=${encodeURIComponent(firstOrderId)}` : "/ordenes-entrega";
   return (
-    <Link className="font-semibold text-blue-700 hover:underline" to="/ordenes-entrega">
+    <Link className="font-semibold text-blue-700 hover:underline" to={target}>
       {orderLabel || row?.display_id || row?.group_id || row?.id || "-"}
     </Link>
   );
@@ -830,8 +894,37 @@ function RemitoReference({ row }) {
 
 function ExpandedRemitoDetail({ row }) {
   const orders = Array.isArray(row?.orders) ? row.orders : [];
+  const needsReview = row?.status === "failed_review";
+  const diagnostic = row?.diagnostic || {};
+  const solutions = Array.isArray(diagnostic?.solutions) ? diagnostic.solutions : [];
   return (
     <>
+      {(row?.last_error || needsReview) && (
+        <div className="mb-3 rounded border border-orange-200 bg-orange-50 p-3 text-sm text-orange-950">
+          <div className="font-semibold">Qué ocurrió</div>
+          <div className="mt-1 whitespace-pre-wrap text-xs leading-relaxed">
+            {diagnostic?.explanation || row?.last_error || "Bejerman no confirmó si el remito fue importado."}
+          </div>
+          {diagnostic?.technicalDetail && (
+            <div className="mt-2 rounded border border-orange-200 bg-white/70 px-2 py-1.5 text-xs leading-relaxed">
+              <span className="font-semibold">Detalle técnico:</span> {diagnostic.technicalDetail}
+            </div>
+          )}
+          {needsReview && (
+            <div className="mt-3">
+              <div className="font-semibold">Cómo resolverlo</div>
+              <ol className="mt-1 list-decimal space-y-1 pl-5 text-xs leading-relaxed">
+                {(solutions.length ? solutions : [
+                  "Verificar el comprobante en Bejerman sin emitir.",
+                  "Abrir la orden, revisarla y guardar la corrección.",
+                  "Confirmar manualmente la reemisión corregida.",
+                ]).map((solution) => <li key={solution}>{solution}</li>)}
+              </ol>
+              {row?.blockedReason && <div className="mt-2 font-medium text-amber-900">Bloqueo actual: {row.blockedReason}</div>}
+            </div>
+          )}
+        </div>
+      )}
       {orders.length > 0 && (
         <div className="mb-3">
           <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Órdenes</div>
@@ -847,13 +940,13 @@ function ExpandedRemitoDetail({ row }) {
       )}
       <div className="grid gap-3 lg:grid-cols-2">
         <div className="min-w-0">
-          <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Request</div>
+          <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Solicitud técnica</div>
           <pre className="max-h-80 overflow-auto rounded border border-gray-200 bg-white p-3 text-xs">
             {payloadText(row.request_payload)}
           </pre>
         </div>
         <div className="min-w-0">
-          <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Response</div>
+          <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Respuesta técnica</div>
           <pre className="max-h-80 overflow-auto rounded border border-gray-200 bg-white p-3 text-xs">
             {payloadText(row.response_payload)}
           </pre>
@@ -1055,7 +1148,10 @@ function PdfOutputStatus({ meta }) {
 
 export default function BejermanSync() {
   const { user } = useAuth();
+  const location = useLocation();
   const canManage = can(user, PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE);
+  const canEditOrders = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_ASSIGN_ARTICLES);
+  const canGenerateRemito = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_GENERATE_BEJERMAN_REMITO);
   const [filters, setFilters] = useState({
     process_type: "all",
     status: "",
@@ -1109,6 +1205,15 @@ export default function BejermanSync() {
   useEffect(() => {
     remitoRowsRef.current = remitoRows;
   }, [remitoRows]);
+
+  useEffect(() => {
+    const processId = new URLSearchParams(location.search).get("processId");
+    if (!processId || !remitoRows.length) return;
+    const row = remitoRows.find((item) => (item.process_id || `${item.source}:${item.id}`) === processId);
+    if (!row) return;
+    const key = `remito:${row.process_id || `${row.source}:${row.id}`}`;
+    setRemitoExpanded((current) => ({ ...current, [key]: true }));
+  }, [location.search, remitoRows]);
 
   useEffect(() => {
     editModalRef.current = editModal;
@@ -1399,16 +1504,33 @@ export default function BejermanSync() {
     }
   };
 
-  const retryRemito = async (row) => {
+  const retryRemito = async (row, action = "retry") => {
     if (!row?.source || !row?.id) return;
+    if (action === "reissue_corrected") {
+      const confirmed = window.confirm(
+        `Se volverá a verificar Bejerman y, únicamente si el RT no existe, se emitirá el remito corregido para ${remitoDocumentLabel(row)}. ¿Desea continuar?`,
+      );
+      if (!confirmed) return;
+    }
     setRemitoErr("");
     setMsg("");
     try {
-      await postBejermanRemitoProcessRetry(row.source, row.id);
-      setMsg(`Proceso de remito ${remitoDocumentLabel(row)} reintentado.`);
-      await loadRemitos();
+      await postBejermanRemitoProcessRetry(
+        row.source,
+        row.id,
+        action === "reissue_corrected" ? { action, confirm: true } : { action },
+      );
+      if (action === "verify") {
+        setMsg(`Se verificó ${remitoDocumentLabel(row)} en Bejerman. Revise el nuevo estado antes de continuar.`);
+      } else if (action === "reissue_corrected") {
+        setMsg(`Se emitió el remito corregido para ${remitoDocumentLabel(row)}.`);
+      } else {
+        setMsg(`Proceso de remito ${remitoDocumentLabel(row)} reintentado.`);
+      }
     } catch (e) {
       setRemitoErr(e?.message || "No se pudo reintentar el remito.");
+    } finally {
+      await loadRemitos();
     }
   };
 
@@ -1794,7 +1916,13 @@ export default function BejermanSync() {
         </div>
 
         {isRemito ? (
-          <RemitoActions row={row} canManage={canManage} onRetry={retryRemito} />
+          <RemitoActions
+            row={row}
+            canManage={canManage}
+            canEditOrders={canEditOrders}
+            canGenerateRemito={canGenerateRemito}
+            onRetry={retryRemito}
+          />
         ) : (
           <JobActions row={row} canManage={canManage} onEdit={openEditModal} onRetry={retry} />
         )}
@@ -1887,7 +2015,14 @@ export default function BejermanSync() {
           </td>
           <td className="px-3 py-2">
             {isRemito ? (
-              <RemitoActions row={row} canManage={canManage} onRetry={retryRemito} className="justify-end" />
+              <RemitoActions
+                row={row}
+                canManage={canManage}
+                canEditOrders={canEditOrders}
+                canGenerateRemito={canGenerateRemito}
+                onRetry={retryRemito}
+                className="justify-end"
+              />
             ) : (
               <JobActions row={row} canManage={canManage} onEdit={openEditModal} onRetry={retry} className="justify-end" />
             )}

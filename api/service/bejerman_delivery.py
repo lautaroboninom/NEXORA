@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -116,6 +117,16 @@ REMITO_GROUP_FINAL_STATUSES = {"generated", "reconciled"}
 REMITO_GROUP_UNCERTAIN_STATUSES = {"sent_unknown", "failed_review"}
 REMITO_GROUP_PDF_REFERENCE_STATUSES = REMITO_GROUP_FINAL_STATUSES | {"failed_review"}
 REMITO_REVIEW_REQUIRED_CODE = "BEJERMAN_REMITO_REQUIRES_REVIEW"
+REMITO_REVIEW_LOOKUP_UNAVAILABLE_CODE = "BEJERMAN_REMITO_LOOKUP_UNAVAILABLE"
+REMITO_REVIEW_LOOKUP_AMBIGUOUS_CODE = "BEJERMAN_REMITO_LOOKUP_AMBIGUOUS"
+REMITO_REVIEW_PAYLOAD_UNCHANGED_CODE = "BEJERMAN_REMITO_PAYLOAD_UNCHANGED"
+REMITO_REVIEW_STATE_REQUIRES_VERIFICATION = "requires_verification"
+REMITO_REVIEW_STATE_READY_FOR_CORRECTION = "ready_for_correction"
+REMITO_REVIEW_STATE_READY_TO_REISSUE = "ready_to_reissue"
+REMITO_REVIEW_STATE_BLOCKED = "blocked"
+REMITO_REVIEW_STATE_SUPERSEDED = "superseded"
+REMITO_FAILURE_CONFIRMED_NOT_IMPORTED = "confirmed_not_imported"
+REMITO_FAILURE_UNKNOWN = "unknown"
 BEJERMAN_REMOTE_RECOVERY_LIMIT = 100
 BEJERMAN_REMITO_PDF_OPERATIONAL_FALLBACK_AFTER_SECONDS = 120
 REMITO_QUERY_COMPANY_KEYS = ("SEPID", "MGBIO")
@@ -124,6 +135,7 @@ BEJERMAN_SQL_DATABASE_DEFAULTS = {
     "SEPID": "SBDASEP",
     "MGBIO": "SBDAMGBI",
 }
+ARTICLE_SALES_VAT_REQUIRED_PREFIX = "BEJERMAN_ARTICLE_SALES_VAT_REQUIRED:"
 
 
 def _is_bejerman_sales_query_schema_error(message: str) -> bool:
@@ -144,6 +156,13 @@ def _sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
     if isinstance(exc, BejermanSdkUnavailable):
         return BillingError("BEJERMAN_SDK_UNAVAILABLE", message, status_code=503)
     if isinstance(exc, BejermanSdkResponseError):
+        if message.startswith(ARTICLE_SALES_VAT_REQUIRED_PREFIX):
+            detail = message.split(":", 1)[1].strip() or "No se pudo resolver el IVA de venta de los artículos en Bejerman."
+            return BillingError(
+                "BEJERMAN_ARTICLE_SALES_VAT_REQUIRED",
+                detail,
+                status_code=409,
+            )
         if "expSinCuotasV1" in message:
             return BillingError(
                 "BEJERMAN_BILLING_QUERY_BUSY",
@@ -1579,10 +1598,46 @@ def _delivery_article_codes_requiring_vat(bridge_request: dict[str, Any], profil
             if not isinstance(item, dict):
                 continue
             code = _optional_text(item.get("articleCode"))
-            unit_price = as_number(item.get("unitPrice")) or 0
-            if code and unit_price > 0:
+            if code:
                 codes.add(code)
     return sorted(codes)
+
+
+def _article_sales_vat_lookup_keys(article_code: Any) -> tuple[str, ...]:
+    keys = [
+        normalize_article_code(article_code),
+        normalize_search(article_code),
+        as_string(article_code),
+    ]
+    return tuple(key for key in keys if key)
+
+
+def _article_sales_vat_entry(
+    article_tax_by_code: dict[str, dict[str, Any]],
+    article_code: Any,
+) -> dict[str, Any]:
+    for key in _article_sales_vat_lookup_keys(article_code):
+        entry = article_tax_by_code.get(key)
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
+def _article_sales_vat_resolved(entry: dict[str, Any]) -> bool:
+    if not entry:
+        return False
+    return as_number(entry.get("salesVatRate")) is not None
+
+
+def _missing_article_sales_vat_codes(
+    article_codes: list[str],
+    article_tax_by_code: dict[str, dict[str, Any]],
+) -> list[str]:
+    return [
+        code
+        for code in article_codes
+        if not _article_sales_vat_resolved(_article_sales_vat_entry(article_tax_by_code, code))
+    ]
 
 
 def _delivery_article_sales_vat_map(
@@ -1594,7 +1649,19 @@ def _delivery_article_sales_vat_map(
     if not article_codes:
         return {}
     catalog = client.list_articulos([], max(50, len(article_codes)))
-    return build_article_sales_vat_map(catalog, article_codes)
+    article_tax_by_code = build_article_sales_vat_map(catalog, article_codes)
+    missing_codes = _missing_article_sales_vat_codes(article_codes, article_tax_by_code)
+    if missing_codes:
+        responses = [client.list_articulos(build_article_filters(code, field="code"), 20) for code in missing_codes]
+        article_tax_by_code.update(build_article_sales_vat_map(responses, missing_codes))
+        missing_codes = _missing_article_sales_vat_codes(article_codes, article_tax_by_code)
+    if missing_codes:
+        labels = ", ".join(missing_codes)
+        raise BejermanSdkResponseError(
+            f"{ARTICLE_SALES_VAT_REQUIRED_PREFIX} No se pudo resolver el IVA de venta en Bejerman para: {labels}. "
+            "Revise que esos artículos tengan código de IVA de venta configurado antes de emitir el comprobante."
+        )
+    return article_tax_by_code
 
 
 def _delivery_status_for_remito_profile(profile: dict[str, Any]) -> str:
@@ -1773,10 +1840,21 @@ def resolve_delivery_order_remito_document(order: dict[str, Any], actor_user_id:
 
 def get_delivery_order_remito_pdf(order_id: str, actor_user_id: int | None = None) -> tuple[bytes, str, str]:
     order = get_delivery_order(order_id, include_events=False)
+    group_id = _optional_text(order.get("bejermanRemitoGroupId"))
+    if group_id:
+        return get_remito_group_pdf(group_id, actor_user_id=actor_user_id)
     document = resolve_delivery_order_remito_document(order, actor_user_id=actor_user_id)
     document_id = document.get("documentId") or document.get("id")
     customer_code = document.get("bejermanCustomerCode") or document.get("customerCode") or order.get("bejermanCustomerCode")
     company_key = document.get("companyKey") or _company_key_for_order(order)
+    document_type = _optional_text(document.get("type") or document.get("comprobanteTipo")).upper()
+    if document_type == "RT" and _company_key_for_marker(company_key) in REMITO_QUERY_COMPANY_KEYS:
+        return get_unpriced_rt_document_pdf(
+            customer_code,
+            document_id,
+            actor_user_id=actor_user_id,
+            company_key=company_key,
+        )
     bytes_, content_type = get_facturacion_pdf(
         customer_code,
         document_id,
@@ -2935,6 +3013,257 @@ def _supersede_uncertain_remito_group_for_print_split(
             )
 
 
+def _remito_group_confirms_not_imported(group: dict[str, Any]) -> bool:
+    summary = _json_object(group.get("response_summary"))
+    if _optional_text(summary.get("failureCertainty")) == REMITO_FAILURE_CONFIRMED_NOT_IMPORTED:
+        return True
+    detail = " ".join(
+        _optional_text(value)
+        for value in (group.get("last_error"), summary.get("error"), summary.get("detail"), summary.get("message"))
+        if _optional_text(value)
+    ).casefold()
+    return any(
+        marker in detail
+        for marker in (
+            "no se importó",
+            "no se importo",
+            "no fue importado",
+            "no ha sido importado",
+        )
+    )
+
+
+def _remito_failure_certainty(exc: Any) -> str:
+    detail = _optional_text(str(exc)).casefold()
+    if any(
+        marker in detail
+        for marker in (
+            "no se importó",
+            "no se importo",
+            "no fue importado",
+            "no ha sido importado",
+        )
+    ):
+        return REMITO_FAILURE_CONFIRMED_NOT_IMPORTED
+    return REMITO_FAILURE_UNKNOWN
+
+
+def _signature_number(value: Any) -> Any:
+    number = as_number(value)
+    return number if number is not None else _optional_text(value)
+
+
+def _comprobante_signature_payload(comprobante: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in comprobante.get("Comprobante_Items") or []:
+        if not isinstance(item, dict) or (_optional_text(item.get("Item_Tipo")) or "").upper() != "A":
+            continue
+        items.append(
+            {
+                "type": (_optional_text(item.get("Item_Tipo")) or "").upper(),
+                "article": (_optional_text(item.get("Item_CodigoArticulo")) or "").upper(),
+                "description": _optional_text(item.get("Item_DescripArticulo")),
+                "quantity1": _signature_number(item.get("Item_CantidadUM1")),
+                "quantity2": _signature_number(item.get("Item_CantidadUM2")),
+                "unitPrice": _signature_number(item.get("Item_PrecioUnitario")),
+                "vatRate": _signature_number(item.get("Item_TasaIVAInscrip")),
+                "vatAmount": _signature_number(item.get("Item_ImporteIVAInscrip")),
+                "lineTotal": _signature_number(item.get("Item_ImporteTotal")),
+                "lineAmount": _signature_number(item.get("Item_Importe")),
+                "discountRate": _signature_number(item.get("Item_TasaDescPorItem")),
+                "discountAmount": _signature_number(item.get("Item_ImporteDescPorLinea")),
+                "deposit": (_optional_text(item.get("Item_Deposito")) or "").upper(),
+                "partida": _optional_text(item.get("Item_Partida")),
+            }
+        )
+    return {
+        "type": (_optional_text(comprobante.get("Comprobante_Tipo")) or "").upper(),
+        "letter": (_optional_text(comprobante.get("Comprobante_Letra")) or "").upper(),
+        "point": _normalized_digits(comprobante.get("Comprobante_PtoVenta")).zfill(5),
+        "customer": (_optional_text(comprobante.get("Cliente_Codigo")) or "").upper(),
+        "customerVat": (_optional_text(comprobante.get("Cliente_SitIVA")) or "").upper(),
+        "seller": (_optional_text(comprobante.get("Vendedor_Codigo")) or "").upper(),
+        "paymentTerm": (_optional_text(comprobante.get("Comprobante_CondVenta")) or "").upper(),
+        "operation": (_optional_text(comprobante.get("Comprobante_TipoOperacion")) or "").upper(),
+        "currency": (_optional_text(comprobante.get("Comprobante_Moneda")) or "").upper(),
+        "exchangeType": (_optional_text(comprobante.get("Comprobante_TipoCambio")) or "").upper(),
+        "exchangeRate": _signature_number(comprobante.get("Comprobante_CotizacionCambio")),
+        "headerTotal": _signature_number(comprobante.get("Comprobante_ImporteTotal")),
+        "items": items,
+    }
+
+
+def _comprobante_signature(comprobante: dict[str, Any] | None) -> str:
+    if not isinstance(comprobante, dict) or not comprobante:
+        return ""
+    raw = json.dumps(
+        _comprobante_signature_payload(comprobante),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _attempted_comprobante_signature(group: dict[str, Any]) -> str:
+    summary = _json_object(group.get("response_summary"))
+    saved = _optional_text(summary.get("attemptedPayloadSignature"))
+    if saved:
+        return saved
+    group_id = _optional_text(group.get("id"))
+    if not group_id:
+        return ""
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT request_payload
+              FROM bejerman_integration_attempts
+             WHERE group_id = %s
+               AND phase = 'sending'
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [group_id],
+        )
+        row = cur.fetchone()
+    request_payload = _json_object(row[0]) if row else {}
+    return _comprobante_signature(request_payload.get("comprobante"))
+
+
+def _patch_remito_review_summary(group_id: str, patch: dict[str, Any]) -> None:
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bejerman_remito_groups
+               SET response_summary = COALESCE(response_summary, '{}'::jsonb) || %s::jsonb,
+                   next_retry_at = NULL
+             WHERE id = %s
+            """,
+            [_json_param(patch), group_id],
+        )
+
+
+def _prepare_remito_group_for_correction(
+    group: dict[str, Any],
+    order_ids: list[str],
+    actor_user_id: int | None,
+) -> dict[str, Any]:
+    group_id = _optional_text(group.get("id"))
+    if not group_id or not order_ids:
+        raise DeliveryOrderError(REMITO_REVIEW_REQUIRED_CODE, "El proceso no conserva órdenes para corregir.", status_code=409)
+    attempted_signature = _attempted_comprobante_signature(group)
+    summary_patch = {
+        "orchestrationStatus": "failed_review",
+        "reviewRequired": False,
+        "reconciliationRequired": True,
+        "failureCertainty": REMITO_FAILURE_CONFIRMED_NOT_IMPORTED,
+        "reviewState": REMITO_REVIEW_STATE_READY_FOR_CORRECTION,
+        "readyForCorrectionAt": timezone.now().isoformat(),
+        "attemptedPayloadSignature": attempted_signature,
+        "operatorCorrectionRecorded": False,
+    }
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, bejerman_remito_group_id, remito_number
+                  FROM delivery_orders
+                 WHERE id = ANY(%s)
+                 FOR UPDATE
+                """,
+                [order_ids],
+            )
+            rows = cur.fetchall()
+            if len(rows) != len(order_ids) or any(
+                _optional_text(row[1]) != group_id or _optional_text(row[2]) for row in rows
+            ):
+                raise DeliveryOrderError(
+                    REMITO_REVIEW_REQUIRED_CODE,
+                    "Las órdenes cambiaron mientras se verificaba el remito. Actualice el proceso antes de continuar.",
+                    status_code=409,
+                )
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET bejerman_remito_group_id = NULL
+                 WHERE id = ANY(%s)
+                   AND bejerman_remito_group_id = %s
+                   AND NULLIF(BTRIM(COALESCE(remito_number, '')), '') IS NULL
+                """,
+                [order_ids, group_id],
+            )
+            if cur.rowcount != len(order_ids):
+                raise DeliveryOrderError(
+                    REMITO_REVIEW_REQUIRED_CODE,
+                    "No se pudieron habilitar todas las órdenes para corrección.",
+                    status_code=409,
+                )
+            _patch_remito_review_summary(group_id, summary_patch)
+        _record_bejerman_integration_attempt(
+            group_id,
+            order_ids,
+            actor_user_id,
+            "review_ready_for_correction",
+            status="orders_unlocked",
+            response_payload=summary_patch,
+            error_message=group.get("last_error"),
+        )
+        for order_id in order_ids:
+            create_event(
+                order_id,
+                actor_user_id,
+                "bejerman_remito_ready_for_correction",
+                metadata={"groupId": group_id, "attemptedPayloadSignature": attempted_signature},
+            )
+    return {
+        "success": True,
+        "groupId": group_id,
+        "reviewState": REMITO_REVIEW_STATE_READY_FOR_CORRECTION,
+        "failureCertainty": REMITO_FAILURE_CONFIRMED_NOT_IMPORTED,
+        "orderIds": order_ids,
+    }
+
+
+def _mark_review_group_superseded(
+    group: dict[str, Any],
+    order_ids: list[str],
+    actor_user_id: int | None,
+    result: dict[str, Any],
+    current_signature: str,
+) -> None:
+    group_id = _optional_text(group.get("id"))
+    replacement_group_id = _optional_text(result.get("groupId"))
+    patch = {
+        "orchestrationStatus": "failed_review",
+        "reviewRequired": False,
+        "reconciliationRequired": False,
+        "reviewState": REMITO_REVIEW_STATE_SUPERSEDED,
+        "reissueInProgress": False,
+        "supersededAt": timezone.now().isoformat(),
+        "replacementGroupId": replacement_group_id,
+        "replacementRemitoNumber": _optional_text(result.get("remitoNumber")),
+        "replacementPayloadSignature": current_signature,
+    }
+    with transaction.atomic():
+        _patch_remito_review_summary(group_id, patch)
+        _record_bejerman_integration_attempt(
+            group_id,
+            order_ids,
+            actor_user_id,
+            "review_reissue",
+            status="generated",
+            response_payload=patch,
+            error_message=group.get("last_error"),
+        )
+        for order_id in order_ids:
+            create_event(
+                order_id,
+                actor_user_id,
+                "bejerman_remito_reissued_after_review",
+                metadata={"previousGroupId": group_id, "replacementGroupId": replacement_group_id},
+            )
+
+
 def _combine_delivery_remito_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     valid_results = [result for result in results if result]
     if len(valid_results) == 1:
@@ -3306,6 +3635,9 @@ def _mark_group_review_required(
     recovery_payload: Any = None,
     reason: str = "bejerman_no_confirmo_el_remito",
 ) -> None:
+    request_object = _json_object(request_payload)
+    attempted_signature = _comprobante_signature(request_object.get("comprobante"))
+    failure_certainty = _remito_failure_certainty(exc)
     with transaction.atomic():
         attempt_count = 1
         with connection.cursor() as cur:
@@ -3318,6 +3650,10 @@ def _mark_group_review_required(
                 "reconciliationRequired": True,
                 "reviewReason": reason,
                 "error": str(exc),
+                "failureCertainty": failure_certainty,
+                "reviewState": REMITO_REVIEW_STATE_REQUIRES_VERIFICATION,
+                "attemptedPayloadSignature": attempted_signature,
+                "operatorCorrectionRecorded": False,
             }
             cur.execute(
                 """
@@ -3811,13 +4147,23 @@ def _bejerman_sql_database_for_company(company_key: Any = None) -> str:
     return _optional_text(os.getenv("BEJERMAN_SQL_DATABASE") or getattr(settings, "BEJERMAN_SQL_DATABASE", "")) or "SBDASEP"
 
 
-def _remote_bejerman_sql_csv(sql: str, *, timeout_seconds: int = 35, company_key: Any = None) -> list[dict[str, Any]]:
+def _remote_bejerman_sql_csv(
+    sql: str,
+    *,
+    timeout_seconds: int = 35,
+    company_key: Any = None,
+    outcome: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not _bejerman_remote_recovery_enabled():
+        if outcome is not None:
+            outcome.update({"status": "disabled"})
         return []
     try:
         import paramiko  # type: ignore
     except Exception:
         logger.warning("bejerman_remito_remote_recovery_paramiko_missing")
+        if outcome is not None:
+            outcome.update({"status": "dependency_missing"})
         return []
 
     host = _optional_text(os.getenv("BEJERMAN_SSH_HOST") or getattr(settings, "BEJERMAN_SSH_HOST", "")) or "45.173.2.155"
@@ -3826,6 +4172,8 @@ def _remote_bejerman_sql_csv(sql: str, *, timeout_seconds: int = 35, company_key
     sql_server = _optional_text(os.getenv("BEJERMAN_SQL_SERVER")) or "10.0.200.155,1433"
     database = _bejerman_sql_database_for_company(company_key)
     if not password:
+        if outcome is not None:
+            outcome.update({"status": "credentials_missing"})
         return []
 
     ps_script = f"""
@@ -3887,9 +4235,13 @@ try {{
         code = stdout.channel.recv_exit_status()
         if code != 0:
             logger.warning("bejerman_remito_remote_recovery_sql_failed", extra={"code": code, "error": err[:1000]})
+            if outcome is not None:
+                outcome.update({"status": "sql_failed", "exitCode": code})
             return []
-    except Exception:
+    except Exception as exc:
         logger.warning("bejerman_remito_remote_recovery_sql_error", exc_info=True)
+        if outcome is not None:
+            outcome.update({"status": "connection_failed", "detail": str(exc)})
         return []
     finally:
         try:
@@ -3900,9 +4252,10 @@ try {{
             pass
         ssh.close()
 
-    if not out.strip():
-        return []
-    return [dict(row) for row in csv.DictReader(StringIO(out))]
+    rows = [dict(row) for row in csv.DictReader(StringIO(out))] if out.strip() else []
+    if outcome is not None:
+        outcome.update({"status": "success", "rowCount": len(rows)})
+    return rows
 
 
 def _remote_sales_recovery_records(
@@ -3911,6 +4264,7 @@ def _remote_sales_recovery_records(
     profile: dict[str, Any],
     group_id: str,
     issue_date: str,
+    lookup_outcome: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     customer_code = _optional_text(compatibility.get("customerCode"))
     document_type = _optional_text(profile.get("type") or compatibility["profile"].get("type"))
@@ -3984,7 +4338,7 @@ LEFT JOIN dbo.SegDetV d ON d.sdvscv_ID = c.scv_ID
 WHERE {" AND ".join(filters)}
 ORDER BY c.scv_FEmision DESC, t.spv_Nro DESC, c.scv_ID DESC, d.sdv_NReng DESC;
 """.strip()
-    return _remote_bejerman_sql_csv(sql, company_key=company_key)
+    return _remote_bejerman_sql_csv(sql, company_key=company_key, outcome=lookup_outcome)
 
 
 def _recover_delivery_remito_from_matches(
@@ -4067,6 +4421,7 @@ def _recover_delivery_remito_after_emit_error(
     *,
     actor_user_id: int | None = None,
     order_ids: list[str] | None = None,
+    lookup_outcome: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     profile = built.get("profile") or compatibility["profile"]
     issue_date = normalize_date(bridge_request.get("issueDate")) or timezone.localdate().isoformat()
@@ -4096,15 +4451,26 @@ def _recover_delivery_remito_after_emit_error(
             extra={"group_id": group_id, "error": str(original_error), "lookup_error": str(lookup_exc)},
             exc_info=True,
         )
+        remote_lookup_outcome: dict[str, Any] = {}
         candidates = _remote_sales_recovery_records(
             bridge_request,
             compatibility,
             profile,
             group_id,
             issue_date,
+            lookup_outcome=remote_lookup_outcome,
         )
         source = "bejerman_sql_recovery_after_sdk_lookup_error"
-        if not candidates:
+        if not candidates and remote_lookup_outcome.get("status") != "success":
+            if lookup_outcome is not None:
+                lookup_outcome.update(
+                    {
+                        "status": "lookup_failed",
+                        "source": source,
+                        "detail": str(lookup_exc),
+                        "remoteLookupStatus": remote_lookup_outcome.get("status"),
+                    }
+                )
             _record_bejerman_integration_attempt(
                 group_id,
                 order_ids or [],
@@ -4112,7 +4478,11 @@ def _recover_delivery_remito_after_emit_error(
                 "recovery_lookup",
                 status="lookup_failed",
                 request_payload={"bridgeRequest": bridge_request},
-                response_payload={"fallback": "sql_remote", "fallbackCandidateCount": 0},
+                response_payload={
+                    "fallback": "sql_remote",
+                    "fallbackCandidateCount": 0,
+                    "remoteLookupStatus": remote_lookup_outcome.get("status"),
+                },
                 error_message=f"{original_error} | lookup: {lookup_exc}",
             )
             return None
@@ -4145,6 +4515,16 @@ def _recover_delivery_remito_after_emit_error(
         if not _optional_text(recovered.get("remitoNumber")):
             continue
         matches.append((record, recovered))
+
+    if lookup_outcome is not None:
+        lookup_outcome.update(
+            {
+                "status": "matched" if len(matches) == 1 else "ambiguous" if len(matches) > 1 else "no_match",
+                "source": source,
+                "candidateCount": len(candidates),
+                "matchCount": len(matches),
+            }
+        )
 
     recovered_data = _recover_delivery_remito_from_matches(
         matches,
@@ -4313,6 +4693,44 @@ def _finalize_delivery_remito_group(
     }
 
 
+def _reattach_review_orders_for_reconciliation(group_id: str, order_ids: list[str]) -> None:
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, bejerman_remito_group_id, remito_number
+                  FROM delivery_orders
+                 WHERE id = ANY(%s)
+                 FOR UPDATE
+                """,
+                [order_ids],
+            )
+            rows = cur.fetchall()
+            if len(rows) != len(order_ids) or any(
+                (_optional_text(row[1]) not in {"", group_id}) or _optional_text(row[2]) for row in rows
+            ):
+                raise DeliveryOrderError(
+                    REMITO_REVIEW_REQUIRED_CODE,
+                    "Las órdenes cambiaron mientras se reconciliaba el remito encontrado.",
+                    status_code=409,
+                )
+            cur.execute(
+                """
+                UPDATE delivery_orders
+                   SET bejerman_remito_group_id = %s
+                 WHERE id = ANY(%s)
+                   AND NULLIF(BTRIM(COALESCE(remito_number, '')), '') IS NULL
+                """,
+                [group_id, order_ids],
+            )
+            if cur.rowcount != len(order_ids):
+                raise DeliveryOrderError(
+                    REMITO_REVIEW_REQUIRED_CODE,
+                    "No se pudieron asociar todas las órdenes al remito encontrado.",
+                    status_code=409,
+                )
+
+
 def _reconcile_existing_uncertain_remito_group(
     group: dict[str, Any],
     orders: list[dict[str, Any]],
@@ -4320,6 +4738,7 @@ def _reconcile_existing_uncertain_remito_group(
     payload: dict[str, Any] | None,
     *,
     force_reviewed_reissue: bool = False,
+    review_action: str = "",
 ) -> dict[str, Any] | None:
     group_id = str(group["id"])
     ids = [order["id"] for order in orders]
@@ -4333,10 +4752,13 @@ def _reconcile_existing_uncertain_remito_group(
     )
     summary = _json_object(group.get("response_summary"))
     saved_bridge_request = summary.get("bridgeRequest") if isinstance(summary.get("bridgeRequest"), dict) else {}
+    review_state = _optional_text(summary.get("reviewState"))
+    review_lookup = review_action in {"verify", "pre_reissue"}
     bridge_request = {
         "groupId": group_id,
         "companyKey": compatibility["companyKey"],
-        "issueDate": _optional_text((payload or {}).get("issueDate"))
+        "issueDate": (_optional_text(saved_bridge_request.get("issueDate")) if review_lookup else "")
+        or _optional_text((payload or {}).get("issueDate"))
         or _optional_text(saved_bridge_request.get("issueDate"))
         or timezone.localdate().isoformat(),
         "customerCode": compatibility["customerCode"],
@@ -4349,7 +4771,7 @@ def _reconcile_existing_uncertain_remito_group(
         "orders": [_bridge_order(order) for order in orders],
     }
     current_attempt_count = int(group.get("attempt_count") or 0)
-    if current_attempt_count >= 5 and not force_reviewed_reissue:
+    if current_attempt_count >= 5 and not force_reviewed_reissue and not review_lookup:
         raise DeliveryOrderError(
             REMITO_REVIEW_REQUIRED_CODE,
             "La emisión ya alcanzó el límite de verificaciones contra Bejerman. Verifique en Bejerman si el remito existe; si no existe, reinicie la emisión desde NEXORA.",
@@ -4385,6 +4807,7 @@ def _reconcile_existing_uncertain_remito_group(
         request_payload={"bridgeRequest": bridge_request},
         error_message=group.get("last_error") or summary.get("error") or str(lookup_error),
     )
+    lookup_outcome: dict[str, Any] = {}
     recovered_bridge_data = _recover_delivery_remito_after_emit_error(
         client,
         bridge_request,
@@ -4394,8 +4817,11 @@ def _reconcile_existing_uncertain_remito_group(
         lookup_error,
         actor_user_id=actor_user_id,
         order_ids=ids,
+        lookup_outcome=lookup_outcome,
     )
     if recovered_bridge_data:
+        if review_lookup and any(not _optional_text(order.get("bejermanRemitoGroupId")) for order in orders):
+            _reattach_review_orders_for_reconciliation(group_id, ids)
         return _finalize_delivery_remito_group(
             group_id,
             ids,
@@ -4407,6 +4833,61 @@ def _reconcile_existing_uncertain_remito_group(
             seller_code,
             payment_term_code,
         )
+    lookup_status = _optional_text(lookup_outcome.get("status"))
+    if lookup_status == "lookup_failed":
+        patch = {
+            "reviewRequired": True,
+            "reconciliationRequired": True,
+            "failureCertainty": REMITO_FAILURE_UNKNOWN,
+            "reviewState": REMITO_REVIEW_STATE_BLOCKED,
+            "blockedReason": "No fue posible consultar Bejerman ni confirmar que el comprobante no exista.",
+            "diagnosticCode": REMITO_REVIEW_LOOKUP_UNAVAILABLE_CODE,
+        }
+        _patch_remito_review_summary(group_id, patch)
+        raise DeliveryOrderError(
+            REMITO_REVIEW_LOOKUP_UNAVAILABLE_CODE,
+            patch["blockedReason"],
+            status_code=409,
+        )
+    if lookup_status == "ambiguous":
+        patch = {
+            "reviewRequired": True,
+            "reconciliationRequired": True,
+            "failureCertainty": REMITO_FAILURE_UNKNOWN,
+            "reviewState": REMITO_REVIEW_STATE_BLOCKED,
+            "blockedReason": "Bejerman devolvió más de un candidato y NEXORA no puede decidir cuál adoptar.",
+            "diagnosticCode": REMITO_REVIEW_LOOKUP_AMBIGUOUS_CODE,
+            "candidateCount": lookup_outcome.get("candidateCount"),
+            "matchCount": lookup_outcome.get("matchCount"),
+        }
+        _patch_remito_review_summary(group_id, patch)
+        raise DeliveryOrderError(
+            REMITO_REVIEW_LOOKUP_AMBIGUOUS_CODE,
+            patch["blockedReason"],
+            status_code=409,
+        )
+    if lookup_status == "no_match" and _remito_group_confirms_not_imported(group):
+        if review_action == "verify":
+            if review_state in {REMITO_REVIEW_STATE_READY_FOR_CORRECTION, REMITO_REVIEW_STATE_READY_TO_REISSUE}:
+                return {
+                    "success": True,
+                    "groupId": group_id,
+                    "reviewState": review_state,
+                    "failureCertainty": REMITO_FAILURE_CONFIRMED_NOT_IMPORTED,
+                    "orderIds": ids,
+                }
+            return _prepare_remito_group_for_correction(group, ids, actor_user_id)
+        if review_action == "pre_reissue" and review_state in {
+            REMITO_REVIEW_STATE_READY_FOR_CORRECTION,
+            REMITO_REVIEW_STATE_READY_TO_REISSUE,
+        }:
+            return {
+                "success": True,
+                "groupId": group_id,
+                "reviewState": "confirmed_not_imported",
+                "failureCertainty": REMITO_FAILURE_CONFIRMED_NOT_IMPORTED,
+                "orderIds": ids,
+            }
     if force_reviewed_reissue:
         blocked_error = DeliveryOrderError(
             REMITO_REVIEW_REQUIRED_CODE,
@@ -4445,6 +4926,191 @@ def _reconcile_existing_uncertain_remito_group(
         "La emisión sigue sin confirmación clara en Bejerman. La orden queda en revisión para evitar duplicar stock.",
         status_code=409,
     )
+
+
+def _orders_for_review_group(group: dict[str, Any], actor_user_id: int | None) -> list[dict[str, Any]]:
+    raw_order_ids = group.get("order_ids")
+    if isinstance(raw_order_ids, str):
+        try:
+            raw_order_ids = json.loads(raw_order_ids)
+        except Exception:
+            raw_order_ids = []
+    order_ids = [str(value).strip() for value in (raw_order_ids or []) if str(value).strip()]
+    if not order_ids:
+        raise DeliveryOrderError(
+            REMITO_REVIEW_REQUIRED_CODE,
+            "El proceso no conserva las órdenes necesarias para la revisión.",
+            status_code=409,
+        )
+    return [
+        get_delivery_order(
+            order_id,
+            include_events=False,
+            actor_user_id=actor_user_id,
+            refresh_article_flags=True,
+        )
+        for order_id in order_ids
+    ]
+
+
+def _current_review_comprobante(
+    group: dict[str, Any],
+    orders: list[dict[str, Any]],
+    actor_user_id: int | None,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    group_id = _optional_text(group.get("id"))
+    compatibility = _validate_remito_orders(orders, allow_existing_group_id=group_id)
+    profile = _profile_for_order(compatibility["deliveryType"], compatibility["companyKey"])
+    orders = _align_service_release_items_with_stock_article(orders, actor_user_id, compatibility, profile)
+    summary = _json_object(group.get("response_summary"))
+    saved_bridge_request = summary.get("bridgeRequest") if isinstance(summary.get("bridgeRequest"), dict) else {}
+    seller_code = _optional_text(group.get("seller_code")) or _env_text("BEJERMAN_REMITO_SELLER", "ADM")
+    payment_term_code = _optional_text(group.get("payment_term_code")) or _env_text(
+        "BEJERMAN_REMITO_PAYMENT_TERM",
+        _env_text("BEJERMAN_RIS_PAYMENT_TERM", "30"),
+    )
+    bridge_request = {
+        "groupId": group_id,
+        "companyKey": compatibility["companyKey"],
+        "issueDate": _optional_text((payload or {}).get("issueDate")) or timezone.localdate().isoformat(),
+        "customerCode": compatibility["customerCode"],
+        "customerName": compatibility["customerName"],
+        "priceCurrency": compatibility["priceCurrency"],
+        "exchangeRate": compatibility["exchangeRate"],
+        "sellerCode": seller_code,
+        "paymentTermCode": payment_term_code,
+        "notes": _optional_text((payload or {}).get("notes")) or _optional_text(saved_bridge_request.get("notes")),
+        "orders": [_bridge_order(order) for order in orders],
+    }
+    client = BejermanSDKClient(company_key=compatibility["companyKey"], actor_user_id=actor_user_id)
+    customer_fields = resolve_customer_document_fields(client, compatibility["customerCode"])
+    article_tax_by_code = _delivery_article_sales_vat_map(client, bridge_request, profile)
+    built = build_delivery_remito_comprobante(
+        bridge_request,
+        delivery_remito_config(profile),
+        customer_fields,
+        article_tax_by_code,
+    )
+    return {
+        "signature": _comprobante_signature(built.get("comprobante")),
+        "comprobante": built.get("comprobante"),
+        "bridgeRequest": bridge_request,
+    }
+
+
+def verify_bejerman_remito_review(group_id: str, actor_user_id: int | None) -> dict[str, Any]:
+    group = _load_remito_group_row(_optional_text(group_id))
+    if not group or _optional_text(group.get("status")) != "failed_review":
+        raise DeliveryOrderError("BEJERMAN_REMITO_REVIEW_NOT_FOUND", "No se encontró un proceso RT pendiente de revisión.", status_code=404)
+    summary = _json_object(group.get("response_summary"))
+    if _optional_text(summary.get("reviewState")) == REMITO_REVIEW_STATE_SUPERSEDED:
+        raise DeliveryOrderError(REMITO_REVIEW_REQUIRED_CODE, "Este proceso ya fue reemplazado por otro remito.", status_code=409)
+    orders = _orders_for_review_group(group, actor_user_id)
+    result = _reconcile_existing_uncertain_remito_group(
+        group,
+        orders,
+        actor_user_id,
+        None,
+        review_action="verify",
+    )
+    return result or {"success": True, "groupId": group_id, "reviewState": REMITO_REVIEW_STATE_BLOCKED}
+
+
+def _claim_review_reissue(group_id: str) -> None:
+    patch = {"reissueInProgress": True, "reissueClaimedAt": timezone.now().isoformat()}
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE bejerman_remito_groups
+               SET response_summary = COALESCE(response_summary, '{}'::jsonb) || %s::jsonb
+             WHERE id = %s
+               AND status = 'failed_review'
+               AND COALESCE(response_summary->>'reviewState', '') IN ('ready_for_correction', 'ready_to_reissue')
+               AND (
+                    COALESCE(response_summary->>'reissueInProgress', 'false') <> 'true'
+                    OR NULLIF(response_summary->>'reissueClaimedAt', '') IS NULL
+                    OR (response_summary->>'reissueClaimedAt')::timestamptz
+                       < CURRENT_TIMESTAMP - INTERVAL '15 minutes'
+               )
+            RETURNING id
+            """,
+            [_json_param(patch), group_id],
+        )
+        if not cur.fetchone():
+            raise DeliveryOrderError(
+                "BEJERMAN_REMITO_REISSUE_CONFLICT",
+                "El proceso no está listo para reemitir o ya hay otra reemisión en curso.",
+                status_code=409,
+            )
+
+
+def _release_review_reissue_claim(group_id: str) -> None:
+    _patch_remito_review_summary(group_id, {"reissueInProgress": False})
+
+
+def reissue_corrected_bejerman_remito_review(
+    group_id: str,
+    actor_user_id: int | None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if (payload or {}).get("confirm") is not True:
+        raise DeliveryOrderError("BEJERMAN_REMITO_REISSUE_CONFIRMATION_REQUIRED", "Debe confirmar la reemisión corregida.", status_code=400)
+    group = _load_remito_group_row(_optional_text(group_id))
+    if not group or _optional_text(group.get("status")) != "failed_review":
+        raise DeliveryOrderError("BEJERMAN_REMITO_REVIEW_NOT_FOUND", "No se encontró un proceso RT pendiente de revisión.", status_code=404)
+    _claim_review_reissue(_optional_text(group_id))
+    completed = False
+    try:
+        group = _load_remito_group_row(_optional_text(group_id)) or group
+        orders = _orders_for_review_group(group, actor_user_id)
+        reconciled = _reconcile_existing_uncertain_remito_group(
+            group,
+            orders,
+            actor_user_id,
+            None,
+            review_action="pre_reissue",
+        )
+        if reconciled and _optional_text(reconciled.get("reviewState")) != "confirmed_not_imported":
+            completed = True
+            return reconciled
+        current = _current_review_comprobante(group, orders, actor_user_id, payload)
+        previous_signature = _attempted_comprobante_signature(group)
+        if not previous_signature or current["signature"] == previous_signature:
+            _patch_remito_review_summary(
+                _optional_text(group_id),
+                {
+                    "reviewState": REMITO_REVIEW_STATE_READY_FOR_CORRECTION,
+                    "hasPayloadChanges": False,
+                    "blockedReason": "El comprobante corregido no presenta cambios respecto del intento anterior.",
+                    "diagnosticCode": REMITO_REVIEW_PAYLOAD_UNCHANGED_CODE,
+                },
+            )
+            raise DeliveryOrderError(
+                REMITO_REVIEW_PAYLOAD_UNCHANGED_CODE,
+                "El comprobante no cambió. Corrija la orden o el cálculo fiscal antes de reemitir.",
+                status_code=409,
+            )
+        _patch_remito_review_summary(
+            _optional_text(group_id),
+            {
+                "reviewState": REMITO_REVIEW_STATE_READY_TO_REISSUE,
+                "hasPayloadChanges": True,
+                "currentPayloadSignature": current["signature"],
+            },
+        )
+        next_payload = {
+            key: value
+            for key, value in (payload or {}).items()
+            if key not in {"action", "confirm", "retryConfirmedNotImported", "forceReviewedReissue"}
+        }
+        result = generate_bejerman_remito([order["id"] for order in orders], actor_user_id, next_payload)
+        _mark_review_group_superseded(group, [order["id"] for order in orders], actor_user_id, result, current["signature"])
+        completed = True
+        return {**result, "previousGroupId": group_id}
+    finally:
+        if not completed:
+            _release_review_reissue_claim(_optional_text(group_id))
 
 
 def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -4649,9 +5315,16 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
                     request_payload={"bridgeRequest": bridge_request, "comprobante": built.get("comprobante")},
                     reason="error_post_envio_sin_confirmacion",
                 )
+                detail = _optional_text(str(exc))
+                message = (
+                    "Bejerman devolvió un error después del envío. "
+                    "NEXORA dejó la orden en revisión y no va a reemitir hasta reconciliar el comprobante."
+                )
+                if detail:
+                    message = f"{message} Detalle Bejerman: {detail}"
                 raise DeliveryOrderError(
                     REMITO_REVIEW_REQUIRED_CODE,
-                    "Bejerman devolvió un error después del envío. NEXORA dejó la orden en revisión y no va a reemitir hasta reconciliar el comprobante.",
+                    message,
                     status_code=409,
                 ) from exc
         else:
@@ -4780,6 +5453,8 @@ def _remito_group_fallback_lines(row: dict[str, Any], summary: dict[str, Any]) -
     for item in raw_items:
         if not isinstance(item, dict):
             continue
+        if _optional_text(item.get("Item_Tipo")).upper() != "A":
+            continue
         code = _optional_text(item.get("Item_CodigoArticulo"))
         detail = _optional_text(item.get("Item_DescripArticulo"))
         quantity = _optional_text(item.get("Item_CantidadUM1"))
@@ -4806,16 +5481,19 @@ def _remito_group_fallback_lines(row: dict[str, Any], summary: dict[str, Any]) -
         for item in order.get("items") if isinstance(order.get("items"), list) else []:
             if not isinstance(item, dict):
                 continue
-            lines.append(
-                {
-                    "order": order_number,
-                    "code": _optional_text(item.get("articleCode")),
-                    "detail": _optional_text(item.get("articleName") or item.get("description") or item.get("sourceText")),
-                    "quantity": _optional_text(item.get("quantity")),
-                    "partida": _optional_text(item.get("partida") or item.get("equipmentSerial")),
-                    "deposit": _optional_text(item.get("stockDepositCode")),
-                }
-            )
+            partidas = item.get("partidas") if isinstance(item.get("partidas"), list) else []
+            item_lines = partidas or [item]
+            for partida in item_lines:
+                lines.append(
+                    {
+                        "order": order_number,
+                        "code": _optional_text(item.get("articleCode")),
+                        "detail": _optional_text(item.get("articleName") or item.get("description")),
+                        "quantity": _optional_text(partida.get("assignedQuantity") or item.get("quantity")),
+                        "partida": _optional_text(partida.get("partida") or item.get("partida") or item.get("equipmentSerial")),
+                        "deposit": _optional_text(partida.get("stockDepositCode") or item.get("stockDepositCode")),
+                    }
+                )
 
     if lines:
         unique: list[dict[str, Any]] = []
@@ -4858,7 +5536,7 @@ def _remito_group_fallback_lines(row: dict[str, Any], summary: dict[str, Any]) -
                 {
                     "order": _optional_text(order.get("orderNumber") or order.get("sourceReference")),
                     "code": _optional_text(item.get("articleCode")),
-                    "detail": _optional_text(item.get("articleName") or item.get("description") or item.get("sourceText")),
+                    "detail": _optional_text(item.get("articleName") or item.get("description")),
                     "quantity": _optional_text(item.get("quantity")),
                     "partida": _optional_text(item.get("partida") or item.get("equipmentSerial")),
                     "deposit": _optional_text(item.get("stockDepositCode")),
@@ -4940,7 +5618,13 @@ def _remito_group_service_release_print_lines(row: dict[str, Any], summary: dict
     return [line for line in lines if _optional_text(line)]
 
 
-def _render_remito_group_operational_pdf(row: dict[str, Any], summary: dict[str, Any], *, reason: str = "") -> bytes:
+def _render_remito_group_operational_pdf(
+    row: dict[str, Any],
+    summary: dict[str, Any],
+    *,
+    reason: str = "",
+    secure_rt: bool = False,
+) -> bytes:
     from io import BytesIO
 
     from reportlab.lib import colors
@@ -4949,7 +5633,7 @@ def _render_remito_group_operational_pdf(row: dict[str, Any], summary: dict[str,
     from reportlab.pdfgen import canvas
 
     buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
+    pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=0)
     width, height = A4
     margin = 16 * mm
     y = height - margin
@@ -4976,10 +5660,12 @@ def _render_remito_group_operational_pdf(row: dict[str, Any], summary: dict[str,
 
     pdf.setTitle(remito_number)
     pdf.setFillColor(colors.HexColor("#111827"))
-    draw_line("Copia operativa NEXORA", size=16, bold=True)
-    draw_line("El PDF oficial de Bejerman no estuvo disponible al momento de imprimir.", size=9)
-    if reason:
-        draw_line(f"Motivo técnico: {reason}", size=8)
+    draw_line("Remito de entrega", size=16, bold=True)
+    if not secure_rt:
+        draw_line("Copia operativa NEXORA", size=9)
+        draw_line("El PDF oficial de Bejerman no estuvo disponible al momento de imprimir.", size=9)
+        if reason:
+            draw_line(f"Motivo técnico: {reason}", size=8)
     y -= 3
     pdf.setStrokeColor(colors.HexColor("#d1d5db"))
     pdf.line(margin, y, width - margin, y)
@@ -5033,7 +5719,8 @@ def _render_remito_group_operational_pdf(row: dict[str, Any], summary: dict[str,
     y = max(y - 12, margin + 20)
     pdf.setFont("Helvetica", 7)
     pdf.setFillColor(colors.HexColor("#6b7280"))
-    pdf.drawString(margin, y, "Esta copia no modifica stock ni reemplaza la registración contable de Bejerman; sólo permite imprimir el comprobante ya registrado.")
+    if not secure_rt:
+        pdf.drawString(margin, y, "Esta copia no modifica stock ni reemplaza la registración contable de Bejerman; sólo permite imprimir el comprobante ya registrado.")
     pdf.showPage()
     pdf.save()
     return buffer.getvalue()
@@ -5063,6 +5750,105 @@ def _remito_group_operational_pdf_response(
         "application/pdf",
         f"remito-operativo-{row.get('remito_number') or row.get('id')}.pdf",
     )
+
+
+def _secure_rt_pdf_response(row: dict[str, Any], summary: dict[str, Any]) -> tuple[bytes, str, str]:
+    lines = _remito_group_fallback_lines(row, summary)
+    if not lines:
+        raise BillingError(
+            "RT_UNPRICED_PDF_DATA_UNAVAILABLE",
+            "No se pudo obtener el detalle de artículos necesario para generar el PDF RT sin importes.",
+            status_code=502,
+        )
+    return (
+        _render_remito_group_operational_pdf(row, summary, secure_rt=True),
+        "application/pdf",
+        f"remito-{row.get('remito_number') or row.get('id')}.pdf",
+    )
+
+
+def get_unpriced_rt_document_pdf(
+    customer_code: str | None,
+    document_id: str,
+    *,
+    actor_user_id: int | None = None,
+    company_key: str | None = None,
+) -> tuple[bytes, str, str]:
+    try:
+        decoded = decode_document_id(_optional_text(document_id))
+    except Exception as exc:
+        raise BillingError("DOCUMENT_ID_INVALID", "Referencia de comprobante inválida.", status_code=400) from exc
+    if _optional_text(decoded.get("t")).upper() != "RT":
+        raise BillingError("RT_UNPRICED_PDF_TYPE_INVALID", "El documento solicitado no es un RT.", status_code=400)
+    normalized_company = _company_key_for_marker(company_key)
+    if normalized_company not in REMITO_QUERY_COMPANY_KEYS:
+        raise BillingError("RT_UNPRICED_PDF_COMPANY_REQUIRED", "Debe indicar MGBIO o SEPID para generar el PDF RT.", status_code=400)
+    effective_customer = _optional_text(decoded.get("c") or customer_code)
+    issue_date = normalize_date(decoded.get("f"))
+    if not effective_customer or not issue_date:
+        raise BillingError("RT_UNPRICED_PDF_REFERENCE_INCOMPLETE", "La referencia RT no tiene cliente o fecha.", status_code=400)
+    try:
+        client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
+        response = client.list_comprobantes_ventas(build_sales_filters(effective_customer, issue_date, issue_date, "RT"))
+        matches = []
+        for record in records_from_response(response):
+            if _optional_text(first_value(record, ("Comprobante_Tipo", "TipoComprobante", "Tipo"))).upper() != "RT":
+                continue
+            if _normalized_digits(first_value(record, ("Comprobante_Numero", "Numero", "NroComprobante"))).lstrip("0") != _normalized_digits(decoded.get("n")).lstrip("0"):
+                continue
+            if _normalized_digits(first_value(record, ("Comprobante_PtoVenta", "PuntoVenta", "PtoVenta"))).zfill(5) != _normalized_digits(decoded.get("p")).zfill(5):
+                continue
+            record_letter = _optional_text(first_value(record, ("Comprobante_Letra", "Letra"))).upper()
+            if record_letter and record_letter != _optional_text(decoded.get("l")).upper():
+                continue
+            matches.append(record)
+        if not matches:
+            raise BillingError("RT_UNPRICED_PDF_DATA_UNAVAILABLE", "No se encontró el RT en Bejerman para obtener su detalle seguro.", status_code=404)
+        if len(matches) > 1:
+            raise BillingError("RT_UNPRICED_PDF_AMBIGUOUS", "Bejerman devolvió más de un RT para la referencia solicitada.", status_code=409)
+        detail_id = comprobante_id_of(matches[0])
+        if not detail_id:
+            raise BillingError("RT_UNPRICED_PDF_DATA_UNAVAILABLE", "Bejerman no devolvió el identificador necesario para consultar el detalle del RT.", status_code=502)
+        detail_records = records_from_response(client.detalle_comprobante_ventas(detail_id))
+        detail = detail_records[0] if detail_records and isinstance(detail_records[0], dict) else {}
+    except BillingError:
+        raise
+    except Exception as exc:
+        raise BillingError(
+            "RT_UNPRICED_PDF_DATA_UNAVAILABLE",
+            f"No se pudo obtener el detalle seguro del RT desde Bejerman: {exc}",
+            status_code=502,
+        ) from exc
+    if not detail or not any(
+        isinstance(item, dict) and _optional_text(item.get("Item_Tipo")).upper() == "A"
+        for item in detail.get("Comprobante_Items") or []
+    ):
+        raise BillingError(
+            "RT_UNPRICED_PDF_DATA_UNAVAILABLE",
+            "Bejerman no devolvió renglones de artículos para generar el PDF RT sin importes.",
+            status_code=502,
+        )
+    point = _normalized_digits(decoded.get("p")).zfill(5)
+    number = _normalized_digits(decoded.get("n")).zfill(8)
+    remito_number = f"RT {_optional_text(decoded.get('l')).upper() or 'R'} {point}-{number}"
+    row = {
+        "id": document_id,
+        "company_key": normalized_company,
+        "comprobante_tipo": "RT",
+        "comprobante_letra": decoded.get("l") or "R",
+        "comprobante_pto_venta": point,
+        "comprobante_numero": number,
+        "customer_code": effective_customer,
+        "customer_name": _optional_text(first_value(detail, ("Cliente_RazonSocial", "Cliente_Nombre", "RazonSocial"))),
+        "remito_number": remito_number,
+        "operation_code": _optional_text(first_value(detail, ("Comprobante_TipoOperacion", "TipoOperacion"))),
+        "deposit_code": "",
+        "created_at": issue_date,
+        "generated_at": issue_date,
+        "order_ids": [],
+    }
+    summary = {"raw": detail, "issueDate": issue_date}
+    return _secure_rt_pdf_response(row, summary)
 
 
 def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tuple[bytes, str, str]:
@@ -5100,6 +5886,9 @@ def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tup
             retry_after_ms=2500,
         )
     company_key = _company_key_for_remito_group(group_id, row.get("response_summary"), row.get("company_key"))
+    if _optional_text(row.get("comprobante_tipo")).upper() == "RT" and company_key in REMITO_QUERY_COMPANY_KEYS:
+        row["company_key"] = company_key
+        return _secure_rt_pdf_response(row, summary)
     doc_id = _document_id(
         {
             "t": row.get("comprobante_tipo"),

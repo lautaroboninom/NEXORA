@@ -1,5 +1,5 @@
 // web/src/pages/PendientesPresupuesto.jsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getPendientesPresupuesto } from "../lib/api";
 import { useNavigate } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
@@ -11,6 +11,7 @@ import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } fro
 
 // Ajustar si el backend usa otra ruta.
 const ENDPOINT = "/api/presupuestos/pendientes/";
+const SCROLL_STORAGE_KEY = "nexora:pendientes-presupuesto:scroll-y";
 
 export default function PendientesPresupuesto() {
   const [rows, setRows] = useState([]);
@@ -18,6 +19,41 @@ export default function PendientesPresupuesto() {
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
   const navigate = useNavigate();
+  const restoredScrollRef = useRef(false);
+
+  useEffect(() => {
+    const saveScroll = () => {
+      try {
+        sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY || 0));
+      } catch {
+        // La posición es una mejora opcional; no debe bloquear la navegación.
+      }
+    };
+
+    window.addEventListener("scroll", saveScroll, { passive: true });
+    return () => {
+      saveScroll();
+      window.removeEventListener("scroll", saveScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (loading || restoredScrollRef.current) return;
+    restoredScrollRef.current = true;
+
+    let savedY = 0;
+    try {
+      savedY = Math.max(0, Number(sessionStorage.getItem(SCROLL_STORAGE_KEY) || 0));
+    } catch {
+      savedY = 0;
+    }
+    if (!savedY) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: savedY, left: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loading]);
 
   async function load() {
     try {

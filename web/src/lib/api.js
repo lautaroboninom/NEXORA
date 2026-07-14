@@ -1023,11 +1023,20 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postDeliveryOrderNotBillable = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/no-facturar/`, payload);
 
+  export const postDeliveryOrderBillingPostponement = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/posponer-facturacion/`, payload);
+
+  export const postDeliveryOrderBillingReactivation = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/reactivar-facturacion/`, payload);
+
   export const postDeliveryOrderCancel = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/cancelar/`, payload);
 
   export const patchDeliveryOrderRemitoLocation = (orderId, payload = {}) =>
     api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/remito-ubicacion/`, payload);
+
+  export const patchDeliveryOrderCommercialCorrection = (orderId, payload = {}) =>
+    api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/correccion-comercial/`, payload);
 
   export const patchDeliveryOrderItemArticle = (orderId, itemId, payload = {}) =>
     api.patch(

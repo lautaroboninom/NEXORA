@@ -58,14 +58,14 @@ export default function ServiceCriticalStrip({ data, isCotizacion = false }) {
 
   return (
     <div className="sticky top-0 z-20 mb-4 rounded border bg-white/95 p-3 shadow-sm backdrop-blur">
-      <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-12 gap-3">
-        <Field label="OS" className="xl:col-span-1">{formatOS(data)}</Field>
-        <Field label="Cliente" className="xl:col-span-1">{data?.razon_social || data?.cliente || "-"}</Field>
-        <Field label="Tipo de equipo" title={tipoEquipo} className="xl:col-span-2">{tipoEquipo}</Field>
-        <Field label="Marca" title={marca} className="xl:col-span-1">{marca}</Field>
-        <Field label="Modelo" title={modelo} className="xl:col-span-1">{modelo}</Field>
-        <Field label="N/S o MG" title={identificador} className="xl:col-span-2">{identificador}</Field>
-        <Field label="Estado" className="xl:col-span-1"><StatusChip value={data?.estado} /></Field>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5 xl:grid-cols-[0.65fr_1.8fr_1.8fr_0.95fr_0.85fr_0.95fr_1fr_1fr_1.1fr_1fr]">
+        <Field label="OS">{formatOS(data)}</Field>
+        <Field label="Cliente">{data?.razon_social || data?.cliente || "-"}</Field>
+        <Field label="Tipo de equipo" title={tipoEquipo}>{tipoEquipo}</Field>
+        <Field label="Marca" title={marca}>{marca}</Field>
+        <Field label="Modelo" title={modelo}>{modelo}</Field>
+        <Field label="N/S o MG" title={identificador}>{identificador}</Field>
+        <Field label="Estado"><StatusChip value={data?.estado} /></Field>
         <Field label={isCotizacion ? "Cotización" : "Presupuesto"}>
           <StatusChip value={data?.presupuesto_estado} />
         </Field>

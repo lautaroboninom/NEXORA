@@ -1,6 +1,7 @@
 import base64
 import json
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from unittest import skipUnless
 from unittest.mock import Mock, patch
@@ -27,6 +28,7 @@ from service.bejerman_delivery import (
     _bejerman_sql_database_for_company,
     _bridge_order,
     _collapse_recovery_candidate_rows,
+    _delivery_article_sales_vat_map,
     _profile_for_order,
     _recovery_record_matches_delivery_request,
     _remito_requires_billing,
@@ -36,6 +38,7 @@ from service.bejerman_delivery import (
     get_delivery_order_remito_pdf,
     get_facturacion_pdf,
     get_remito_group_pdf,
+    get_unpriced_rt_document_pdf,
     list_bejerman_article_stock,
     list_bejerman_articles,
     list_bejerman_depositos,
@@ -43,6 +46,11 @@ from service.bejerman_delivery import (
     list_remitos_from_bejerman,
     resolve_delivery_order_invoice_document,
     resolve_delivery_order_remito_document,
+)
+from service.bejerman_remito_price_fix import (
+    RemitoPriceLineTarget,
+    build_bejerman_price_fix_sql,
+    perform_bejerman_remito_price_fix,
 )
 from service.bejerman_pdf_settings import (
     BejermanPdfOutputSettingsError,
@@ -82,6 +90,7 @@ from service.bejerman_sdk import (
     sdk_emission_article_quantity,
     sdk_signed_article_quantity,
     sdk_uses_negative_article_quantity,
+    _validate_delivery_comprobante_amounts,
 )
 
 
@@ -153,6 +162,82 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
                 "printUrl": "/api/cobranzas/remitos/abc%2F123/print/?customerCode=CLI&companyKey=SEPID",
             },
         )
+
+    def test_bejerman_remito_price_fix_sql_respalda_actualiza_y_recalcula_totales(self):
+        target = RemitoPriceLineTarget(
+            company_key="SEPID",
+            group_id="brg-test",
+            remito_number="RT R 00004-00012345",
+            tipo="RT",
+            letra="R",
+            punto="00004",
+            numero="00012345",
+            customer_code="CLI",
+            customer_name="Cliente",
+            order_number="OE-TEST",
+            item_id="doi-test",
+            article_code="ART001",
+            partida="P1",
+            quantity=Decimal("2"),
+            unit_price=Decimal("1500.00"),
+            discount_percent=Decimal("10"),
+            line_net=Decimal("2700.00"),
+        )
+
+        sql = build_bejerman_price_fix_sql([target], database="SBDASEP", apply=True, backup_name="BKP_TEST")
+
+        self.assertIn("USE [SBDASEP];", sql)
+        self.assertIn("@BackupPrefix sysname = N'BKP_TEST'", sql)
+        self.assertIn("_SegDetV", sql)
+        self.assertIn("_SegTotV", sql)
+        self.assertIn("UPDATE d", sql)
+        self.assertIn("sdv_PrecioUn = lm.unit_price", sql)
+        self.assertIn("sdv_ImpTot = lm.line_net", sql)
+        self.assertIn("DELETE tv", sql)
+        self.assertIn("INSERT INTO SegTotV", sql)
+        self.assertIn("line_matches <> 1", sql)
+        self.assertIn("mismo renglón Bejerman", sql)
+
+    def test_bejerman_remito_price_fix_perform_usa_executor_y_devuelve_backup(self):
+        target = RemitoPriceLineTarget(
+            company_key="SEPID",
+            group_id="brg-test",
+            remito_number="RT R 00004-00012345",
+            tipo="RT",
+            letra="R",
+            punto="00004",
+            numero="00012345",
+            customer_code="CLI",
+            customer_name="Cliente",
+            order_number="OE-TEST",
+            item_id="doi-test",
+            article_code="ART001",
+            partida="P1",
+            quantity=Decimal("1"),
+            unit_price=Decimal("100.00"),
+            discount_percent=Decimal("0"),
+            line_net=Decimal("100.00"),
+        )
+        calls = []
+
+        def executor(sql, **kwargs):
+            calls.append((sql, kwargs))
+            return [{"estado": "DRY_RUN", "backup_name": "BKP_TEST"}]
+
+        result = perform_bejerman_remito_price_fix(
+            [target],
+            company_key="SEPID",
+            database="SBDASEP",
+            backup_name="BKP_TEST",
+            apply=False,
+            executor=executor,
+        )
+
+        self.assertEqual(result["backupName"], "BKP_TEST")
+        self.assertEqual(result["lineCount"], 1)
+        self.assertEqual(result["rows"], [{"estado": "DRY_RUN", "backup_name": "BKP_TEST"}])
+        self.assertEqual(calls[0][1], {"company_key": "SEPID"})
+        self.assertIn("DECLARE @Apply bit = 0", calls[0][0])
 
     @override_settings(BEJERMAN_RSS_MAX_PRINT_LINES=22, BEJERMAN_RSS_PRINT_LINES_PER_ITEM=3)
     def test_rss_print_split_usa_tres_lineas_por_equipo_tmd(self):
@@ -321,6 +406,37 @@ class FakeArticleCatalogClient:
                     "Art_TipoTasaVentas": "1",
                     "Art_CodTasaIVAVentas": "03",
                 },
+            ]
+        }
+
+
+class FakeArticleVatLookupClient:
+    def __init__(self, include_filtered_articles=True):
+        self.calls = []
+        self.include_filtered_articles = include_filtered_articles
+
+    def list_articulos(self, filters, limit):
+        self.calls.append((filters, limit))
+        filters_text = json.dumps(filters, ensure_ascii=False)
+        if "1206001" in filters_text and self.include_filtered_articles:
+            return {
+                "DatosJSON": [
+                    {
+                        "Articulo_Codigo": "1206001",
+                        "Articulo_Descripcion": "Canula nasal",
+                        "Art_TipoTasaVentas": "1",
+                        "Art_CodTasaIVAVentas": "01",
+                    }
+                ]
+            }
+        return {
+            "DatosJSON": [
+                {
+                    "Articulo_Codigo": "1100001",
+                    "Articulo_Descripcion": "Articulo inicial",
+                    "Art_TipoTasaVentas": "1",
+                    "Art_CodTasaIVAVentas": "03",
+                }
             ]
         }
 
@@ -2000,6 +2116,96 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         self.assertIn("registrado manualmente", str(ctx.exception))
         pdf_mock.assert_not_called()
 
+    def test_rt_de_sepid_y_mgbio_usa_pdf_nexora_sin_importes(self):
+        for company_key, point in (("SEPID", "00004"), ("MGBIO", "00007")):
+            with self.subTest(company_key=company_key):
+                group_id = f"brg-rt-unpriced-{company_key.lower()}"
+                self._insert_remito_group(
+                    group_id,
+                    remito_type="RT",
+                    customer_code="EDU",
+                    customer_name="ANDREOLI EDUARDO GABRIEL",
+                    number="00000007",
+                    operation_code="MC",
+                    total=23858.78,
+                    company_key=company_key,
+                    point_of_sale=point,
+                )
+                with connection.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE bejerman_remito_groups
+                           SET response_summary = response_summary || %s::jsonb
+                         WHERE id = %s
+                        """,
+                        [
+                            json.dumps(
+                                {
+                                    "raw": {
+                                        "Comprobante_FechaEmision": "2026-07-13",
+                                        "Comprobante_ImporteTotal": 23858.78,
+                                        "Comprobante_Items": [
+                                            {
+                                                "Item_Tipo": "A",
+                                                "Item_CodigoArticulo": "ART-SEGURO",
+                                                "Item_DescripArticulo": "Equipo médico",
+                                                "Item_CantidadUM1": 1,
+                                                "Item_Partida": "SERIE-001",
+                                                "Item_Deposito": "VAL",
+                                                "Item_PrecioUnitario": 23858.78,
+                                                "Item_ImporteIVAInscrip": 0,
+                                                "Item_ImporteTotal": 23858.78,
+                                            },
+                                            {
+                                                "Item_Tipo": "L",
+                                                "Item_DescripArticulo": "Descuento $ 9999 Total $ 23858.78",
+                                            },
+                                        ],
+                                    }
+                                }
+                            ),
+                            group_id,
+                        ],
+                    )
+
+                with patch("service.bejerman_delivery.get_facturacion_pdf") as official_pdf:
+                    pdf_bytes, content_type, filename = get_remito_group_pdf(group_id, actor_user_id=1152)
+
+                official_pdf.assert_not_called()
+                pdf_text = pdf_bytes.decode("latin-1", "ignore").lower()
+                self.assertEqual(content_type, "application/pdf")
+                self.assertIn("art-seguro", pdf_text)
+                self.assertNotIn("precio", pdf_text)
+                self.assertNotIn("descuento", pdf_text)
+                self.assertNotIn("subtotal", pdf_text)
+                self.assertNotIn("importe", pdf_text)
+                self.assertNotIn("iva", pdf_text)
+                self.assertIn("remito-rt", filename.lower())
+
+    def test_rt_historico_sin_detalle_no_entrega_pdf_oficial_valorizado(self):
+        document_id = build_document_id(
+            {"t": "RT", "n": "00000105", "l": "R", "p": "00007", "f": "2026-07-13", "c": "EDU"}
+        )
+        client = Mock()
+        client.list_comprobantes_ventas.return_value = {
+            "DatosJSON": [
+                {
+                    "Comprobante_ID": "105",
+                    "Comprobante_Tipo": "RT",
+                    "Comprobante_Letra": "R",
+                    "Comprobante_PtoVenta": "00007",
+                    "Comprobante_Numero": "00000105",
+                }
+            ]
+        }
+        client.detalle_comprobante_ventas.side_effect = BejermanSdkResponseError("detalle no disponible")
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client):
+            with self.assertRaises(BillingError) as ctx:
+                get_unpriced_rt_document_pdf("EDU", document_id, actor_user_id=1152, company_key="MGBIO")
+
+        self.assertEqual(ctx.exception.code, "RT_UNPRICED_PDF_DATA_UNAVAILABLE")
+
     def test_remito_group_pdf_permanece_disponible_en_revision_con_numero(self):
         self._insert_remito_group("brg-rss-review-with-number", remito_type="RSS", number="00004741")
         with connection.cursor() as cur:
@@ -2234,6 +2440,89 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
         self.assertFalse(result["items"][0]["stockByPartida"])
         self.assertFalse(result["items"][0]["requiresPartida"])
 
+    def test_delivery_article_sales_vat_map_retries_missing_codes_by_code(self):
+        client = FakeArticleVatLookupClient()
+
+        result = _delivery_article_sales_vat_map(
+            client,
+            {
+                "orders": [
+                    {
+                        "deliveryType": "sale",
+                        "items": [
+                            {"articleCode": "1100001", "unitPrice": 100},
+                            {"articleCode": "1206001", "unitPrice": 200},
+                        ],
+                    }
+                ]
+            },
+            {"type": "RT"},
+        )
+
+        self.assertEqual(result["1100001"]["salesVatRate"], 10.5)
+        self.assertEqual(result["1206001"]["salesVatRate"], 21)
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("1206001", json.dumps(client.calls[1][0], ensure_ascii=False))
+
+    def test_delivery_article_sales_vat_map_blocks_unresolved_priced_articles(self):
+        client = FakeArticleVatLookupClient(include_filtered_articles=False)
+
+        with self.assertRaisesRegex(BejermanSdkResponseError, "No se pudo resolver el IVA de venta"):
+            _delivery_article_sales_vat_map(
+                client,
+                {
+                    "orders": [
+                        {
+                            "deliveryType": "sale",
+                            "items": [
+                                {"articleCode": "1206001", "unitPrice": 200},
+                            ],
+                        }
+                    ]
+                },
+                {"type": "RT"},
+            )
+
+    def test_delivery_article_sales_vat_map_includes_zero_priced_articles(self):
+        client = FakeArticleVatLookupClient()
+
+        result = _delivery_article_sales_vat_map(
+            client,
+            {
+                "orders": [
+                    {
+                        "deliveryType": "sale",
+                        "items": [
+                            {"articleCode": "1206001", "unitPrice": 0},
+                        ],
+                    }
+                ]
+            },
+            {"type": "RT"},
+        )
+
+        self.assertEqual(result["1206001"]["salesVatCode"], "01")
+        self.assertEqual(result["1206001"]["salesVatRate"], 21)
+
+    def test_delivery_article_sales_vat_map_blocks_unresolved_zero_priced_articles(self):
+        client = FakeArticleVatLookupClient(include_filtered_articles=False)
+
+        with self.assertRaisesRegex(BejermanSdkResponseError, "No se pudo resolver el IVA de venta"):
+            _delivery_article_sales_vat_map(
+                client,
+                {
+                    "orders": [
+                        {
+                            "deliveryType": "sale",
+                            "items": [
+                                {"articleCode": "1206001", "unitPrice": 0},
+                            ],
+                        }
+                    ]
+                },
+                {"type": "RT"},
+            )
+
     def test_article_stock_returns_only_positive_val_lots_with_expiration(self):
         client = FakeArticleStockClient()
 
@@ -2324,11 +2613,11 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(require_company("MGBI").key, "MGBIO")
         self.assertEqual(require_company("MODE").key, "TEST")
 
-    @override_settings(BEJERMAN_COMPANY_TEST="MODE")
+    @override_settings(BEJERMAN_COMPANY_TEST="SEP")
     def test_sdk_resolves_company_key(self):
         self.assertEqual(BejermanSDKClient(company_key="SEPID").company, "SEP")
         self.assertEqual(BejermanSDKClient(company_key="MGBIO").company, "MGBI")
-        self.assertEqual(BejermanSDKClient(company_key="TEST").company, "MODE")
+        self.assertEqual(BejermanSDKClient(company_key="TEST").company, "SEP")
 
     def test_sdk_sends_parametros_json_as_single_json_string(self):
         client = BejermanSDKClient(company_key="SEPID")
@@ -2554,6 +2843,8 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(legend_lines[0], "Se recibe para servicio técnico:")
         self.assertEqual(legend_lines.count("------------------------------"), 2)
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-1", "SN-2"])
+        self.assertTrue(any("SN-1" in line for line in legend_lines))
+        self.assertTrue(any("SN-2" in line for line in legend_lines))
         self.assertIn("Motivo de ingreso: No enciende", legend_lines)
         self.assertIn("Accesorios: Bolso (ref: B-1)", legend_lines)
         self.assertIn("Accesorios: batería (ref: 2046-01)", legend_lines)
@@ -3331,6 +3622,155 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(article_lines[0]["Item_TasaIVAInscrip"], 21)
         self.assertEqual(article_lines[0]["Item_ImporteIVAInscrip"], 12495.86)
         self.assertEqual(comprobante["Comprobante_ImporteTotal"], 71999.96)
+
+    def test_delivery_rt_sitiva_6_envia_importes_finales_sin_iva_discriminado(self):
+        built = build_delivery_remito_comprobante(
+            {
+                "groupId": "brg-oe-00105",
+                "issueDate": "2026-07-13",
+                "customerCode": "EDU",
+                "customerName": "ANDREOLI EDUARDO GABRIEL",
+                "sellerCode": "ADM",
+                "paymentTermCode": "30",
+                "orders": [
+                    {
+                        "orderNumber": "OE-00105",
+                        "deliveryType": "sale",
+                        "items": [
+                            {"articleCode": "ART-1", "articleName": "Equipo 1", "quantity": 1, "unitPrice": 9438},
+                            {"articleCode": "ART-2", "articleName": "Equipo 2", "quantity": 1, "unitPrice": 10280},
+                        ],
+                    }
+                ],
+            },
+            delivery_remito_config({"type": "RT", "operation": "MC", "deposit": "VAL", "pointOfSale": "00007"}),
+            {"Cliente_SitIVA": "6"},
+            {
+                "ART-1": {"salesVatType": "1", "salesVatRate": 21},
+                "ART-2": {"salesVatType": "1", "salesVatRate": 21},
+            },
+        )
+
+        comprobante = built["comprobante"]
+        article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(built["amountMode"], "tax_included")
+        self.assertEqual([item["Item_ImporteTotal"] for item in article_lines], [11419.98, 12438.8])
+        self.assertEqual([item["Item_TasaIVAInscrip"] for item in article_lines], [0, 0])
+        self.assertEqual([item["Item_ImporteIVAInscrip"] for item in article_lines], [0, 0])
+        self.assertEqual(comprobante["Comprobante_ImporteTotal"], 23858.78)
+
+    def test_delivery_rt_sitiva_1_conserva_neto_mas_iva_discriminado(self):
+        built = build_delivery_remito_comprobante(
+            {
+                "groupId": "brg-sitiva-1",
+                "issueDate": "2026-07-13",
+                "customerCode": "RI",
+                "customerName": "Responsable inscripto",
+                "sellerCode": "ADM",
+                "paymentTermCode": "30",
+                "orders": [{"orderNumber": "OE-1", "deliveryType": "sale", "items": [{"articleCode": "ART", "quantity": 1, "unitPrice": 100}]}],
+            },
+            delivery_remito_config({"type": "RT", "operation": "MC", "deposit": "VAL", "pointOfSale": "00004"}),
+            {"Cliente_SitIVA": "1"},
+            {"ART": {"salesVatType": "1", "salesVatRate": 21}},
+        )
+
+        article = next(item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A")
+        self.assertEqual(built["amountMode"], "tax_discriminated")
+        self.assertEqual(article["Item_ImporteTotal"], 100)
+        self.assertEqual(article["Item_ImporteIVAInscrip"], 21)
+        self.assertEqual(built["comprobante"]["Comprobante_ImporteTotal"], 121)
+
+    def test_prevalidacion_bloquea_encabezado_que_no_cierra(self):
+        comprobante = {
+            "Comprobante_ImporteTotal": 121.01,
+            "Comprobante_Items": [
+                {
+                    "Item_Tipo": "A",
+                    "Item_ImporteTotal": 100,
+                    "Item_ImporteIVAInscrip": 21,
+                    "Item_ImporteIVANoInscrip": 0,
+                    "Item_ImporteIVANoGravado": 0,
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(BejermanSdkResponseError, "DELIVERY_REMITO_AMOUNT_MISMATCH"):
+            _validate_delivery_comprobante_amounts(comprobante)
+
+    def test_delivery_comprobante_prioriza_iva_de_bejerman_sobre_item_local(self):
+        built = build_delivery_remito_comprobante(
+            {
+                "groupId": "brg-sale-vat-catalog",
+                "issueDate": "2026-07-08",
+                "customerCode": "RES",
+                "customerName": "RESPIRAR S.A.",
+                "sellerCode": "EZE",
+                "paymentTermCode": "30",
+                "orders": [
+                    {
+                        "orderNumber": "OE-IVA-CATALOG",
+                        "deliveryType": "sale",
+                        "items": [
+                            {
+                                "articleCode": "1206001",
+                                "articleName": "Canula nasal",
+                                "articleRequiresPartida": False,
+                                "quantity": 1,
+                                "unitPrice": 100,
+                                "salesVatRate": 0,
+                                "salesVatCode": "04",
+                            }
+                        ],
+                    }
+                ],
+            },
+            delivery_remito_config({"type": "RT", "operation": "MC", "deposit": "VAL", "pointOfSale": "00004"}),
+            {},
+            {"1206001": {"salesVatType": "1", "salesVatCode": "01", "salesVatRate": 21}},
+        )
+
+        article_lines = [item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        self.assertEqual(article_lines[0]["Item_TasaIVAInscrip"], 21)
+        self.assertEqual(article_lines[0]["Item_ImporteIVAInscrip"], 21)
+        self.assertEqual(built["comprobante"]["Comprobante_ImporteTotal"], 121)
+
+    def test_delivery_comprobante_envia_iva_de_bejerman_con_precio_cero(self):
+        built = build_delivery_remito_comprobante(
+            {
+                "groupId": "brg-sale-vat-zero-price",
+                "issueDate": "2026-07-13",
+                "customerCode": "RES",
+                "customerName": "RESPIRAR S.A.",
+                "sellerCode": "EZE",
+                "paymentTermCode": "30",
+                "orders": [
+                    {
+                        "orderNumber": "OE-IVA-SIN-PRECIO",
+                        "deliveryType": "sale",
+                        "items": [
+                            {
+                                "articleCode": "1206001",
+                                "articleName": "Cánula nasal",
+                                "articleRequiresPartida": False,
+                                "quantity": 10,
+                                "unitPrice": 0,
+                            }
+                        ],
+                    }
+                ],
+            },
+            delivery_remito_config({"type": "RT", "operation": "MC", "deposit": "VAL", "pointOfSale": "00004"}),
+            {"Cliente_SitIVA": "1"},
+            {"1206001": {"salesVatType": "1", "salesVatCode": "01", "salesVatRate": 21}},
+        )
+
+        article_line = next(item for item in built["comprobante"]["Comprobante_Items"] if item["Item_Tipo"] == "A")
+        self.assertEqual(article_line["Item_TipoIVA"], "1")
+        self.assertEqual(article_line["Item_TasaIVAInscrip"], 21)
+        self.assertEqual(article_line["Item_ImporteTotal"], 0)
+        self.assertEqual(article_line["Item_ImporteIVAInscrip"], 0)
+        self.assertEqual(built["comprobante"]["Comprobante_ImporteTotal"], 0)
 
     def test_delivery_comprobante_soporta_iva_diez_y_medio(self):
         built = build_delivery_remito_comprobante(

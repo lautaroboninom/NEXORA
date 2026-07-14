@@ -1,5 +1,6 @@
 import json
 import time
+from decimal import Decimal
 from typing import Any
 
 from django.conf import settings
@@ -7,13 +8,18 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from service.bejerman_companies import require_company
-from service.bejerman_ris import _apply_registered_document
+from service.bejerman_ris import _apply_registered_document, _send_service_ingress_comprobante
 from service.bejerman_sdk import (
     BejermanSDKClient,
     BejermanSdkError,
     as_string,
     bejerman_filter,
+    build_delivery_remito_comprobante,
+    build_sales_filters,
     build_service_ingress_comprobante,
+    build_stock_rows,
+    comprobante_id_of,
+    delivery_remito_config,
     first_value,
     format_remito_number,
     is_ok_response,
@@ -21,7 +27,13 @@ from service.bejerman_sdk import (
     records_from_response,
     resolve_customer_document_fields,
 )
-from service.management.commands.seed_bejerman_test_environment import TEST_ARTICLES, TEST_CUSTOMER_CODE
+from service.management.commands.seed_bejerman_test_environment import (
+    SAFE_TEST_COMPANIES,
+    SAFE_TEST_COMPANY_KEYS,
+    TEST_ARTICLES,
+    TEST_CUSTOMER_CODE,
+    TEST_CUSTOMER_SITIVA6_CODE,
+)
 
 
 def _clean(value: Any) -> str:
@@ -34,14 +46,25 @@ def _upper(value: Any) -> str:
 
 def _assert_test_target(company_key: str):
     company = require_company(company_key or "TEST")
-    if not company.is_test:
-        raise CommandError("Este smoke solo admite company-key TEST.")
     wsdl = _clean(getattr(settings, "BEJERMAN_WSDL_URL", ""))
     if "Bejerman-SDK-WS-TEST" not in wsdl:
         raise CommandError("El WSDL no apunta a Bejerman-SDK-WS-TEST; se rechaza para evitar producción.")
-    if _upper(company.bejerman_company) != "MODE":
-        raise CommandError("La empresa TEST debe resolver a MODE. Revisá BEJERMAN_COMPANY_TEST.")
+    if company.key not in SAFE_TEST_COMPANY_KEYS or _upper(company.bejerman_company) not in SAFE_TEST_COMPANIES:
+        raise CommandError("La empresa de prueba debe resolver a SEP o MGBI mediante el WSDL TEST.")
     return company
+
+
+def _rt_point(company) -> str:
+    return "00007" if company.key == "MGBIO" else "00004"
+
+
+def _scenarios_for_company(company, requested: str) -> tuple[str, ...]:
+    supported = ("rt-valued",) if company.key == "MGBIO" else ("emission", "manual", "rt-valued")
+    if requested == "all":
+        return supported
+    if requested not in supported:
+        raise CommandError(f"El escenario {requested} no está definido para {company.key} en Bejerman TEST.")
+    return (requested,)
 
 
 def _stock_rows_for_partida(response: dict[str, Any], partida: str, deposit: str) -> list[dict[str, Any]]:
@@ -137,22 +160,26 @@ def _find_free_manual_number(client: BejermanSDKClient, explicit: str | None = N
 
 
 def _run_emission(client: BejermanSDKClient, company, serial: str):
-    payload = _base_payload(company, serial, update_stock=True, point="00004", ingreso_id=int(time.time()) % 100000)
+    payload = _base_payload(
+        company,
+        serial,
+        update_stock=True,
+        point="00004",
+        ingreso_id=int(time.time()) % 100000,
+    )
     customer_fields = resolve_customer_document_fields(client, TEST_CUSTOMER_CODE)
-    built = build_service_ingress_comprobante(payload, customer_fields)
-    response = client.ingresar_comprobante_ventas_json(
-        built["comprobante"],
-        circuito="VENTAS",
-        operacion="IngresarComprobanteJSON",
+    _, response = _send_service_ingress_comprobante(
+        client,
+        payload,
+        customer_fields,
+        operation="IngresarComprobanteJSON",
         numera_flex="S",
         emite_reg="E",
     )
-    _ensure_ok(response, "Emisión RIS online")
-    summary = parse_remito_response(response)
-    if not summary.get("remitoNumber"):
+    if not response.get("remitoNumber"):
         raise CommandError("Bejerman TEST no devolvió número de remito para emisión online.")
     _verify_stock(client, serial, "STR")
-    return summary["remitoNumber"]
+    return response["remitoNumber"]
 
 
 def _run_manual_registration(client: BejermanSDKClient, company, serial: str, manual_number: str | None):
@@ -209,26 +236,155 @@ def _run_manual_registration(client: BejermanSDKClient, company, serial: str, ma
     return document["remitoNumber"]
 
 
+def _article_real_stock(client: BejermanSDKClient, article_code: str, deposit: str) -> Decimal:
+    rows = build_stock_rows(client.obtener_stock_deposito(deposit))
+    values = [
+        Decimal(str(row.get("realQuantity") or 0))
+        for row in rows
+        if _upper(row.get("articleCode")) == _upper(article_code) and _upper(row.get("depositCode")) == _upper(deposit)
+    ]
+    if not values:
+        raise CommandError(f"No se encontró stock de {article_code} en {deposit} para ejecutar el smoke RT valorizado.")
+    return sum(values, Decimal("0"))
+
+
+def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -> str:
+    article = TEST_ARTICLES[1]
+    deposit = "VAL"
+    before_stock = _article_real_stock(client, article["code"], deposit)
+    if before_stock < 1:
+        raise CommandError(f"El artículo {article['code']} necesita al menos una unidad en {deposit} para el smoke RT.")
+    customer_fields = resolve_customer_document_fields(client, TEST_CUSTOMER_SITIVA6_CODE)
+    if _clean(customer_fields.get("Cliente_SitIVA")) != "6":
+        raise CommandError(
+            f"El cliente {TEST_CUSTOMER_SITIVA6_CODE} no resolvió Cliente_SitIVA=6: {customer_fields.get('Cliente_SitIVA')}"
+        )
+    issue_date = timezone.localdate().isoformat()
+    request = {
+        "groupId": reference,
+        "companyKey": company.key,
+        "issueDate": issue_date,
+        "customerCode": TEST_CUSTOMER_SITIVA6_CODE,
+        "customerName": "NEXORA TEST CLIENTE SITUACIÓN IVA 6",
+        "sellerCode": _clean(getattr(settings, "BEJERMAN_RIS_SELLER_CODE", "ADM")) or "ADM",
+        "paymentTermCode": _clean(getattr(settings, "BEJERMAN_RIS_PAYMENT_TERM", "30")) or "30",
+        "priceCurrency": "ARS",
+        "orders": [
+            {
+                "orderNumber": reference,
+                "deliveryType": "sale",
+                "items": [
+                    {
+                        "articleCode": article["code"],
+                        "articleName": article["description"],
+                        "quantity": 1,
+                        "unitPrice": 100,
+                        "priceCurrency": "ARS",
+                        "discountPercent": 0,
+                        "stockDepositCode": deposit,
+                    }
+                ],
+            }
+        ],
+    }
+    profile = {
+        "type": "RT",
+        "operation": "MC",
+        "deposit": deposit,
+        "pointOfSale": _rt_point(company),
+        "companyKey": company.key,
+    }
+    built = build_delivery_remito_comprobante(
+        request,
+        delivery_remito_config(profile),
+        customer_fields,
+        {article["code"]: {"salesVatType": "1", "salesVatRate": 21}},
+    )
+    comprobante = built["comprobante"]
+    article_lines = [item for item in comprobante["Comprobante_Items"] if item.get("Item_Tipo") == "A"]
+    if (
+        built.get("amountMode") != "tax_included"
+        or len(article_lines) != 1
+        or Decimal(str(article_lines[0].get("Item_ImporteTotal"))) != Decimal("121.0")
+        or Decimal(str(article_lines[0].get("Item_ImporteIVAInscrip"))) != Decimal("0")
+        or Decimal(str(comprobante.get("Comprobante_ImporteTotal"))) != Decimal("121.0")
+    ):
+        raise CommandError("El contrato local SitIVA 6 no produjo un RT final de 121,00 sin IVA discriminado.")
+    response = client.ingresar_comprobante_ventas_json(
+        comprobante,
+        circuito="VENTAS",
+        operacion="IngresarComprobanteJSON",
+        numera_flex="S",
+        emite_reg="E",
+    )
+    _ensure_ok(response, "Emisión RT valorizado SitIVA 6")
+    summary = parse_remito_response(response)
+    remito_number = summary.get("remitoNumber")
+    if not remito_number:
+        raise CommandError("Bejerman TEST no devolvió número para el RT valorizado SitIVA 6.")
+
+    headers = records_from_response(
+        client.list_comprobantes_ventas(build_sales_filters(TEST_CUSTOMER_SITIVA6_CODE, issue_date, issue_date, "RT", ""))
+    )
+    number = _clean(summary.get("comprobanteNumero"))
+    point = _clean(summary.get("comprobantePtoVenta"))
+    matches = [
+        header
+        for header in headers
+        if _clean(first_value(header, ("Comprobante_Numero", "Numero"))).lstrip("0") == number.lstrip("0")
+        and _clean(first_value(header, ("Comprobante_PtoVenta", "PtoVenta"))).zfill(5) == point.zfill(5)
+    ]
+    if len(matches) != 1 or not comprobante_id_of(matches[0]):
+        raise CommandError(f"El read-back del RT devolvió {len(matches)} coincidencias; se esperaba una.")
+    details = records_from_response(client.detalle_comprobante_ventas(comprobante_id_of(matches[0])))
+    detail = details[0] if details and isinstance(details[0], dict) else {}
+    detail_articles = [item for item in detail.get("Comprobante_Items") or [] if isinstance(item, dict) and item.get("Item_Tipo") == "A"]
+    if len(detail_articles) != 1:
+        raise CommandError(f"El RT leído tiene {len(detail_articles)} movimientos de artículo; se esperaba uno.")
+    detail_total = Decimal(str(first_value(detail, ("Comprobante_ImporteTotal", "ImporteTotal")) or 0))
+    if detail_total != Decimal("121.0"):
+        raise CommandError(f"El read-back del RT devolvió total {detail_total}; se esperaba 121,00.")
+
+    after_stock = None
+    for attempt in range(5):
+        if attempt:
+            time.sleep(2)
+        after_stock = _article_real_stock(client, article["code"], deposit)
+        if before_stock - after_stock == Decimal("1"):
+            break
+    if after_stock is None or before_stock - after_stock != Decimal("1"):
+        raise CommandError(
+            f"El stock de {article['code']} cambió de {before_stock} a {after_stock}; se esperaba un único movimiento de salida."
+        )
+    return remito_number
+
+
 class Command(BaseCommand):
     help = "Smoke live de remitos contra Bejerman TEST. Emite comprobantes solo en la empresa de prueba."
 
     def add_arguments(self, parser):
         parser.add_argument("--company-key", default="TEST")
-        parser.add_argument("--scenario", choices=("all", "emission", "manual"), default="all")
+        parser.add_argument("--scenario", choices=("all", "emission", "manual", "rt-valued"), default="all")
         parser.add_argument("--manual-number", default="", help="Número RIS 00001 reservado; si se omite se busca uno alto libre.")
 
     def handle(self, *args, **options):
         company = _assert_test_target(options["company_key"])
         client = BejermanSDKClient(company_key=company.key, allow_system_credentials=True)
         stamp = timezone.now().strftime("%Y%m%d%H%M%S")
-        self.stdout.write(f"Objetivo seguro: {company.key}->{company.bejerman_company}")
+        self.stdout.write(f"Objetivo seguro TEST: {company.key}->{company.bejerman_company}")
+        scenarios = _scenarios_for_company(company, options["scenario"])
+        if options["scenario"] == "all" and company.key == "MGBIO":
+            self.stdout.write("Escenarios RIS omitidos: MGBIO TEST no tiene definido el tipo de comprobante RIS.")
         try:
-            if options["scenario"] in ("all", "emission"):
+            if "emission" in scenarios:
                 remito = _run_emission(client, company, f"NXTEST-{stamp}-E")
                 self.stdout.write(f"OK emisión online: {remito}")
-            if options["scenario"] in ("all", "manual"):
+            if "manual" in scenarios:
                 remito = _run_manual_registration(client, company, f"NXTEST-{stamp}-R", options["manual_number"] or None)
                 self.stdout.write(f"OK registración manual: {remito}")
+            if "rt-valued" in scenarios:
+                remito = _run_valued_rt_sitiva6(client, company, f"NXTEST-{stamp}-RT6")
+                self.stdout.write(f"OK RT valorizado SitIVA 6: {remito}")
         except BejermanSdkError as exc:
             raise CommandError(str(exc)) from exc
         self.stdout.write("OK: smoke Bejerman TEST completado")

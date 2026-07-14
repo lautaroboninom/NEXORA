@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..pdf import render_quote_pdf
+from ..email_delivery import dispatch_email_delivery
 from ..notifications import emit_notification, notify_presupuesto_aprobado
 from ..repair_ready_notifications import notify_repair_ready_for_remito
 from ..permissions import user_has_permission
@@ -146,7 +147,10 @@ def _send_stock_min_alerts(items: list[dict]):
             lines.append(f"  Ubicación: {it.get('ubicacion_deposito')}")
         lines.append("")
     body = _email_append_footer_text("\n".join(lines).rstrip() + "\n")
-    send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", None), recipients, fail_silently=True)
+    def _send_notice():
+        send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", None), recipients, fail_silently=True)
+
+    dispatch_email_delivery(_send_notice, label="stock-minimo")
 
 
 def _has_catalogo_repuestos_estado_column() -> bool:
@@ -1461,8 +1465,17 @@ class AprobarPresupuestoView(APIView):
                     "Aviso automático - no responder a este correo.",
                 ]
                 body = "\n".join(body_lines)
-                from django.core.mail import send_mail
-                send_mail(subject, body, getattr(settings, 'DEFAULT_FROM_EMAIL', None), [to_email], fail_silently=True)
+
+                def _send_technician_notice():
+                    send_mail(
+                        subject,
+                        body,
+                        getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                        [to_email],
+                        fail_silently=True,
+                    )
+
+                dispatch_email_delivery(_send_technician_notice, label=f"presupuesto-aprobado-{ingreso_id}")
         except Exception:
             _clear_transaction_rollback()
             pass

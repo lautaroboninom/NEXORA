@@ -52,7 +52,7 @@ def _configured_companies() -> tuple[BejermanIngressCompany, ...]:
             key="TEST",
             label="Empresa de prueba",
             branding_key="TEST",
-            bejerman_company=_clean(getattr(settings, "BEJERMAN_COMPANY_TEST", "MODE")) or "MODE",
+            bejerman_company=_clean(getattr(settings, "BEJERMAN_COMPANY_TEST", "SEP")) or "SEP",
             is_test=True,
         ),
     )

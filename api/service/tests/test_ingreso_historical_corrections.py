@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from unittest import skipUnless
 from unittest.mock import patch
@@ -295,7 +296,7 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.data.get("detail"), "accion inválida")
+        self.assertEqual(resp.data.get("detail"), "acción inválida")
 
     def test_entrega_forzada_actualiza_ingreso_evento_y_auditoria(self):
         fecha_efectiva = timezone.localtime(timezone.now() - timedelta(days=4)).replace(second=0, microsecond=0)
@@ -310,6 +311,9 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.data.get("ok"))
         self.assertEqual(resp.data.get("estado"), "entregado")
+        self.assertEqual(resp.data.get("nexora", {}).get("status"), "applied")
+        self.assertEqual(resp.data.get("bejerman", {}).get("status"), "reference_registered")
+        self.assertEqual(resp.data.get("bejerman", {}).get("document_number"), "REM-H-100")
 
         with connection.cursor() as cur:
             cur.execute(
@@ -361,6 +365,21 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
         self.assertTrue(bool(audit_row[3]))
         self.assertIsNotNone(audit_row[4])
 
+    def test_alta_alquiler_requiere_cliente_del_catalogo(self):
+        response = self.client.post(
+            self._url(),
+            {
+                "accion": "alta_alquiler",
+                "fecha_efectiva": timezone.now().isoformat(),
+                "motivo": "Alta histórica sin cliente seleccionado",
+                "alquiler_a": "Texto libre no permitido",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("seleccionar un cliente válido", response.data.get("detail", ""))
+
     def test_alta_y_baja_alquiler_forzadas(self):
         fecha_alta = timezone.localtime(timezone.now() - timedelta(days=6)).replace(second=0, microsecond=0)
         resp_alta = self.client.post(
@@ -369,7 +388,7 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
                 "accion": "alta_alquiler",
                 "fecha_efectiva": fecha_alta.isoformat(),
                 "motivo": "Alta histórica no cargada",
-                "alquiler_a": "Clinica Centro",
+                "alquiler_customer_id": self.customer_id,
                 "alquiler_remito": "REM-ALQ-44",
                 "alquiler_fecha": "2026-03-12",
             },
@@ -377,6 +396,11 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
         )
         self.assertEqual(resp_alta.status_code, 200)
         self.assertEqual(resp_alta.data.get("estado"), "alquilado")
+        self.assertEqual(resp_alta.data.get("bejerman", {}).get("status"), "reference_registered")
+        self.assertEqual(
+            resp_alta.data.get("nexora", {}).get("alquiler_customer", {}).get("id"),
+            self.customer_id,
+        )
 
         with connection.cursor() as cur:
             cur.execute(
@@ -388,11 +412,29 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
                 [self.ingreso_id],
             )
             alta_row = cur.fetchone()
+            cur.execute("SELECT alquilado FROM devices WHERE id=%s", [self.device_id])
+            device_alta = cur.fetchone()
+            cur.execute(
+                """
+                SELECT payload
+                  FROM ingreso_historical_corrections
+                 WHERE ingreso_id=%s
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                [self.ingreso_id],
+            )
+            alta_audit_payload = cur.fetchone()[0]
+            if isinstance(alta_audit_payload, str):
+                alta_audit_payload = json.loads(alta_audit_payload)
         self.assertEqual(alta_row[0], "alquilado")
         self.assertTrue(bool(alta_row[1]))
-        self.assertEqual(alta_row[2], "Clinica Centro")
+        self.assertEqual(alta_row[2], "Clinica Historica")
         self.assertEqual(alta_row[3], "REM-ALQ-44")
         self.assertIsNotNone(alta_row[4])
+        self.assertTrue(bool(device_alta[0]))
+        self.assertEqual(alta_audit_payload["alquiler_customer"]["id"], self.customer_id)
+        self.assertEqual(alta_audit_payload["alquiler_customer"]["razon_social"], "Clinica Historica")
 
         fecha_baja = timezone.localtime(timezone.now() - timedelta(days=3)).replace(second=0, microsecond=0)
         resp_baja = self.client.post(
@@ -417,6 +459,8 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
                 [self.ingreso_id],
             )
             baja_row = cur.fetchone()
+            cur.execute("SELECT alquilado FROM devices WHERE id=%s", [self.device_id])
+            device_baja = cur.fetchone()
             cur.execute(
                 """
                 SELECT accion
@@ -433,13 +477,25 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
         self.assertIsNone(baja_row[2])
         self.assertIsNone(baja_row[3])
         self.assertIsNone(baja_row[4])
+        self.assertFalse(bool(device_baja[0]))
         self.assertEqual(acciones, ["alta_alquiler", "baja_alquiler"])
 
     def test_notificar_en_baja_alta_respeta_flag(self):
         fecha_baja = timezone.localtime(timezone.now() - timedelta(days=2)).replace(second=0, microsecond=0)
         fecha_alta = timezone.localtime(timezone.now() - timedelta(days=1)).replace(second=0, microsecond=0)
 
-        with patch("service.views.ingresos_views._notify_estado_patrimonial") as notify_mock:
+        with (
+            patch("service.views.ingresos_views._notify_estado_patrimonial") as notify_mock,
+            patch("service.views.ingresos_views.ingreso_is_internal_equipment", return_value=True),
+            patch(
+                "service.views.ingresos_views.enqueue_stock_baja_for_ingreso",
+                return_value={"id": 901, "status": "pending", "attempts": 0},
+            ) as enqueue_baja,
+            patch(
+                "service.views.ingresos_views.enqueue_stock_alta_for_ingreso",
+                return_value={"id": 902, "status": "succeeded", "attempts": 1},
+            ) as enqueue_alta,
+        ):
             resp_baja = self.client.post(
                 self._url(),
                 {
@@ -452,7 +508,11 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
             )
             self.assertEqual(resp_baja.status_code, 200)
             self.assertEqual(resp_baja.data.get("estado"), "baja")
+            self.assertEqual(resp_baja.data.get("bejerman", {}).get("status"), "pending")
             notify_mock.assert_not_called()
+            enqueue_baja.assert_called_once()
+            self.assertEqual(enqueue_baja.call_args.kwargs.get("actor_user_id"), self.admin.id)
+            self.assertIsNotNone(enqueue_baja.call_args.kwargs.get("ingreso_event_id"))
 
             resp_alta = self.client.post(
                 self._url(),
@@ -466,7 +526,11 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
             )
             self.assertEqual(resp_alta.status_code, 200)
             self.assertEqual(resp_alta.data.get("estado"), "ingresado")
+            self.assertEqual(resp_alta.data.get("bejerman", {}).get("status"), "succeeded")
             self.assertEqual(notify_mock.call_count, 1)
+            enqueue_alta.assert_called_once()
+            self.assertEqual(enqueue_alta.call_args.kwargs.get("actor_user_id"), self.admin.id)
+            self.assertIsNotNone(enqueue_alta.call_args.kwargs.get("ingreso_event_id"))
 
         with connection.cursor() as cur:
             cur.execute(

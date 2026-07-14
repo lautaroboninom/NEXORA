@@ -1026,6 +1026,113 @@ def _parse_historical_effective_datetime(raw):
     return dt
 
 
+def _historical_rental_customer(customer_id):
+    try:
+        customer_id_int = int(customer_id)
+    except (TypeError, ValueError):
+        return None
+    if customer_id_int <= 0:
+        return None
+    alias_sql = (
+        "COALESCE(c.alias_interno, '') AS alias_interno"
+        if _has_table_column("customers", "alias_interno")
+        else "'' AS alias_interno"
+    )
+    return q(
+        f"""
+        SELECT c.id,
+               COALESCE(c.razon_social, '') AS razon_social,
+               COALESCE(c.cod_empresa, '') AS cod_empresa,
+               {alias_sql}
+          FROM customers c
+         WHERE c.id=%s
+        """,
+        [customer_id_int],
+        one=True,
+    )
+
+
+def _sync_historical_device_snapshot(
+    *,
+    ingreso_id: int,
+    device_id: int,
+    accion: str,
+    alquiler_a: str = "",
+    dash_id=None,
+    taller_id=None,
+) -> bool:
+    """Mantiene el snapshot del equipo solo si la OS corregida es la más reciente."""
+    latest = q(
+        """
+        SELECT id
+          FROM ingresos
+         WHERE device_id=%s
+         ORDER BY COALESCE(fecha_ingreso, fecha_creacion) DESC, id DESC
+         LIMIT 1
+        """,
+        [device_id],
+        one=True,
+    ) or {}
+    if int(latest.get("id") or 0) != int(ingreso_id):
+        return False
+
+    sets = []
+    params = []
+    has_alquilado = _has_table_column("devices", "alquilado")
+    has_alquiler_a = _has_table_column("devices", "alquiler_a")
+    has_ubicacion = _has_table_column("devices", "ubicacion_id")
+
+    if accion == "alta_alquiler":
+        if has_alquilado:
+            sets.append("alquilado=TRUE")
+        if has_alquiler_a:
+            sets.append("alquiler_a=NULLIF(%s,'')")
+            params.append(alquiler_a)
+    elif accion == "baja_alquiler":
+        if has_alquilado:
+            sets.append("alquilado=FALSE")
+        if has_alquiler_a:
+            sets.append("alquiler_a=NULL")
+
+    target_location = taller_id if accion in ("baja_alquiler", "alta_ingreso") else dash_id
+    if has_ubicacion and target_location:
+        sets.append("ubicacion_id=COALESCE(%s, ubicacion_id)")
+        params.append(target_location)
+
+    if not sets:
+        return False
+    params.append(device_id)
+    exec_void(f"UPDATE devices SET {', '.join(sets)} WHERE id=%s", params)
+    return True
+
+
+def _historical_bejerman_reference_effect(accion: str, document_number: str = "") -> dict:
+    labels = {
+        "entrega": "remito de salida",
+        "alta_alquiler": "RTA de alquiler",
+        "baja_alquiler": "RDA de devolución",
+    }
+    document_label = labels.get(accion, "comprobante")
+    document_number = str(document_number or "").strip()
+    if document_number:
+        detail = (
+            f"Se registró la referencia {document_number}. "
+            f"No se emitió un nuevo {document_label} en Bejerman por tratarse de una corrección histórica."
+        )
+        status = "reference_registered"
+    else:
+        detail = (
+            f"No se emitió un nuevo {document_label} en Bejerman. "
+            "La corrección quedó asentada solo en NEXORA y requiere una referencia histórica para poder rastrearse."
+        )
+        status = "reference_missing"
+    return {
+        "status": status,
+        "document_number": document_number or None,
+        "detail": detail,
+    }
+
+
 def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_evento=None):
     evento_norm = (evento or "").strip().lower()
     if evento_norm not in ("baja", "alta", "alta_mg"):
@@ -2373,8 +2480,15 @@ class IngresoConvertirPropioMgView(APIView):
                 status=400,
             )
 
+        has_mg_schema = _has_mg_schema()
+        mg_estado_sql = (
+            "COALESCE(d.mg_estado,'activo') AS mg_estado,"
+            if has_mg_schema
+            else "'activo' AS mg_estado,"
+        )
+
         ingreso = q(
-            """
+            f"""
             SELECT
               i.id,
               i.device_id,
@@ -2382,6 +2496,7 @@ class IngresoConvertirPropioMgView(APIView):
               d.customer_id,
               COALESCE(d.numero_interno,'') AS numero_interno_actual,
               COALESCE(d.numero_serie,'') AS numero_serie,
+              {mg_estado_sql}
               COALESCE(d.alquilado,false) AS alquilado
             FROM ingresos i
             LEFT JOIN devices d ON d.id = i.device_id
@@ -2413,7 +2528,16 @@ class IngresoConvertirPropioMgView(APIView):
                 status=404,
             )
 
-        if _is_mg_owner_customer(ingreso.get("customer_id"), mg_owner_id):
+        ingreso_mg_flags = resolve_mg_flags(
+            {
+                "customer_id": ingreso.get("customer_id"),
+                "numero_interno": ingreso.get("numero_interno_actual") or "",
+                "numero_serie": ingreso.get("numero_serie") or "",
+                "mg_estado": ingreso.get("mg_estado") or "activo",
+            },
+            mg_owner_id,
+        )
+        if _is_mg_owner_customer(ingreso.get("customer_id"), mg_owner_id) and not ingreso_mg_flags.get("mg_inactivo_venta"):
             return Response(
                 {
                     "detail": "El equipo ya figura como equipo propio de MG BIO.",
@@ -2460,6 +2584,21 @@ class IngresoConvertirPropioMgView(APIView):
             "numero_interno = %s",
         ]
         params = [mg_owner_id, numero_interno]
+        if has_mg_schema:
+            sets.append("mg_estado = 'activo'")
+        if _has_table_column("devices", "mg_inactivo_desde"):
+            sets.append("mg_inactivo_desde = NULL")
+        for column_name in (
+            "mg_venta_fecha",
+            "mg_venta_factura_numero",
+            "mg_venta_remito_numero",
+            "mg_venta_observaciones",
+            "mg_venta_usuario_id",
+            "mg_venta_customer_id",
+            "mg_venta_numero_alternativo",
+        ):
+            if _has_table_column("devices", column_name):
+                sets.append(f"{column_name} = NULL")
         if _has_table_column("devices", "alquilado"):
             sets.append("alquilado = FALSE")
         if _has_table_column("devices", "alquiler_a"):
@@ -2538,7 +2677,19 @@ class IngresoCorreccionesHistoricasView(APIView):
         uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
 
         row = q(
-            "SELECT id, estado, COALESCE(alquilado,false) AS alquilado FROM ingresos WHERE id=%s",
+            """
+            SELECT id,
+                   device_id,
+                   estado,
+                   COALESCE(alquilado,false) AS alquilado,
+                   COALESCE(alquiler_a,'') AS alquiler_a,
+                   COALESCE(alquiler_remito,'') AS alquiler_remito,
+                   alquiler_fecha,
+                   COALESCE(remito_salida,'') AS remito_salida,
+                   fecha_entrega
+              FROM ingresos
+             WHERE id=%s
+            """,
             [ingreso_id],
             one=True,
         )
@@ -2552,6 +2703,8 @@ class IngresoCorreccionesHistoricasView(APIView):
         params = []
         dash_id = _dash_location_id()
         taller_id = _taller_location_id()
+        rental_customer = None
+        document_reference = ""
 
         if accion == "entrega":
             remito_salida = (data.get("remito_salida") or "").strip()
@@ -2568,14 +2721,22 @@ class IngresoCorreccionesHistoricasView(APIView):
                 ]
             )
             params.extend(["entregado", remito_salida, factura_numero, fecha_entrega])
+            document_reference = remito_salida
             if dash_id:
                 sets.append("ubicacion_id = COALESCE(%s, ubicacion_id)")
                 params.append(dash_id)
             nuevo_estado = "entregado"
 
         elif accion == "alta_alquiler":
-            alquiler_a = (data.get("alquiler_a") or "").strip()
+            rental_customer = _historical_rental_customer(data.get("alquiler_customer_id"))
+            if not rental_customer:
+                return Response(
+                    {"detail": "Debe seleccionar un cliente válido de la lista para el alta de alquiler."},
+                    status=400,
+                )
+            alquiler_a = (rental_customer.get("razon_social") or "").strip()
             alquiler_remito = (data.get("alquiler_remito") or "").strip()
+            document_reference = alquiler_remito
             alquiler_fecha_raw = data.get("alquiler_fecha")
             if alquiler_fecha_raw in (None, ""):
                 alquiler_fecha = timezone.localtime(fecha_efectiva).date()
@@ -2606,6 +2767,7 @@ class IngresoCorreccionesHistoricasView(APIView):
             nuevo_estado = "alquilado"
 
         elif accion == "baja_alquiler":
+            document_reference = (data.get("remito_baja_alquiler") or "").strip()
             sets.extend(
                 [
                     "alquilado=FALSE",
@@ -2646,28 +2808,116 @@ class IngresoCorreccionesHistoricasView(APIView):
         params.append(ingreso_id)
         exec_void(f"UPDATE ingresos SET {', '.join(sets)} WHERE id=%s", params)
 
+        device_snapshot_updated = _sync_historical_device_snapshot(
+            ingreso_id=ingreso_id,
+            device_id=int(row.get("device_id")),
+            accion=accion,
+            alquiler_a=(rental_customer or {}).get("razon_social") or "",
+            dash_id=dash_id,
+            taller_id=(
+                taller_id
+                if accion == "alta_ingreso" or (accion == "baja_alquiler" and de_estado == "alquilado")
+                else None
+            ),
+        )
+
+        event_id = None
         try:
-            exec_void(
-                """
-                INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, ts, comentario)
-                VALUES (%s, NULLIF(%s,'')::ticket_state, %s::ticket_state, %s, %s, %s)
-                """,
-                [ingreso_id, de_estado, nuevo_estado, uid, fecha_efectiva, comentario],
-            )
+            with transaction.atomic():
+                event_row = q(
+                    """
+                    INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, ts, comentario)
+                    VALUES (%s, NULLIF(%s,'')::ticket_state, %s::ticket_state, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    [ingreso_id, de_estado, nuevo_estado, uid, fecha_efectiva, comentario],
+                    one=True,
+                ) or {}
+                event_id = event_row.get("id")
         except Exception:
             # Fallback para esquemas sin casts/columnas extendidas.
             try:
-                exec_void(
-                    """
-                    INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, ts, comentario)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    [ingreso_id, nuevo_estado, uid, fecha_efectiva, comentario],
-                )
+                with transaction.atomic():
+                    event_row = q(
+                        """
+                        INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, ts, comentario)
+                        VALUES (%s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        [ingreso_id, nuevo_estado, uid, fecha_efectiva, comentario],
+                        one=True,
+                    ) or {}
+                    event_id = event_row.get("id")
             except Exception:
                 pass
 
-        payload_json = json.dumps(data, ensure_ascii=False, default=str)
+        if accion in ("baja_ingreso", "alta_ingreso"):
+            try:
+                if not ingreso_is_internal_equipment(ingreso_id):
+                    bejerman_effect = {
+                        "status": "not_applicable",
+                        "detail": "La corrección de stock Bejerman no aplica porque el equipo no es propio de MG.",
+                    }
+                else:
+                    enqueue = (
+                        enqueue_stock_baja_for_ingreso
+                        if accion == "baja_ingreso"
+                        else enqueue_stock_alta_for_ingreso
+                    )
+                    job = enqueue(
+                        ingreso_id,
+                        ingreso_event_id=event_id,
+                        actor_user_id=uid,
+                    ) or {}
+                    job_status = job.get("status") or "pending"
+                    bejerman_effect = {
+                        "status": job_status,
+                        "job_id": job.get("id"),
+                        "detail": (
+                            "La corrección de stock quedó encolada para Bejerman."
+                            if job_status in ("pending", "running")
+                            else "La corrección de stock Bejerman ya estaba aplicada."
+                            if job_status == "succeeded"
+                            else job.get("last_error") or "La corrección de stock Bejerman quedó bloqueada."
+                        ),
+                    }
+            except Exception as exc:
+                logger.exception(
+                    "No se pudo encolar la corrección histórica en Bejerman",
+                    extra={"ingreso_id": ingreso_id, "accion": accion},
+                )
+                bejerman_effect = {
+                    "status": "not_queued",
+                    "detail": "NEXORA se actualizó, pero no se pudo encolar la corrección de stock en Bejerman.",
+                    "error": str(exc),
+                }
+        else:
+            bejerman_effect = _historical_bejerman_reference_effect(accion, document_reference)
+
+        audit_payload = {
+            **data,
+            "accion": accion,
+            "estado_anterior": de_estado,
+            "estado_resultante": nuevo_estado,
+            "alquiler_anterior": {
+                "activo": bool(row.get("alquilado")),
+                "cliente": row.get("alquiler_a") or "",
+                "remito": row.get("alquiler_remito") or "",
+                "fecha": row.get("alquiler_fecha"),
+            },
+            "device_snapshot_updated": device_snapshot_updated,
+            "bejerman": bejerman_effect,
+        }
+        if rental_customer:
+            audit_payload["alquiler_customer"] = {
+                "id": rental_customer.get("id"),
+                "razon_social": rental_customer.get("razon_social") or "",
+                "alias_interno": rental_customer.get("alias_interno") or "",
+                "cod_empresa": rental_customer.get("cod_empresa") or "",
+            }
+            audit_payload["alquiler_a"] = rental_customer.get("razon_social") or ""
+
+        payload_json = json.dumps(audit_payload, ensure_ascii=False, default=str)
         if connection.vendor == "postgresql":
             exec_void(
                 """
@@ -2703,6 +2953,13 @@ class IngresoCorreccionesHistoricasView(APIView):
                 "estado": nuevo_estado,
                 "fecha_efectiva": fecha_efectiva,
                 "notificar": bool(notificar),
+                "nexora": {
+                    "status": "applied",
+                    "detail": "La corrección se aplicó en NEXORA y quedó registrada en el historial.",
+                    "device_snapshot_updated": device_snapshot_updated,
+                    "alquiler_customer": audit_payload.get("alquiler_customer"),
+                },
+                "bejerman": bejerman_effect,
             }
         )
 

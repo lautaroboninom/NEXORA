@@ -16,6 +16,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .delivery_orders import sync_service_release_orders_invoice_from_ingreso
+from .email_delivery import dispatch_email_delivery
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
 
 logger = logging.getLogger(__name__)
@@ -659,10 +660,12 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
     try:
         conn = transaction.get_connection()
         if getattr(conn, "in_atomic_block", False):
-            transaction.on_commit(_send_notice)
+            transaction.on_commit(
+                lambda: dispatch_email_delivery(_send_notice, label=f"service-order-billing-{ingreso_id}")
+            )
         else:
-            _send_notice()
+            dispatch_email_delivery(_send_notice, label=f"service-order-billing-{ingreso_id}")
     except Exception:
-        _send_notice()
+        dispatch_email_delivery(_send_notice, label=f"service-order-billing-{ingreso_id}")
 
     return {"notifications": inserted_total, "emails": len(email_recipients), "recipients": email_recipients}

@@ -1130,6 +1130,10 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
   remito_location_updated_by      INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   remito_location_updated_at      TIMESTAMPTZ NULL,
   invoice_number                  TEXT NULL,
+  billing_postponed_until         TIMESTAMPTZ NULL,
+  billing_postponed_by_user_id    INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  billing_postponed_at            TIMESTAMPTZ NULL,
+  billing_postponement_notified_at TIMESTAMPTZ NULL,
   imported_delivered_flag         BOOLEAN NULL,
   created_by_user_id              INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   prepared_by_user_id             INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
@@ -1157,6 +1161,10 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
 
 ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS company_key TEXT NULL;
 ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS';
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS billing_postponed_until TIMESTAMPTZ NULL;
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS billing_postponed_by_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS billing_postponed_at TIMESTAMPTZ NULL;
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS billing_postponement_notified_at TIMESTAMPTZ NULL;
 UPDATE delivery_orders
    SET price_currency = 'ARS'
  WHERE price_currency IS NULL OR TRIM(price_currency) = '';
@@ -1274,21 +1282,35 @@ CREATE TABLE IF NOT EXISTS bejerman_remito_groups (
   status                     TEXT NOT NULL DEFAULT 'pending',
   order_ids                  JSONB NOT NULL DEFAULT '[]'::jsonb,
   response_summary           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  correlation_key            TEXT NULL,
+  attempt_count              INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at            TIMESTAMPTZ NULL,
+  next_retry_at              TIMESTAMPTZ NULL,
+  last_error                 TEXT NULL,
   created_by_user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   source_created_by_user_id  TEXT NULL,
   created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   generated_at               TIMESTAMPTZ NULL,
   CONSTRAINT chk_bejerman_remito_groups_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
-  CONSTRAINT chk_bejerman_remito_groups_status CHECK (status IN ('pending','generated','failed'))
+  CONSTRAINT chk_bejerman_remito_groups_status CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'))
 );
 
 ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS company_key TEXT NULL;
 ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS source_created_by_user_id TEXT NULL;
+ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS correlation_key TEXT NULL;
+ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NULL;
+ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ NULL;
+ALTER TABLE bejerman_remito_groups ADD COLUMN IF NOT EXISTS last_error TEXT NULL;
 ALTER TABLE bejerman_remito_groups DROP CONSTRAINT IF EXISTS chk_bejerman_remito_groups_company_key;
 ALTER TABLE bejerman_remito_groups
   ADD CONSTRAINT chk_bejerman_remito_groups_company_key
   CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO'));
+ALTER TABLE bejerman_remito_groups DROP CONSTRAINT IF EXISTS chk_bejerman_remito_groups_status;
+ALTER TABLE bejerman_remito_groups
+  ADD CONSTRAINT chk_bejerman_remito_groups_status
+  CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'));
 
 UPDATE delivery_orders AS o
    SET status = 'entregado_no_facturable'
@@ -1314,6 +1336,21 @@ UPDATE bejerman_remito_groups AS g
          NULLIF(g.response_summary ->> 'comprobanteTipo', '')
        )) IS DISTINCT FROM 'RT'
    AND COALESCE(g.response_summary ->> 'billingRequired', '') IS DISTINCT FROM 'false';
+
+CREATE TABLE IF NOT EXISTS bejerman_integration_attempts (
+  id                BIGSERIAL PRIMARY KEY,
+  group_id          TEXT NOT NULL REFERENCES bejerman_remito_groups(id) ON DELETE CASCADE,
+  order_ids         JSONB NOT NULL DEFAULT '[]'::jsonb,
+  actor_user_id     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  phase             TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'recorded',
+  attempt_number    INTEGER NOT NULL DEFAULT 1,
+  request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  error_message     TEXT NULL,
+  recovery_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS delivery_order_events (
   id                    BIGSERIAL PRIMARY KEY,
@@ -1353,6 +1390,9 @@ CREATE INDEX IF NOT EXISTS ix_delivery_orders_company_key ON delivery_orders(com
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_delivery_type ON delivery_orders(delivery_type, status, order_date DESC);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_remito_group ON delivery_orders(bejerman_remito_group_id);
 CREATE INDEX IF NOT EXISTS ix_delivery_orders_ingreso ON delivery_orders(ingreso_id) WHERE ingreso_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_delivery_orders_billing_postponed_until
+  ON delivery_orders(billing_postponed_until)
+  WHERE billing_postponed_until IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_delivery_order_items_order ON delivery_order_items(order_id, sort_order);
 CREATE INDEX IF NOT EXISTS ix_delivery_order_items_article ON delivery_order_items(article_code);
 CREATE INDEX IF NOT EXISTS ix_delivery_order_items_ingreso ON delivery_order_items(ingreso_id) WHERE ingreso_id IS NOT NULL;
@@ -1364,6 +1404,9 @@ CREATE INDEX IF NOT EXISTS ix_delivery_order_events_order ON delivery_order_even
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_customer ON bejerman_remito_groups(customer_code, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_bejerman_integration_attempts_group ON bejerman_integration_attempts(group_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_bejerman_integration_attempts_phase ON bejerman_integration_attempts(phase, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_bejerman_integration_attempts_created_at ON bejerman_integration_attempts(created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_users_bejerman_seller_code ON users(bejerman_seller_code);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_bejerman_seller_code_ci
   ON users ((UPPER(TRIM(bejerman_seller_code))))

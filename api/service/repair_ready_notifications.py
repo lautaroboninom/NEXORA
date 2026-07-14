@@ -4,6 +4,7 @@ from django.conf import settings
 from django.core.mail import EmailMessage, get_connection, send_mail
 from django.db import connection, transaction
 
+from .email_delivery import dispatch_email_delivery
 from .notifications import active_user_ids_for_roles, notify_reparacion_lista_remito
 
 logger = logging.getLogger(__name__)
@@ -247,10 +248,12 @@ def notify_repair_ready_for_remito(ingreso_id, *, request=None, actor_name="", r
     try:
         conn = transaction.get_connection()
         if getattr(conn, "in_atomic_block", False):
-            transaction.on_commit(_send_notice)
+            transaction.on_commit(
+                lambda: dispatch_email_delivery(_send_notice, label=f"repair-ready-{ingreso_id}")
+            )
         else:
-            _send_notice()
+            dispatch_email_delivery(_send_notice, label=f"repair-ready-{ingreso_id}")
     except Exception:
-        _send_notice()
+        dispatch_email_delivery(_send_notice, label=f"repair-ready-{ingreso_id}")
 
     return {"notifications": inserted, "recipients": recips}
