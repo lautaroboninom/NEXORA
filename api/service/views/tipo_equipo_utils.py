@@ -1,12 +1,35 @@
 """Helpers para comparar y elegir nombres de tipos de equipo."""
 
+import re
+
 from .helpers import _norm_txt
 
 _ACCENTED_CHARS = set("áéíóúüñÁÉÍÓÚÜÑ")
 
+# Siglas médicas que se preservan en mayúscula al normalizar la capitalización
+# (ej. "AUTO CPAP" -> "Auto CPAP", no "Auto cpap").
+_ACRONYMS = {"CPAP", "BPAP", "AVAPS", "CFLEX", "BIFLEX", "CO2", "CO"}
+_WORD_RE = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+")
+
 
 def clean_tipo_equipo(value) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def sentence_case_tipo_equipo(value) -> str:
+    """Primera letra en mayúscula, resto en minúscula, preservando siglas conocidas."""
+    text = clean_tipo_equipo(value)
+    if not text:
+        return text
+    chars = list(text.lower())
+    chars[0] = chars[0].upper()
+    result = "".join(chars)
+
+    def _restore_acronym(match):
+        word = match.group(0)
+        return word.upper() if word.upper() in _ACRONYMS else word
+
+    return _WORD_RE.sub(_restore_acronym, result)
 
 
 def tipo_equipo_key(value) -> str:

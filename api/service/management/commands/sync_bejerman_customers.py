@@ -1,6 +1,10 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from service.customer_bejerman_sync import load_bejerman_customer_records, sync_customers_from_bejerman_records
+from service.customer_bejerman_sync import (
+    load_bejerman_customer_records,
+    load_bejerman_customer_records_for_companies,
+    sync_customers_from_bejerman_records,
+)
 
 
 class Command(BaseCommand):
@@ -10,6 +14,11 @@ class Command(BaseCommand):
         parser.add_argument("--user-id", type=int, default=None, help="ID del usuario Nexora con credenciales Bejerman")
         parser.add_argument("--system-credentials", action="store_true", help="Usa credenciales globales Bejerman explícitamente")
         parser.add_argument("--company-key", default="", help="Empresa Bejerman a consultar, por ejemplo SEPID o MGBIO")
+        parser.add_argument(
+            "--all-companies",
+            action="store_true",
+            help="Sincroniza todas las empresas configuradas (SEPID y MGBIO)",
+        )
         parser.add_argument("--dry-run", action="store_true", help="Calcula altas/actualizaciones sin escribir")
 
     def handle(self, *args, **opts):
@@ -19,18 +28,30 @@ class Command(BaseCommand):
             raise CommandError("Indique --user-id o use --system-credentials explícitamente.")
 
         company_key = (opts.get("company_key") or "").strip() or None
-        records = load_bejerman_customer_records(
-            user_id=user_id,
-            allow_system_credentials=use_system,
-            company_key=company_key,
-        )
+        if opts.get("all_companies"):
+            if company_key:
+                raise CommandError("Use --company-key o --all-companies, no ambos.")
+            records, company_errors = load_bejerman_customer_records_for_companies(
+                user_id=user_id,
+                allow_system_credentials=use_system,
+            )
+        else:
+            records = load_bejerman_customer_records(
+                user_id=user_id,
+                allow_system_credentials=use_system,
+                company_key=company_key,
+            )
+            company_errors = []
         summary = sync_customers_from_bejerman_records(records, dry_run=bool(opts.get("dry_run")))
         self.stdout.write(
             "OK clientes Bejerman: "
             f"total={summary['total_bejerman']} "
             f"updated={summary['updated']} "
             f"created={summary['created']} "
-            f"skipped={summary['skipped']}"
+            f"skipped={summary['skipped']} "
+            f"linked_other_company={summary.get('linked_other_company', 0)}"
         )
+        for item in company_errors:
+            self.stdout.write(f"empresa {item.get('company')} sin datos: {item.get('error')}")
         for item in summary.get("errors", [])[:10]:
             self.stdout.write(f"omitido {item.get('customer')}: {item.get('reason')}")

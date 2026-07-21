@@ -21,7 +21,6 @@ from ..bejerman_delivery import (
     get_delivery_order_remito_pdf,
     get_facturacion_pdf,
     get_remito_group_pdf,
-    get_unpriced_rt_document_pdf,
     list_bejerman_article_stock,
     list_bejerman_articles,
     list_bejerman_depositos,
@@ -69,6 +68,9 @@ def _error_response(exc: Exception):
     if isinstance(exc, (DeliveryOrderError, BillingError, ServiceOrderBillingError)):
         retry_after_ms = getattr(exc, "retry_after_ms", None)
         payload = {"detail": str(exc), "code": exc.code}
+        extra_payload = getattr(exc, "payload", None)
+        if isinstance(extra_payload, dict):
+            payload.update(extra_payload)
         if retry_after_ms:
             payload["retry_after_ms"] = retry_after_ms
         response = Response(
@@ -539,22 +541,14 @@ class CobranzasRemitoPdfView(DeliveryOrderPermissionMixin, APIView):
                     raise registered_remito_no_pdf_error(
                         registered_remito.get("remito_number") or registered_remito.get("manual_remito_number")
                     )
-                if _cobranzas_remito_document_type(document_id) == "RT":
-                    bytes_, content_type, filename = get_unpriced_rt_document_pdf(
-                        customer_code,
-                        document_id,
-                        actor_user_id=_actor_id(request),
-                        company_key=company_key,
-                    )
-                else:
-                    bytes_, content_type = get_facturacion_pdf(
-                        customer_code,
-                        document_id,
-                        interactive=True,
-                        actor_user_id=_actor_id(request),
-                        company_key=company_key,
-                    )
-                    filename = f"remito-{document_id}.pdf"
+                bytes_, content_type = get_facturacion_pdf(
+                    customer_code,
+                    document_id,
+                    interactive=True,
+                    actor_user_id=_actor_id(request),
+                    company_key=company_key,
+                )
+                filename = f"remito-{document_id}.pdf"
         except Exception as exc:
             return _error_response(exc)
         response = HttpResponse(bytes_, content_type=content_type or "application/pdf")

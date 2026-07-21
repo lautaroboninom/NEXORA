@@ -40,7 +40,6 @@ from .bejerman_sdk import (
     comprobante_id_of,
     decode_document_id,
     delivery_remito_config,
-    fetch_comprobante_pdf,
     first_value,
     is_bejerman_sdk_race_message,
     is_bejerman_sales_query_schema_message,
@@ -53,6 +52,12 @@ from .bejerman_sdk import (
     resolve_customer_document_fields,
     service_release_equipment_line,
     service_release_item_legend,
+)
+from .bejerman_pdf_requests import (
+    BejermanPdfFolderUnavailableError,
+    BejermanPdfNotPublishedError,
+    fetch_or_enqueue_comprobante_pdf,
+    pdf_error_metadata,
 )
 from .bejerman_companies import company_for_key
 from .bejerman_documents import (
@@ -96,11 +101,20 @@ logger = logging.getLogger(__name__)
 
 
 class BillingError(RuntimeError):
-    def __init__(self, code: str, message: str, *, status_code: int = 400, retry_after_ms: int | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 400,
+        retry_after_ms: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
         self.retry_after_ms = retry_after_ms
+        self.payload = payload or {}
 
 
 def registered_remito_no_pdf_error(remito_number: Any = "") -> BillingError:
@@ -128,7 +142,6 @@ REMITO_REVIEW_STATE_SUPERSEDED = "superseded"
 REMITO_FAILURE_CONFIRMED_NOT_IMPORTED = "confirmed_not_imported"
 REMITO_FAILURE_UNKNOWN = "unknown"
 BEJERMAN_REMOTE_RECOVERY_LIMIT = 100
-BEJERMAN_REMITO_PDF_OPERATIONAL_FALLBACK_AFTER_SECONDS = 120
 REMITO_QUERY_COMPANY_KEYS = ("SEPID", "MGBIO")
 REMITO_ALL_COMPANY_MARKERS = {"ALL", "TODAS", "TODOS", "*"}
 BEJERMAN_SQL_DATABASE_DEFAULTS = {
@@ -144,12 +157,27 @@ def _is_bejerman_sales_query_schema_error(message: str) -> bool:
 
 def _sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
     message = str(exc)
+    if isinstance(exc, BejermanPdfFolderUnavailableError):
+        return BillingError(
+            exc.code,
+            message,
+            status_code=exc.status_code,
+            payload=pdf_error_metadata(exc),
+        )
+    if isinstance(exc, BejermanPdfNotPublishedError):
+        return BillingError(
+            exc.code,
+            message,
+            status_code=exc.status_code,
+            payload=pdf_error_metadata(exc),
+        )
     if isinstance(exc, BejermanPdfPendingError):
         return BillingError(
             "BEJERMAN_PDF_PENDING",
             str(exc),
             status_code=202,
             retry_after_ms=getattr(exc, "retry_after_ms", 2500),
+            payload=pdf_error_metadata(exc),
         )
     if isinstance(exc, BejermanSdkConfigError):
         return BillingError("BEJERMAN_SDK_NOT_CONFIGURED", message, status_code=503)
@@ -856,6 +884,8 @@ def _remito_partial_error(comprobante_type: str, exc: Exception) -> dict[str, st
 
 def _pdf_sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
     message = str(exc)
+    if isinstance(exc, (BejermanPdfPendingError, BejermanPdfNotPublishedError)):
+        return _sdk_error(exc)
     if "expCuotasV" in message:
         return BillingError(
             "BEJERMAN_PDF_GENERATION_ERROR",
@@ -1517,6 +1547,7 @@ def get_facturacion_pdf(
     interactive: bool = False,
     actor_user_id: int | None = None,
     company_key: str | None = None,
+    remito_group_id: str | None = None,
 ) -> tuple[bytes, str]:
     code = _optional_text(customer_code)
     doc = _optional_text(document_id)
@@ -1532,8 +1563,9 @@ def get_facturacion_pdf(
         bejerman_customer_code = decoded.get("c") or code
         if not _optional_text(bejerman_customer_code):
             raise BillingError("CUSTOMER_CODE_REQUIRED", "Código Bejerman requerido", status_code=400)
-        return fetch_comprobante_pdf(
-            BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id),
+        client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
+        return fetch_or_enqueue_comprobante_pdf(
+            client,
             BejermanPdfReference(
                 type=decoded["t"],
                 number=decoded["n"],
@@ -1542,8 +1574,11 @@ def get_facturacion_pdf(
                 issue_date=decoded["f"],
                 customer_code=bejerman_customer_code,
             ),
-            interactive=interactive,
+            actor_user_id=actor_user_id,
+            remito_group_id=remito_group_id,
         )
+    except BejermanPdfFolderUnavailableError as exc:
+        raise _sdk_error(exc) from exc
     except BejermanSdkUnavailable as exc:
         if interactive:
             logger.info(
@@ -1552,9 +1587,10 @@ def get_facturacion_pdf(
             )
             raise BillingError(
                 "BEJERMAN_PDF_PENDING",
-                "Bejerman no respondió a tiempo al pedir el PDF. El remito ya está emitido; se reintentará la descarga.",
+                "Bejerman no respondió a tiempo al pedir el PDF. El remito ya está emitido; se volverá a comprobar únicamente la carpeta.",
                 status_code=202,
                 retry_after_ms=5000,
+                payload={"pdf_state": "waiting_folder", "generation_requested": True},
             ) from exc
         raise _sdk_error(exc) from exc
     except Exception as exc:
@@ -1847,14 +1883,6 @@ def get_delivery_order_remito_pdf(order_id: str, actor_user_id: int | None = Non
     document_id = document.get("documentId") or document.get("id")
     customer_code = document.get("bejermanCustomerCode") or document.get("customerCode") or order.get("bejermanCustomerCode")
     company_key = document.get("companyKey") or _company_key_for_order(order)
-    document_type = _optional_text(document.get("type") or document.get("comprobanteTipo")).upper()
-    if document_type == "RT" and _company_key_for_marker(company_key) in REMITO_QUERY_COMPANY_KEYS:
-        return get_unpriced_rt_document_pdf(
-            customer_code,
-            document_id,
-            actor_user_id=actor_user_id,
-            company_key=company_key,
-        )
     bytes_, content_type = get_facturacion_pdf(
         customer_code,
         document_id,
@@ -2686,11 +2714,22 @@ def _refresh_service_release_orders_for_remito(orders: list[dict[str, Any]], act
     return refreshed_orders
 
 
-def _service_release_print_line_limit() -> int:
+# El remito impreso de Bejerman es de una sola hoja: si el comprobante supera el
+# límite de líneas hay que emitir varios remitos. Aplica a todos los remitos de
+# salida de órdenes de entrega: liberaciones de servicio (RSS), ventas (RT),
+# alquileres (RTA) y demos.
+REMITO_PRINT_SPLIT_DELIVERY_TYPES = {"service_release", "sale", "rental", "demo"}
+
+
+def _remito_print_line_limit(delivery_type: str) -> int:
+    if delivery_type == "service_release":
+        setting_name, default = "BEJERMAN_RSS_MAX_PRINT_LINES", 22
+    else:
+        setting_name, default = "BEJERMAN_REMITO_MAX_PRINT_LINES", 21
     try:
-        max_lines = int(getattr(settings, "BEJERMAN_RSS_MAX_PRINT_LINES", 22))
+        max_lines = int(getattr(settings, setting_name, default))
     except (TypeError, ValueError):
-        max_lines = 22
+        max_lines = default
     return max(4, min(22, max_lines))
 
 
@@ -2701,33 +2740,54 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-def _item_print_line_count(item: dict[str, Any]) -> int:
-    partida_lines = len([partida for partida in (item.get("partidas") or []) if isinstance(partida, dict)]) or 1
-    discount = as_number(item.get("discountPercent")) or 0
+def _print_lines_per_partida(delivery_type: str) -> int:
+    if delivery_type != "service_release":
+        return 1
     try:
         item_print_lines = int(getattr(settings, "BEJERMAN_RSS_PRINT_LINES_PER_ITEM", 3))
     except (TypeError, ValueError):
         item_print_lines = 3
-    item_print_lines = max(1, item_print_lines)
-    return partida_lines * (item_print_lines + (1 if discount > 0 else 0))
+    return max(1, item_print_lines)
+
+
+def _order_print_header_line_count(delivery_type: str) -> int:
+    # build_delivery_remito_comprobante antepone separador + leyenda de orden
+    # para los tipos que no son service_release.
+    return 0 if delivery_type == "service_release" else 2
+
+
+def _item_print_line_count(item: dict[str, Any], lines_per_partida: int) -> int:
+    partida_lines = len([partida for partida in (item.get("partidas") or []) if isinstance(partida, dict)]) or 1
+    discount = as_number(item.get("discountPercent")) or 0
+    return partida_lines * (max(1, lines_per_partida) + (1 if discount > 0 else 0))
 
 
 def _order_print_line_count(order: dict[str, Any]) -> int:
-    if normalize_delivery_type(order.get("deliveryType")) != "service_release":
+    delivery_type = normalize_delivery_type(order.get("deliveryType"))
+    if delivery_type not in REMITO_PRINT_SPLIT_DELIVERY_TYPES:
         return 0
-    return sum(_item_print_line_count(item) for item in (order.get("items") or []) if isinstance(item, dict))
+    lines_per_partida = _print_lines_per_partida(delivery_type)
+    return _order_print_header_line_count(delivery_type) + sum(
+        _item_print_line_count(item, lines_per_partida)
+        for item in (order.get("items") or [])
+        if isinstance(item, dict)
+    )
 
 
-def _service_release_item_chunks(order: dict[str, Any]) -> list[list[dict[str, Any]]]:
+def _remito_print_item_chunks(order: dict[str, Any]) -> list[list[dict[str, Any]]]:
     items = [item for item in (order.get("items") or []) if isinstance(item, dict)]
     if not items:
         return []
-    limit = _service_release_print_line_limit()
+    delivery_type = normalize_delivery_type(order.get("deliveryType"))
+    if delivery_type not in REMITO_PRINT_SPLIT_DELIVERY_TYPES:
+        return [items]
+    lines_per_partida = _print_lines_per_partida(delivery_type)
+    limit = max(1, _remito_print_line_limit(delivery_type) - _order_print_header_line_count(delivery_type))
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_lines = 0
     for item in items:
-        item_lines = _item_print_line_count(item)
+        item_lines = _item_print_line_count(item, lines_per_partida)
         if current and current_lines + item_lines > limit:
             chunks.append(current)
             current = []
@@ -2760,7 +2820,7 @@ def _split_order_number(base: str, index: int) -> str:
     return f"{clean_base}-{suffix}"
 
 
-def _materialize_service_release_order_split(
+def _materialize_remito_order_split(
     order: dict[str, Any],
     chunks: list[list[dict[str, Any]]],
     actor_user_id: int | None,
@@ -2896,46 +2956,53 @@ def _materialize_service_release_order_split(
                         [target_order_id, sort_order, item_id],
                     )
 
+    delivery_type = normalize_delivery_type(order.get("deliveryType"))
+    event_name = (
+        "service_release_order_split_for_rss_print"
+        if delivery_type == "service_release"
+        else "delivery_order_split_for_remito_print"
+    )
     for target_order_id in target_ids:
         create_event(
             target_order_id,
             actor_user_id,
-            "service_release_order_split_for_rss_print",
+            event_name,
             metadata={
                 "sourceOrderId": order_id,
-                "maxPrintLines": _service_release_print_line_limit(),
+                "maxPrintLines": _remito_print_line_limit(delivery_type),
                 "splitOrderIds": target_ids,
             },
         )
     return [get_delivery_order(target_id, include_events=False) for target_id in target_ids]
 
 
-def _split_service_release_orders_for_printing(
+def _split_remito_orders_for_printing(
     orders: list[dict[str, Any]],
     actor_user_id: int | None,
 ) -> list[dict[str, Any]]:
     split_orders: list[dict[str, Any]] = []
     changed = False
     for order in orders:
-        if normalize_delivery_type(order.get("deliveryType")) != "service_release":
+        if normalize_delivery_type(order.get("deliveryType")) not in REMITO_PRINT_SPLIT_DELIVERY_TYPES:
             split_orders.append(order)
             continue
         if _optional_text(order.get("bejermanRemitoGroupId")):
             split_orders.append(order)
             continue
-        chunks = _service_release_item_chunks(order)
+        chunks = _remito_print_item_chunks(order)
         if len(chunks) <= 1:
             split_orders.append(order)
             continue
-        split_orders.extend(_materialize_service_release_order_split(order, chunks, actor_user_id))
+        split_orders.extend(_materialize_remito_order_split(order, chunks, actor_user_id))
         changed = True
     return split_orders if changed else orders
 
 
-def _partition_service_release_orders_for_printing(orders: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    if not orders or any(normalize_delivery_type(order.get("deliveryType")) != "service_release" for order in orders):
+def _partition_remito_orders_for_printing(orders: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    delivery_types = {normalize_delivery_type(order.get("deliveryType")) for order in orders}
+    if not orders or len(delivery_types) != 1 or next(iter(delivery_types)) not in REMITO_PRINT_SPLIT_DELIVERY_TYPES:
         return [orders]
-    limit = _service_release_print_line_limit()
+    limit = _remito_print_line_limit(next(iter(delivery_types)))
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_lines = 0
@@ -2952,10 +3019,11 @@ def _partition_service_release_orders_for_printing(orders: list[dict[str, Any]])
     return batches or [orders]
 
 
-def _service_release_needs_print_split(orders: list[dict[str, Any]]) -> bool:
-    if not orders or any(normalize_delivery_type(order.get("deliveryType")) != "service_release" for order in orders):
+def _remito_orders_need_print_split(orders: list[dict[str, Any]]) -> bool:
+    delivery_types = {normalize_delivery_type(order.get("deliveryType")) for order in orders}
+    if not orders or len(delivery_types) != 1 or next(iter(delivery_types)) not in REMITO_PRINT_SPLIT_DELIVERY_TYPES:
         return False
-    return any(len(_service_release_item_chunks(order)) > 1 for order in orders) or len(_partition_service_release_orders_for_printing(orders)) > 1
+    return any(len(_remito_print_item_chunks(order)) > 1 for order in orders) or len(_partition_remito_orders_for_printing(orders)) > 1
 
 
 def _supersede_uncertain_remito_group_for_print_split(
@@ -5135,7 +5203,7 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
     existing_uncertain_group = _same_uncertain_remito_group_for_orders(orders)
     if existing_uncertain_group:
         force_print_split_reissue = bool((payload or {}).get("forcePrintSplitReissue"))
-        print_split_required = force_print_split_reissue and _service_release_needs_print_split(orders)
+        print_split_required = force_print_split_reissue and _remito_orders_need_print_split(orders)
         try:
             reconciled_result = _reconcile_existing_uncertain_remito_group(
                 existing_uncertain_group,
@@ -5165,9 +5233,9 @@ def generate_bejerman_remito(order_ids: list[str], actor_user_id: int | None, pa
             for order in orders
         ]
     if not bool((payload or {}).get("_skipPrintSplit")):
-        orders = _split_service_release_orders_for_printing(orders, actor_user_id)
+        orders = _split_remito_orders_for_printing(orders, actor_user_id)
         ids = [order["id"] for order in orders]
-        batches = _partition_service_release_orders_for_printing(orders)
+        batches = _partition_remito_orders_for_printing(orders)
         if len(batches) > 1:
             next_payload = {**(payload or {}), "_skipPrintSplit": True}
             results = [
@@ -5618,239 +5686,6 @@ def _remito_group_service_release_print_lines(row: dict[str, Any], summary: dict
     return [line for line in lines if _optional_text(line)]
 
 
-def _render_remito_group_operational_pdf(
-    row: dict[str, Any],
-    summary: dict[str, Any],
-    *,
-    reason: str = "",
-    secure_rt: bool = False,
-) -> bytes:
-    from io import BytesIO
-
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.pdfgen import canvas
-
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=0)
-    width, height = A4
-    margin = 16 * mm
-    y = height - margin
-
-    def text(value: Any) -> str:
-        return _optional_text(value) or "-"
-
-    def draw_line(value: str, *, size: int = 9, bold: bool = False, x: float = margin) -> None:
-        nonlocal y
-        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        pdf.drawString(x, y, value[:130])
-        y -= (size + 4)
-
-    def ensure_space(required: float = 30 * mm) -> None:
-        nonlocal y
-        if y > margin + required:
-            return
-        pdf.showPage()
-        y = height - margin
-
-    remito_number = text(row.get("remito_number") or summary.get("remitoNumber"))
-    raw = summary.get("raw") if isinstance(summary.get("raw"), dict) else {}
-    issue_date = text(raw.get("Comprobante_FechaEmision") or summary.get("issueDate") or row.get("generated_at") or row.get("created_at"))
-
-    pdf.setTitle(remito_number)
-    pdf.setFillColor(colors.HexColor("#111827"))
-    draw_line("Remito de entrega", size=16, bold=True)
-    if not secure_rt:
-        draw_line("Copia operativa NEXORA", size=9)
-        draw_line("El PDF oficial de Bejerman no estuvo disponible al momento de imprimir.", size=9)
-        if reason:
-            draw_line(f"Motivo técnico: {reason}", size=8)
-    y -= 3
-    pdf.setStrokeColor(colors.HexColor("#d1d5db"))
-    pdf.line(margin, y, width - margin, y)
-    y -= 14
-
-    draw_line(remito_number, size=14, bold=True)
-    draw_line(f"Empresa: {text(row.get('company_key'))}    Cliente: {text(row.get('customer_code'))} - {text(row.get('customer_name'))}")
-    draw_line(
-        f"Tipo: {text(row.get('comprobante_tipo'))}    PV: {text(row.get('comprobante_pto_venta'))}    Número: {text(row.get('comprobante_numero'))}    Fecha: {issue_date}"
-    )
-    draw_line(f"Operación: {text(row.get('operation_code'))}    Depósito: {text(row.get('deposit_code'))}")
-    y -= 8
-
-    service_release_lines = _remito_group_service_release_print_lines(row, summary)
-    if service_release_lines:
-        pdf.setFont("Courier", 8)
-        for line in service_release_lines:
-            ensure_space(14 * mm)
-            pdf.drawString(margin + 2, y, line[:112])
-            y -= 10
-    else:
-        headers = [("Orden", 24 * mm), ("Código", 24 * mm), ("Detalle", 77 * mm), ("Cant.", 18 * mm), ("Partida", 28 * mm), ("Dep.", 14 * mm)]
-        pdf.setFillColor(colors.HexColor("#f3f4f6"))
-        pdf.rect(margin, y - 4, width - margin * 2, 14, fill=True, stroke=False)
-        pdf.setFillColor(colors.HexColor("#111827"))
-        pdf.setFont("Helvetica-Bold", 8)
-        x = margin + 2
-        for label, col_width in headers:
-            pdf.drawString(x, y, label)
-            x += col_width
-        y -= 14
-
-        lines = _remito_group_fallback_lines(row, summary)
-        pdf.setFont("Helvetica", 8)
-        for line in lines or [{"detail": "Sin detalle local disponible"}]:
-            ensure_space(24 * mm)
-            x = margin + 2
-            values = [
-                line.get("order") or "",
-                line.get("code") or "",
-                line.get("detail") or "",
-                line.get("quantity") or "",
-                line.get("partida") or "",
-                line.get("deposit") or "",
-            ]
-            for value, (_, col_width) in zip(values, headers):
-                pdf.drawString(x, y, text(value)[:55 if col_width > 50 * mm else 18])
-                x += col_width
-            y -= 12
-
-    y = max(y - 12, margin + 20)
-    pdf.setFont("Helvetica", 7)
-    pdf.setFillColor(colors.HexColor("#6b7280"))
-    if not secure_rt:
-        pdf.drawString(margin, y, "Esta copia no modifica stock ni reemplaza la registración contable de Bejerman; sólo permite imprimir el comprobante ya registrado.")
-    pdf.showPage()
-    pdf.save()
-    return buffer.getvalue()
-
-
-def _remito_group_pdf_fallback_due(row: dict[str, Any]) -> bool:
-    threshold = _env_positive_int(
-        "BEJERMAN_REMITO_PDF_OPERATIONAL_FALLBACK_AFTER_SECONDS",
-        BEJERMAN_REMITO_PDF_OPERATIONAL_FALLBACK_AFTER_SECONDS,
-    )
-    reference = row.get("generated_at") or row.get("created_at")
-    if not reference or not hasattr(reference, "date"):
-        return False
-    if timezone.is_naive(reference):
-        reference = timezone.make_aware(reference, timezone.get_current_timezone())
-    return timezone.now() - reference >= timedelta(seconds=threshold)
-
-
-def _remito_group_operational_pdf_response(
-    row: dict[str, Any],
-    summary: dict[str, Any],
-    *,
-    reason: str,
-) -> tuple[bytes, str, str]:
-    return (
-        _render_remito_group_operational_pdf(row, summary, reason=reason),
-        "application/pdf",
-        f"remito-operativo-{row.get('remito_number') or row.get('id')}.pdf",
-    )
-
-
-def _secure_rt_pdf_response(row: dict[str, Any], summary: dict[str, Any]) -> tuple[bytes, str, str]:
-    lines = _remito_group_fallback_lines(row, summary)
-    if not lines:
-        raise BillingError(
-            "RT_UNPRICED_PDF_DATA_UNAVAILABLE",
-            "No se pudo obtener el detalle de artículos necesario para generar el PDF RT sin importes.",
-            status_code=502,
-        )
-    return (
-        _render_remito_group_operational_pdf(row, summary, secure_rt=True),
-        "application/pdf",
-        f"remito-{row.get('remito_number') or row.get('id')}.pdf",
-    )
-
-
-def get_unpriced_rt_document_pdf(
-    customer_code: str | None,
-    document_id: str,
-    *,
-    actor_user_id: int | None = None,
-    company_key: str | None = None,
-) -> tuple[bytes, str, str]:
-    try:
-        decoded = decode_document_id(_optional_text(document_id))
-    except Exception as exc:
-        raise BillingError("DOCUMENT_ID_INVALID", "Referencia de comprobante inválida.", status_code=400) from exc
-    if _optional_text(decoded.get("t")).upper() != "RT":
-        raise BillingError("RT_UNPRICED_PDF_TYPE_INVALID", "El documento solicitado no es un RT.", status_code=400)
-    normalized_company = _company_key_for_marker(company_key)
-    if normalized_company not in REMITO_QUERY_COMPANY_KEYS:
-        raise BillingError("RT_UNPRICED_PDF_COMPANY_REQUIRED", "Debe indicar MGBIO o SEPID para generar el PDF RT.", status_code=400)
-    effective_customer = _optional_text(decoded.get("c") or customer_code)
-    issue_date = normalize_date(decoded.get("f"))
-    if not effective_customer or not issue_date:
-        raise BillingError("RT_UNPRICED_PDF_REFERENCE_INCOMPLETE", "La referencia RT no tiene cliente o fecha.", status_code=400)
-    try:
-        client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
-        response = client.list_comprobantes_ventas(build_sales_filters(effective_customer, issue_date, issue_date, "RT"))
-        matches = []
-        for record in records_from_response(response):
-            if _optional_text(first_value(record, ("Comprobante_Tipo", "TipoComprobante", "Tipo"))).upper() != "RT":
-                continue
-            if _normalized_digits(first_value(record, ("Comprobante_Numero", "Numero", "NroComprobante"))).lstrip("0") != _normalized_digits(decoded.get("n")).lstrip("0"):
-                continue
-            if _normalized_digits(first_value(record, ("Comprobante_PtoVenta", "PuntoVenta", "PtoVenta"))).zfill(5) != _normalized_digits(decoded.get("p")).zfill(5):
-                continue
-            record_letter = _optional_text(first_value(record, ("Comprobante_Letra", "Letra"))).upper()
-            if record_letter and record_letter != _optional_text(decoded.get("l")).upper():
-                continue
-            matches.append(record)
-        if not matches:
-            raise BillingError("RT_UNPRICED_PDF_DATA_UNAVAILABLE", "No se encontró el RT en Bejerman para obtener su detalle seguro.", status_code=404)
-        if len(matches) > 1:
-            raise BillingError("RT_UNPRICED_PDF_AMBIGUOUS", "Bejerman devolvió más de un RT para la referencia solicitada.", status_code=409)
-        detail_id = comprobante_id_of(matches[0])
-        if not detail_id:
-            raise BillingError("RT_UNPRICED_PDF_DATA_UNAVAILABLE", "Bejerman no devolvió el identificador necesario para consultar el detalle del RT.", status_code=502)
-        detail_records = records_from_response(client.detalle_comprobante_ventas(detail_id))
-        detail = detail_records[0] if detail_records and isinstance(detail_records[0], dict) else {}
-    except BillingError:
-        raise
-    except Exception as exc:
-        raise BillingError(
-            "RT_UNPRICED_PDF_DATA_UNAVAILABLE",
-            f"No se pudo obtener el detalle seguro del RT desde Bejerman: {exc}",
-            status_code=502,
-        ) from exc
-    if not detail or not any(
-        isinstance(item, dict) and _optional_text(item.get("Item_Tipo")).upper() == "A"
-        for item in detail.get("Comprobante_Items") or []
-    ):
-        raise BillingError(
-            "RT_UNPRICED_PDF_DATA_UNAVAILABLE",
-            "Bejerman no devolvió renglones de artículos para generar el PDF RT sin importes.",
-            status_code=502,
-        )
-    point = _normalized_digits(decoded.get("p")).zfill(5)
-    number = _normalized_digits(decoded.get("n")).zfill(8)
-    remito_number = f"RT {_optional_text(decoded.get('l')).upper() or 'R'} {point}-{number}"
-    row = {
-        "id": document_id,
-        "company_key": normalized_company,
-        "comprobante_tipo": "RT",
-        "comprobante_letra": decoded.get("l") or "R",
-        "comprobante_pto_venta": point,
-        "comprobante_numero": number,
-        "customer_code": effective_customer,
-        "customer_name": _optional_text(first_value(detail, ("Cliente_RazonSocial", "Cliente_Nombre", "RazonSocial"))),
-        "remito_number": remito_number,
-        "operation_code": _optional_text(first_value(detail, ("Comprobante_TipoOperacion", "TipoOperacion"))),
-        "deposit_code": "",
-        "created_at": issue_date,
-        "generated_at": issue_date,
-        "order_ids": [],
-    }
-    summary = {"raw": detail, "issueDate": issue_date}
-    return _secure_rt_pdf_response(row, summary)
-
-
 def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tuple[bytes, str, str]:
     started_at = time.monotonic()
     with connection.cursor() as cur:
@@ -5884,20 +5719,17 @@ def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tup
             "El remito ya fue solicitado. Bejerman todavía no publicó el PDF.",
             status_code=202,
             retry_after_ms=2500,
+            payload={"pdf_state": "pending_document", "generation_requested": False},
         )
     company_key = _company_key_for_remito_group(group_id, row.get("response_summary"), row.get("company_key"))
-    if _optional_text(row.get("comprobante_tipo")).upper() == "RT" and company_key in REMITO_QUERY_COMPANY_KEYS:
-        row["company_key"] = company_key
-        return _secure_rt_pdf_response(row, summary)
+    raw_summary = summary.get("raw") if isinstance(summary.get("raw"), dict) else {}
     doc_id = _document_id(
         {
             "t": row.get("comprobante_tipo"),
             "n": row.get("comprobante_numero"),
             "l": row.get("comprobante_letra") or "R",
             "p": row.get("comprobante_pto_venta"),
-            "f": (row.get("generated_at") or row.get("created_at")).date().isoformat()
-            if hasattr(row.get("generated_at") or row.get("created_at"), "date")
-            else None,
+            "f": _local_remito_issue_date(row, raw_summary),
             "c": row.get("customer_code"),
         }
     )
@@ -5908,33 +5740,23 @@ def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tup
             interactive=True,
             actor_user_id=actor_user_id,
             company_key=company_key,
+            remito_group_id=group_id,
         )
     except BillingError as exc:
         if exc.status_code == 202:
-            if _remito_group_pdf_fallback_due(row):
-                logger.warning(
-                    "bejerman_remito_pdf_pending_fallback_operational_copy",
-                    extra={
-                        "group_id": group_id,
-                        "duration_ms": int((time.monotonic() - started_at) * 1000),
-                        "error": str(exc),
-                    },
-                )
-                return _remito_group_operational_pdf_response(row, summary, reason=str(exc))
             logger.info(
                 "bejerman_remito_pdf_pending",
                 extra={"group_id": group_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
             )
-        elif exc.status_code >= 500:
+        else:
             logger.warning(
-                "bejerman_remito_pdf_fallback_operational_copy",
+                "bejerman_remito_pdf_unavailable",
                 extra={
                     "group_id": group_id,
                     "duration_ms": int((time.monotonic() - started_at) * 1000),
                     "error": str(exc),
                 },
             )
-            return _remito_group_operational_pdf_response(row, summary, reason=str(exc))
         raise
     filename = f"remito-{row.get('remito_number') or group_id}.pdf"
     logger.info(

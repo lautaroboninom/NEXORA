@@ -1,0 +1,23 @@
+services:
+  api:
+    volumes:
+      - /mnt/e/Datos/NEXORA_Runtime/staticfiles:/app/staticfiles
+      - /mnt/e/Datos/NEXORA_Runtime/mediafiles:/app/media
+      - /mnt/e/Datos/NEXORA_Runtime/repuestos_costos:/repuestos:ro
+      - /mnt/e/Datos:/mnt/nexora-z
+      - /mnt/e/Datos/NEXORA_Runtime/trazabilidad_general:/trazabilidad:ro
+
+  bejerman-pdf-worker:
+    volumes:
+      - /mnt/e/Datos:/mnt/nexora-z
+
+  frontend:
+    volumes:
+      - /mnt/e/Datos/NEXORA_Runtime/staticfiles:/static:ro
+      - /mnt/c/sepid_certs:/etc/nginx/certs:ro
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1280"

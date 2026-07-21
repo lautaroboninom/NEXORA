@@ -12,11 +12,11 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from django.conf import settings
-from django.core.mail import send_mail
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.utils import timezone
 
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
+from .notification_email_outbox import queue_notification_email
 from .bejerman_remito_price_fix import (
     BejermanRemitoPriceFixError,
     perform_bejerman_remito_price_fix,
@@ -867,7 +867,7 @@ def actor_is_delivery_discount_admin(actor_user_id: int | None) -> bool:
     with connection.cursor() as cur:
         cur.execute("SELECT LOWER(TRIM(COALESCE(rol, ''))) FROM users WHERE id = %s", [actor_user_id])
         row = cur.fetchone()
-    return bool(row and row[0] in {"admin", "supervisor", "ventas"})
+    return bool(row and row[0] in {"jefe", "admin", "supervisor", "ventas"})
 
 
 def _assert_item_discounts_allowed(
@@ -1766,26 +1766,21 @@ def _send_delivery_order_billing_email(order: dict[str, Any], users: list[dict[s
             ]
         )
     )
-    try:
-        return int(
-            send_mail(
-                subject,
-                body,
-                getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                recipients,
-                fail_silently=True,
-            )
-            or 0
-        )
-    except Exception:
-        logger.exception("delivery_order_billing_email_failed", extra={"order_id": order.get("id")})
-        return 0
+    queued = queue_notification_email(
+        notification_key="sales_order_remito_ready",
+        dedupe_key=f"sales_order_remito_ready:sales_order:{order.get('id')}",
+        recipients=recipients,
+        subject=subject,
+        body=body,
+    )
+    return int(queued["queued"] + queued["reactivated"])
 
 
 def _send_delivery_order_commercial_correction_email(
     order: dict[str, Any],
     users: list[dict[str, Any]],
     correction: dict[str, Any],
+    dedupe_key: str,
 ) -> int:
     recipients = notification_email_recipients_for_users(users)
     if not recipients:
@@ -1808,20 +1803,14 @@ def _send_delivery_order_commercial_correction_email(
             ]
         )
     )
-    try:
-        return int(
-            send_mail(
-                subject,
-                body,
-                getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                recipients,
-                fail_silently=True,
-            )
-            or 0
-        )
-    except Exception:
-        logger.exception("delivery_order_commercial_correction_email_failed", extra={"order_id": order.get("id")})
-        return 0
+    queued = queue_notification_email(
+        notification_key="sales_order_commercial_terms_updated",
+        dedupe_key=dedupe_key,
+        recipients=recipients,
+        subject=subject,
+        body=body,
+    )
+    return int(queued["queued"] + queued["reactivated"])
 
 
 def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind: str) -> int:
@@ -1885,15 +1874,15 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
             },
             push=kind == "created",
         )
-        email_sent = 0
-        if inserted and kind == "remito_ready":
+        email_queued = 0
+        if kind == "remito_ready":
             email_users = active_users_for_notification(notification_key, roles=roles, channel="email", require_email=True)
-            email_sent = _send_delivery_order_billing_email(order, email_users)
+            email_queued = _send_delivery_order_billing_email(order, email_users)
         create_event(
             order_id,
             actor_user_id,
             "notification_sent" if inserted else "notification_skipped",
-            metadata={"kind": kind, "roles": roles, "recipients": inserted, "emailSent": email_sent},
+            metadata={"kind": kind, "roles": roles, "recipients": inserted, "emailQueued": email_queued},
         )
         return inserted
     except Exception:
@@ -1944,6 +1933,7 @@ def notify_delivery_order_commercial_correction(
                 metadata={"kind": "commercial_correction", "roles": roles, "reason": "no_active_recipients"},
             )
             return 0
+        notification_dedupe_key = f"{notification_key}:sales_order:{order_id}:{uuid4()}"
         inserted = emit_notification(
             notification_key,
             user_ids=recipients,
@@ -1953,7 +1943,7 @@ def notify_delivery_order_commercial_correction(
             severity="warning",
             entity_type="delivery_order",
             entity_id=order_id,
-            dedupe_key=f"{notification_key}:sales_order:{order_id}:{uuid4()}",
+            dedupe_key=notification_dedupe_key,
             payload={
                 "orderId": order_id,
                 "orderNumber": order.get("orderNumber"),
@@ -1967,15 +1957,18 @@ def notify_delivery_order_commercial_correction(
             },
             push=True,
         )
-        email_sent = 0
-        if inserted:
-            email_users = active_users_for_notification(notification_key, roles=roles, channel="email", require_email=True)
-            email_sent = _send_delivery_order_commercial_correction_email(order, email_users, correction)
+        email_users = active_users_for_notification(notification_key, roles=roles, channel="email", require_email=True)
+        email_queued = _send_delivery_order_commercial_correction_email(
+            order,
+            email_users,
+            correction,
+            notification_dedupe_key,
+        )
         create_event(
             order_id,
             actor_user_id,
             "notification_sent" if inserted else "notification_skipped",
-            metadata={"kind": "commercial_correction", "roles": roles, "recipients": inserted, "emailSent": email_sent},
+            metadata={"kind": "commercial_correction", "roles": roles, "recipients": inserted, "emailQueued": email_queued},
         )
         return inserted
     except Exception:

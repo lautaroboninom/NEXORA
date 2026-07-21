@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from ..permissions import MappedPermissionGuard
 from .helpers import q, exec_void, exec_returning, require_roles, _fetchall_dicts, _set_audit_user
 from .mg_state import normalize_mg, resolve_mg_flags
+from .tipo_equipo_utils import sentence_case_tipo_equipo
 
 
 def _has_mg_schema() -> bool:
@@ -220,7 +221,7 @@ class DeviceIdentificadoresView(APIView):
         if "ubicacion_id" in data:
             next_ubicacion_id = _parse_int_or_none(data.get("ubicacion_id"))
         if "tipo_equipo" in data:
-            next_tipo_equipo = (data.get("tipo_equipo") or "").strip()
+            next_tipo_equipo = sentence_case_tipo_equipo(data.get("tipo_equipo"))
         if "variante" in data:
             next_variante = (data.get("variante") or "").strip()
         if "numero_serie" in data:
@@ -885,7 +886,7 @@ class DeviceDirectCreateView(APIView):
         if numero_interno and not numero_interno.upper().startswith(("MG", "NM", "NV", "CE")):
             numero_interno = "MG " + numero_interno
 
-        tipo_equipo = (data.get("tipo_equipo") or "").strip()
+        tipo_equipo = sentence_case_tipo_equipo(data.get("tipo_equipo"))
         variante = (data.get("variante") or "").strip()
         alquilado = bool(_parse_bool_or_default(data.get("alquilado"), False))
         alquiler_a = (data.get("alquiler_a") or "").strip()

@@ -28,7 +28,7 @@ SEED_CLIENTES = [
 
 SEED_TIPOS = [
     "CPAP",
-    "Concentrador de Oxígeno",
+    "Concentrador de oxígeno",
     "Aspirador",
     "Monitor multiparamétrico",
 ]
@@ -39,10 +39,10 @@ SEED_MARCAS_MODELOS = {
         {"nombre": "V5", "tipo_equipo": "CPAP"},
     ],
     "Longfian": [
-        {"nombre": "JAY-5", "tipo_equipo": "Concentrador de Oxígeno"},
+        {"nombre": "JAY-5", "tipo_equipo": "Concentrador de oxígeno"},
     ],
     "Inogen": [
-        {"nombre": "ONE G3", "tipo_equipo": "Concentrador de Oxígeno"},
+        {"nombre": "ONE G3", "tipo_equipo": "Concentrador de oxígeno"},
     ],
 }
 

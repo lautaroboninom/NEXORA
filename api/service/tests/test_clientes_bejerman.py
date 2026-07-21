@@ -14,12 +14,15 @@ from service.models import User
 
 
 class _FakeBejermanClient:
-    def __init__(self, records=None, *args, **kwargs):
+    def __init__(self, records=None, mgbio_records=None, *args, **kwargs):
         self.records = records
+        self.mgbio_records = mgbio_records
         self.company_key = kwargs.get("company_key") or "SEPID"
-        self.company = "SEP"
+        self.company = "MGBI" if str(self.company_key).upper() == "MGBIO" else "SEP"
 
     def list_clientes(self):
+        if str(self.company_key).upper() == "MGBIO":
+            return {"DatosJSON": self.mgbio_records or []}
         if self.records is not None:
             return {"DatosJSON": self.records}
         return {
@@ -41,6 +44,13 @@ class _FakeBejermanClient:
                 },
             ]
         }
+
+
+def _fake_bejerman_factory(records=None, mgbio_records=None):
+    def _factory(*args, **kwargs):
+        return _FakeBejermanClient(records=records, mgbio_records=mgbio_records, **kwargs)
+
+    return _factory
 
 
 class ClientesBejermanAPITest(TestCase):
@@ -254,7 +264,7 @@ class ClientesBejermanAPITest(TestCase):
             cur.execute("INSERT INTO ingresos (device_id) VALUES (%s)", [device_id])
         return sim_id, cma_id
 
-    @patch("service.customer_bejerman_sync.BejermanSDKClient", return_value=_FakeBejermanClient())
+    @patch("service.customer_bejerman_sync.BejermanSDKClient", side_effect=_fake_bejerman_factory())
     def test_customer_list_includes_bejerman_sync_and_activity_counts(self, _client_cls):
         sim_id, cma_id = self._seed_customers()
 
@@ -271,7 +281,7 @@ class ClientesBejermanAPITest(TestCase):
         self.assertEqual(by_id[cma_id]["bejerman_sync"]["status"], "missing_code")
         self.assertEqual(by_id[cma_id]["bejerman_sync"]["candidates"][0]["code"], "CMA")
 
-    @patch("service.customer_bejerman_sync.BejermanSDKClient", return_value=_FakeBejermanClient())
+    @patch("service.customer_bejerman_sync.BejermanSDKClient", side_effect=_fake_bejerman_factory())
     def test_bejerman_candidate_search_matches_by_name(self, _client_cls):
         self._seed_customers()
 
@@ -283,7 +293,7 @@ class ClientesBejermanAPITest(TestCase):
 
     @patch("service.customer_bejerman_sync.BejermanSDKClient")
     def test_bejerman_sync_updates_existing_and_creates_missing_customer(self, client_cls):
-        client_cls.return_value = _FakeBejermanClient(
+        client_cls.side_effect = _fake_bejerman_factory(
             records=[
                 {
                     "Cliente_Codigo": "SIM",
@@ -347,7 +357,7 @@ class ClientesBejermanAPITest(TestCase):
 
     @patch("service.customer_bejerman_sync.BejermanSDKClient")
     def test_bejerman_sync_does_not_rename_argas_to_argenlab_by_stale_code(self, client_cls):
-        client_cls.return_value = _FakeBejermanClient(
+        client_cls.side_effect = _fake_bejerman_factory(
             records=[
                 {
                     "Cliente_Codigo": "ARG",
@@ -388,6 +398,101 @@ class ClientesBejermanAPITest(TestCase):
         self.assertEqual(row[1], "ARGENTINA DE GASES S.A.")
         self.assertEqual(row[2], "30708604689")
         self.assertEqual(argenlab_count, 0)
+
+    @patch("service.customer_bejerman_sync.BejermanSDKClient")
+    def test_bejerman_sync_adds_mgbio_customers_without_duplicating_shared_clients(self, client_cls):
+        client_cls.side_effect = _fake_bejerman_factory(
+            records=[
+                {
+                    "Cliente_Codigo": "SIM",
+                    "Cliente_RazonSocial": "SIM ELECTRO MEDICINA",
+                    "Cliente_NroDocumento": "30716787946",
+                }
+            ],
+            mgbio_records=[
+                {
+                    "Cliente_Codigo": "SIMMG",
+                    "Cliente_RazonSocial": "SIM ELECTRO MEDICINA",
+                    "Cliente_NroDocumento": "30716787946",
+                },
+                {
+                    "Cliente_Codigo": "HOSP",
+                    "Cliente_RazonSocial": "HOSPITAL SOLO MGBIO",
+                    "Cliente_NroDocumento": "30711111119",
+                },
+            ],
+        )
+
+        response = self.client.post("/api/catalogos/clientes/sincronizar-bejerman/", {})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["created"], 2)
+        self.assertEqual(response.data["updated"], 0)
+        self.assertEqual(response.data["linked_other_company"], 1)
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT cod_empresa, bejerman_company_key FROM customers ORDER BY cod_empresa"
+            )
+            rows = cur.fetchall()
+        self.assertEqual(rows, [("HOSP", "MGBIO"), ("SIM", "SEPID")])
+
+    @patch("service.customer_bejerman_sync.BejermanSDKClient")
+    def test_bejerman_sync_same_code_different_clients_across_companies(self, client_cls):
+        client_cls.side_effect = _fake_bejerman_factory(
+            records=[
+                {
+                    "Cliente_Codigo": "ABC",
+                    "Cliente_RazonSocial": "CLIENTE UNO SA",
+                    "Cliente_NroDocumento": "30700000010",
+                }
+            ],
+            mgbio_records=[
+                {
+                    "Cliente_Codigo": "ABC",
+                    "Cliente_RazonSocial": "CLIENTE DOS SRL",
+                    "Cliente_NroDocumento": "30700000029",
+                }
+            ],
+        )
+
+        response = self.client.post("/api/catalogos/clientes/sincronizar-bejerman/", {})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["created"], 2)
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT razon_social, bejerman_company_key FROM customers WHERE cod_empresa=%s ORDER BY razon_social",
+                ["ABC"],
+            )
+            rows = cur.fetchall()
+        self.assertEqual(rows, [("CLIENTE DOS SRL", "MGBIO"), ("CLIENTE UNO SA", "SEPID")])
+
+        # Re-sincronizar no debe duplicar ni cruzar empresas.
+        response = self.client.post("/api/catalogos/clientes/sincronizar-bejerman/", {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["created"], 0)
+        self.assertEqual(response.data["updated"], 2)
+
+    @patch(
+        "service.customer_bejerman_sync.BejermanSDKClient",
+        side_effect=_fake_bejerman_factory(
+            mgbio_records=[
+                {
+                    "Cliente_Codigo": "HOSP",
+                    "Cliente_RazonSocial": "HOSPITAL SOLO MGBIO",
+                    "Cliente_NroDocumento": "30711111119",
+                    "Cliente_SitIVA": "RI",
+                }
+            ]
+        ),
+    )
+    def test_bejerman_candidate_search_includes_mgbio_records(self, _client_cls):
+        response = self.client.get("/api/catalogos/clientes/bejerman-candidatos/?q=solo mgbio")
+
+        self.assertEqual(response.status_code, 200)
+        by_code = {item["code"]: item for item in response.data["items"]}
+        self.assertIn("HOSP", by_code)
+        self.assertEqual(by_code["HOSP"]["details"]["companyKey"], "MGBIO")
 
     def test_apply_customer_alias_schema_creates_column_index_and_seed_examples(self):
         with connection.cursor() as cur:

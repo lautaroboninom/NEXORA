@@ -32,13 +32,12 @@ from service.bejerman_delivery import (
     _profile_for_order,
     _recovery_record_matches_delivery_request,
     _remito_requires_billing,
-    _service_release_item_chunks,
+    _remito_print_item_chunks,
     _validate_remito_orders,
     get_delivery_order_invoice_pdf,
     get_delivery_order_remito_pdf,
     get_facturacion_pdf,
     get_remito_group_pdf,
-    get_unpriced_rt_document_pdf,
     list_bejerman_article_stock,
     list_bejerman_articles,
     list_bejerman_depositos,
@@ -57,6 +56,7 @@ from service.bejerman_pdf_settings import (
     resolve_pdf_output_path,
     validate_pdf_output_dir,
 )
+from service.bejerman_pdf_requests import BejermanPdfRequestPending
 from service.delivery_orders import (
     DeliveryOrderError,
     _service_release_equipment_detail,
@@ -253,7 +253,7 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
             ],
         }
 
-        chunks = _service_release_item_chunks(order)
+        chunks = _remito_print_item_chunks(order)
 
         self.assertEqual([len(chunk) for chunk in chunks], [7, 7, 7, 7, 7, 7, 4])
 
@@ -271,11 +271,73 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
             ],
         }
 
-        chunks = _service_release_item_chunks(order)
+        chunks = _remito_print_item_chunks(order)
 
         self.assertEqual(len(chunks), 7)
         self.assertEqual([len(chunk) for chunk in chunks], [7, 7, 7, 7, 7, 7, 6])
         self.assertTrue(all(len(chunk) <= 7 for chunk in chunks))
+
+    @override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21)
+    def test_venta_print_split_cuenta_una_linea_por_partida_mas_encabezado(self):
+        # Caso OE-00116: 6 artículos con 26 partidas en total. El RT imprime
+        # 1 línea por partida más 2 líneas de encabezado por orden.
+        partida_counts = [1, 2, 2, 10, 10, 1]
+        order = {
+            "deliveryType": "sale",
+            "items": [
+                {
+                    "id": f"item-{index}",
+                    "quantity": count,
+                    "partidas": [{"partida": f"D25-{index}{serial:02d}", "quantity": 1} for serial in range(count)],
+                }
+                for index, count in enumerate(partida_counts)
+            ],
+        }
+
+        chunks = _remito_print_item_chunks(order)
+
+        # Capacidad por remito: 21 - 2 de encabezado = 19 líneas de artículos.
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual([len(chunk) for chunk in chunks], [4, 2])
+        self.assertEqual(
+            [sum(len(item["partidas"]) for item in chunk) for chunk in chunks],
+            [15, 11],
+        )
+
+    def test_venta_print_split_no_divide_si_entra_en_una_hoja(self):
+        order = {
+            "deliveryType": "sale",
+            "items": [
+                {"id": f"item-{index}", "quantity": 1, "partidas": [{"partida": f"P-{index}", "quantity": 1}]}
+                for index in range(10)
+            ],
+        }
+
+        chunks = _remito_print_item_chunks(order)
+
+        self.assertEqual(len(chunks), 1)
+
+    @override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21)
+    def test_alquiler_y_demo_print_split_usan_el_limite_general(self):
+        # Alquileres (RTA) y demos imprimen igual que las ventas: 1 línea por
+        # NS/partida más 2 líneas de encabezado por orden.
+        for delivery_type in ("rental", "demo"):
+            with self.subTest(delivery_type=delivery_type):
+                order = {
+                    "deliveryType": delivery_type,
+                    "items": [
+                        {
+                            "id": f"item-{index}",
+                            "quantity": 1,
+                            "partidas": [{"partida": f"NS-{index:03d}", "quantity": 1}],
+                        }
+                        for index in range(25)
+                    ],
+                }
+
+                chunks = _remito_print_item_chunks(order)
+
+                self.assertEqual([len(chunk) for chunk in chunks], [19, 6])
 
 
 class FakeSDKClient:
@@ -1471,21 +1533,29 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         self.assertFalse(any(item["Campo"] == "Cliente_Codigo" for item in filters))
         self.assertEqual(filters[0]["Campo"], "Comprobante_Tipo")
 
-    def test_facturacion_pdf_interactivo_timeout_queda_pendiente(self):
+    def test_facturacion_pdf_interactivo_propaga_estado_pendiente_del_coordinador(self):
         document_id = build_document_id(
             {"t": "RSS", "n": "00000012", "l": "R", "p": "0004", "f": "2026-06-12", "c": "ACU"}
         )
 
+        pending = BejermanPdfRequestPending(
+            "El PDF oficial quedó en cola para solicitarse una sola vez a Bejerman.",
+            pdf_state="queued",
+            generation_requested=False,
+            retry_after_ms=2500,
+        )
         with patch(
-            "service.bejerman_delivery.fetch_comprobante_pdf",
-            side_effect=BejermanSdkUnavailable("Error HTTP Bejerman: Read timed out"),
-        ):
+            "service.bejerman_delivery.fetch_or_enqueue_comprobante_pdf",
+            side_effect=pending,
+        ) as coordinator:
             with self.assertRaises(BillingError) as ctx:
                 get_facturacion_pdf("ACU", document_id, interactive=True)
 
         self.assertEqual(ctx.exception.code, "BEJERMAN_PDF_PENDING")
         self.assertEqual(ctx.exception.status_code, 202)
-        self.assertEqual(ctx.exception.retry_after_ms, 5000)
+        self.assertEqual(ctx.exception.retry_after_ms, 2500)
+        self.assertEqual(ctx.exception.payload, {"pdf_state": "queued", "generation_requested": False})
+        self.assertEqual(coordinator.call_args.kwargs, {"actor_user_id": None, "remito_group_id": None})
 
     def test_facturacion_pdf_exp_cuotas_devuelve_error_legible(self):
         document_id = build_document_id(
@@ -1493,7 +1563,7 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         )
 
         with patch(
-            "service.bejerman_delivery.fetch_comprobante_pdf",
+            "service.bejerman_delivery.fetch_or_enqueue_comprobante_pdf",
             side_effect=BejermanSdkResponseError("Invalid object name 'expCuotasV'."),
         ):
             with self.assertRaises(BillingError) as ctx:
@@ -1514,7 +1584,7 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         )
 
         with patch(
-            "service.bejerman_delivery.fetch_comprobante_pdf",
+            "service.bejerman_delivery.fetch_or_enqueue_comprobante_pdf",
             side_effect=BejermanSdkResponseError(sdk_error),
         ):
             with self.assertRaises(BillingError) as ctx:
@@ -1530,13 +1600,36 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
             {"t": "RT", "n": "00000012", "l": "R", "p": "00007", "f": "2026-06-12", "c": "ACU"}
         )
 
-        with patch("service.bejerman_delivery.BejermanSDKClient") as client_cls:
-            with patch("service.bejerman_delivery.fetch_comprobante_pdf", return_value=(b"%PDF-1.4", "application/pdf")):
-                get_facturacion_pdf("ACU", document_id, actor_user_id=1152, company_key="MGBIO")
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient") as client_cls,
+            patch(
+                "service.bejerman_delivery.fetch_or_enqueue_comprobante_pdf",
+                return_value=(b"%PDF-1.4", "application/pdf"),
+            ) as coordinator,
+        ):
+            get_facturacion_pdf(
+                "ACU",
+                document_id,
+                actor_user_id=1152,
+                company_key="MGBIO",
+                remito_group_id="brg-rt-mgbio",
+            )
 
         client_cls.assert_called_once_with(company_key="MGBIO", actor_user_id=1152)
+        self.assertIs(coordinator.call_args.args[0], client_cls.return_value)
+        reference = coordinator.call_args.args[1]
+        self.assertEqual(reference.type, "RT")
+        self.assertEqual(reference.number, "00000012")
+        self.assertEqual(reference.customer_code, "ACU")
+        self.assertEqual(
+            coordinator.call_args.kwargs,
+            {"actor_user_id": 1152, "remito_group_id": "brg-rt-mgbio"},
+        )
 
     def test_endpoint_pdf_remito_cobranzas_usa_cliente_y_empresa(self):
+        document_id = build_document_id(
+            {"t": "RT", "n": "00000683", "l": "R", "p": "00007", "f": "2026-07-14", "c": "ACU"}
+        )
         request = type(
             "Request",
             (),
@@ -1547,17 +1640,19 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         )()
         with (
             patch("service.views.delivery_orders_views.resolve_remito_group_for_document_id", return_value=None),
+            patch("service.views.delivery_orders_views.resolve_registered_ingreso_remito_for_document_id", return_value=None),
             patch(
                 "service.views.delivery_orders_views.get_facturacion_pdf",
-                return_value=(b"%PDF-1.4", "application/pdf"),
+                return_value=(b"%PDF-1.7\nPDF-OFICIAL-BEJERMAN", "application/pdf"),
             ) as pdf_mock,
         ):
-            response = CobranzasRemitoPdfView().get(request, "doc-remito")
+            response = CobranzasRemitoPdfView().get(request, document_id)
 
-        pdf_mock.assert_called_once_with("ACU", "doc-remito", interactive=True, actor_user_id=1152, company_key="MGBIO")
+        pdf_mock.assert_called_once_with("ACU", document_id, interactive=True, actor_user_id=1152, company_key="MGBIO")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/pdf")
-        self.assertIn("remito-doc-remito.pdf", response["Content-Disposition"])
+        self.assertEqual(response.content, b"%PDF-1.7\nPDF-OFICIAL-BEJERMAN")
+        self.assertIn(f"remito-{document_id}.pdf", response["Content-Disposition"])
 
     def test_endpoint_pdf_remito_cobranzas_prefiere_grupo_local(self):
         request = type(
@@ -1731,37 +1826,41 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         self.assertEqual(remitos_mock.call_args_list[1].args[0], "")
         self.assertEqual(remitos_mock.call_args_list[1].args[1]["search"], "00004715")
 
-    def test_pdf_remito_de_orden_usa_documento_resuelto_en_bejerman(self):
+    def test_pdf_rt_historico_de_orden_entrega_exactamente_el_archivo_de_bejerman(self):
         document_id = build_document_id(
-            {"t": "RSS", "n": "00004715", "l": "R", "p": "00004", "f": "2026-06-29", "c": "RUSSO"}
+            {"t": "RT", "n": "00000683", "l": "R", "p": "00007", "f": "2026-07-14", "c": "JORGE"}
         )
         order = {
-            "id": "do-rss-manual",
-            "remitoNumber": "RSS R 00004-00004715",
-            "bejermanCustomerCode": "RUSSO",
-            "companyKey": "SEPID",
+            "id": "do-rt-historico",
+            "remitoNumber": "RT R 00007-00000683",
+            "bejermanCustomerCode": "JORGE",
+            "companyKey": "MGBIO",
         }
+        official_bytes = b"%PDF-1.7\nPDF-OFICIAL-BEJERMAN"
 
         with (
             patch("service.bejerman_delivery.get_delivery_order", return_value=order),
             patch(
                 "service.bejerman_delivery.resolve_delivery_order_remito_document",
-                return_value={"documentId": document_id, "bejermanCustomerCode": "RUSSO", "companyKey": "SEPID"},
+                return_value={"documentId": document_id, "bejermanCustomerCode": "JORGE", "companyKey": "MGBIO"},
             ) as resolver,
-            patch("service.bejerman_delivery.get_facturacion_pdf", return_value=(b"%PDF-1.4", "application/pdf")) as pdf_mock,
+            patch(
+                "service.bejerman_delivery.get_facturacion_pdf",
+                return_value=(official_bytes, "application/pdf"),
+            ) as pdf_mock,
         ):
-            pdf_bytes, content_type, filename = get_delivery_order_remito_pdf("do-rss-manual", actor_user_id=1152)
+            pdf_bytes, content_type, filename = get_delivery_order_remito_pdf("do-rt-historico", actor_user_id=1152)
 
-        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
+        self.assertEqual(pdf_bytes, official_bytes)
         self.assertEqual(content_type, "application/pdf")
-        self.assertEqual(filename, "remito-RSS-R-00004-00004715.pdf")
+        self.assertEqual(filename, "remito-RT-R-00007-00000683.pdf")
         resolver.assert_called_once_with(order, actor_user_id=1152)
         pdf_mock.assert_called_once_with(
-            "RUSSO",
+            "JORGE",
             document_id,
             interactive=True,
             actor_user_id=1152,
-            company_key="SEPID",
+            company_key="MGBIO",
         )
 
     def test_resuelve_factura_de_orden_por_punto_y_numero_y_empresa(self):
@@ -2116,10 +2215,11 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         self.assertIn("registrado manualmente", str(ctx.exception))
         pdf_mock.assert_not_called()
 
-    def test_rt_de_sepid_y_mgbio_usa_pdf_nexora_sin_importes(self):
+    def test_rt_de_sepid_y_mgbio_entrega_exactamente_el_pdf_oficial_de_bejerman(self):
+        official_bytes = b"%PDF-1.7\nPDF-OFICIAL-BEJERMAN"
         for company_key, point in (("SEPID", "00004"), ("MGBIO", "00007")):
             with self.subTest(company_key=company_key):
-                group_id = f"brg-rt-unpriced-{company_key.lower()}"
+                group_id = f"brg-rt-official-{company_key.lower()}"
                 self._insert_remito_group(
                     group_id,
                     remito_type="RT",
@@ -2131,80 +2231,26 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
                     company_key=company_key,
                     point_of_sale=point,
                 )
-                with connection.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE bejerman_remito_groups
-                           SET response_summary = response_summary || %s::jsonb
-                         WHERE id = %s
-                        """,
-                        [
-                            json.dumps(
-                                {
-                                    "raw": {
-                                        "Comprobante_FechaEmision": "2026-07-13",
-                                        "Comprobante_ImporteTotal": 23858.78,
-                                        "Comprobante_Items": [
-                                            {
-                                                "Item_Tipo": "A",
-                                                "Item_CodigoArticulo": "ART-SEGURO",
-                                                "Item_DescripArticulo": "Equipo médico",
-                                                "Item_CantidadUM1": 1,
-                                                "Item_Partida": "SERIE-001",
-                                                "Item_Deposito": "VAL",
-                                                "Item_PrecioUnitario": 23858.78,
-                                                "Item_ImporteIVAInscrip": 0,
-                                                "Item_ImporteTotal": 23858.78,
-                                            },
-                                            {
-                                                "Item_Tipo": "L",
-                                                "Item_DescripArticulo": "Descuento $ 9999 Total $ 23858.78",
-                                            },
-                                        ],
-                                    }
-                                }
-                            ),
-                            group_id,
-                        ],
-                    )
-
-                with patch("service.bejerman_delivery.get_facturacion_pdf") as official_pdf:
+                with patch(
+                    "service.bejerman_delivery.get_facturacion_pdf",
+                    return_value=(official_bytes, "application/pdf"),
+                ) as official_pdf:
                     pdf_bytes, content_type, filename = get_remito_group_pdf(group_id, actor_user_id=1152)
 
-                official_pdf.assert_not_called()
-                pdf_text = pdf_bytes.decode("latin-1", "ignore").lower()
+                official_pdf.assert_called_once()
+                self.assertEqual(official_pdf.call_args.args[0], "EDU")
+                self.assertEqual(
+                    official_pdf.call_args.kwargs,
+                    {
+                        "interactive": True,
+                        "actor_user_id": 1152,
+                        "company_key": company_key,
+                        "remito_group_id": group_id,
+                    },
+                )
                 self.assertEqual(content_type, "application/pdf")
-                self.assertIn("art-seguro", pdf_text)
-                self.assertNotIn("precio", pdf_text)
-                self.assertNotIn("descuento", pdf_text)
-                self.assertNotIn("subtotal", pdf_text)
-                self.assertNotIn("importe", pdf_text)
-                self.assertNotIn("iva", pdf_text)
+                self.assertEqual(pdf_bytes, official_bytes)
                 self.assertIn("remito-rt", filename.lower())
-
-    def test_rt_historico_sin_detalle_no_entrega_pdf_oficial_valorizado(self):
-        document_id = build_document_id(
-            {"t": "RT", "n": "00000105", "l": "R", "p": "00007", "f": "2026-07-13", "c": "EDU"}
-        )
-        client = Mock()
-        client.list_comprobantes_ventas.return_value = {
-            "DatosJSON": [
-                {
-                    "Comprobante_ID": "105",
-                    "Comprobante_Tipo": "RT",
-                    "Comprobante_Letra": "R",
-                    "Comprobante_PtoVenta": "00007",
-                    "Comprobante_Numero": "00000105",
-                }
-            ]
-        }
-        client.detalle_comprobante_ventas.side_effect = BejermanSdkResponseError("detalle no disponible")
-
-        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client):
-            with self.assertRaises(BillingError) as ctx:
-                get_unpriced_rt_document_pdf("EDU", document_id, actor_user_id=1152, company_key="MGBIO")
-
-        self.assertEqual(ctx.exception.code, "RT_UNPRICED_PDF_DATA_UNAVAILABLE")
 
     def test_remito_group_pdf_permanece_disponible_en_revision_con_numero(self):
         self._insert_remito_group("brg-rss-review-with-number", remito_type="RSS", number="00004741")
@@ -2238,25 +2284,26 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         self.assertEqual(content_type, "application/pdf")
         self.assertIn("00004741", filename)
 
-    def test_remito_group_pdf_devuelve_copia_operativa_si_bejerman_pdf_falla(self):
+    def test_remito_group_pdf_no_inventa_copia_si_bejerman_falla(self):
         self._insert_remito_group("brg-rss-pdf-fallback", remito_type="RSS", number="00004743")
+        error = BillingError(
+            "BEJERMAN_BILLING_QUERY_BUSY",
+            "Bejerman no pudo completar la consulta porque dejó bloqueado expSinCuotasV1.",
+            status_code=502,
+        )
 
         with patch(
             "service.bejerman_delivery.get_facturacion_pdf",
-            side_effect=BillingError(
-                "BEJERMAN_BILLING_QUERY_BUSY",
-                "Bejerman no pudo completar la consulta porque dejó bloqueado expSinCuotasV1.",
-                status_code=502,
-            ),
+            side_effect=error,
         ) as pdf_mock:
-            pdf_bytes, content_type, filename = get_remito_group_pdf("brg-rss-pdf-fallback", actor_user_id=1152)
+            with self.assertRaises(BillingError) as ctx:
+                get_remito_group_pdf("brg-rss-pdf-fallback", actor_user_id=1152)
 
         pdf_mock.assert_called_once()
-        self.assertEqual(content_type, "application/pdf")
-        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
-        self.assertIn("remito-operativo", filename)
+        self.assertIs(ctx.exception, error)
+        self.assertEqual(ctx.exception.status_code, 502)
 
-    def test_remito_group_pdf_devuelve_copia_operativa_si_pdf_pendiente_esta_vencido(self):
+    def test_remito_group_pdf_antiguo_sigue_pendiente_hasta_recibir_el_pdf_real(self):
         self._insert_remito_group("brg-rss-pdf-pending-old", remito_type="RSS", number="00004743")
         with connection.cursor() as cur:
             cur.execute(
@@ -2273,12 +2320,12 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
                 retry_after_ms=1200,
             ),
         ) as pdf_mock:
-            pdf_bytes, content_type, filename = get_remito_group_pdf("brg-rss-pdf-pending-old", actor_user_id=1152)
+            with self.assertRaises(BillingError) as ctx:
+                get_remito_group_pdf("brg-rss-pdf-pending-old", actor_user_id=1152)
 
         pdf_mock.assert_called_once()
-        self.assertEqual(content_type, "application/pdf")
-        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
-        self.assertIn("remito-operativo", filename)
+        self.assertEqual(ctx.exception.code, "BEJERMAN_PDF_PENDING")
+        self.assertEqual(ctx.exception.status_code, 202)
 
     def test_remito_group_pdf_pendiente_reciente_no_devuelve_copia_operativa(self):
         self._insert_remito_group("brg-rss-pdf-pending-recent", remito_type="RSS", number="00004744")
@@ -4259,10 +4306,12 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertIn("REMITO_DOCUMENT_NOT_FOUND", html)
         self.assertIn("NEXORA volverá a buscar el remito automáticamente", html)
         self.assertIn("Cerrar pestaña", html)
-        self.assertIn("Esta pestaña se reemplazará por el PDF", html)
         self.assertNotIn("maxAttempts", html)
         self.assertNotIn("maxWaitMs", html)
+        self.assertNotIn("lookupMissRetryLimit", html)
         self.assertNotIn("shouldStopWaiting", html)
+        self.assertIn("PDF original emitido por Bejerman", html)
+        self.assertIn("únicamente por el archivo de Bejerman", html)
         self.assertNotIn("Reintente en unos segundos", html)
         self.assertNotIn("no es necesario volver a emitir el remito", html)
         self.assertNotIn("Intento ", html)

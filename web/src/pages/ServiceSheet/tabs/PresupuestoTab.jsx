@@ -717,8 +717,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     const puAuto = calcPrecioDesdeCosto(costo, multiplicador);
     const pu = (puRaw == null || puRaw === "") ? puAuto : parseOptionalNumber(puRaw);
     if (!nuevoRep.descripcion.trim()) { setQErr("Descripción requerida"); return; }
-    if (qty == null || Number.isNaN(qty) || qty < 0) { setQErr("Cantidad inválida"); return; }
-    //if (qty <= 0) { setQErr("Cantidad > 0"); return; }
+    if (qty == null || Number.isNaN(qty)) { setQErr("Cantidad inválida"); return; }
     if (pu != null && (Number.isNaN(pu) || pu < 0)) { setQErr("Precio inválido"); return; }
     if (multiplicador != null && (Number.isNaN(multiplicador) || multiplicador < 0)) { setQErr("Multiplicador inv\u00e1lido"); return; }
     if (costo != null && (Number.isNaN(costo) || costo < 0)) { setQErr("Costo inv\u00e1lido"); return; }
@@ -1127,7 +1126,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                   </div>
                 </td>
                 <td className="p-2">
-                  <input type="number" step="0.01" min="0" className="border rounded p-1 w-24 text-right" value={nuevoRep.qty} onChange={(e) => setNuevoRep((s) => ({ ...s, qty: e.target.value }))} disabled={isReadOnlyQuote} />
+                  <input type="number" step="0.01" className="border rounded p-1 w-24 text-right" value={nuevoRep.qty} onChange={(e) => setNuevoRep((s) => ({ ...s, qty: e.target.value }))} disabled={isReadOnlyQuote} />
                 </td>
                 {canSeeCosts ? (
                   <td className="p-2">
@@ -1169,7 +1168,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
           </table>
           {canSeeCosts ? (
             <div className="mb-4 text-xs text-gray-500">
-              {"Si cambi\u00e1s el costo o el multiplicador, el precio unitario se recalcula desde ah\u00ed. Si edit\u00e1s el precio a mano, el multiplicador mostrado se ajusta solo."}
+              {"Si cambi\u00e1s el costo o el multiplicador, el precio unitario se recalcula desde ah\u00ed. Si edit\u00e1s el precio a mano, el multiplicador mostrado se ajusta solo. Para descuentos, ingres\u00e1 una cantidad negativa; el multiplicador debe permanecer positivo."}
             </div>
           ) : null}
           <div className="flex items-end gap-3 mb-4">

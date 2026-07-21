@@ -1,7 +1,6 @@
 from decimal import Decimal
+from uuid import uuid4
 
-from django.conf import settings
-from django.core.mail import send_mail
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
@@ -11,7 +10,12 @@ from service.delivery_orders import (
     delivery_order_remito_print_url,
     list_delivery_orders,
 )
-from service.notifications import active_users_for_notification, emit_notification
+from service.notification_email_outbox import queue_notification_email
+from service.notifications import (
+    active_users_for_notification,
+    emit_notification,
+    notification_email_recipients_for_users,
+)
 from service.views.helpers import _email_append_footer_text
 
 
@@ -80,7 +84,7 @@ class Command(BaseCommand):
 
         today = timezone.localdate().isoformat()
         dedupe_key = f"{NOTIFICATION_KEY}:{today}"
-        sent = 0
+        queued_total = 0
         skipped = 0
         subject = f"Remitos pendientes de facturación: {total_pending}"
 
@@ -88,10 +92,23 @@ class Command(BaseCommand):
             body = _email_body(user, items, total_pending)
             if dry_run:
                 self.stdout.write(f"DRY-RUN {user.get('email')}: {subject}")
-                sent += 1
+                queued_total += 1
                 continue
 
-            inserted = emit_notification(
+            email_dedupe_key = f"{dedupe_key}:force:{uuid4()}" if force else dedupe_key
+            recipients = notification_email_recipients_for_users([user])
+            queued = queue_notification_email(
+                notification_key=NOTIFICATION_KEY,
+                dedupe_key=email_dedupe_key,
+                recipients=recipients,
+                subject=subject,
+                body=body,
+            )
+            accepted = int(queued["queued"] + queued["reactivated"])
+            queued_total += accepted
+            skipped += int(queued["duplicates"])
+
+            emit_notification(
                 NOTIFICATION_KEY,
                 user_ids=[user.get("id")],
                 title="Resumen de remitos pendientes de facturación",
@@ -103,17 +120,5 @@ class Command(BaseCommand):
                 dedupe_key=dedupe_key,
                 payload={"totalPending": total_pending, "listed": len(items)},
             )
-            if not force and not inserted:
-                skipped += 1
-                continue
 
-            send_mail(
-                subject,
-                body,
-                getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                [user.get("email")],
-                fail_silently=True,
-            )
-            sent += 1
-
-        self.stdout.write(f"Resumen de cobranzas procesado. enviados={sent} omitidos={skipped}")
+        self.stdout.write(f"Resumen de cobranzas procesado. encolados={queued_total} omitidos={skipped}")

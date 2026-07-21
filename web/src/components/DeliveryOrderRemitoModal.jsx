@@ -703,7 +703,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
   const [progressTitle, setProgressTitle] = useState("Emitiendo remito");
   const [progressStatus, setProgressStatus] = useState("Emitiendo remito en Bejerman");
   const [progressDetail, setProgressDetail] = useState("NEXORA está trabajando. El PDF se abrirá cuando esté listo.");
-  const [manualRemitoPrint, setManualRemitoPrint] = useState(null);
+  const [manualRemitoPrints, setManualRemitoPrints] = useState([]);
 
   useEffect(() => {
     if (!open) return;
@@ -712,7 +712,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
     setError("");
     setProgressOpen(false);
     setProgressTitle("Emitiendo remito");
-    setManualRemitoPrint(null);
+    setManualRemitoPrints([]);
   }, [open, orders]);
 
   useEffect(() => {
@@ -739,7 +739,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
     const progressLabel = remitoProgressFromOrders(localOrders);
     setSaving(true);
     setError("");
-    setManualRemitoPrint(null);
+    setManualRemitoPrints([]);
     setProgressTitle(`Emitiendo ${documentLabel}`);
     setProgressStatus(`Emitiendo ${progressLabel} en Bejerman`);
     setProgressDetail("Enviando el remito a Bejerman.");
@@ -753,39 +753,63 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
       });
       setProgressStatus(`${documentLabel} emitido`);
       setProgressDetail("Esperando el PDF publicado por Bejerman.");
-      const pdfUrl = remitoPdfUrlFromResult(result);
-      if (!pdfUrl) {
-        setError(`Remito ${result?.remitoNumber || ""} emitido, pero no se recibió una URL de PDF.`);
-        onGenerated(result, { keepOpen: true });
-        return;
+      // La emisión puede dividirse en varios remitos si no entran en una hoja.
+      const subResults = Array.isArray(result?.remitos) && result.remitos.length > 1 ? result.remitos : [result];
+      const printJobs = [];
+      const missingPdfs = [];
+      for (let index = 0; index < subResults.length; index += 1) {
+        const subResult = subResults[index];
+        const subLabel = subResults.length > 1 ? `${documentLabel} ${index + 1} de ${subResults.length}` : documentLabel;
+        const pdfUrl = remitoPdfUrlFromResult(subResult);
+        if (!pdfUrl) {
+          missingPdfs.push(clean(subResult?.remitoNumber) || subLabel);
+          continue;
+        }
+        try {
+          const blob = await waitForPdfBlob(pdfUrl, {
+            label: subLabel,
+            onProgress: (progress) => {
+              setProgressStatus(progress?.status || `Preparando PDF del ${subLabel}...`);
+              setProgressDetail(progress?.detail || "Esperando el archivo de Bejerman.");
+            },
+          });
+          printJobs.push({ blob, result: subResult, documentLabel: subLabel });
+        } catch (pdfError) {
+          missingPdfs.push(clean(subResult?.remitoNumber) || subLabel);
+        }
       }
-      let blob = null;
-      try {
-        blob = await waitForPdfBlob(pdfUrl, {
-          label: documentLabel,
-          onProgress: (progress) => {
-            setProgressStatus(progress?.status || `Preparando PDF del ${documentLabel}...`);
-            setProgressDetail(progress?.detail || "Esperando el archivo de Bejerman.");
-          },
-        });
-      } catch (pdfError) {
+      if (!printJobs.length) {
         setError(
-          `Remito ${result?.remitoNumber || ""} emitido, pero Bejerman no pudo devolver el PDF. ${
-            pdfError?.message || "Reintente imprimirlo desde el historial de pedidos."
-          }`
+          `Remito ${result?.remitoNumber || ""} emitido, pero Bejerman no pudo devolver el PDF. ` +
+            "Reintente imprimirlo desde el historial de pedidos."
         );
         onGenerated(result, { keepOpen: true });
         return;
       }
       setProgressStatus("Abriendo impresión");
-      setProgressDetail("El PDF está listo. Intentando abrir la ventana de impresión.");
+      setProgressDetail(
+        printJobs.length > 1
+          ? `Se emitieron ${subResults.length} remitos. Se abrirá el primero; imprima el resto desde los botones.`
+          : "El PDF está listo. Intentando abrir la ventana de impresión."
+      );
       await waitForRisProgressMinimum(startedAt);
-      const opened = openRemitoPrintablePdf(blob, result, documentLabel).opened;
-      if (opened) {
+      const [firstJob, ...restJobs] = printJobs;
+      const opened = openRemitoPrintablePdf(firstJob.blob, firstJob.result, firstJob.documentLabel).opened;
+      const pendingJobs = opened ? restJobs : printJobs;
+      if (!pendingJobs.length && !missingPdfs.length) {
         onGenerated(result);
       } else {
-        setManualRemitoPrint({ blob, result, documentLabel });
-        setError(`Remito ${result?.remitoNumber || ""} emitido. El PDF está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.`);
+        setManualRemitoPrints(pendingJobs);
+        const parts = [];
+        if (!opened) {
+          parts.push(`Remito ${result?.remitoNumber || ""} emitido. El navegador bloqueó la ventana automática. Use Abrir e imprimir.`);
+        } else if (pendingJobs.length) {
+          parts.push(`Se emitieron ${subResults.length} remitos (${result?.remitoNumber || ""}). Imprima los restantes con el botón de abajo.`);
+        }
+        if (missingPdfs.length) {
+          parts.push(`No se pudo obtener el PDF de: ${missingPdfs.join(" / ")}. Reintente desde el historial de pedidos.`);
+        }
+        setError(parts.join(" "));
         onGenerated(result, { keepOpen: true });
       }
     } catch (err) {
@@ -801,18 +825,24 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
   };
 
   const abrirRemitoManualPendiente = () => {
-    if (!manualRemitoPrint?.blob) return;
+    const [job, ...restJobs] = manualRemitoPrints;
+    if (!job?.blob) return;
     const opened = openRemitoPrintablePdf(
-      manualRemitoPrint.blob,
-      manualRemitoPrint.result || {},
-      manualRemitoPrint.documentLabel || remitoDocumentFromOrders(localOrders),
+      job.blob,
+      job.result || {},
+      job.documentLabel || remitoDocumentFromOrders(localOrders),
     ).opened;
-    if (opened) {
-      setManualRemitoPrint(null);
-      setError("");
-      onGenerated(manualRemitoPrint.result);
-    } else {
+    if (!opened) {
       setError("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
+      return;
+    }
+    setManualRemitoPrints(restJobs);
+    if (restJobs.length) {
+      setError(`Quedan ${restJobs.length} remito(s) por imprimir. Use Abrir e imprimir para el siguiente.`);
+      onGenerated(job.result, { keepOpen: true });
+    } else {
+      setError("");
+      onGenerated(job.result);
     }
   };
 
@@ -847,13 +877,14 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           {error && (
             <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               <div>{error}</div>
-              {manualRemitoPrint?.blob && (
+              {manualRemitoPrints[0]?.blob && (
                 <button
                   type="button"
                   onClick={abrirRemitoManualPendiente}
                   className="mt-2 rounded bg-red-700 px-3 py-1.5 font-medium text-white hover:bg-red-800"
                 >
-                  Abrir e imprimir {manualRemitoPrint?.documentLabel || remitoDocumentFromOrders(localOrders)}
+                  Abrir e imprimir {clean(manualRemitoPrints[0]?.result?.remitoNumber) || manualRemitoPrints[0]?.documentLabel || remitoDocumentFromOrders(localOrders)}
+                  {manualRemitoPrints.length > 1 ? ` (${manualRemitoPrints.length} pendientes)` : ""}
                 </button>
               )}
             </div>

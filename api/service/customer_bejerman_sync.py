@@ -9,7 +9,7 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .bejerman_sdk import BejermanSDKClient, as_string, first_value, normalize_search, records_from_response
-from .bejerman_companies import company_for_key
+from .bejerman_companies import company_for_key, list_ingress_companies
 
 
 BEJERMAN_COMPANY_CONTEXT_KEY = "__nexora_bejerman_company_key"
@@ -184,6 +184,39 @@ def load_bejerman_customer_records(
     return [_with_company_context(record, resolved_company_key) for record in records_from_response(client.list_clientes())]
 
 
+def load_bejerman_customer_records_for_companies(
+    *,
+    user_id: int | None = None,
+    allow_system_credentials: bool = False,
+    company_keys: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Carga clientes de todas las empresas Bejerman configuradas (excluye la de prueba).
+
+    Devuelve (records, errors); solo lanza si ninguna empresa pudo consultarse.
+    """
+    if company_keys:
+        keys = [clean_upper(key) for key in company_keys if clean(key)]
+    else:
+        keys = [company.key for company in list_ingress_companies() if not company.is_test]
+
+    records: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for key in keys:
+        try:
+            records.extend(
+                load_bejerman_customer_records(
+                    user_id=user_id,
+                    allow_system_credentials=allow_system_credentials,
+                    company_key=key,
+                )
+            )
+        except Exception as exc:
+            errors.append({"company": key, "error": clean(str(exc)) or exc.__class__.__name__})
+    if keys and errors and not records:
+        raise RuntimeError("; ".join(f"{item['company']}: {item['error']}" for item in errors))
+    return records, errors
+
+
 def bejerman_customer_details_from_record(record: dict[str, Any]) -> dict[str, str]:
     details = {
         key: as_string(first_value(record, aliases))
@@ -258,6 +291,15 @@ def _load_local_customers(columns: set[str]) -> list[dict[str, Any]]:
         cur.execute(f"SELECT {', '.join(select_columns)} FROM customers")
         names = [col[0] for col in cur.description]
         return [dict(zip(names, row)) for row in cur.fetchall()]
+
+
+def _row_company_key(row: dict[str, Any]) -> str:
+    return clean_upper(row.get("bejerman_company_key"))
+
+
+def _company_compatible(row: dict[str, Any], company_key: str) -> bool:
+    row_company = _row_company_key(row)
+    return not company_key or not row_company or row_company == company_key
 
 
 def _register_index(
@@ -364,6 +406,7 @@ def sync_customers_from_bejerman_records(
         "updated": 0,
         "skipped": 0,
         "identity_mismatch": 0,
+        "linked_other_company": 0,
         "errors": [],
     }
     seen_codes: set[str] = set()
@@ -371,6 +414,7 @@ def sync_customers_from_bejerman_records(
     with transaction.atomic():
         for record in records:
             details = bejerman_customer_details_from_record(record)
+            record_company = clean_upper(details.get("bejerman_company_key"))
             code_key = clean_upper(details.get("cod_empresa"))
             cuit_key = digits_only(details.get("cuit"))
             label = details.get("cod_empresa") or details.get("razon_social") or cuit_key or "cliente sin identificar"
@@ -379,17 +423,18 @@ def sync_customers_from_bejerman_records(
                 summary["skipped"] += 1
                 summary["errors"].append({"customer": label, "reason": "missing_identity"})
                 continue
-            if code_key and code_key in seen_codes:
+            seen_key = f"{record_company}|{code_key}"
+            if code_key and seen_key in seen_codes:
                 summary["skipped"] += 1
                 summary["errors"].append({"customer": label, "reason": "duplicate_bejerman_code"})
                 continue
             if code_key:
-                seen_codes.add(code_key)
+                seen_codes.add(seen_key)
 
             target = None
             match_reason = ""
             if code_key:
-                matches = by_code.get(code_key, [])
+                matches = [row for row in by_code.get(code_key, []) if _company_compatible(row, record_company)]
                 if len(matches) == 1:
                     target = matches[0]
                     match_reason = "code"
@@ -398,7 +443,7 @@ def sync_customers_from_bejerman_records(
                     summary["errors"].append({"customer": label, "reason": "duplicate_local_code"})
                     continue
             if target is None and cuit_key:
-                matches = by_cuit.get(cuit_key, [])
+                matches = [row for row in by_cuit.get(cuit_key, []) if _company_compatible(row, record_company)]
                 if len(matches) == 1:
                     target = matches[0]
                     match_reason = "cuit"
@@ -406,15 +451,34 @@ def sync_customers_from_bejerman_records(
                     summary["skipped"] += 1
                     summary["errors"].append({"customer": label, "reason": "duplicate_local_cuit"})
                     continue
+            name_key = normalize_search(details.get("razon_social"))
             if target is None:
-                name_key = normalize_search(details.get("razon_social"))
-                matches = by_name.get(name_key, []) if name_key else []
+                matches = [row for row in by_name.get(name_key, []) if _company_compatible(row, record_company)] if name_key else []
                 if len(matches) == 1:
                     target = matches[0]
                     match_reason = "name"
                 elif len(matches) > 1:
                     summary["skipped"] += 1
                     summary["errors"].append({"customer": label, "reason": "duplicate_local_name"})
+                    continue
+
+            if target is None and record_company:
+                # El mismo cliente ya existe vinculado a otra empresa Bejerman:
+                # no se duplica ni se pisa esa vinculación.
+                bound_elsewhere = None
+                if cuit_key:
+                    bound_elsewhere = next(
+                        (row for row in by_cuit.get(cuit_key, []) if not _company_compatible(row, record_company)),
+                        None,
+                    )
+                if bound_elsewhere is None and name_key:
+                    bound_elsewhere = next(
+                        (row for row in by_name.get(name_key, []) if not _company_compatible(row, record_company)),
+                        None,
+                    )
+                if bound_elsewhere is not None:
+                    summary["skipped"] += 1
+                    summary["linked_other_company"] += 1
                     continue
 
             if target and _identity_mismatch(target, details):

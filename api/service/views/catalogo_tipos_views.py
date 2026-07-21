@@ -3,7 +3,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import exec_void, q, require_roles, _set_audit_user
-from .tipo_equipo_utils import clean_tipo_equipo, matching_rows, preferred_name, preferred_row, tipo_equipo_key
+from .tipo_equipo_utils import (
+    clean_tipo_equipo,
+    matching_rows,
+    preferred_name,
+    preferred_row,
+    sentence_case_tipo_equipo,
+    tipo_equipo_key,
+)
 
 
 class TiposEquipoView(APIView):
@@ -11,7 +18,7 @@ class TiposEquipoView(APIView):
 
     @staticmethod
     def _norm_name(value: str) -> str:
-        return clean_tipo_equipo(value)
+        return sentence_case_tipo_equipo(value)
 
     @classmethod
     def _ensure_catalog_tipo(cls, nombre: str) -> None:

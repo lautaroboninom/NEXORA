@@ -8,11 +8,12 @@ from rest_framework.views import APIView
 
 from ..bejerman_sdk import BejermanSDKClient, as_string, first_value, normalize_search, records_from_response
 from ..customer_bejerman_sync import (
+    BEJERMAN_COMPANY_CONTEXT_KEY,
     BEJERMAN_CUSTOMER_COLUMNS,
     bejerman_customer_detail_payload_from_record,
     bejerman_customer_details_from_record,
     customer_bejerman_detail_payload,
-    load_bejerman_customer_records,
+    load_bejerman_customer_records_for_companies,
     sync_customers_from_bejerman_records,
 )
 from ..permissions import require_any_permission
@@ -291,7 +292,12 @@ def _candidate_payload(record, local=None, query=""):
 
 
 def _load_bejerman_records(user_id: int | None = None):
-    return load_bejerman_customer_records(user_id=user_id)
+    """Carga clientes de todas las empresas Bejerman configuradas (SEPID, MGBIO)."""
+    return load_bejerman_customer_records_for_companies(user_id=user_id)
+
+
+def _record_company_key(record):
+    return _clean_upper((record or {}).get(BEJERMAN_COMPANY_CONTEXT_KEY))
 
 
 def _candidate_score(candidate):
@@ -319,7 +325,8 @@ def _bejerman_sync_payload(local, records, by_code):
     local_cuit = _digits_only(local.get("cuit"))
 
     if local_code:
-        record = by_code.get(local_code)
+        local_company = _clean_upper(local.get("bejerman_company_key"))
+        record = by_code.get((local_company, local_code)) if local_company else by_code.get(local_code)
         if record:
             candidate = _candidate_payload(record, local=local)
             candidate_name = candidate.get("name") or ""
@@ -361,7 +368,7 @@ def _bejerman_sync_payload(local, records, by_code):
 
 def _attach_bejerman_sync(rows, user_id: int | None = None):
     try:
-        records = _load_bejerman_records(user_id=user_id)
+        records, company_errors = _load_bejerman_records(user_id=user_id)
     except Exception as exc:
         for row in rows:
             row["bejerman_sync"] = {
@@ -372,12 +379,24 @@ def _attach_bejerman_sync(rows, user_id: int | None = None):
             }
         return rows
 
+    failed_companies = {_clean_upper(item.get("company")) for item in company_errors}
     by_code = {}
     for record in records:
         code = _clean_upper(_bejerman_customer_code(record))
-        if code and code not in by_code:
-            by_code[code] = record
+        if not code:
+            continue
+        by_code.setdefault((_record_company_key(record), code), record)
+        by_code.setdefault(code, record)
     for row in rows:
+        row_company = _clean_upper(row.get("bejerman_company_key"))
+        if row_company and row_company in failed_companies:
+            row["bejerman_sync"] = {
+                "status": "unavailable",
+                "label": "No disponible",
+                "message": f"No se pudo consultar la empresa {row_company} en Bejerman.",
+                "candidates": [],
+            }
+            continue
         row["bejerman_sync"] = _bejerman_sync_payload(row, records, by_code)
     return rows
 
@@ -509,7 +528,7 @@ class ClienteBejermanCandidatesView(APIView):
 
         try:
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-            records = _load_bejerman_records(user_id=user_id)
+            records, _company_errors = _load_bejerman_records(user_id=user_id)
         except Exception as exc:
             return Response({"detail": str(exc) or "No se pudo consultar Bejerman."}, status=503)
 
@@ -546,10 +565,12 @@ class ClientesBejermanSyncView(APIView):
         dry_run = _bool_param((request.data or {}).get("dry_run"))
         try:
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-            records = _load_bejerman_records(user_id=user_id)
+            records, company_errors = _load_bejerman_records(user_id=user_id)
             summary = sync_customers_from_bejerman_records(records, dry_run=dry_run)
         except Exception as exc:
             return Response({"detail": str(exc) or "No se pudo sincronizar Bejerman."}, status=503)
+        if company_errors:
+            summary["company_errors"] = company_errors
         return Response(summary)
 
 

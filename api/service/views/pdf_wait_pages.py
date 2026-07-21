@@ -39,11 +39,11 @@ def render_bejerman_pdf_wait_page(
   <main>
     <span class="spinner" aria-hidden="true"></span>
     <h1>Preparando {escape(clean_document_name)}</h1>
-    <p id="status" aria-live="polite">Esperando el PDF emitido por Bejerman...</p>
-    <p id="detail" class="detail">Esta pestaña se reemplazará por el PDF cuando esté disponible.</p>
+    <p id="status" aria-live="polite">Esperando el PDF original emitido por Bejerman...</p>
+    <p id="detail" class="detail">Esta pestaña seguirá esperando y se reemplazará únicamente por el archivo de Bejerman.</p>
     <div id="actions" class="actions">
-      <button id="retry" type="button">Reintentar</button>
-      <a href="{escape(clean_pdf_url)}" target="_self">Abrir PDF directo</a>
+      <button id="retry" type="button">Volver a comprobar</button>
+      <a id="open-pdf" href="#" target="_self" hidden>Abrir e imprimir</a>
       <button id="close" type="button">Cerrar pestaña</button>
     </div>
   </main>
@@ -55,9 +55,10 @@ def render_bejerman_pdf_wait_page(
     const detailEl = document.getElementById('detail');
     const actionsEl = document.getElementById('actions');
     const retryEl = document.getElementById('retry');
+    const openPdfEl = document.getElementById('open-pdf');
     const closeEl = document.getElementById('close');
     let attempts = 0;
-    const lookupMissRetryLimit = 20;
+    let pdfBlobUrl = '';
     const REMITO_DOCUMENT_NOT_FOUND = 'REMITO_DOCUMENT_NOT_FOUND';
 
     function hasOnlyPdfPadding(bytes, end) {{
@@ -92,12 +93,17 @@ def render_bejerman_pdf_wait_page(
     function fail(message, detail) {{
       statusEl.textContent = message;
       detailEl.textContent = detail || fallbackDetail;
+      retryEl.hidden = false;
+      openPdfEl.hidden = !pdfBlobUrl;
       showActions(true);
     }}
 
     function retryDelayFrom(response, payload) {{
-      const retryAfter = Number(response.headers.get('Retry-After') || 0);
-      if (retryAfter > 0) return retryAfter * 1000;
+      const retryAfterHeader = String(response.headers.get('Retry-After') || '').trim();
+      const retryAfterSeconds = Number(retryAfterHeader);
+      if (retryAfterSeconds > 0) return retryAfterSeconds * 1000;
+      const retryAfterDate = Date.parse(retryAfterHeader);
+      if (Number.isFinite(retryAfterDate) && retryAfterDate > Date.now()) return retryAfterDate - Date.now();
       const retryAfterMs = Number(payload && payload.retry_after_ms || 0);
       if (retryAfterMs > 0) return retryAfterMs;
       return Math.min(900 + attempts * 250, 2000);
@@ -111,7 +117,7 @@ def render_bejerman_pdf_wait_page(
     }}
 
     function shouldRetryLookupMiss(response, payload) {{
-      if (![404, 502, 503, 504].includes(response.status) || attempts >= lookupMissRetryLimit) return false;
+      if (![404, 502, 503, 504].includes(response.status)) return false;
       const text = normalizeLookupText(String((payload && payload.code) || '') + ' ' + String((payload && payload.detail) || ''));
       return text.includes(REMITO_DOCUMENT_NOT_FOUND.toLowerCase())
         || text.includes('no se encontro el comprobante asociado')
@@ -139,7 +145,7 @@ def render_bejerman_pdf_wait_page(
       statusEl.textContent = attempts === 1
         ? 'Buscando el PDF del ' + documentName + ' emitido por Bejerman...'
         : 'El ' + documentName + ' ya fue emitido. Esperando PDF...';
-      detailEl.textContent = 'Consultando Bejerman sin bloquear NEXORA.';
+      detailEl.textContent = 'Comprobando si el archivo ya está disponible.';
 
       try {{
         const separator = pdfUrl.includes('?') ? '&' : '?';
@@ -152,12 +158,32 @@ def render_bejerman_pdf_wait_page(
         }});
         window.clearTimeout(timeout);
 
-        if (response.ok) {{
+        if (response.status === 202) {{
+          const payload = await readResponsePayload(response);
+          const detail = payload && payload.detail ? String(payload.detail) : '';
+          statusEl.textContent = 'El ' + documentName + ' está emitido. Bejerman todavía está preparando el PDF.';
+          detailEl.textContent = detail || 'Esperando la disponibilidad del archivo para imprimir.';
+          scheduleNext(retryDelayFrom(response, payload));
+          return;
+        }}
+
+        if (response.status === 200) {{
           const buffer = await response.arrayBuffer();
           const bytes = pdfBytesFromResponse(new Uint8Array(buffer));
           if (bytes) {{
             const blob = new Blob([bytes], {{ type: 'application/pdf' }});
-            window.location.replace(URL.createObjectURL(blob));
+            pdfBlobUrl = URL.createObjectURL(blob);
+            openPdfEl.href = pdfBlobUrl;
+            openPdfEl.hidden = false;
+            retryEl.hidden = true;
+            statusEl.textContent = 'El PDF del ' + documentName + ' está listo.';
+            detailEl.textContent = 'Abriendo el archivo para imprimir.';
+            showActions(true);
+            try {{
+              window.location.replace(pdfBlobUrl);
+            }} catch (error) {{
+              detailEl.textContent = 'El navegador no pudo abrirlo automáticamente. Use Abrir e imprimir.';
+            }}
             return;
           }}
           fail('NEXORA recibió una respuesta que no es un PDF válido.', 'Reintente la impresión desde esta pestaña.');
@@ -167,12 +193,6 @@ def render_bejerman_pdf_wait_page(
         const payload = await readResponsePayload(response);
         const detail = payload && payload.detail ? String(payload.detail) : '';
 
-        if (response.status === 202) {{
-          statusEl.textContent = 'El ' + documentName + ' está emitido. Bejerman todavía está preparando el PDF.';
-          detailEl.textContent = detail || 'Esperando la disponibilidad del archivo para imprimir.';
-          scheduleNext(retryDelayFrom(response, payload));
-          return;
-        }}
         if (shouldRetryLookupMiss(response, payload)) {{
           statusEl.textContent = 'Bejerman todavía no devolvió el ' + documentName + ' en la consulta.';
           detailEl.textContent = 'NEXORA volverá a buscar el remito automáticamente.';
@@ -200,6 +220,7 @@ def render_bejerman_pdf_wait_page(
 
     retryEl.addEventListener('click', () => {{
       attempts = 0;
+      retryEl.hidden = false;
       void pollPdf();
     }});
     closeEl.addEventListener('click', () => window.close());

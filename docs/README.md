@@ -69,7 +69,10 @@ Manual de NEXORA
 - Aviso inmediato: cuando un remito queda pendiente de facturación se notifica a usuarios activos con rol `cobranzas` y preferencia habilitada.
 - Resumen diario: `python manage.py send_billing_pending_notifications [--dry-run] [--limit 50]`.
 - Destinatarios: usuarios activos con rol `cobranzas`, email cargado y notificación `billing_pending_summary` habilitada.
-- Scheduling: ejecutar diario via cron/Task Scheduler, mismo patrón que presupuestos.
+- Programación: las pilas de producción incluyen el servicio `billing-summary`, que lo ejecuta todos los días a las 08:00 (hora local).
+- La hora puede configurarse con `BILLING_SUMMARY_AT=HH:MM`; para una ejecución controlada se puede usar `python manage.py run_billing_pending_notifications --once`.
+- Los correos de Cobranzas y los PDF de remitos se guardan en `notification_email_outbox`; el servicio `email-outbox` los entrega y reintenta con espera progresiva ante errores de SMTP o cuando Bejerman todavía no publicó el PDF.
+- Estado de la cola: `python manage.py run_notification_email_outbox --once`; para reactivar entregas agotadas: `python manage.py run_notification_email_outbox --once --retry-failed`.
 
 ### Mantenimientos preventivos (`/equipos`)
 - UX:

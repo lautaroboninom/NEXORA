@@ -529,6 +529,9 @@ function BejermanEditModal({
                 {modal.searchError && (
                   <div className="mt-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{modal.searchError}</div>
                 )}
+                {modal.searchPerformed && !modal.searchLoading && !modal.searchError && searchItems.length === 0 && (
+                  <div className="mt-2 text-xs text-gray-500">No se encontraron artículos para esa búsqueda.</div>
+                )}
                 {searchItems.length > 0 && (
                   <div className="mt-3 grid gap-2 xl:grid-cols-2">
                     {searchItems.map((candidate, index) => (
@@ -793,7 +796,7 @@ function RemitoPdfAction({ row }) {
   );
 }
 
-function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRetry, className = "" }) {
+function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRetry, actionState, className = "" }) {
   const needsReview = row?.status === "failed_review";
   const reviewState = row?.reviewState || (needsReview ? "requires_verification" : "");
   const actions = row?.actions || {};
@@ -810,6 +813,9 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
   const verifyAllowed = actions?.verify?.allowed ?? (canManage && needsReview);
   const editAllowed = actions?.edit?.allowed ?? (canEditOrders && ["ready_for_correction", "ready_to_reissue"].includes(reviewState));
   const reissueAllowed = actions?.reissue?.allowed ?? (canManage && canGenerateRemito && reviewState === "ready_to_reissue");
+  const actionLoading = Boolean(actionState?.loading);
+  const actionError = trimValue(actionState?.error);
+  const verifyBlockedReason = !verifyAllowed ? trimValue(actions?.verify?.blockedReason) : "";
   if (!canRetry && !needsReview && !hasPdfState) return null;
   return (
     <div className={`flex flex-wrap items-center gap-2 ${className}`.trim()}>
@@ -819,10 +825,11 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
           onClick={() => onRetry(row, "retry")}
+          disabled={actionLoading}
           title="Reintentar el proceso"
         >
           <RotateCcw className="h-3.5 w-3.5" />
-          Reintentar
+          {actionLoading && actionState?.action === "retry" ? "Reintentando..." : "Reintentar"}
         </button>
       )}
       {needsReview && (
@@ -830,11 +837,11 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={() => onRetry(row, "verify")}
-          disabled={!verifyAllowed}
+          disabled={!verifyAllowed || actionLoading}
           title={actions?.verify?.blockedReason || "Buscar el comprobante en Bejerman sin emitir"}
         >
           <Search className="h-3.5 w-3.5" />
-          Verificar en Bejerman
+          {actionLoading && actionState?.action === "verify" ? "Verificando..." : "Verificar en Bejerman"}
         </button>
       )}
       {needsReview && editHref && (editAllowed ? (
@@ -862,12 +869,18 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-orange-300 bg-orange-50 px-2 text-xs text-orange-900 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={() => onRetry(row, "reissue_corrected")}
-          disabled={!reissueAllowed}
+          disabled={!reissueAllowed || actionLoading}
           title={actions?.reissue?.blockedReason || "Requiere confirmación y una nueva verificación antes de emitir"}
         >
           <RotateCcw className="h-3.5 w-3.5" />
-          Emitir remito corregido
+          {actionLoading && actionState?.action === "reissue_corrected" ? "Emitiendo..." : "Emitir remito corregido"}
         </button>
+      )}
+      {actionError && (
+        <div className="w-full text-xs leading-relaxed text-red-700" role="alert">{actionError}</div>
+      )}
+      {!actionError && verifyBlockedReason && (
+        <div className="w-full text-xs leading-relaxed text-amber-800">{verifyBlockedReason}</div>
       )}
     </div>
   );
@@ -1172,6 +1185,7 @@ export default function BejermanSync() {
   const [remitoAutoRefreshing, setRemitoAutoRefreshing] = useState(false);
   const [err, setErr] = useState("");
   const [remitoErr, setRemitoErr] = useState("");
+  const [remitoActionState, setRemitoActionState] = useState({});
   const [msg, setMsg] = useState("");
   const [expanded, setExpanded] = useState({});
   const [remitoExpanded, setRemitoExpanded] = useState({});
@@ -1190,6 +1204,7 @@ export default function BejermanSync() {
   const rowsRef = useRef(rows);
   const remitoRowsRef = useRef(remitoRows);
   const editModalRef = useRef(editModal);
+  const editSearchSeqRef = useRef(0);
   const loadingRef = useRef(false);
   const remitoLoadingRef = useRef(false);
   const autoRefreshPausedRef = useRef(false);
@@ -1506,6 +1521,7 @@ export default function BejermanSync() {
 
   const retryRemito = async (row, action = "retry") => {
     if (!row?.source || !row?.id) return;
+    const actionKey = row.process_id || `${row.source}:${row.id}`;
     if (action === "reissue_corrected") {
       const confirmed = window.confirm(
         `Se volverá a verificar Bejerman y, únicamente si el RT no existe, se emitirá el remito corregido para ${remitoDocumentLabel(row)}. ¿Desea continuar?`,
@@ -1514,6 +1530,10 @@ export default function BejermanSync() {
     }
     setRemitoErr("");
     setMsg("");
+    setRemitoActionState((prev) => ({
+      ...prev,
+      [actionKey]: { loading: true, action, error: "" },
+    }));
     try {
       await postBejermanRemitoProcessRetry(
         row.source,
@@ -1528,9 +1548,18 @@ export default function BejermanSync() {
         setMsg(`Proceso de remito ${remitoDocumentLabel(row)} reintentado.`);
       }
     } catch (e) {
-      setRemitoErr(e?.message || "No se pudo reintentar el remito.");
+      const actionError = e?.data?.detail || e?.message || "No se pudo reintentar el remito.";
+      setRemitoErr(actionError);
+      setRemitoActionState((prev) => ({
+        ...prev,
+        [actionKey]: { loading: false, action, error: actionError },
+      }));
     } finally {
       await loadRemitos();
+      setRemitoActionState((prev) => ({
+        ...prev,
+        [actionKey]: { ...(prev[actionKey] || {}), loading: false, action },
+      }));
     }
   };
 
@@ -1571,6 +1600,7 @@ export default function BejermanSync() {
       searchLoading: false,
       searchError: "",
       searchItems: [],
+      searchPerformed: false,
     });
     try {
       const data = await getDeviceEditable(row.device_id);
@@ -1623,28 +1653,49 @@ export default function BejermanSync() {
 
   const searchModalArticles = async () => {
     const modal = editModal;
-    if (!modal?.row?.id) return;
+    const jobId = trimValue(modal?.row?.id);
+    if (!jobId) return;
     const query = trimValue(modal.searchQuery);
-    setEditModal((prev) => prev ? ({ ...prev, searchLoading: true, searchError: "" }) : prev);
+    const requestId = ++editSearchSeqRef.current;
+    let timeoutId = null;
+    setEditModal((prev) => (
+      trimValue(prev?.row?.id) === jobId
+        ? {
+            ...prev,
+            searchLoading: true,
+            searchError: "",
+            searchPerformed: false,
+          }
+        : prev
+    ));
+    let searchItems = [];
+    let searchError = "";
+    let searchPerformed = false;
     try {
-      const data = await getBejermanArticles({ job_id: modal.row.id, q: query });
-      setEditModal((prev) => (
-        prev?.row?.id === modal.row.id
-          ? {
-              ...prev,
-              searchLoading: false,
-              searchItems: Array.isArray(data?.items) ? data.items : [],
-              searchError: "",
-            }
-          : prev
-      ));
+      const timeout = new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error("La búsqueda tardó demasiado. Probá de nuevo."));
+        }, 60000);
+      });
+      const data = await Promise.race([
+        getBejermanArticles({ job_id: jobId, q: query }),
+        timeout,
+      ]);
+      searchItems = Array.isArray(data?.items) ? data.items : [];
+      searchPerformed = true;
     } catch (e) {
+      searchError = e?.message || "No se pudo buscar artículos Bejerman.";
+    } finally {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      if (editSearchSeqRef.current !== requestId) return;
       setEditModal((prev) => (
-        prev?.row?.id === modal.row.id
+        prev
           ? {
               ...prev,
               searchLoading: false,
-              searchError: e?.message || "No se pudo buscar artículos Bejerman.",
+              searchItems,
+              searchError,
+              searchPerformed,
             }
           : prev
       ));
@@ -1922,6 +1973,7 @@ export default function BejermanSync() {
             canEditOrders={canEditOrders}
             canGenerateRemito={canGenerateRemito}
             onRetry={retryRemito}
+            actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
           />
         ) : (
           <JobActions row={row} canManage={canManage} onEdit={openEditModal} onRetry={retry} />
@@ -2021,6 +2073,7 @@ export default function BejermanSync() {
                 canEditOrders={canEditOrders}
                 canGenerateRemito={canGenerateRemito}
                 onRetry={retryRemito}
+                actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
                 className="justify-end"
               />
             ) : (

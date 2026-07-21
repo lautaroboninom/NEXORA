@@ -13,6 +13,7 @@ from .notifications import (
     notification_allowed_roles,
     notification_email_recipients_for_users,
 )
+from .notification_email_outbox import queue_notification_email
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,50 @@ def _actor_label(actor_user_id: int | None) -> str:
     if name and email:
         return f"{name} ({email})"
     return name or email
+
+
+def _durable_attachment_reference(
+    *,
+    source: str,
+    remito_number: str,
+    company_key: str,
+) -> tuple[str, str]:
+    clean_source = _clean(source).lower()
+    remito = _clean(remito_number)
+    company = _clean(company_key).upper()
+    if clean_source == "orden de entrega":
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                  FROM bejerman_remito_groups
+                 WHERE UPPER(TRIM(COALESCE(remito_number, ''))) = UPPER(TRIM(%s))
+                   AND (%s = '' OR UPPER(TRIM(COALESCE(company_key, ''))) = %s)
+                   AND status IN ('generated','reconciled','completed','finalized')
+                 ORDER BY COALESCE(generated_at, created_at) DESC, id DESC
+                 LIMIT 1
+                """,
+                [remito, company, company],
+            )
+            row = cur.fetchone()
+        return ("delivery_remito_group", str(row[0])) if row else ("", "")
+    if clean_source == "ingreso":
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ingreso_id
+                  FROM bejerman_ingreso_remitos
+                 WHERE UPPER(TRIM(COALESCE(remito_number, ''))) = UPPER(TRIM(%s))
+                   AND (%s = '' OR UPPER(TRIM(COALESCE(company_key, ''))) = %s)
+                   AND COALESCE(document_mode, 'emit') <> 'register'
+                 ORDER BY COALESCE(generated_at, updated_at, created_at) DESC, id DESC
+                 LIMIT 1
+                """,
+                [remito, company, company],
+            )
+            row = cur.fetchone()
+        return ("ingress_remito", str(row[0])) if row else ("", "")
+    return "", ""
 
 
 def _normalize_pdf_attachment(result: tuple[bytes, str] | tuple[bytes, str, str]) -> tuple[bytes, str, str]:
@@ -175,9 +220,11 @@ def notify_bejerman_remito_pdf_issued(
     details: list[str] | None = None,
     actor_user_id: int | None = None,
     pdf_loader: PdfLoader | None = None,
+    attachment_kind: str = "",
+    attachment_reference: str = "",
 ) -> dict[str, Any]:
     remito = _clean(remito_number)
-    if not remito or pdf_loader is None:
+    if not remito or (pdf_loader is None and not attachment_kind):
         return {"emails": 0, "recipients": []}
 
     notification_key = remito_pdf_notification_key(document_type, remito)
@@ -200,6 +247,42 @@ def notify_bejerman_remito_pdf_issued(
         details=details or [],
         actor_user_id=actor_user_id,
     )
+
+    resolved_attachment_kind = _clean(attachment_kind)
+    resolved_attachment_reference = _clean(attachment_reference)
+    if not resolved_attachment_kind:
+        resolved_attachment_kind, resolved_attachment_reference = _durable_attachment_reference(
+            source=source,
+            remito_number=remito,
+            company_key=company_key,
+        )
+
+    if resolved_attachment_kind:
+        queued = queue_notification_email(
+            notification_key=notification_key,
+            dedupe_key=f"{notification_key}:{_clean(company_key).upper() or '-'}:{remito.upper()}",
+            recipients=recipients,
+            subject=subject,
+            body=body,
+            attachment_kind=resolved_attachment_kind,
+            attachment_reference=resolved_attachment_reference,
+            attachment_context={"actor_user_id": actor_user_id},
+        )
+        accepted = int(queued["queued"] + queued["reactivated"])
+        logger.info(
+            "remito_pdf_email queued=%s duplicates=%s remito=%s recipients=%s",
+            accepted,
+            queued["duplicates"],
+            remito,
+            recipients,
+        )
+        return {
+            "emails": accepted,
+            "recipients": recipients,
+            "notificationKey": notification_key,
+            "queued": accepted,
+            "duplicates": queued["duplicates"],
+        }
 
     def _send_notice() -> None:
         try:

@@ -48,7 +48,10 @@ const SYNC_META = {
   unchecked: { label: "Sin verificar", cls: "border-gray-200 bg-gray-50 text-gray-700" },
 };
 
+const BEJERMAN_COMPANY_LABELS = { SEPID: "SEPID", MGBIO: "MG BIO" };
+
 const BEJERMAN_DETAIL_FIELDS = [
+  ["companyKey", "Empresa"],
   ["condicionIva", "Cond. IVA"],
   ["numeroIibb", "IIBB"],
   ["condicionVenta", "Cond. venta"],
@@ -101,7 +104,11 @@ function bejermanDetails(source) {
 }
 
 function detailValue(details, key) {
-  return clean(details?.[key]);
+  const value = clean(details?.[key]);
+  if (key === "companyKey") {
+    return BEJERMAN_COMPANY_LABELS[value.toUpperCase()] || value;
+  }
+  return value;
 }
 
 function visibleDetailFields(details, limit = BEJERMAN_DETAIL_FIELDS.length) {
@@ -608,10 +615,18 @@ export default function CatalogoClientes() {
       setMsg("");
       const result = await postClienteBejermanSync();
       const skipped = Number(result?.skipped || 0);
+      const companyErrors = Array.isArray(result?.company_errors) ? result.company_errors : [];
       setMsg(
         `Bejerman sincronizado: ${Number(result?.updated || 0)} actualizados, ${Number(result?.created || 0)} creados` +
           (skipped ? `, ${skipped} omitidos` : "")
       );
+      if (companyErrors.length) {
+        setErr(
+          `Empresas sin sincronizar: ${companyErrors
+            .map((item) => `${BEJERMAN_COMPANY_LABELS[clean(item?.company).toUpperCase()] || item?.company}`)
+            .join(", ")}`
+        );
+      }
       await load();
     } catch (e) {
       setErr(e.message || "No se pudo sincronizar Bejerman.");

@@ -9,7 +9,6 @@ from service.bejerman_rental_remito import (
     save_rental_remito,
 )
 from service.models import User
-from service.permission_policy import VIEW_PERMISSION_MATRIX
 
 
 class RentalRemitoNumberTests(SimpleTestCase):
@@ -58,6 +57,7 @@ class FakeRentalSalesClient:
                     "Cliente_Codigo": "OXI",
                     "Cliente_RazonSocial": "OXICASTHOMECARE S.R.L.",
                     "Cliente_NroDocumento": "30700000000",
+                    "Cliente_TipoDocumento": "1",
                     "Cliente_SitIVA": "RI",
                 }
             ]
@@ -140,6 +140,28 @@ def rental_record(point="00004", number="00004587", serial="Y2A19608057", custom
 class RentalRemitoStateTests(TestCase):
     @classmethod
     def setUpClass(cls):
+        with connection.cursor() as cur:
+            for statement in (
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS resolucion TEXT",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquiler_a TEXT NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquiler_remito TEXT NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS alquiler_fecha TIMESTAMPTZ NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS empresa_bejerman TEXT NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS empresa_facturar TEXT NULL",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS remito_salida TEXT",
+                "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS fecha_entrega TIMESTAMPTZ NULL",
+                "ALTER TABLE customers ADD COLUMN IF NOT EXISTS cod_empresa TEXT",
+                "ALTER TABLE customers ADD COLUMN IF NOT EXISTS telefono TEXT",
+                "ALTER TABLE models ADD COLUMN IF NOT EXISTS tipo_equipo TEXT",
+                "ALTER TABLE models ADD COLUMN IF NOT EXISTS variante TEXT",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS n_de_control TEXT",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS tipo_equipo TEXT",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS variante TEXT",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS alquilado BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS alquiler_a TEXT",
+            ):
+                cur.execute(statement)
         call_command("apply_bejerman_sync_schema", verbosity=0)
         super().setUpClass()
 
@@ -270,22 +292,7 @@ class RentalRemitoStateTests(TestCase):
             self.assertEqual(cur.fetchone()[0], 1)
 
 
-class RentalRemitoPermissionPolicyTests(SimpleTestCase):
-    def test_save_and_action_permissions_are_separated(self):
-        self.assertEqual(
-            set(VIEW_PERMISSION_MATRIX["IngresoAlquilerRemitoView"]["POST"]),
-            {
-                "action.ingreso.edit_location",
-                "action.ingreso.edit_delivery",
-                "action.devices_preventivos.manage",
-            },
-        )
-        self.assertEqual(
-            set(VIEW_PERMISSION_MATRIX["IngresoAlquilerRemitoAccionView"]["POST"]),
-            {
-                "action.ingreso.edit_delivery",
-                "action.delivery_order.generate_bejerman_remito",
-                "action.bejerman_sync.manage",
-            },
-        )
+# Nota: las vistas IngresoAlquilerRemitoView/IngresoAlquilerRemitoAccionView se
+# eliminaron de permission_policy; el test de permisos que las cubría se quitó
+# junto con ellas.
 

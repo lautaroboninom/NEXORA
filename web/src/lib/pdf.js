@@ -101,8 +101,11 @@ async function readResponsePayload(response) {
 }
 
 function retryDelayFrom(response, payload, attempt) {
-  const retryAfter = Number(response.headers.get("Retry-After") || 0);
-  if (retryAfter > 0) return retryAfter * 1000;
+  const retryAfterHeader = String(response.headers.get("Retry-After") || "").trim();
+  const retryAfterSeconds = Number(retryAfterHeader);
+  if (retryAfterSeconds > 0) return retryAfterSeconds * 1000;
+  const retryAfterDate = Date.parse(retryAfterHeader);
+  if (Number.isFinite(retryAfterDate) && retryAfterDate > Date.now()) return retryAfterDate - Date.now();
   const retryAfterMs = Number(payload?.retry_after_ms || 0);
   if (retryAfterMs > 0) return retryAfterMs;
   return Math.min(900 + attempt * 250, 2000);
@@ -185,7 +188,21 @@ export async function waitForPdfBlob(pdfUrl, {
       });
       if (timeout) window.clearTimeout(timeout);
 
-      if (response.ok) {
+      if (response.status === 202) {
+        const payload = await readResponsePayload(response);
+        const waitMs = retryDelayFrom(response, payload, attempt);
+        notifyProgress(onProgress, {
+          state: "pending",
+          attempt,
+          delayMs: waitMs,
+          status: `${label} emitido. Bejerman todavía está preparando el PDF.`,
+          detail: payload?.detail || "NEXORA volverá a consultar automáticamente.",
+        });
+        await delay(waitMs);
+        continue;
+      }
+
+      if (response.status === 200) {
         const buffer = await response.arrayBuffer();
         const bytes = pdfBytesFromResponse(new Uint8Array(buffer));
         if (!bytes) {
@@ -199,23 +216,10 @@ export async function waitForPdfBlob(pdfUrl, {
           status: `PDF del ${label} listo.`,
           detail: "Abriendo impresión.",
         });
-        return new Blob([bytes], { type: response.headers.get("content-type") || "application/pdf" });
+        return new Blob([bytes], { type: "application/pdf" });
       }
 
       const payload = await readResponsePayload(response);
-      if (response.status === 202) {
-        const waitMs = retryDelayFrom(response, payload, attempt);
-        notifyProgress(onProgress, {
-          state: "pending",
-          attempt,
-          delayMs: waitMs,
-          status: `${label} emitido. Bejerman todavía está preparando el PDF.`,
-          detail: payload?.detail || "NEXORA volverá a consultar automáticamente.",
-        });
-        await delay(waitMs);
-        continue;
-      }
-
       if (isTransientPdfLookupMiss(response, payload)) {
         const waitMs = retryDelayFrom(response, payload, attempt);
         notifyProgress(onProgress, {

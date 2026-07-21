@@ -6,7 +6,6 @@ from io import BytesIO
 from typing import Any
 
 from django.conf import settings
-from django.core.mail import EmailMessage, get_connection
 from django.db import connection, transaction
 from django.utils import timezone
 from reportlab.lib import colors
@@ -16,8 +15,8 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .delivery_orders import sync_service_release_orders_invoice_from_ingreso
-from .email_delivery import dispatch_email_delivery
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
+from .notification_email_outbox import queue_notification_email
 
 logger = logging.getLogger(__name__)
 
@@ -557,51 +556,6 @@ def render_service_order_billing_pdf(ingreso_id: int) -> tuple[bytes, str]:
     return pdf, f"OS-{item.get('os')}-facturacion.pdf"
 
 
-def _send_email_with_optional_fallback(subject: str, body: str, recipients: list[str], attachment: tuple[bytes, str] | None) -> bool:
-    if not recipients:
-        return False
-
-    def _send(connection_obj=None):
-        message = EmailMessage(
-            subject,
-            body,
-            getattr(settings, "DEFAULT_FROM_EMAIL", None),
-            recipients,
-            connection=connection_obj,
-        )
-        if attachment:
-            pdf_bytes, filename = attachment
-            message.attach(filename, pdf_bytes, "application/pdf")
-        sent = message.send(fail_silently=False)
-        return bool(sent and sent > 0)
-
-    try:
-        return _send()
-    except Exception as exc:
-        try:
-            port_cfg = int(getattr(settings, "EMAIL_PORT", 0) or 0)
-        except Exception:
-            port_cfg = 0
-        if port_cfg != 587:
-            logger.exception("service_order_billing_email failed", extra={"recipients": recipients})
-            return False
-        try:
-            conn = get_connection(
-                backend=getattr(settings, "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"),
-                host=getattr(settings, "EMAIL_HOST", None),
-                port=465,
-                username=getattr(settings, "EMAIL_HOST_USER", None),
-                password=getattr(settings, "EMAIL_HOST_PASSWORD", None),
-                use_tls=False,
-                use_ssl=True,
-                fail_silently=False,
-            )
-            return _send(conn)
-        except Exception:
-            logger.exception("service_order_billing_email fallback failed", extra={"recipients": recipients, "original_error": str(exc)})
-            return False
-
-
 def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, actor_name: str = "") -> dict[str, Any]:
     item = get_service_order_billing_item(ingreso_id, include_invoiced=False)
     if not item:
@@ -636,36 +590,26 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
             payload={"ingreso_id": ingreso_id, "os": item.get("os"), "rss": item.get("rss")},
         )
         inserted_total += inserted
-    if inserted_total:
-        email_users = active_users_for_notification(NOTIFICATION_KEY, roles=["cobranzas"], channel="email", require_email=True)
-        email_recipients = notification_email_recipients_for_users(email_users)
-
-    def _send_notice():
-        if not email_recipients:
-            return
-        attachment = None
-        try:
-            attachment = render_service_order_billing_pdf(ingreso_id)
-        except Exception:
-            logger.exception("service_order_billing_pdf failed", extra={"ingreso_id": ingreso_id})
-        ok = _send_email_with_optional_fallback(subject, body, email_recipients, attachment)
-        logger.info(
-            "service_order_billing_email sent=%s ingreso_id=%s recipients=%s backend=%s",
-            bool(ok),
-            ingreso_id,
-            email_recipients,
-            getattr(settings, "EMAIL_BACKEND", ""),
-        )
-
-    try:
-        conn = transaction.get_connection()
-        if getattr(conn, "in_atomic_block", False):
-            transaction.on_commit(
-                lambda: dispatch_email_delivery(_send_notice, label=f"service-order-billing-{ingreso_id}")
-            )
-        else:
-            dispatch_email_delivery(_send_notice, label=f"service-order-billing-{ingreso_id}")
-    except Exception:
-        dispatch_email_delivery(_send_notice, label=f"service-order-billing-{ingreso_id}")
-
-    return {"notifications": inserted_total, "emails": len(email_recipients), "recipients": email_recipients}
+    email_users = active_users_for_notification(
+        NOTIFICATION_KEY,
+        roles=["cobranzas"],
+        channel="email",
+        require_email=True,
+    )
+    email_recipients = notification_email_recipients_for_users(email_users)
+    queued = queue_notification_email(
+        notification_key=NOTIFICATION_KEY,
+        dedupe_key=f"ingreso:{ingreso_id}:service_order_ready_to_bill",
+        recipients=email_recipients,
+        subject=subject,
+        body=body,
+        attachment_kind="service_order_billing",
+        attachment_reference=str(ingreso_id),
+        attachment_context={"optional": True},
+    )
+    queued_total = int(queued["queued"] + queued["reactivated"])
+    return {
+        "notifications": inserted_total,
+        "emails": queued_total,
+        "recipients": email_recipients if queued_total else [],
+    }

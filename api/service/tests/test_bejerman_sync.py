@@ -31,7 +31,12 @@ from service.bejerman_sync import (
     process_bejerman_jobs,
     restore_target_stock_from_jobs,
 )
-from service.bejerman_sdk import BejermanPdfPendingError, BejermanSdkResponseError, BejermanSdkUnavailable, build_document_id
+from service.bejerman_pdf_requests import (
+    BejermanPdfFolderUnavailableError,
+    BejermanPdfNotPublishedError,
+    BejermanPdfRequestPending,
+)
+from service.bejerman_sdk import BejermanSdkResponseError, BejermanSdkUnavailable, build_document_id
 from service.bejerman_stock_corrections import (
     ApprovedStockCorrection,
     apply_approved_stock_corrections,
@@ -533,6 +538,8 @@ class BejermanSyncTest(TestCase):
         call_command("apply_bejerman_ris_schema", verbosity=0)
         call_command("apply_bejerman_user_credentials_schema", verbosity=0)
         call_command("apply_user_permissions_schema", verbosity=0)
+        call_command("apply_delivery_orders_schema", verbosity=0)
+        call_command("apply_bejerman_pdf_requests_schema", verbosity=0)
         super().setUpClass()
 
     def setUp(self):
@@ -1015,12 +1022,20 @@ class BejermanSyncTest(TestCase):
             self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
 
         with patch(
-            "service.bejerman_ris.fetch_comprobante_pdf",
-            side_effect=BejermanPdfPendingError(retry_after_ms=1800),
+            "service.bejerman_ris.fetch_or_enqueue_comprobante_pdf",
+            side_effect=BejermanPdfRequestPending(
+                "El PDF oficial quedó en cola.",
+                pdf_state="queued",
+                generation_requested=False,
+                retry_after_ms=1800,
+            ),
         ):
             response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
 
         self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["code"], "BEJERMAN_PDF_PENDING")
+        self.assertEqual(response.json()["pdf_state"], "queued")
+        self.assertIs(response.json()["generation_requested"], False)
         self.assertEqual(response.json()["pdf_status"], "pending")
         self.assertEqual(response["Retry-After"], "2")
         with connection.cursor() as cur:
@@ -1041,7 +1056,10 @@ class BejermanSyncTest(TestCase):
         ):
             self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
 
-        with patch("service.bejerman_ris.fetch_comprobante_pdf", return_value=(b"%PDF-1.4", "application/pdf")):
+        with patch(
+            "service.bejerman_ris.fetch_or_enqueue_comprobante_pdf",
+            return_value=(b"%PDF-1.4", "application/pdf"),
+        ):
             response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
 
         self.assertEqual(response.status_code, 200)
@@ -1123,14 +1141,14 @@ class BejermanSyncTest(TestCase):
         with connection.cursor() as cur:
             cur.execute("UPDATE ingresos SET remito_ingreso = 'RIS R 00004-00004439' WHERE id = %s", [ingreso_id])
 
-        def capture_pdf(_client, reference, *, interactive=True):
+        def capture_pdf(_client, reference, *, actor_user_id=None, remito_group_id=None):
             references.append(reference)
             return b"%PDF-1.4\nlegacy", "application/pdf"
 
         with (
             _bejerman_settings(),
             patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
-            patch("service.bejerman_ris.fetch_comprobante_pdf", side_effect=capture_pdf),
+            patch("service.bejerman_ris.fetch_or_enqueue_comprobante_pdf", side_effect=capture_pdf),
         ):
             response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
 
@@ -1142,6 +1160,59 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(references[0].letter, "R")
         self.assertEqual(references[0].point_of_sale, "00004")
         self.assertEqual(references[0].number, "00004439")
+
+    def test_ris_pdf_carpeta_inaccesible_devuelve_503_con_estado_del_coordinador(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PDF-FOLDER-ERROR")
+        fake = FakeRisClient(number="00004567")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        with patch(
+            "service.bejerman_ris.fetch_or_enqueue_comprobante_pdf",
+            side_effect=BejermanPdfFolderUnavailableError(
+                "No se pudo consultar la carpeta de PDFs de Samtronic.",
+                generation_requested=False,
+            ),
+        ):
+            response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["code"], "BEJERMAN_PDF_FOLDER_UNAVAILABLE")
+        self.assertEqual(payload["pdf_state"], "folder_error")
+        self.assertIs(payload["generation_requested"], False)
+        self.assertEqual(payload["pdf_status"], "pending")
+
+    def test_ris_pdf_no_publicado_devuelve_504_sin_reintentar_generacion(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-PDF-NOT-PUBLISHED")
+        fake = FakeRisClient(number="00004568")
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        with patch(
+            "service.bejerman_ris.fetch_or_enqueue_comprobante_pdf",
+            side_effect=BejermanPdfNotPublishedError(
+                "Bejerman no publicó el PDF oficial dentro del plazo esperado."
+            ),
+        ):
+            response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(payload["code"], "BEJERMAN_PDF_NOT_PUBLISHED")
+        self.assertEqual(payload["pdf_state"], "failed")
+        self.assertIs(payload["generation_requested"], True)
+        self.assertEqual(payload["pdf_status"], "pending")
 
     @override_settings(
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
@@ -1163,13 +1234,16 @@ class BejermanSyncTest(TestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.json()["remito_number"], "RIS R 00004-00004566")
-        self.assertEqual(len(mail.outbox), 1)
-        message = mail.outbox[0]
-        self.assertEqual(set(message.to), {"admin@bejerman.test", "cobranzas@bejerman.test", "recepcion@bejerman.test"})
-        self.assertIn("RIS R 00004-00004566", message.subject)
-        self.assertIn("Se emitió un remito en Bejerman.", message.body)
-        self.assertEqual(len(message.attachments), 1)
-        self.assertTrue(message.attachments[0][1].startswith(b"%PDF-"))
+        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(
+            {message.to[0] for message in mail.outbox},
+            {"admin@bejerman.test", "cobranzas@bejerman.test", "recepcion@bejerman.test"},
+        )
+        for message in mail.outbox:
+            self.assertIn("RIS R 00004-00004566", message.subject)
+            self.assertIn("Se emitió un remito en Bejerman.", message.body)
+            self.assertEqual(len(message.attachments), 1)
+            self.assertTrue(message.attachments[0][1].startswith(b"%PDF-"))
         pdf_mock.assert_called_once()
 
     def test_ris_print_page_incluye_polling_resiliente_y_textos_utf8(self):
@@ -1185,7 +1259,11 @@ class BejermanSyncTest(TestCase):
         self.assertIn("NEXORA volverá a buscar el remito automáticamente", html)
         self.assertIn("no se encontro el comprobante asociado", html)
         self.assertIn("Cerrar pestaña", html)
-        self.assertIn("Esta pestaña se reemplazará por el PDF", html)
+        self.assertIn("Esta pestaña seguirá esperando", html)
+        self.assertIn("Volver a comprobar", html)
+        self.assertIn("Abrir e imprimir", html)
+        self.assertNotIn("Abrir PDF directo", html)
+        self.assertLess(html.index("response.status === 202"), html.index("response.status === 200"))
         self.assertNotIn("maxAttempts", html)
         self.assertNotIn("maxWaitMs", html)
         self.assertNotIn("shouldStopWaiting", html)
@@ -1215,7 +1293,7 @@ class BejermanSyncTest(TestCase):
             self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
 
         with patch(
-            "service.bejerman_ris.fetch_comprobante_pdf",
+            "service.bejerman_ris.fetch_or_enqueue_comprobante_pdf",
             side_effect=BejermanSdkResponseError("Servicio PDF no disponible"),
         ):
             response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
@@ -1240,7 +1318,7 @@ class BejermanSyncTest(TestCase):
             self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
 
         with patch(
-            "service.bejerman_ris.fetch_comprobante_pdf",
+            "service.bejerman_ris.fetch_or_enqueue_comprobante_pdf",
             side_effect=BejermanSdkUnavailable("Error HTTP Bejerman: Read timed out"),
         ):
             response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")

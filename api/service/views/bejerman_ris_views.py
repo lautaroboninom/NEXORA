@@ -177,14 +177,30 @@ class IngresoRisPdfView(APIView):
             pdf_bytes, content_type, row = fetch_ris_pdf(ingreso_id, user_id=_actor_id(request))
         except BejermanRisPdfPendingError as exc:
             retry_after_ms = getattr(exc, "retry_after_ms", 2500)
+            extra_payload = getattr(exc, "payload", None)
             response = Response(
-                {"detail": str(exc), **_ris_payload(ingreso_id), "retry_after_ms": retry_after_ms},
+                {
+                    "detail": str(exc),
+                    "code": getattr(exc, "code", "BEJERMAN_PDF_PENDING"),
+                    **_ris_payload(ingreso_id),
+                    **(extra_payload if isinstance(extra_payload, dict) else {}),
+                    "retry_after_ms": retry_after_ms,
+                },
                 status=202,
             )
             response["Retry-After"] = retry_after_header_value(retry_after_ms)
             return response
         except BejermanRisPdfError as exc:
-            return Response({"detail": str(exc), **_ris_payload(ingreso_id)}, status=502)
+            extra_payload = getattr(exc, "payload", None)
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": getattr(exc, "code", "BEJERMAN_RIS_PDF_ERROR"),
+                    **_ris_payload(ingreso_id),
+                    **(extra_payload if isinstance(extra_payload, dict) else {}),
+                },
+                status=getattr(exc, "status_code", 502),
+            )
         except BejermanRisReviewRequiredError as exc:
             return Response({"detail": str(exc), "code": exc.code, **_ris_payload(ingreso_id)}, status=409)
         except BejermanRisRegisteredNoPdfError as exc:

@@ -1312,6 +1312,80 @@ ALTER TABLE bejerman_remito_groups
   ADD CONSTRAINT chk_bejerman_remito_groups_status
   CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'));
 
+CREATE TABLE IF NOT EXISTS bejerman_pdf_requests (
+  document_key                 TEXT PRIMARY KEY,
+  remito_group_id              TEXT NULL REFERENCES bejerman_remito_groups(id) ON DELETE SET NULL,
+  actor_user_id                INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  company_key                  TEXT NOT NULL,
+  customer_code               TEXT NOT NULL DEFAULT '',
+  tipo                         TEXT NOT NULL,
+  letra                        TEXT NOT NULL,
+  pto_venta                    TEXT NOT NULL,
+  numero                       TEXT NOT NULL,
+  issue_date                   DATE NOT NULL,
+  state                        TEXT NOT NULL DEFAULT 'queued',
+  generation_attempt_count     INTEGER NOT NULL DEFAULT 0,
+  generation_requested_at      TIMESTAMPTZ NULL,
+  lease_expires_at             TIMESTAMPTZ NULL,
+  deadline_at                  TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '10 minutes'),
+  next_folder_check_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ready_at                     TIMESTAMPTZ NULL,
+  remote_path                  TEXT NULL,
+  pdf_payload                  BYTEA NULL,
+  payload_sha256               TEXT NULL,
+  last_error_code              TEXT NULL,
+  last_error_detail            TEXT NULL,
+  created_at                   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_pdf_requests_document_key
+    CHECK (NULLIF(TRIM(document_key), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_pdf_requests_company_key
+    CHECK (NULLIF(TRIM(company_key), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_pdf_requests_tipo
+    CHECK (NULLIF(TRIM(tipo), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_pdf_requests_letra
+    CHECK (NULLIF(TRIM(letra), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_pdf_requests_pto_venta
+    CHECK (NULLIF(TRIM(pto_venta), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_pdf_requests_numero
+    CHECK (NULLIF(TRIM(numero), '') IS NOT NULL),
+  CONSTRAINT chk_bejerman_pdf_requests_state
+    CHECK (state IN ('queued','requesting','waiting_sdk','waiting_folder','ready_direct','ready_folder','failed')),
+  CONSTRAINT chk_bejerman_pdf_requests_generation_attempts
+    CHECK (generation_attempt_count BETWEEN 0 AND 1)
+);
+
+ALTER TABLE bejerman_pdf_requests
+  ADD COLUMN IF NOT EXISTS customer_code TEXT NOT NULL DEFAULT '';
+UPDATE bejerman_pdf_requests AS request
+   SET customer_code = COALESCE(NULLIF(TRIM(remito.customer_code), ''), '')
+  FROM bejerman_remito_groups AS remito
+ WHERE request.remito_group_id = remito.id
+   AND NULLIF(TRIM(request.customer_code), '') IS NULL;
+ALTER TABLE bejerman_pdf_requests
+  DROP CONSTRAINT IF EXISTS chk_bejerman_pdf_requests_state;
+ALTER TABLE bejerman_pdf_requests
+  ADD CONSTRAINT chk_bejerman_pdf_requests_state
+  CHECK (state IN ('queued','requesting','waiting_sdk','waiting_folder','ready_direct','ready_folder','failed'));
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_pdf_requests_document
+  ON bejerman_pdf_requests(company_key, tipo, letra, pto_venta, numero, issue_date);
+DROP INDEX IF EXISTS ix_bejerman_pdf_requests_state_next_check;
+CREATE INDEX ix_bejerman_pdf_requests_state_next_check
+  ON bejerman_pdf_requests(state, next_folder_check_at, created_at)
+  WHERE state IN ('queued','requesting','waiting_sdk','waiting_folder','ready_direct');
+CREATE INDEX IF NOT EXISTS ix_bejerman_pdf_requests_group
+  ON bejerman_pdf_requests(remito_group_id)
+  WHERE remito_group_id IS NOT NULL;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_pdf_requests_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_pdf_requests_set_updated_at
+    BEFORE UPDATE ON bejerman_pdf_requests
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+END $$;
+
 UPDATE delivery_orders AS o
    SET status = 'entregado_no_facturable'
   FROM bejerman_remito_groups AS g
@@ -1922,6 +1996,32 @@ CREATE TABLE IF NOT EXISTS notification_email_addresses (
   CONSTRAINT chk_notification_email_address_email CHECK (NULLIF(TRIM(email), '') IS NOT NULL)
 );
 
+CREATE TABLE IF NOT EXISTS notification_email_outbox (
+  id                    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  notification_key      TEXT NOT NULL,
+  dedupe_key            TEXT NOT NULL,
+  recipient             TEXT NOT NULL,
+  subject               TEXT NOT NULL,
+  body                  TEXT NOT NULL DEFAULT '',
+  attachment_kind       TEXT NOT NULL DEFAULT '',
+  attachment_reference  TEXT NOT NULL DEFAULT '',
+  attachment_context    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status                TEXT NOT NULL DEFAULT 'pending',
+  attempt_count         INTEGER NOT NULL DEFAULT 0,
+  max_attempts           INTEGER NOT NULL DEFAULT 12,
+  next_attempt_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_error            TEXT NOT NULL DEFAULT '',
+  sent_at               TIMESTAMPTZ NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_notification_email_outbox_key CHECK (NULLIF(TRIM(notification_key), '') IS NOT NULL),
+  CONSTRAINT chk_notification_email_outbox_dedupe CHECK (NULLIF(TRIM(dedupe_key), '') IS NOT NULL),
+  CONSTRAINT chk_notification_email_outbox_recipient CHECK (NULLIF(TRIM(recipient), '') IS NOT NULL),
+  CONSTRAINT chk_notification_email_outbox_status CHECK (status IN ('pending','retry','sending','sent','failed')),
+  CONSTRAINT chk_notification_email_outbox_attachment CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing')),
+  CONSTRAINT chk_notification_email_outbox_attempts CHECK (attempt_count >= 0 AND max_attempts > 0)
+);
+
 CREATE TABLE IF NOT EXISTS notification_push_subscriptions (
   id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1969,6 +2069,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_email_addresses_user_email
 CREATE INDEX IF NOT EXISTS ix_notification_email_addresses_active_user
   ON notification_email_addresses(user_id, updated_at DESC)
   WHERE active = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_email_outbox_dedupe_recipient
+  ON notification_email_outbox(notification_key, dedupe_key, recipient);
+CREATE INDEX IF NOT EXISTS ix_notification_email_outbox_pending
+  ON notification_email_outbox(next_attempt_at, id)
+  WHERE status IN ('pending','retry');
+CREATE INDEX IF NOT EXISTS ix_notification_email_outbox_status_created
+  ON notification_email_outbox(status, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_push_endpoint
   ON notification_push_subscriptions(endpoint);
 CREATE INDEX IF NOT EXISTS ix_notification_push_active_user
@@ -2009,6 +2116,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_email_addresses_set_updated_at') THEN
     CREATE TRIGGER trg_notification_email_addresses_set_updated_at
     BEFORE UPDATE ON notification_email_addresses
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_email_outbox_set_updated_at') THEN
+    CREATE TRIGGER trg_notification_email_outbox_set_updated_at
+    BEFORE UPDATE ON notification_email_outbox
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;

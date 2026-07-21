@@ -33,7 +33,6 @@ from .bejerman_sdk import (
     build_customer_document_fields,
     build_service_ingress_comprobante,
     comprobante_id_of,
-    fetch_comprobante_pdf,
     find_bejerman_client_record,
     first_record,
     first_value,
@@ -47,6 +46,12 @@ from .bejerman_sdk import (
     resolve_equipment_partida,
     sdk_signed_article_quantity,
     sdk_uses_negative_article_quantity,
+)
+from .bejerman_pdf_requests import (
+    BejermanPdfFolderUnavailableError,
+    BejermanPdfNotPublishedError,
+    fetch_or_enqueue_comprobante_pdf,
+    pdf_error_metadata,
 )
 from .bejerman_sync import (
     BejermanBlockedError,
@@ -82,12 +87,38 @@ class BejermanRisBusyError(BejermanRisError):
 
 
 class BejermanRisPdfError(BejermanRisError):
-    pass
+    code = "BEJERMAN_RIS_PDF_ERROR"
+    status_code = 502
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status_code: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ):
+        super().__init__(message)
+        self.code = code or self.code
+        self.status_code = status_code or self.status_code
+        self.payload = payload or {}
 
 
 class BejermanRisPdfPendingError(BejermanRisPdfError):
-    def __init__(self, message: str = "El PDF del RIS todavía no está listo", *, retry_after_ms: int = 2500):
-        super().__init__(message)
+    code = "BEJERMAN_PDF_PENDING"
+    status_code = 202
+
+    def __init__(
+        self,
+        message: str = "El PDF del RIS todavía no está listo",
+        *,
+        retry_after_ms: int = 2500,
+        payload: dict[str, Any] | None = None,
+    ):
+        pending_payload = {"pdf_state": "pending_document", "generation_requested": False}
+        if payload:
+            pending_payload.update(payload)
+        super().__init__(message, code=self.code, status_code=self.status_code, payload=pending_payload)
         self.retry_after_ms = retry_after_ms
 
 
@@ -2884,7 +2915,11 @@ def _fetch_pdf(row: dict[str, Any], user_id: int | None = None) -> tuple[bytes, 
         issue_date=params["issueDate"],
         customer_code=params["customerCode"],
     )
-    return fetch_comprobante_pdf(client, reference, interactive=True)
+    return fetch_or_enqueue_comprobante_pdf(
+        client,
+        reference,
+        actor_user_id=user_id,
+    )
 
 
 def _load_ingress_remito_pdf_attachment(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, str, str]:
@@ -3730,7 +3765,33 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
         )
         row = _update_ris_pdf_pending(ingreso_id)
-        raise BejermanRisPdfPendingError(str(exc), retry_after_ms=getattr(exc, "retry_after_ms", 2500)) from exc
+        raise BejermanRisPdfPendingError(
+            str(exc),
+            retry_after_ms=getattr(exc, "retry_after_ms", 2500),
+            payload=pdf_error_metadata(exc),
+        ) from exc
+    except BejermanPdfNotPublishedError as exc:
+        logger.warning(
+            "bejerman_ris_pdf_not_published",
+            extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
+        )
+        raise BejermanRisPdfError(
+            str(exc),
+            code=exc.code,
+            status_code=exc.status_code,
+            payload=pdf_error_metadata(exc),
+        ) from exc
+    except BejermanPdfFolderUnavailableError as exc:
+        logger.warning(
+            "bejerman_ris_pdf_folder_unavailable",
+            extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
+        )
+        raise BejermanRisPdfError(
+            str(exc),
+            code=exc.code,
+            status_code=exc.status_code,
+            payload=pdf_error_metadata(exc),
+        ) from exc
     except BejermanSdkUnavailable as exc:
         logger.info(
             "bejerman_ris_pdf_timeout_pending",
@@ -3738,8 +3799,9 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
         )
         row = _update_ris_pdf_pending(ingreso_id)
         raise BejermanRisPdfPendingError(
-            "Bejerman no respondió a tiempo al pedir el PDF del RIS. El RIS ya está emitido; se reintentará la descarga.",
+            "Bejerman no respondió a tiempo al pedir el PDF del RIS. El RIS ya está emitido; se volverá a comprobar únicamente la carpeta.",
             retry_after_ms=5000,
+            payload={"pdf_state": "waiting_folder", "generation_requested": True},
         ) from exc
     except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanRisPdfError) as exc:
         logger.warning(

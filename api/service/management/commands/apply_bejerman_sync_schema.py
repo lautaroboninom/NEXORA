@@ -107,6 +107,18 @@ class Command(BaseCommand):
                     )
                     """
                 )
+                # Upgrade de tablas creadas por versiones anteriores del comando.
+                for statement in (
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS variante TEXT NOT NULL DEFAULT ''",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS variante_norm TEXT NOT NULL DEFAULT ''",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS article_description TEXT NULL",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS match_source TEXT NOT NULL DEFAULT 'manual'",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS source_payload JSONB NOT NULL DEFAULT '{}'::jsonb",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS confirmed_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ NULL",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP",
+                ):
+                    cur.execute(statement)
                 cur.execute(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_ingreso

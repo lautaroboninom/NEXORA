@@ -109,7 +109,7 @@ function canSyncDrive(user) {
 }
 
 function canEditItemDiscounts(user) {
-  return ["admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
+  return ["jefe", "admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
 }
 
 function canEditCommercialFields(user) {

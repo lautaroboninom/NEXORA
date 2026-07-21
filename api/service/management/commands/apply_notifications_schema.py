@@ -7,6 +7,7 @@ TABLES = [
     "notification_user_preferences",
     "notification_push_subscriptions",
     "notification_email_addresses",
+    "notification_email_outbox",
 ]
 
 
@@ -84,6 +85,35 @@ class Command(BaseCommand):
                       created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       CONSTRAINT chk_notification_email_address_email CHECK (NULLIF(TRIM(email), '') IS NOT NULL)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS notification_email_outbox (
+                      id                    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                      notification_key      TEXT NOT NULL,
+                      dedupe_key            TEXT NOT NULL,
+                      recipient             TEXT NOT NULL,
+                      subject               TEXT NOT NULL,
+                      body                  TEXT NOT NULL DEFAULT '',
+                      attachment_kind       TEXT NOT NULL DEFAULT '',
+                      attachment_reference  TEXT NOT NULL DEFAULT '',
+                      attachment_context    JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      status                TEXT NOT NULL DEFAULT 'pending',
+                      attempt_count         INTEGER NOT NULL DEFAULT 0,
+                      max_attempts           INTEGER NOT NULL DEFAULT 12,
+                      next_attempt_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      last_error            TEXT NOT NULL DEFAULT '',
+                      sent_at               TIMESTAMPTZ NULL,
+                      created_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_notification_email_outbox_key CHECK (NULLIF(TRIM(notification_key), '') IS NOT NULL),
+                      CONSTRAINT chk_notification_email_outbox_dedupe CHECK (NULLIF(TRIM(dedupe_key), '') IS NOT NULL),
+                      CONSTRAINT chk_notification_email_outbox_recipient CHECK (NULLIF(TRIM(recipient), '') IS NOT NULL),
+                      CONSTRAINT chk_notification_email_outbox_status CHECK (status IN ('pending','retry','sending','sent','failed')),
+                      CONSTRAINT chk_notification_email_outbox_attachment CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing')),
+                      CONSTRAINT chk_notification_email_outbox_attempts CHECK (attempt_count >= 0 AND max_attempts > 0)
                     )
                     """
                 )
@@ -186,6 +216,25 @@ class Command(BaseCommand):
                 )
                 cur.execute(
                     """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_email_outbox_dedupe_recipient
+                      ON notification_email_outbox(notification_key, dedupe_key, recipient)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_notification_email_outbox_pending
+                      ON notification_email_outbox(next_attempt_at, id)
+                      WHERE status IN ('pending','retry')
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_notification_email_outbox_status_created
+                      ON notification_email_outbox(status, created_at DESC)
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_push_endpoint
                       ON notification_push_subscriptions(endpoint)
                     """
@@ -220,6 +269,11 @@ class Command(BaseCommand):
                           IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_email_addresses_set_updated_at') THEN
                             CREATE TRIGGER trg_notification_email_addresses_set_updated_at
                             BEFORE UPDATE ON notification_email_addresses
+                            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                          END IF;
+                          IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_notification_email_outbox_set_updated_at') THEN
+                            CREATE TRIGGER trg_notification_email_outbox_set_updated_at
+                            BEFORE UPDATE ON notification_email_outbox
                             FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                           END IF;
                         END $$;

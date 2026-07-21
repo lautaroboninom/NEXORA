@@ -151,13 +151,14 @@ _SDK_RACE_MARKERS = (
     "already an object named",
 )
 
-# Operaciones sin efectos (o idempotentes, como la generación de PDF) que es
-# seguro reintentar cuando la falla es la carrera de vistas temporales.
+# Operaciones de consulta sin efectos que es seguro reintentar cuando la falla
+# es la carrera de vistas temporales. La generación de PDF se excluye a
+# propósito: un timeout deja un resultado ambiguo y no debe duplicar la
+# solicitud sobre Crystal.
 _SDK_RETRYABLE_OPERATIONS = {
     "WSLISTARCOMPROBANTESJSON",
     "DETALLECOMPROBANTEJSON",
     "WS_CONSULTARCOMPROBANTEPDF",
-    "WS_GENERARCOMPROBANTEPDF",
     "OBTENERARTICULOS",
     "OBTENERCLIENTES",
     "OBTENERPROVEEDORES",
@@ -564,7 +565,11 @@ class BejermanSDKClient:
         )
 
     def generar_comprobante_ventas_pdf(self, reference: BejermanPdfReference) -> dict[str, str]:
-        return self.execute(
+        # No pasar por execute(): esa capa reintenta automáticamente algunas
+        # operaciones ante carreras internas del SDK. Generar un PDF debe ser
+        # una solicitud de a lo sumo una vez porque un timeout no confirma que
+        # Bejerman haya cancelado el trabajo.
+        return self._execute_once(
             "VENTAS",
             "WS_GenerarComprobantePDF",
             params_json=[
@@ -1302,17 +1307,30 @@ def _positive_int_setting(name: str, default: int) -> int:
 
 
 @contextmanager
-def _temporary_request_timeout(client: BejermanSDKClient, timeout_seconds: int | None):
+def _temporary_request_timeout(
+    client: BejermanSDKClient,
+    timeout_seconds: int | tuple[int, int] | None,
+):
     original = getattr(client, "timeout", None)
     changed = False
     if timeout_seconds is not None:
-        try:
-            timeout = int(timeout_seconds)
-        except (TypeError, ValueError):
-            timeout = 0
-        if timeout > 0 and hasattr(client, "timeout"):
-            client.timeout = timeout
-            changed = True
+        if isinstance(timeout_seconds, tuple) and len(timeout_seconds) == 2:
+            try:
+                connect_timeout = int(timeout_seconds[0])
+                read_timeout = int(timeout_seconds[1])
+            except (TypeError, ValueError):
+                connect_timeout = read_timeout = 0
+            if connect_timeout > 0 and read_timeout > 0 and hasattr(client, "timeout"):
+                client.timeout = (connect_timeout, read_timeout)
+                changed = True
+        else:
+            try:
+                timeout = int(timeout_seconds)
+            except (TypeError, ValueError):
+                timeout = 0
+            if timeout > 0 and hasattr(client, "timeout"):
+                client.timeout = timeout
+                changed = True
     try:
         yield
     finally:
@@ -1466,7 +1484,13 @@ def _cleanup_samtronic_facturas_remito_copy(reference: BejermanPdfReference, pdf
         return
     try:
         directory_uri, filenames, prefixes = _samtronic_facturas_remito_cleanup_targets(reference)
-        removed_paths = remove_remote_pdf_candidates_if_same(directory_uri, filenames, prefixes, pdf)
+        # Con el cliente persistido en la solicitud conocemos el nombre exacto
+        # que usa Crystal. Probarlo primero evita listar toda FACTURAS y deja el
+        # barrido por prefijo únicamente para documentos históricos.
+        exact_names = filenames[:1]
+        removed_paths = remove_remote_pdf_candidates_if_same(directory_uri, exact_names, [], pdf)
+        if not removed_paths:
+            removed_paths = remove_remote_pdf_candidates_if_same(directory_uri, filenames, prefixes, pdf)
         for path in removed_paths:
             logger.info(
                 "bejerman_pdf_facturas_remito_copy_removed",
@@ -1500,7 +1524,7 @@ def _unique_pdf_destination(folder: Path, filename: str, pdf: bytes) -> Path:
     return folder / f"{destination.stem}_{int(time.time())}{destination.suffix}"
 
 
-def _store_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdfReference, pdf: bytes) -> None:
+def _store_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdfReference, pdf: bytes) -> bool:
     try:
         output_dir = _configured_pdf_output_dir(client, reference)
     except BejermanPdfOutputSettingsError as exc:
@@ -1508,9 +1532,9 @@ def _store_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPd
             "bejerman_pdf_copy_invalid_output_dir",
             extra={**_pdf_log_context(reference, interactive=False), "error": str(exc)},
         )
-        return
+        return False
     if not output_dir or not pdf:
-        return
+        return False
     try:
         if is_remote_pdf_path(output_dir):
             result = write_remote_pdf(output_dir, _comprobante_pdf_filename(reference), pdf)
@@ -1519,7 +1543,7 @@ def _store_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPd
                 "bejerman_pdf_copy_saved",
                 extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_path": result.path},
             )
-            return
+            return True
         folder = Path(output_dir)
         folder.mkdir(parents=True, exist_ok=True)
         destination = _unique_pdf_destination(folder, _comprobante_pdf_filename(reference), pdf)
@@ -1529,14 +1553,21 @@ def _store_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPd
             "bejerman_pdf_copy_saved",
             extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_path": str(destination)},
         )
+        return True
     except Exception as exc:
         logger.warning(
             "bejerman_pdf_copy_failed",
             extra={**_pdf_log_context(reference, interactive=False), "bejerman_pdf_output_dir": output_dir, "error": str(exc)},
         )
+        return False
 
 
-def _load_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdfReference, *, interactive: bool) -> bytes | None:
+def _probe_comprobante_pdf_copy(
+    client: BejermanSDKClient,
+    reference: BejermanPdfReference,
+    *,
+    interactive: bool,
+) -> tuple[bytes | None, str]:
     try:
         output_dir = _configured_pdf_output_dir(client, reference)
     except BejermanPdfOutputSettingsError as exc:
@@ -1544,9 +1575,9 @@ def _load_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdf
             "bejerman_pdf_copy_invalid_output_dir",
             extra={**_pdf_log_context(reference, interactive=interactive), "error": str(exc)},
         )
-        return None
+        return None, "error"
     if not output_dir:
-        return None
+        return None, "error"
 
     filenames = _comprobante_pdf_filename_candidates(reference)
     prefix = _comprobante_pdf_filename_prefix(reference)
@@ -1583,22 +1614,82 @@ def _load_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdf
                 "error": str(exc),
             },
         )
-        return None
+        return None, "error"
 
     if not raw:
-        return None
+        return None, "missing"
     pdf = _normalized_pdf_bytes(raw)
     if not pdf:
         logger.warning(
             "bejerman_pdf_copy_invalid",
             extra={**_pdf_log_context(reference, interactive=interactive), "bejerman_pdf_path": path_label},
         )
-        return None
+        return None, "error"
     logger.info(
         "bejerman_pdf_cache_hit",
         extra={**_pdf_log_context(reference, interactive=interactive), "bejerman_pdf_path": path_label},
     )
+    return pdf, "ready"
+
+
+def _load_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdfReference, *, interactive: bool) -> bytes | None:
+    pdf, _status = _probe_comprobante_pdf_copy(client, reference, interactive=interactive)
     return pdf
+
+
+def load_comprobante_pdf_copy(
+    client: BejermanSDKClient,
+    reference: BejermanPdfReference,
+    *,
+    interactive: bool = True,
+) -> bytes | None:
+    """Lee y valida el PDF durable configurado para la empresa."""
+
+    return _load_comprobante_pdf_copy(client, reference, interactive=interactive)
+
+
+def probe_comprobante_pdf_copy(
+    client: BejermanSDKClient,
+    reference: BejermanPdfReference,
+    *,
+    interactive: bool = True,
+) -> tuple[bytes | None, str]:
+    """Distingue archivo listo, ausente y error de acceso/configuración."""
+
+    return _probe_comprobante_pdf_copy(client, reference, interactive=interactive)
+
+
+def store_comprobante_pdf_copy(
+    client: BejermanSDKClient,
+    reference: BejermanPdfReference,
+    pdf: bytes,
+) -> bool:
+    """Guarda bytes oficiales de Bejerman en el destino durable configurado."""
+
+    normalized = _normalized_pdf_bytes(pdf)
+    if not normalized:
+        return False
+    return _store_comprobante_pdf_copy(client, reference, normalized)
+
+
+def normalize_pdf_bytes(data: bytes) -> bytes | None:
+    """Normaliza un PDF admitiendo solamente BOM o espacios antes de `%PDF-`."""
+
+    return _normalized_pdf_bytes(data)
+
+
+def comprobante_pdf_output_path(client: BejermanSDKClient, reference: BejermanPdfReference) -> str:
+    """Devuelve una etiqueta estable del destino esperado, sin acceder a la red."""
+
+    try:
+        output_dir = _configured_pdf_output_dir(client, reference)
+    except BejermanPdfOutputSettingsError:
+        return ""
+    if not output_dir:
+        return ""
+    separator = "\\" if is_remote_pdf_path(output_dir) or "\\" in output_dir else os.sep
+    clean_output_dir = output_dir.rstrip("\\/")
+    return f"{clean_output_dir}{separator}{_comprobante_pdf_filename(reference)}"
 
 
 def _pdf_log_context(reference: BejermanPdfReference, *, interactive: bool) -> dict[str, Any]:
@@ -1738,6 +1829,18 @@ def build_customer_document_fields(response: dict[str, Any], customer_code: str)
         return None
     fields = {
         "Cliente_RazonSocial": as_string(first_value(record, ("Cliente_RazonSocial", "Cliente_Nombre", "RazonSocial", "Nombre", "Cliente"))),
+        "Cliente_TipoDocumento": as_string(
+            first_value(
+                record,
+                (
+                    "Cliente_TipoDocumento",
+                    "Cliente_TipoDocumentoCodigo",
+                    "TipoDocumento",
+                    "TipoDocumentoCodigo",
+                    "TipoDoc",
+                ),
+            )
+        ),
         "Cliente_NroDocumento": as_string(first_value(record, ("Cliente_NroDocumento", "Cliente_CUIT", "Cliente_Cuit", "CUIT", "Cuit", "TaxId"))),
         "Cliente_Provincia": as_string(first_value(record, ("Cliente_Provincia", "Cliente_CodigoProvincia", "Provincia", "CodigoProvincia"))),
         "Cliente_SitIVA": as_string(first_value(record, ("Cliente_SitIVA", "Cliente_SituacionIVACodigo", "SituacionIVACodigo", "SituacionIVA"))),
@@ -1753,6 +1856,8 @@ def resolve_customer_document_fields(client: BejermanSDKClient, customer_code: s
         raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_NOT_FOUND")
     if not fields.get("Cliente_SitIVA"):
         raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_VAT_MISSING")
+    if not fields.get("Cliente_TipoDocumento"):
+        raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_DOCUMENT_TYPE_MISSING")
     if not fields.get("Cliente_NroDocumento"):
         raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_DOCUMENT_MISSING")
     return fields

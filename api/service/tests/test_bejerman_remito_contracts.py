@@ -13,6 +13,7 @@ from service.bejerman_sdk import BejermanSdkResponseError, build_service_ingress
 
 CUSTOMER_FIELDS = {
     "Cliente_RazonSocial": "Cliente Bejerman TEST",
+    "Cliente_TipoDocumento": "1",
     "Cliente_NroDocumento": "30700000000",
     "Cliente_Provincia": "02",
     "Cliente_SitIVA": "RI",
@@ -191,6 +192,7 @@ class BejermanRemitoContractsTests(SimpleTestCase):
         comprobante = request_payload["comprobante"]
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
+        self.assertEqual(comprobante["Cliente_TipoDocumento"], "1")
         self.assertEqual(article_lines[0]["Item_Deposito"], "STR")
         self.assertEqual(article_lines[0]["Item_Partida"], "SN-RIS-001")
 

@@ -12,11 +12,11 @@ from .helpers import (
     _set_audit_user,
     require_roles,
 )
-from .tipo_equipo_utils import clean_tipo_equipo, preferred_row
+from .tipo_equipo_utils import clean_tipo_equipo, preferred_row, sentence_case_tipo_equipo
 
 
 def _ensure_catalog_tipo(nombre: str) -> None:
-    clean = clean_tipo_equipo(nombre)
+    clean = sentence_case_tipo_equipo(nombre)
     if not clean:
         return
     rows = q("SELECT id, nombre, activo FROM catalogo_tipos_equipo ORDER BY id") or []
@@ -32,7 +32,7 @@ def _ensure_catalog_tipo(nombre: str) -> None:
 
 
 def _ensure_marca_tipo_id(marca_id: int, nombre: str, activo: bool = True):
-    clean = clean_tipo_equipo(nombre)
+    clean = sentence_case_tipo_equipo(nombre)
     if not clean:
         return None
     rows = q(
@@ -307,7 +307,7 @@ class ModelosPorMarcaView(APIView):
         if not n:
             return Response({"detail": "nombre requerido"}, status=400)
         tecnico_id = d.get("tecnico_id")
-        tipo_equipo = (d.get("tipo_equipo") or "").strip() or None
+        tipo_equipo = sentence_case_tipo_equipo(d.get("tipo_equipo")) or None
         variante = (d.get("variante") or "").strip() or None
         if tecnico_id:
             ok = q(

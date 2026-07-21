@@ -404,7 +404,7 @@ def _delivery_remito_processes(action_permissions=None):
             order_rows = q(
                 """
                 SELECT id, order_number, delivery_type, source_reference, customer_name,
-                       equipment_model, equipment_serial, raw_pedido, ingreso_id
+                       equipment_model, equipment_serial, raw_pedido, ingreso_id, status
                   FROM delivery_orders
                  WHERE id = ANY(%s)
                 """,
@@ -421,6 +421,7 @@ def _delivery_remito_processes(action_permissions=None):
                 "equipmentSerial": order.get("equipment_serial") or "",
                 "rawPedido": order.get("raw_pedido") or "",
                 "ingresoId": order.get("ingreso_id"),
+                "status": order.get("status") or "",
             }
             for order in order_rows
         ]
@@ -441,32 +442,54 @@ def _delivery_remito_processes(action_permissions=None):
         blocked_reason = _clean_filter(response_summary.get("blockedReason"))
         if review_state == "blocked" and not blocked_reason:
             blocked_reason = "La verificación no produjo un resultado seguro."
+        closed_order = next(
+            (order for order in orders if order.get("status") in {"cancelado", "facturado"}),
+            None,
+        )
+        closed_order_reason = ""
+        if closed_order:
+            order_label = closed_order.get("orderNumber") or closed_order.get("id") or "La orden"
+            status_label = "cancelada" if closed_order.get("status") == "cancelado" else "facturada"
+            closed_order_reason = (
+                f"La orden {order_label} está {status_label}. "
+                "Este proceso queda sólo como registro y no puede verificarse ni reemitirse."
+            )
+            blocked_reason = closed_order_reason
         actions = {
             "verify": {
                 "visible": status == "failed_review" and not superseded,
-                "allowed": status == "failed_review" and not superseded and can_manage,
-                "blockedReason": "No tiene permiso para verificar comprobantes en Bejerman." if not can_manage else "",
+                "allowed": status == "failed_review" and not superseded and can_manage and not closed_order,
+                "blockedReason": (
+                    closed_order_reason
+                    or ("No tiene permiso para verificar comprobantes en Bejerman." if not can_manage else "")
+                ),
             },
             "edit": {
                 "visible": status == "failed_review" and not superseded,
-                "allowed": review_state in {"ready_for_correction", "ready_to_reissue"} and can_edit,
+                "allowed": review_state in {"ready_for_correction", "ready_to_reissue"} and can_edit and not closed_order,
                 "blockedReason": (
-                    "Primero debe verificarse que el comprobante no se importó."
-                    if review_state not in {"ready_for_correction", "ready_to_reissue"}
-                    else "No tiene permiso para modificar los artículos de la orden."
-                    if not can_edit
-                    else ""
+                    closed_order_reason
+                    or (
+                        "Primero debe verificarse que el comprobante no se importó."
+                        if review_state not in {"ready_for_correction", "ready_to_reissue"}
+                        else "No tiene permiso para modificar los artículos de la orden."
+                        if not can_edit
+                        else ""
+                    )
                 ),
             },
             "reissue": {
                 "visible": status == "failed_review" and not superseded,
-                "allowed": review_state == "ready_to_reissue" and can_manage and can_generate,
+                "allowed": review_state == "ready_to_reissue" and can_manage and can_generate and not closed_order,
                 "blockedReason": (
-                    "Debe abrir, revisar y guardar la orden antes de reemitir."
-                    if review_state != "ready_to_reissue"
-                    else "No tiene todos los permisos necesarios para reemitir el RT."
-                    if not (can_manage and can_generate)
-                    else ""
+                    closed_order_reason
+                    or (
+                        "Debe abrir, revisar y guardar la orden antes de reemitir."
+                        if review_state != "ready_to_reissue"
+                        else "No tiene todos los permisos necesarios para reemitir el RT."
+                        if not (can_manage and can_generate)
+                        else ""
+                    )
                 ),
             },
         }
@@ -501,6 +524,7 @@ def _delivery_remito_processes(action_permissions=None):
                     row.get("status") in {"failed", "failed_review"}
                     and bool(order_ids)
                     and not superseded
+                    and not closed_order
                 ),
                 "retry_mode": "reconcile" if row.get("status") == "failed_review" else "retry",
                 "reviewState": review_state,

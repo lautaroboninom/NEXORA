@@ -195,6 +195,7 @@ class NotificationsAPITest(TestCase):
 
         call_command("apply_notifications_schema", verbosity=0)
         call_command("apply_delivery_orders_schema", verbosity=0)
+        call_command("apply_bejerman_pdf_requests_schema", verbosity=0)
         call_command("apply_user_permissions_schema", verbosity=0)
         super().setUpClass()
 
@@ -761,6 +762,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -860,6 +862,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -985,6 +988,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -1111,6 +1115,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -1246,6 +1251,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -1387,6 +1393,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -1580,6 +1587,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -1951,6 +1959,7 @@ class NotificationsAPITest(TestCase):
         expected_keys = {
             "sales_order_remito_ready",
             "billing_pending_summary",
+            "billing_remito_postponement_due",
             "service_order_ready_to_bill",
             "sales_order_commercial_terms_updated",
             "remito_pdf_rt",
@@ -2726,6 +2735,31 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(item["discountAmount"], 50.0)
         self.assertEqual(item["netSubtotal"], 950.0)
 
+    def test_jefe_puede_cargar_descuento_por_item_en_orden_entrega(self):
+        order = create_delivery_order(
+            {
+                "id": "do-discount-jefe",
+                "orderNumber": "OE-DESC-JEFE",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "items": [
+                    {
+                        "description": "Artículo de prueba",
+                        "quantity": 1,
+                        "unitPrice": "1000",
+                        "discountPercent": "5",
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+
+        item = order["items"][0]
+        self.assertEqual(item["discountPercent"], 5.0)
+        self.assertEqual(item["discountAmount"], 50.0)
+        self.assertEqual(item["netSubtotal"], 950.0)
+
     def test_no_admin_no_puede_crear_descuento_por_item(self):
         with self.assertRaises(DeliveryOrderError) as ctx:
             create_delivery_order(
@@ -2744,7 +2778,7 @@ class NotificationsAPITest(TestCase):
                         }
                     ],
                 },
-                self.jefe.id,
+                self.tecnico.id,
             )
 
         self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_DISCOUNT_ADMIN_REQUIRED")
@@ -2785,7 +2819,7 @@ class NotificationsAPITest(TestCase):
                     }
                 ],
             },
-            self.jefe.id,
+            self.tecnico.id,
         )
         self.assertEqual(updated["items"][0]["discountPercent"], 12.5)
         self.assertEqual(updated["items"][0]["netSubtotal"], 1750.0)
@@ -2804,7 +2838,7 @@ class NotificationsAPITest(TestCase):
                         }
                     ],
                 },
-                self.jefe.id,
+                self.tecnico.id,
             )
 
         self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_DISCOUNT_ADMIN_REQUIRED")
@@ -3255,7 +3289,20 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "ART-1",
+                            "Articulo_Descripcion": "Artículo de prueba",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
                         }
                     ]
                 }
@@ -3348,7 +3395,20 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "1208010",
+                            "Articulo_Descripcion": "Filtro de aire",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
                         }
                     ]
                 }
@@ -3375,6 +3435,122 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(article_lines[0]["Item_CodigoArticulo"], "1208010")
         self.assertEqual(article_lines[0]["Item_Partida"], " ")
         self.assertEqual(article_lines[0]["Item_CantidadUM1"], 10)
+
+    def test_venta_grande_se_divide_en_varios_remitos_por_limite_de_lineas(self):
+        # Caso OE-00116: una venta con más partidas de las que entran en la
+        # hoja del RT debe emitirse como varios remitos automáticamente.
+        lots = [
+            {"articleCode": "ART-SPLIT", "depositCode": "VAL", "partida": f"P-{index:03d}", "availableQuantity": 1}
+            for index in range(25)
+        ]
+        with self._delivery_partida_stock_patch(lots):
+            order = create_delivery_order(
+                {
+                    "id": "do-remito-venta-split",
+                    "orderNumber": "OE-VENTA-SPLIT",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": "SEPID",
+                    "sellerName": "Ventas",
+                    "sellerCode": "MAX",
+                    "status": "armado_pendiente_entrega",
+                    "items": [
+                        {
+                            "articleCode": "ART-SPLIT",
+                            "articleName": "Artículo divisible",
+                            "articleRequiresPartida": True,
+                            "description": "Artículo divisible",
+                            "quantity": 1,
+                            "unitPrice": "10",
+                            "partida": f"P-{index:03d}",
+                        }
+                        for index in range(25)
+                    ],
+                },
+                self.jefe.id,
+            )
+        sent_comprobantes = []
+
+        class SplitSaleClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clinica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
+                            "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "ART-SPLIT",
+                            "Articulo_Descripcion": "Artículo divisible",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
+                        }
+                    ]
+                }
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                sent_comprobantes.append(comprobante)
+                number = 3234 + len(sent_comprobantes) - 1
+                return {
+                    "Resultado": "OK",
+                    "DatosJSON": json.dumps(
+                        {
+                            "Comprobante_Tipo": "RT",
+                            "Comprobante_Letra": "R",
+                            "Comprobante_PtoVenta": "00004",
+                            "Comprobante_Numero": f"{number:08d}",
+                        }
+                    ),
+                }
+
+        with override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21):
+            with patch("service.bejerman_delivery.BejermanSDKClient", SplitSaleClient):
+                result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertTrue(result["multiple"])
+        self.assertEqual(result["remitoNumbers"], ["RT R 00004-00003234", "RT R 00004-00003235"])
+        self.assertEqual(len(sent_comprobantes), 2)
+        article_counts = [
+            len([item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"])
+            for comprobante in sent_comprobantes
+        ]
+        line_counts = [len(comprobante["Comprobante_Items"]) for comprobante in sent_comprobantes]
+        # Capacidad: 21 líneas por hoja, 2 de encabezado por orden → 19 artículos.
+        self.assertEqual(article_counts, [19, 6])
+        self.assertTrue(all(count <= 21 for count in line_counts))
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT order_number, source_system, remito_number,
+                       (SELECT COUNT(*) FROM delivery_order_items i WHERE i.order_id = d.id) AS item_count
+                  FROM delivery_orders d
+                 WHERE id = %s OR source_external_id LIKE %s
+                 ORDER BY order_number
+                """,
+                [order["id"], f"{order['id']}:rss-split:%"],
+            )
+            rows = cur.fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "OE-VENTA-SPLIT")
+        self.assertEqual(rows[0][2], "RT R 00004-00003234")
+        self.assertEqual(rows[0][3], 19)
+        self.assertTrue(rows[1][0].startswith("OE-VENTA-SPLIT-P2-"))
+        self.assertEqual(rows[1][1], "nexora-rss-split")
+        self.assertEqual(rows[1][2], "RT R 00004-00003235")
+        self.assertEqual(rows[1][3], 6)
 
     def test_remito_bejerman_recupera_rt_creado_tras_error_falso_de_stock(self):
         with self._delivery_partida_stock_patch(
@@ -3425,6 +3601,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -3575,6 +3752,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -3690,6 +3868,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "6",
                         }
                     ]
@@ -3878,6 +4057,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clínica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "6",
                         }
                     ]
@@ -3985,6 +4165,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -4103,6 +4284,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -4245,6 +4427,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -4369,6 +4552,7 @@ class NotificationsAPITest(TestCase):
                             "Cliente_RazonSocial": "Clinica Notificaciones",
                             "Cliente_NroDocumento": "30700000000",
                             "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
                             "Cliente_SitIVA": "1",
                         }
                     ]
@@ -5065,7 +5249,7 @@ class NotificationsAPITest(TestCase):
         out = StringIO()
         call_command("send_billing_pending_notifications", stdout=out)
 
-        self.assertIn("enviados=1", out.getvalue())
+        self.assertIn("encolados=1", out.getvalue())
         self.assertEqual(len(mail.outbox), 1)
         body = mail.outbox[0].body
         self.assertIn("Hay 1 remito(s) pendiente(s) de facturación.", body)
@@ -5720,14 +5904,14 @@ class NotificationsAPITest(TestCase):
                 [order["id"]],
             )
 
-        with patch("service.delivery_orders.send_mail") as send_mail_mock:
+        with patch("service.notification_email_outbox.EmailMessage") as email_message_mock:
             first = process_due_delivery_order_billing_postponements()
             second = process_due_delivery_order_billing_postponements()
 
         self.assertEqual(first["due"], 1)
         self.assertEqual(second["due"], 0)
         self.assertEqual(first["notifications"], 1)
-        send_mail_mock.assert_not_called()
+        email_message_mock.assert_not_called()
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -6045,13 +6229,16 @@ class NotificationsAPITest(TestCase):
 
         self.assertEqual(result["remitoNumber"], "RSS R 00004-00001234")
         self.assertFalse(result["billingRequired"])
-        self.assertEqual(len(mail.outbox), 1)
-        message = mail.outbox[0]
-        self.assertEqual(set(message.to), {"admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"})
-        self.assertIn("RSS R 00004-00001234", message.subject)
-        self.assertIn("Se emitió un remito en Bejerman.", message.body)
-        self.assertEqual(len(message.attachments), 1)
-        self.assertTrue(message.attachments[0][1].startswith(b"%PDF-"))
+        self.assertEqual(len(mail.outbox), 3)
+        self.assertEqual(
+            {message.to[0] for message in mail.outbox},
+            {"admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"},
+        )
+        for message in mail.outbox:
+            self.assertIn("RSS R 00004-00001234", message.subject)
+            self.assertIn("Se emitió un remito en Bejerman.", message.body)
+            self.assertEqual(len(message.attachments), 1)
+            self.assertTrue(message.attachments[0][1].startswith(b"%PDF-"))
         pdf_mock.assert_called_once_with(result["groupId"], actor_user_id=self.jefe.id)
 
     def test_rss_emitido_marca_vendido_pendiente_como_vendido_entregado(self):
