@@ -17,6 +17,7 @@ y el PDF se entrega igual, que es justamente el problema que estamos resolviendo
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -133,21 +134,43 @@ SELECT LTRIM(RTRIM(COALESCE(a.art_CodGen, '') + COALESCE(a.art_CodEle1, '')
     return resultado
 
 
+def _maybe_json(value: Any) -> Any:
+    """Parsea un texto que en realidad es JSON.
+
+    Hace falta dos veces: la columna JSONB vuelve como `str`, y adentro el SDK
+    guarda `DatosJSON` como un string JSON dentro del JSON (doble codificado).
+    """
+
+    if not isinstance(value, str):
+        return value
+    texto = value.strip()
+    if not texto.startswith(("{", "[")):
+        return value
+    try:
+        return json.loads(texto)
+    except (ValueError, TypeError):
+        return value
+
+
 def _find_comprobante(node: Any, depth: int = 0) -> dict[str, Any] | None:
     """Busca, dentro de un JSON guardado, el dict que parece el comprobante.
 
     Los dos circuitos guardan la emisión con forma distinta (el de ingreso en
     `bejerman_ingreso_remitos`, el de órdenes de entrega en
-    `bejerman_integration_attempts`) y además el SDK a veces anida la respuesta.
-    En vez de codificar cada forma, se busca el dict que trae los renglones, que
-    es lo único que el renderer necesita sí o sí.
+    `bejerman_integration_attempts`) y además el SDK anida su respuesta y la
+    vuelve a serializar. En vez de codificar cada forma se busca el dict que
+    trae los renglones, que es lo único que el renderer necesita sí o sí.
     """
 
-    if depth > 6:
+    if depth > 10:
         return None
+    node = _maybe_json(node)
     if isinstance(node, dict):
-        if isinstance(node.get("Comprobante_Items"), list) and node["Comprobante_Items"]:
-            return node
+        items = node.get("Comprobante_Items")
+        if isinstance(items, str):  # los renglones también pueden venir serializados
+            items = _maybe_json(items)
+        if isinstance(items, list) and items:
+            return dict(node, Comprobante_Items=items)
         for value in node.values():
             encontrado = _find_comprobante(value, depth + 1)
             if encontrado is not None:

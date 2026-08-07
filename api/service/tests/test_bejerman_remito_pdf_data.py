@@ -179,10 +179,53 @@ class RemitoPdfPayloadLookupTests(TestCase):
     def test_encuentra_el_comprobante_aunque_venga_anidado(self):
         from service.bejerman_remito_pdf_data import _find_comprobante
 
+        # Devuelve una copia con los renglones ya normalizados, no el dict original.
         comprobante = {"Comprobante_Items": [{"Item_CodigoArticulo": "1204001"}]}
-        self.assertIs(_find_comprobante({"response": {"DatosJSON": comprobante}}), comprobante)
-        self.assertIs(_find_comprobante([{"a": 1}, {"b": comprobante}]), comprobante)
-        self.assertIs(_find_comprobante(comprobante), comprobante)
+        self.assertEqual(_find_comprobante({"response": {"DatosJSON": comprobante}}), comprobante)
+        self.assertEqual(_find_comprobante([{"a": 1}, {"b": comprobante}]), comprobante)
+        self.assertEqual(_find_comprobante(comprobante), comprobante)
+
+    def test_atraviesa_el_json_doblemente_codificado_del_sdk(self):
+        """La forma real de lo guardado, que es la que hacía fallar la búsqueda.
+
+        La columna JSONB vuelve como texto y adentro el SDK guarda `DatosJSON`
+        como un string JSON dentro del JSON. Sin desarmar las dos capas el
+        comprobante no aparecía y el fallback nunca podía entrar.
+        """
+
+        import json
+
+        from service.bejerman_remito_pdf_data import _find_comprobante
+
+        datos = json.dumps(
+            {
+                "Comprobante_Numero": "00004342",
+                "Comprobante_Items": [{"Item_CodigoArticulo": "1115003", "Item_Tipo": "A"}],
+            }
+        )
+        guardado = json.dumps({"raw": {"Fault": "", "ErrorMsg": "", "DatosJSON": datos}})
+
+        comprobante = _find_comprobante(guardado)
+        self.assertIsNotNone(comprobante)
+        self.assertEqual(comprobante["Comprobante_Numero"], "00004342")
+        self.assertEqual(comprobante["Comprobante_Items"][0]["Item_CodigoArticulo"], "1115003")
+
+    def test_desarma_los_renglones_si_vienen_serializados_aparte(self):
+        import json
+
+        from service.bejerman_remito_pdf_data import _find_comprobante
+
+        comprobante = _find_comprobante(
+            {"Comprobante_Items": json.dumps([{"Item_CodigoArticulo": "1204001"}])}
+        )
+        self.assertIsNotNone(comprobante)
+        self.assertEqual(comprobante["Comprobante_Items"][0]["Item_CodigoArticulo"], "1204001")
+
+    def test_un_texto_que_no_es_json_no_rompe(self):
+        from service.bejerman_remito_pdf_data import _find_comprobante
+
+        self.assertIsNone(_find_comprobante("no soy json"))
+        self.assertIsNone(_find_comprobante("{ roto"))
 
     def test_ignora_lo_que_no_tiene_renglones(self):
         from service.bejerman_remito_pdf_data import _find_comprobante
