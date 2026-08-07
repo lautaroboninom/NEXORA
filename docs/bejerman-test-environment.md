@@ -66,3 +66,80 @@ El RT valorizado verifica:
 - punto de venta `00004` para SEPID y `00007` para MGBIO.
 
 No ejecutar estos comandos con `docker-compose.prod.yml` ni contra el WSDL productivo.
+
+## Aceptación segura del circuito COMPRAS
+
+El ingreso de mercadería es un circuito independiente de VENTAS. Su perfil fijo es:
+
+- empresa NEXORA `SEPID`;
+- circuito Bejerman `COMPRAS`;
+- comprobante `RT`;
+- operación `MC`;
+- depósito `VAL`;
+- numeración externa `N`;
+- registración `R`.
+
+Para prevalidaciones y ensayos masivos mantener siempre:
+
+```env
+BEJERMAN_PURCHASE_EMISSION_ENABLED=0
+BEJERMAN_PURCHASE_CURRENCY=1
+BEJERMAN_PURCHASE_EXCHANGE_TYPE=UNI
+BEJERMAN_PURCHASE_EXCHANGE_RATE=1
+```
+
+La combinación `1 / UNI / 1` corresponde a la moneda local y al tipo de cambio
+existentes en la base Bejerman TEST. El preflight falla de forma cerrada si
+alguno de esos tres valores falta.
+
+En RT/MC valorizados, el importe de cabecera es `neto + IVA`. La tasa y el
+importe de IVA deben viajar también discriminados en cada renglón; NEXORA
+valida localmente que la suma de ítems e IVA coincida con la cabecera antes de
+llamar al SDK.
+
+Los activos oficiales para una aceptación controlada son:
+
+- proveedor `MGBIO`;
+- artículo con partida `NXTPART`;
+- depósito `VAL`.
+
+La primera escritura debe ser un único RT de una unidad y sólo puede ejecutarse
+contra `Bejerman-SDK-WS-TEST`, con autorización explícita. Antes de habilitarla,
+comprobar en la pantalla de Mercadería que el banner indique `Entorno Bejerman:
+TEST`.
+
+Después de registrar el RT:
+
+1. no volver a emitir mientras el lote esté `running`, `verifying` o
+   `failed_review`;
+2. usar **Verificar en Bejerman** hasta obtener evidencia de cabecera RT/MC,
+   proveedor, fecha, total e ítems;
+3. confirmar el incremento exacto de stock en `VAL` y la partida utilizada;
+4. aceptar el lote como terminado únicamente cuando su estado sea `generated`;
+5. volver a configurar `BEJERMAN_PURCHASE_EMISSION_ENABLED=0` y recrear el API
+   de desarrollo.
+
+### Aceptación ejecutada el 29/07/2026
+
+La aceptación mínima autorizada se realizó en Bejerman TEST con:
+
+- RT `R 00001-29120948`;
+- proveedor `MGBIO`;
+- artículo `NXTPART`;
+- partida `NX260729120948`;
+- depósito `VAL`;
+- cantidad `1`;
+- neto `100,00`, IVA `21,00` y total `121,00`.
+
+El read-back encontró una única cabecera `RT/MC`, fecha y total exactos, un
+único ítem con fingerprint coincidente, stock `NXTPART` en `VAL` de `0` a `1`
+y una única partida en `VAL`. El lote quedó `generated` con todas las
+postcondiciones confirmadas.
+
+Antes de la aceptación hubo dos rechazos explícitos de Bejerman que indicaron
+que el comprobante no se importó: primero por moneda/tipo de cambio vacíos y
+luego por IVA no discriminado en el renglón. Ambos casos mantuvieron RT, stock
+y partida ausentes. Las dos condiciones quedaron corregidas y cubiertas por
+validaciones locales antes de la llamada al SDK.
+
+No se realizan pruebas del circuito COMPRAS en producción.

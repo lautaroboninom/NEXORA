@@ -37,14 +37,9 @@ if (-not $KeepLegacyContainers) {
 docker compose -f $ComposeFile pull
 docker compose -f $ComposeFile up -d --build
 
-docker compose -f $ComposeFile exec -T api python manage.py apply_ticket_sale_states_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_delivery_orders_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_route_sheet_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_notifications_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_assignment_requests_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_sync_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_ris_schema
-docker compose -f $ComposeFile exec -T api python manage.py apply_bejerman_sale_items_schema
+# Los esquemas los aplica el propio arranque del contenedor (prepare_production_schema en el
+# command de docker-compose.prod.yml). No repetir la lista acá: tenerla duplicada en varios
+# archivos desincronizados es lo que hacía que un apply_ nuevo se olvidara en algún entorno.
 if (-not $SkipBejermanSmoke) {
   docker compose -f $ComposeFile exec -T api python manage.py check_bejerman_sdk --skip-live
 }

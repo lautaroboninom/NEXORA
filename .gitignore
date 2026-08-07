@@ -47,3 +47,6 @@ quotes/
 deploy/tailscale-certs/
 
 .env.local
+
+# --- Claude Code (permisos locales de la maquina)
+.claude/
