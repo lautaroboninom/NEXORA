@@ -3,6 +3,7 @@ import { useAuth } from "../context/AuthContext";
 import { normalizeRole } from "../lib/authz";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import { formatMoney, norm } from "../lib/ui-helpers";
+import { parseSort } from "../lib/table-sort.js";
 import * as XLSX from "xlsx";
 import {
   getRepuestos,
@@ -29,6 +30,7 @@ import {
   deleteRepuesto,
 } from "../lib/api";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
 
 const Input = (p) => <input {...p} className="border rounded p-2 w-full" />;
 
@@ -154,6 +156,14 @@ const EMPTY_ADD_FORM = {
   costo_moneda: "USD",
 };
 
+const REPUESTOS_SORT_OPTIONS = [
+  { value: "codigo", label: "Código" },
+  { value: "nombre", label: "Nombre" },
+  { value: "multiplicador", label: "Multiplicador" },
+  { value: "stock", label: "Stock" },
+  { value: "stock_min", label: "Stock mínimo" },
+];
+
 const EMPTY_SUBRUBRO_FORM = {
   codigo: "",
   nombre: "",
@@ -235,8 +245,10 @@ export default function Repuestos() {
   const [items, setItems] = useState([]);
   const [q, setQ] = useState("");
   const [equipo, setEquipo] = useState("");
-  const [orderBy, setOrderBy] = useState("codigo");
-  const [orderDir, setOrderDir] = useState("desc");
+  const [sort, setSort] = useState("");
+  const parsedSort = parseSort(sort);
+  const orderBy = parsedSort.field || "codigo";
+  const orderDir = parsedSort.field ? parsedSort.direction : "desc";
   const [config, setConfig] = useState(null);
   const [history, setHistory] = useState([]);
   const [cfgForm, setCfgForm] = useState({ dolar_ars: "", multiplicador_general: "" });
@@ -900,21 +912,6 @@ export default function Repuestos() {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  function setCodigoOrder() {
-    if (orderBy === "codigo" && orderDir === "desc") return;
-    setOrderBy("codigo");
-    setOrderDir("desc");
-  }
-
-  function toggleStockOrder() {
-    if (orderBy !== "stock") {
-      setOrderBy("stock");
-      setOrderDir("desc");
-      return;
-    }
-    setOrderDir((prev) => (prev === "desc" ? "asc" : "desc"));
   }
 
   function exportCambiosCSV() {
@@ -2153,6 +2150,12 @@ export default function Repuestos() {
         )}
 
         <div>
+          <MobileSortControl
+            sort={sort}
+            onSortChange={setSort}
+            options={REPUESTOS_SORT_OPTIONS}
+            className="mb-3"
+          />
           <MobileDataList>
             {filtered.map((it) => {
               const draft = drafts[it.id] || {};
@@ -2255,27 +2258,11 @@ export default function Repuestos() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th className="p-2 w-20 whitespace-nowrap">
-                  <button
-                    type="button"
-                    className="hover:underline"
-                    onClick={setCodigoOrder}
-                  >
-                    Código
-                  </button>
-                </th>
-                <th className="p-2">Nombre</th>
-                <th className="p-2">Mul.</th>
-                <th className="p-2">
-                  <button
-                    type="button"
-                    className="hover:underline"
-                    onClick={toggleStockOrder}
-                  >
-                    Stock
-                  </button>
-                </th>
-                <th className="p-2">Stock min</th>
+                <SortableTh field="codigo" sort={sort} onSortChange={setSort} className="p-2 w-20 whitespace-nowrap">Código</SortableTh>
+                <SortableTh field="nombre" sort={sort} onSortChange={setSort} className="p-2">Nombre</SortableTh>
+                <SortableTh field="multiplicador" sort={sort} onSortChange={setSort} className="p-2">Mul.</SortableTh>
+                <SortableTh field="stock" sort={sort} onSortChange={setSort} className="p-2">Stock</SortableTh>
+                <SortableTh field="stock_min" sort={sort} onSortChange={setSort} className="p-2">Stock min</SortableTh>
                 <th className="p-2 text-right">Acciones</th>
               </tr>
             </thead>

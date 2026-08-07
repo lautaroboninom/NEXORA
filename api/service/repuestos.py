@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Tuple
 
 from django.conf import settings
-from django.db import connection
+from django.db import connection, transaction
 from django.utils import timezone
 
 
@@ -467,3 +467,213 @@ def sync_catalogo_repuestos(path: str | None = None, sheet: str | None = None, d
         )
 
     return {"count": len(rows), "conflicts": conflicts}
+
+
+def load_costos_masivos_from_excel(path: str, sheet: str = "Hoja1") -> List[Dict]:
+    """
+    Lee una lista de costos con layout: Col A=codigo (Bejerman), Col B=nombre, Col C=costo USD neto.
+    Es el formato de "COSTOS VIGENTES SEPID" (hoja Hoja1/SEPID/Clientes).
+    """
+    from openpyxl import load_workbook
+
+    if not path:
+        raise FileNotFoundError("Ruta de excel no provista")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"No existe archivo: {path}")
+
+    wb = load_workbook(path, data_only=True, read_only=True)
+    if sheet not in wb.sheetnames:
+        raise ValueError(f"Hoja '{sheet}' no encontrada. Disponibles: {wb.sheetnames}")
+    ws = wb[sheet]
+
+    items: List[Dict] = []
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        code_raw = row[0] if len(row) > 0 else None
+        name_raw = row[1] if len(row) > 1 else None
+        cost_raw = row[2] if len(row) > 2 else None
+
+        code = _norm_code(code_raw)
+        name = _norm_name(name_raw)
+        cost = _to_decimal(cost_raw)
+
+        if row_idx == 1 and _is_header(code, name, cost_raw):
+            continue
+        if not code or not name or cost is None:
+            continue
+
+        items.append({"codigo": code, "nombre": name, "costo_usd": cost.quantize(Decimal("0.01"))})
+
+    return items
+
+
+def actualizar_costos_masivos(items: List[Dict], insertar_faltantes: bool = True) -> Dict:
+    """
+    Actualiza costo_usd/costo_neto (ARS) de catalogo_repuestos para los codigos dados.
+    No modifica nombre ni activo de repuestos ya existentes: solo actualiza costos.
+    Si insertar_faltantes, crea filas nuevas (activo=TRUE) para codigos ausentes en el catalogo.
+    """
+    result = {"actualizados": [], "insertados": [], "omitidos": []}
+    if not items:
+        return result
+
+    cfg = get_repuestos_config()
+    dolar_ars = _to_decimal(cfg.get("dolar_ars")) or Decimal("0")
+
+    codigos = [it["codigo"] for it in items]
+    with connection.cursor() as cur:
+        cur.execute("SELECT codigo FROM catalogo_repuestos WHERE codigo = ANY(%s)", [codigos])
+        existentes = {row[0] for row in (cur.fetchall() or [])}
+
+        update_rows = []
+        insert_rows = []
+        for it in items:
+            costo_usd = it["costo_usd"]
+            costo_ars = calc_costo_ars(costo_usd, dolar_ars, costo_moneda="USD") or Decimal("0.00")
+            if it["codigo"] in existentes:
+                update_rows.append((costo_usd, costo_ars, it["codigo"]))
+            elif insertar_faltantes:
+                insert_rows.append((it["codigo"], it["nombre"], costo_usd, costo_ars))
+            else:
+                result["omitidos"].append(it["codigo"])
+
+        if update_rows:
+            cur.executemany(
+                """
+                UPDATE catalogo_repuestos
+                   SET costo_usd=%s, costo_neto=%s, costo_moneda='USD', updated_at=NOW()
+                 WHERE codigo=%s
+                """,
+                update_rows,
+            )
+        if insert_rows:
+            cur.executemany(
+                """
+                INSERT INTO catalogo_repuestos (codigo, nombre, costo_usd, costo_neto, costo_moneda, activo, updated_at)
+                VALUES (%s,%s,%s,%s,'USD',TRUE,NOW())
+                """,
+                insert_rows,
+            )
+
+    result["actualizados"] = [r[2] for r in update_rows]
+    result["insertados"] = [r[0] for r in insert_rows]
+    return result
+
+
+def load_maestro_codigos_from_excel(path: str, sheet: str = "CODIGOS") -> List[Dict]:
+    """
+    Lee el mapeo "codigo interno viejo -> codigo Bejerman" del excel de
+    ACTUALIZACION MAESTRO DE CODIGOS - BEJERMAN.
+    Layout (detectado por header): CODIGO, CODIGO BEJERMAN, DESCRIPCION, COD PROV., PROVEEDOR, EQUIPO.
+    """
+    from openpyxl import load_workbook
+
+    if not path:
+        raise FileNotFoundError("Ruta de excel no provista")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"No existe archivo: {path}")
+
+    wb = load_workbook(path, data_only=True, read_only=True)
+    if sheet not in wb.sheetnames:
+        raise ValueError(f"Hoja '{sheet}' no encontrada. Disponibles: {wb.sheetnames}")
+    ws = wb[sheet]
+
+    header_seen = False
+    items: List[Dict] = []
+    for row in ws.iter_rows(values_only=True):
+        col1 = row[1] if len(row) > 1 else None
+        col2 = row[2] if len(row) > 2 else None
+
+        if not header_seen:
+            if isinstance(col1, str) and col1.strip().upper() == "CODIGO":
+                header_seen = True
+            continue
+
+        codigo_viejo = _norm_name(col1)
+        if not codigo_viejo:
+            continue
+
+        if isinstance(col2, float) and col2.is_integer():
+            codigo_nuevo = str(int(col2))
+        elif col2 is None:
+            codigo_nuevo = ""
+        else:
+            codigo_nuevo = str(col2).strip()
+
+        items.append({
+            "codigo_viejo": codigo_viejo.strip().upper(),
+            "codigo_nuevo": codigo_nuevo.upper(),
+            "descripcion": _norm_name(row[3] if len(row) > 3 else None),
+            "cod_prov": _norm_name(row[4] if len(row) > 4 else None),
+            "proveedor": _norm_name(row[5] if len(row) > 5 else None),
+            "equipo": _norm_name(row[6] if len(row) > 6 else None),
+        })
+
+    return items
+
+
+def corregir_codigos_repuestos(mapping_items: List[Dict], dry_run: bool = False) -> Dict:
+    """
+    Aplica el mapeo codigo_viejo -> codigo_nuevo a catalogo_repuestos y quote_items.
+    Solo renombra codigo (conserva el id, y con el todas las FK: stock, movimientos,
+    proveedores). No toca nombre/costo/stock. Se salta (sin tocar nada) cualquier caso
+    donde el codigo_nuevo ya exista como otra fila (colision real) para evitar mezclar
+    dos repuestos distintos sin revision humana.
+    """
+    result = {
+        "renombrados": [],
+        "sin_cambio": [],
+        "pendientes": [],
+        "no_encontrados": [],
+        "colisiones": [],
+    }
+    if not mapping_items:
+        return result
+
+    with connection.cursor() as cur:
+        cur.execute("SELECT codigo FROM catalogo_repuestos")
+        existentes = {row[0].strip().upper() for row in (cur.fetchall() or [])}
+
+        renombres = []
+        for it in mapping_items:
+            old = it["codigo_viejo"]
+            new = it["codigo_nuevo"]
+
+            if old not in existentes:
+                result["no_encontrados"].append(old)
+                continue
+            if not new:
+                result["pendientes"].append(old)
+                continue
+            if new == old:
+                result["sin_cambio"].append(old)
+                continue
+            if new in existentes:
+                result["colisiones"].append({"codigo_viejo": old, "codigo_nuevo": new})
+                continue
+
+            renombres.append((old, new))
+            existentes.discard(old)
+            existentes.add(new)
+
+        if not dry_run and renombres:
+            with transaction.atomic():
+                for old, new in renombres:
+                    cur.execute(
+                        "UPDATE catalogo_repuestos SET codigo=%s, updated_at=NOW() WHERE codigo=%s",
+                        [new, old],
+                    )
+                    cur.execute(
+                        "UPDATE quote_items SET repuesto_codigo=%s WHERE repuesto_codigo=%s",
+                        [new, old],
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO repuestos_cambios (repuesto_id, codigo, accion, nota, created_by)
+                        SELECT id, %s, 'recodificacion', %s, NULL
+                          FROM catalogo_repuestos WHERE codigo=%s
+                        """,
+                        [new, f"Codigo actualizado de {old} a {new} (maestro Bejerman)", new],
+                    )
+
+    result["renombrados"] = renombres
+    return result

@@ -829,17 +829,19 @@ class RepuestosView(APIView):
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
         order_map = {
-            "codigo": "codigo",
-            "stock": "COALESCE(stock_on_hand, 0)",
-            "stock_on_hand": "COALESCE(stock_on_hand, 0)",
-            "stock_min": "COALESCE(stock_min, 0)",
+            "codigo": "NULLIF(LOWER(BTRIM(COALESCE(codigo, ''))), '')",
+            "nombre": "NULLIF(LOWER(BTRIM(COALESCE(nombre, ''))), '')",
+            "multiplicador": "multiplicador",
+            "stock": "stock_on_hand",
+            "stock_on_hand": "stock_on_hand",
+            "stock_min": "stock_min",
         }
         dir_sql = "ASC" if dir_raw == "asc" else "DESC"
-        order_expr = order_map.get(order_raw or "", "codigo")
-        if order_expr == "codigo":
-            order_sql = f"ORDER BY {order_expr} {dir_sql}"
+        order_expr = order_map.get(order_raw or "")
+        if order_expr:
+            order_sql = f"ORDER BY {order_expr} {dir_sql} NULLS LAST, id {dir_sql}"
         else:
-            order_sql = f"ORDER BY {order_expr} {dir_sql}, codigo DESC"
+            order_sql = "ORDER BY codigo DESC, id DESC"
         rows = q(
             f"""
             SELECT id, codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, stock_on_hand, stock_min, estado
