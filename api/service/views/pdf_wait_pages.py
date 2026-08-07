@@ -180,7 +180,14 @@ def render_bejerman_pdf_wait_page(
             detailEl.textContent = 'Abriendo el archivo para imprimir.';
             showActions(true);
             try {{
-              window.location.replace(pdfBlobUrl);
+              // El PDF va en un iframe y NO se navega la pestaña: al reemplazar el
+              // documento que creó el blob, el navegador lo revoca y la URL queda en
+              // ERR_FILE_NOT_FOUND. Era una carrera, por eso a veces salía bien.
+              const visor = document.createElement('iframe');
+              visor.src = pdfBlobUrl;
+              visor.title = 'PDF del ' + documentName;
+              visor.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff;z-index:9999';
+              document.body.appendChild(visor);
             }} catch (error) {{
               detailEl.textContent = 'El navegador no pudo abrirlo automáticamente. Use Abrir e imprimir.';
             }}

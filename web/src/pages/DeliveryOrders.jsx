@@ -386,15 +386,17 @@ function RemitoDocumentLinks({ remito, includeNumber = false, emptyLabel = "" })
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
       {includeNumber && number && <span className="w-full font-mono text-[11px] text-gray-600">{number}</span>}
-      {printUrl && (
-        <a href={printUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">
+      {/* Un solo acceso: "Imprimir" abre el PDF listo para imprimir. El enlace "PDF"
+          que había al lado llevaba al mismo documento y sólo confundía. */}
+      {(printUrl || pdfUrl) && (
+        <a
+          href={printUrl || pdfUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-blue-700 hover:underline"
+        >
           <Printer className="h-3.5 w-3.5" aria-hidden="true" />
           Imprimir
-        </a>
-      )}
-      {pdfUrl && pdfUrl !== printUrl && (
-        <a href={pdfUrl} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
-          PDF
         </a>
       )}
     </div>
