@@ -893,3 +893,47 @@ class RemitoPdfGeneradoPorNexoraTests(TransactionTestCase):
 
         with override_settings(BEJERMAN_REMITO_PDF_ENABLED=False, BEJERMAN_REMITO_PDF_FALLBACK_ENABLED=True):
             self.assertTrue(remito_pdf_enabled())
+
+    def _fila_pendiente(self):
+        """Un remito viejo, sin PDF: el caso de la reimpresión."""
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bejerman_pdf_requests
+                       (document_key, company_key, customer_code, tipo, letra,
+                        pto_venta, numero, issue_date, state)
+                VALUES ('SEPID|RT|R|00004|00004345|2026-08-07', 'SEPID', 'TMD', 'RT', 'R',
+                        '00004', '00004345', '2026-08-07'::date, 'queued')
+                """
+            )
+        from service.bejerman_pdf_requests import _load_request
+
+        return _load_request("SEPID|RT|R|00004|00004345|2026-08-07")
+
+    def test_un_remito_viejo_se_reproduce_desde_lo_guardado(self):
+        # Candado de un bug real: al refactorizar se había perdido la línea que
+        # renderiza y el camino explotaba con NameError en vez de dar el PDF.
+        from service.bejerman_pdf_requests import _load_request, _render_own_remito_pdf
+
+        row = self._fila_pendiente()
+        with self._sin_pm(), patch(
+            "service.bejerman_remito_pdf_data.load_comprobante_for_document",
+            return_value=COMPROBANTE_EMITIDO,
+        ), patch("service.bejerman_pdf_requests._process_direct_copy", return_value=True):
+            self.assertTrue(_render_own_remito_pdf(row))
+
+        state, payload, _tipo = self._fila()
+        self.assertEqual(state, "ready_direct")
+        self.assertTrue(bytes(payload).startswith(b"%PDF"))
+
+    def test_sin_nada_guardado_no_se_inventa_un_pdf(self):
+        from service.bejerman_pdf_requests import _render_own_remito_pdf
+
+        row = self._fila_pendiente()
+        with patch(
+            "service.bejerman_remito_pdf_data.load_comprobante_for_document",
+            return_value=None,
+        ):
+            self.assertFalse(_render_own_remito_pdf(row))
+        self.assertEqual(self._fila()[0], "queued")

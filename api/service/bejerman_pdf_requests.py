@@ -665,6 +665,7 @@ def _render_own_remito_pdf(row: dict[str, Any]) -> bool:
         logger.warning("bejerman_remito_pdf_sin_payload", extra={"document_key": document_key})
         return False
 
+    pdf = _render_remito_pdf_bytes(comprobante, row.get("company_key"))
     # `_render_remito_pdf_bytes` ya valida los bytes. Se comprueba acá y no en
     # `_store_direct_pdf`, que ante un PDF inválido marca la fila como fallada
     # culpando a Bejerman: si el que salió mal es el nuestro, corresponde dejar el
