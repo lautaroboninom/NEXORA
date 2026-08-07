@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest import skipUnless
 from unittest.mock import Mock, patch
@@ -12,9 +14,14 @@ from service.bejerman_pdf_requests import (
     BejermanPdfFolderUnavailableError,
     BejermanPdfNotPublishedError,
     BejermanPdfRequestPending,
+    BejermanPdfWorkerStalledError,
     document_key_for,
     fetch_or_enqueue_comprobante_pdf,
+    pdf_error_metadata,
     process_bejerman_pdf_requests_once,
+    record_worker_heartbeat,
+    requeue_pdf_request,
+    worker_liveness,
 )
 from service.bejerman_sdk import (
     BejermanPdfReference,
@@ -62,6 +69,9 @@ class BejermanPdfSdkContractTests(SimpleTestCase):
     BEJERMAN_PDF_GENERATION_READ_TIMEOUT=90,
     BEJERMAN_PDF_SDK_READ_TIMEOUT=30,
     BEJERMAN_PDF_SDK_CHECK_SECONDS=1,
+    BEJERMAN_PDF_MAX_REGENERATIONS=2,
+    BEJERMAN_PDF_WORKER_STALL_GRACE_SECONDS=90,
+    BEJERMAN_PDF_DEADLINE_GRACE_SECONDS=120,
 )
 class BejermanPdfRequestsTests(TransactionTestCase):
     reset_sequences = False
@@ -108,12 +118,27 @@ class BejermanPdfRequestsTests(TransactionTestCase):
                 )
                 """
             )
+        call_command("apply_bejerman_worker_heartbeat_schema", verbosity=0)
         call_command("apply_bejerman_pdf_requests_schema", verbosity=0)
 
     def setUp(self):
         super().setUp()
         with connection.cursor() as cur:
             cur.execute("DELETE FROM bejerman_pdf_requests")
+            cur.execute("DELETE FROM bejerman_worker_heartbeats")
+
+    @staticmethod
+    def _beat(stage: str = "tick") -> None:
+        """Deja al worker como vivo para los caminos que no prueban el latido."""
+
+        record_worker_heartbeat(stage=stage)
+
+    def _set_regenerations(self, document_key: str, count: int) -> None:
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE bejerman_pdf_requests SET regeneration_count=%s WHERE document_key=%s",
+                [count, document_key],
+            )
 
     @staticmethod
     def _reference() -> BejermanPdfReference:
@@ -174,7 +199,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertEqual(pdf, PDF_BYTES)
         self.assertEqual(content_type, "application/pdf")
         self.assertEqual(self._count_rows(), 0)
-        probe.assert_called_once_with(client, reference, interactive=True)
+        probe.assert_called_once_with(client, reference, interactive=True, allow_directory_scan=False)
         client.register.assert_not_called()
         client.generar_comprobante_ventas_pdf.assert_not_called()
 
@@ -200,6 +225,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertEqual(row["remote_path"], REMOTE_PATH)
         self.assertEqual(pending.pdf_state, "queued")
         self.assertFalse(pending.generation_requested)
+        probe.assert_called_once_with(client, reference, interactive=True, allow_directory_scan=False)
         client.register.assert_not_called()
         client.generar_comprobante_ventas_pdf.assert_not_called()
 
@@ -212,7 +238,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             patch(
                 "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
                 return_value=(None, "error"),
-            ),
+            ) as probe,
         ):
             with self.assertRaises(BejermanPdfFolderUnavailableError) as ctx:
                 fetch_or_enqueue_comprobante_pdf(client, reference)
@@ -221,6 +247,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertEqual(ctx.exception.status_code, 503)
         self.assertFalse(ctx.exception.generation_requested)
         self.assertEqual(self._count_rows(), 0)
+        probe.assert_called_once_with(client, reference, interactive=True, allow_directory_scan=False)
         client.register.assert_not_called()
         client.generar_comprobante_ventas_pdf.assert_not_called()
 
@@ -236,7 +263,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             patch(
                 "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
                 return_value=(None, "missing"),
-            ),
+            ) as probe,
             patch("service.bejerman_pdf_requests.BejermanSDKClient", return_value=worker_client),
             patch("service.bejerman_pdf_requests.extract_pdf_bytes", return_value=PDF_BYTES),
             patch("service.bejerman_pdf_requests.store_comprobante_pdf_copy", return_value=True) as store,
@@ -252,6 +279,10 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         worker_client.register.assert_called_once_with()
         worker_client.generar_comprobante_ventas_pdf.assert_called_once()
         store.assert_called_once()
+        # Primer acceso (HTTP) + primer paso del worker: ninguno debe escanear la carpeta.
+        self.assertEqual(probe.call_count, 2)
+        for call in probe.call_args_list:
+            self.assertFalse(call.kwargs["allow_directory_scan"])
 
     def test_timeout_ambiguo_no_vuelve_a_generar(self):
         request_client = self._client()
@@ -266,7 +297,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             patch(
                 "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
                 return_value=(None, "missing"),
-            ),
+            ) as probe,
             patch("service.bejerman_pdf_requests.BejermanSDKClient", return_value=worker_client),
         ):
             self._enqueue(request_client, reference)
@@ -288,6 +319,12 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         worker_client.generar_comprobante_ventas_pdf.assert_called_once()
         worker_client.consultar_comprobante_ventas_pdf.assert_called_once()
         self.assertEqual(self._row(document_key)["state"], "waiting_sdk")
+        # Primer acceso (HTTP) + primer paso del worker: ninguno debe escanear la carpeta
+        # (el reintento posterior de "waiting_sdk" pasa por _process_sdk_wait, que no
+        # toca la carpeta en absoluto, así que el conteo no debe subir de 2).
+        self.assertEqual(probe.call_count, 2)
+        for call in probe.call_args_list:
+            self.assertFalse(call.kwargs["allow_directory_scan"])
 
     def test_worker_consulta_bytes_oficiales_y_guarda_directo_en_remitos(self):
         request_client = self._client()
@@ -325,6 +362,8 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         consulted_reference = worker_client.consultar_comprobante_ventas_pdf.call_args.args[0]
         self.assertEqual(consulted_reference.customer_code, "JORGE")
         self.assertEqual(probe.call_count, 2)
+        for call in probe.call_args_list:
+            self.assertFalse(call.kwargs["allow_directory_scan"])
         store.assert_called_once()
         self.assertEqual(store.call_args.args[2], PDF_BYTES)
 
@@ -340,7 +379,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             patch(
                 "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
                 return_value=(None, "missing"),
-            ),
+            ) as probe,
             patch("service.bejerman_pdf_requests.BejermanSDKClient", return_value=worker_client),
             patch("service.bejerman_pdf_requests.extract_pdf_bytes", return_value=PDF_BYTES),
             patch(
@@ -368,25 +407,34 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         worker_client.generar_comprobante_ventas_pdf.assert_called_once()
         self.assertEqual(store.call_count, 2)
         self.assertEqual([call.args[2] for call in store.call_args_list], [PDF_BYTES, PDF_BYTES])
+        # Primer acceso (HTTP) + primer paso del worker; el "ready_direct" y el
+        # reintento de copia no vuelven a tocar la carpeta remota.
+        self.assertEqual(probe.call_count, 2)
+        for call in probe.call_args_list:
+            self.assertFalse(call.kwargs["allow_directory_scan"])
 
     def test_deadline_devuelve_504_y_admite_recuperacion_tardia_desde_carpeta(self):
         client = self._client()
         reference = self._reference()
         document_key = document_key_for(client, reference)
+        self._beat()
 
         with (
             patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
             patch(
                 "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
                 side_effect=[(None, "missing"), (None, "missing"), (PDF_BYTES, "ready")],
-            ),
+            ) as probe,
         ):
             self._enqueue(client, reference)
+            # regeneration_count al tope: este caso cubre el final del camino, ya
+            # sin ciclos de generación disponibles (el reintento tiene su test).
             with connection.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE bejerman_pdf_requests
                        SET state='waiting_folder', generation_attempt_count=1,
+                           regeneration_count=2,
                            deadline_at=CURRENT_TIMESTAMP - INTERVAL '1 second'
                      WHERE document_key=%s
                     """,
@@ -408,6 +456,237 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertEqual(self._row(document_key)["state"], "ready_folder")
         client.register.assert_not_called()
         client.generar_comprobante_ventas_pdf.assert_not_called()
+        # (1) primer acceso: sin escaneo. (2) vencimiento de waiting_folder y
+        # (3) recheck del estado terminal "failed": ambos son chequeos de
+        # última oportunidad, sí escanean la carpeta completa.
+        self.assertEqual(
+            [call.kwargs["allow_directory_scan"] for call in probe.call_args_list],
+            [False, True, True],
+        )
+
+    # --- Recuperación: un PDF trabado tiene que poder destrabarse -------------
+
+    def test_reencolar_no_genera_si_el_archivo_ya_esta_en_la_carpeta(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+        self._beat()
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                side_effect=[(None, "missing"), (PDF_BYTES, "ready")],
+            ),
+        ):
+            self._enqueue(client, reference)
+            result = requeue_pdf_request(document_key, reason="test")
+
+        self.assertEqual(result["outcome"], "ready")
+        self.assertEqual(self._row(document_key)["state"], "ready_folder")
+        # Encontrarlo en la carpeta no puede costar una generación nueva.
+        self.assertEqual(self._row(document_key)["regeneration_count"], 0)
+        client.generar_comprobante_ventas_pdf.assert_not_called()
+
+    def test_reencolar_abre_un_ciclo_nuevo_sin_romper_el_single_shot(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+        self._beat()
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+        ):
+            self._enqueue(client, reference)
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE bejerman_pdf_requests
+                       SET state='failed', generation_attempt_count=1,
+                           last_error_code='BEJERMAN_PDF_NOT_PUBLISHED'
+                     WHERE document_key=%s
+                    """,
+                    [document_key],
+                )
+
+            result = requeue_pdf_request(document_key, reason="test", actor_user_id=None)
+
+        self.assertEqual(result["outcome"], "requeued")
+        row = self._row(document_key)
+        self.assertEqual(row["state"], "queued")
+        # El contador de intentos vuelve a 0 porque cuenta *dentro* de un ciclo:
+        # así el CHECK 0..1 sigue valiendo y Bejerman recibe una sola generación
+        # por ciclo, pero el PDF deja de estar perdido para siempre.
+        self.assertEqual(row["generation_attempt_count"], 0)
+        self.assertEqual(row["regeneration_count"], 1)
+        self.assertIsNone(row["last_error_code"])
+
+    def test_reencolar_respeta_el_tope_de_ciclos(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+        self._beat()
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+        ):
+            self._enqueue(client, reference)
+            self._set_regenerations(document_key, 2)
+            result = requeue_pdf_request(document_key, reason="test")
+            forced = requeue_pdf_request(document_key, reason="test", force=True)
+
+        self.assertEqual(result["outcome"], "exhausted")
+        self.assertEqual(self._row(document_key)["regeneration_count"], 3)
+        self.assertEqual(forced["outcome"], "requeued")
+
+    def test_estado_failed_deja_de_ser_definitivo(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+        self._beat()
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+        ):
+            self._enqueue(client, reference)
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE bejerman_pdf_requests SET state='failed', generation_attempt_count=1 WHERE document_key=%s",
+                    [document_key],
+                )
+
+            # Antes esto devolvía 504 para siempre: el comprobante quedaba sin PDF
+            # posible aunque estuviera perfecto en Bejerman.
+            with self.assertRaises(BejermanPdfRequestPending):
+                fetch_or_enqueue_comprobante_pdf(client, reference)
+
+        row = self._row(document_key)
+        self.assertEqual(row["state"], "queued")
+        self.assertEqual(row["generation_attempt_count"], 0)
+        client.generar_comprobante_ventas_pdf.assert_not_called()
+
+    # --- Latido del worker ---------------------------------------------------
+
+    def test_queued_sin_latido_corta_el_202_eterno(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+        ):
+            self._enqueue(client, reference)
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE bejerman_pdf_requests SET created_at=CURRENT_TIMESTAMP - INTERVAL '5 minutes' WHERE document_key=%s",
+                    [document_key],
+                )
+
+            with self.assertRaises(BejermanPdfWorkerStalledError) as ctx:
+                fetch_or_enqueue_comprobante_pdf(client, reference)
+
+        self.assertEqual(ctx.exception.code, "BEJERMAN_PDF_WORKER_STALLED")
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIs(pdf_error_metadata(ctx.exception)["worker_alive"], False)
+        # No toca la fila: cuando el worker vuelve, genera igual y una sola vez.
+        row = self._row(document_key)
+        self.assertEqual(row["state"], "queued")
+        self.assertEqual(row["generation_attempt_count"], 0)
+
+    def test_queued_con_latido_fresco_sigue_pendiente(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+        ):
+            self._enqueue(client, reference)
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE bejerman_pdf_requests SET created_at=CURRENT_TIMESTAMP - INTERVAL '5 minutes' WHERE document_key=%s",
+                    [document_key],
+                )
+            self._beat()
+
+            with self.assertRaises(BejermanPdfRequestPending) as ctx:
+                fetch_or_enqueue_comprobante_pdf(client, reference)
+
+        payload = pdf_error_metadata(ctx.exception)
+        self.assertIs(payload["worker_alive"], True)
+        self.assertEqual(payload["stage_label"], "En cola para solicitar la generación")
+        self.assertEqual(payload["document_key"], document_key)
+        self.assertGreaterEqual(payload["queued_seconds"], 300)
+
+    def test_sin_tabla_de_latidos_el_comportamiento_no_cambia(self):
+        """Fail-open: durante el deploy la tabla puede no existir todavía."""
+
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+            patch("service.bejerman_pdf_requests._heartbeat_table_ready", return_value=False),
+        ):
+            self._enqueue(client, reference)
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE bejerman_pdf_requests SET created_at=CURRENT_TIMESTAMP - INTERVAL '5 minutes' WHERE document_key=%s",
+                    [document_key],
+                )
+
+            self.assertIsNone(worker_liveness()["alive"])
+            with self.assertRaises(BejermanPdfRequestPending):
+                fetch_or_enqueue_comprobante_pdf(client, reference)
+
+        self.assertEqual(self._row(document_key)["state"], "queued")
+
+    def test_el_worker_registra_latido_por_documento(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+            patch("service.bejerman_pdf_requests._client_from_row", return_value=client),
+        ):
+            self._enqueue(client, reference)
+            self._force_due(document_key)
+            process_bejerman_pdf_requests_once(limit=1, heartbeat=True)
+
+        worker = worker_liveness()
+        self.assertIs(worker["alive"], True)
+        self.assertEqual(worker["stage"], "processing:queued")
+        self.assertEqual(worker["current_document_key"], document_key)
 
     def test_veinticuatro_solicitudes_concurrentes_crean_una_sola_fila(self):
         reference = self._reference()
@@ -429,7 +708,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             patch(
                 "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
                 return_value=(None, "missing"),
-            ),
+            ) as probe,
         ):
             with ThreadPoolExecutor(max_workers=24) as executor:
                 results = list(executor.map(request_pdf, range(24)))
@@ -440,3 +719,50 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertEqual(self._count_rows(), 1)
         row = self._row(document_key_for(self._client(), reference))
         self.assertEqual(row["generation_attempt_count"], 0)
+        # Esta es la aserción que realmente cierra el bug: sin el lock por
+        # documento, las 24 llamadas concurrentes dispararían 24 probes
+        # interactivos reales contra Bejerman (la "tormenta SFTP").
+        self.assertEqual(probe.call_count, 1)
+
+    def test_solicitud_concurrente_no_espera_al_probe_en_curso(self):
+        """Un sondeo concurrente para el mismo documento no debe esperar a que
+        termine el probe en curso: debe volver casi instantáneo por el camino
+        de "otra solicitud ya está comprobando este comprobante", sin tocar SFTP."""
+
+        reference = self._reference()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def fake_probe(_client, _reference, *, interactive, allow_directory_scan=True):
+            probe_started.set()
+            self.assertTrue(release_probe.wait(timeout=5), "el test no liberó el probe a tiempo")
+            return None, "missing"
+
+        def first_request():
+            close_old_connections()
+            try:
+                return self._enqueue(self._client(), reference)
+            finally:
+                close_old_connections()
+
+        with (
+            patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
+            patch("service.bejerman_pdf_requests.probe_comprobante_pdf_copy", side_effect=fake_probe) as probe,
+        ):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                first_future = executor.submit(first_request)
+                self.assertTrue(probe_started.wait(timeout=5), "el primer thread nunca entró al probe")
+
+                started_at = time.monotonic()
+                second_pending = self._enqueue(self._client(), reference)
+                elapsed_seconds = time.monotonic() - started_at
+
+                release_probe.set()
+                first_pending = first_future.result(timeout=5)
+
+        self.assertEqual(probe.call_count, 1)
+        self.assertLess(elapsed_seconds, 1.0, "el segundo sondeo esperó al probe en curso en vez de volver rápido")
+        self.assertEqual(second_pending.pdf_state, "queued")
+        self.assertFalse(second_pending.generation_requested)
+        self.assertEqual(first_pending.pdf_state, "queued")
+        self.assertEqual(self._count_rows(), 1)

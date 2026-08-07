@@ -3,6 +3,7 @@ from __future__ import annotations
 import posixpath
 import re
 import stat
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -100,8 +101,61 @@ def _connect():
         look_for_keys=False,
         allow_agent=False,
         timeout=20,
+        banner_timeout=20,
+        auth_timeout=20,
     )
+    # `timeout` arriba cubre solo el connect. Sin timeout de canal, una lectura SFTP
+    # colgada inmoviliza al worker sosteniendo el lock global de generación: no se
+    # genera ningún PDF del sistema hasta que alguien reinicia el contenedor.
+    transport = client.get_transport()
+    if transport is not None:
+        transport.set_keepalive(15)
     return client
+
+
+def _open_sftp(client):
+    """SFTP con timeout de lectura, para que ninguna operación quede colgada."""
+
+    sftp = client.open_sftp()
+    channel = sftp.get_channel()
+    if channel is not None:
+        channel.settimeout(_channel_timeout())
+    return sftp
+
+
+def _channel_timeout() -> float:
+    try:
+        return float(getattr(settings, "BEJERMAN_PDF_SFTP_CHANNEL_TIMEOUT", 60) or 60)
+    except (TypeError, ValueError):
+        return 60.0
+
+
+# Listar la carpeta remota es la operación cara (puede tener miles de archivos). El
+# worker consulta cada 5s y por cada documento en vuelo, así que sin caché el
+# barrido por prefijo era impagable y estaba apagado — y por eso los PDFs que
+# Bejerman publica con otro nombre no aparecían nunca.
+_listing_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _listing_cache_ttl() -> float:
+    try:
+        return float(getattr(settings, "BEJERMAN_PDF_FOLDER_LISTING_CACHE_SECONDS", 30) or 30)
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _listdir_cached(sftp, directory: str, *, use_cache: bool) -> list[str]:
+    if not use_cache:
+        names = list(sftp.listdir(directory))
+        _listing_cache[directory] = (time.monotonic(), names)
+        return names
+    entry = _listing_cache.get(directory)
+    now = time.monotonic()
+    if entry and (now - entry[0]) < _listing_cache_ttl():
+        return entry[1]
+    names = list(sftp.listdir(directory))
+    _listing_cache[directory] = (now, names)
+    return names
 
 
 def _remote_stat_dir(sftp, path: str) -> None:
@@ -118,7 +172,7 @@ def validate_remote_pdf_output_dir(uri: Any) -> str:
     path = _sftp_path(windows_path)
     client = _connect()
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             _remote_stat_dir(sftp, path)
             test_name = f".nexora-pdf-write-{uuid.uuid4().hex}.tmp"
@@ -159,7 +213,7 @@ def write_remote_pdf(directory_uri: Any, filename: str, pdf: bytes) -> RemotePdf
     directory = _sftp_path(windows_dir).rstrip("/")
     client = _connect()
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             _remote_stat_dir(sftp, directory)
             base, dot, suffix = filename.rpartition(".")
@@ -192,7 +246,7 @@ def read_remote_pdf(directory_uri: Any, filename: str) -> bytes | None:
     directory = _sftp_path(windows_dir).rstrip("/")
     client = _connect()
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             _remote_stat_dir(sftp, directory)
             return _read_remote_bytes(sftp, posixpath.join(directory, filename))
@@ -202,16 +256,26 @@ def read_remote_pdf(directory_uri: Any, filename: str) -> bytes | None:
         client.close()
 
 
-def read_remote_pdf_candidates(directory_uri: Any, filenames: list[str], prefixes: list[str] | None = None) -> tuple[bytes, str] | tuple[None, str]:
+def read_remote_pdf_candidates(
+    directory_uri: Any,
+    filenames: list[str],
+    prefixes: list[str] | None = None,
+    *,
+    use_cache: bool = False,
+) -> tuple[bytes, str] | tuple[None, str]:
     """
     Intenta leer un PDF remoto probando múltiples nombres de archivo y prefijos.
     Retorna (bytes, path_label) si encontró algo, (None, "") si no.
+
+    `use_cache` reutiliza el listado de la carpeta durante unos segundos: lo usa el
+    ciclo normal del worker. Los chequeos interactivos y de última oportunidad van
+    siempre contra el listado fresco.
     """
     windows_dir = remote_windows_path(directory_uri)
     directory = _sftp_path(windows_dir).rstrip("/")
     client = _connect()
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             _remote_stat_dir(sftp, directory)
             for filename in filenames or []:
@@ -219,18 +283,19 @@ def read_remote_pdf_candidates(directory_uri: Any, filenames: list[str], prefixe
                 content = _read_remote_bytes(sftp, path)
                 if content is not None:
                     return content, path
-            if prefixes:
-                for prefix in prefixes:
-                    try:
-                        files = sftp.listdir(directory)
-                        for f in files:
-                            if f.startswith(prefix):
-                                path = posixpath.join(directory, f)
-                                content = _read_remote_bytes(sftp, path)
-                                if content is not None:
-                                    return content, path
-                    except Exception:
-                        pass
+            clean_prefixes = [_clean(prefix) for prefix in (prefixes or []) if _clean(prefix)]
+            if clean_prefixes:
+                # Un solo listdir para todos los prefijos: es la operación cara.
+                # Y sin `except: pass` — un error de acceso no es "el archivo no
+                # está", y taparlo hacía que se consumiera el deadline entero
+                # esperando un archivo que nunca se llegó a buscar.
+                for name in _listdir_cached(sftp, directory, use_cache=use_cache):
+                    if not any(name.startswith(prefix) for prefix in clean_prefixes):
+                        continue
+                    path = posixpath.join(directory, name)
+                    content = _read_remote_bytes(sftp, path)
+                    if content is not None:
+                        return content, path
             return None, ""
         finally:
             sftp.close()
@@ -273,7 +338,7 @@ def remove_remote_pdf_candidates_if_same(
     removed: list[str] = []
     client = _connect()
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             _remote_stat_dir(sftp, directory)
             for filename in _remote_candidate_names(sftp, directory, filenames, prefixes):
@@ -295,7 +360,7 @@ def remove_remote_file_if_same(file_uri: Any, expected: bytes) -> bool:
     path = _sftp_path(windows_file)
     client = _connect()
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             existing = _read_remote_bytes(sftp, path)
             if existing is None or existing != expected:

@@ -45,8 +45,45 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function delay(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+function delay(ms, signal) {
+  const wait = Math.max(0, Number(ms) || 0);
+  if (!signal) return new Promise((resolve) => window.setTimeout(resolve, wait));
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(finish, wait);
+    function finish() {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    }
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+// Tope por defecto de la espera del PDF. Antes no había ninguno: mientras la API
+// respondiera 202, el modal giraba para siempre y no se podía ni cancelar.
+export const PDF_WAIT_DEADLINE_MS = 120000;
+
+export const PDF_WAIT_TIMEOUT = "PDF_WAIT_TIMEOUT";
+export const PDF_WAIT_CANCELLED = "PDF_WAIT_CANCELLED";
+
+/**
+ * ¿El documento está bien y sólo falta el PDF?
+ * Sirve para no pintar de rojo un remito que se emitió perfecto en Bejerman.
+ */
+export function isPendingPdfError(error) {
+  if (!error) return false;
+  if (error.pending) return true;
+  return [PDF_WAIT_TIMEOUT, PDF_WAIT_CANCELLED].includes(error.code);
+}
+
+function pendingWaitError(message, code, extra = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.pending = true;
+  error.terminal = true;
+  Object.assign(error, extra);
+  return error;
 }
 
 function hasOnlyPdfPadding(bytes, end) {
@@ -160,18 +197,40 @@ function responseErrorMessage(response, payload, label) {
 export async function waitForPdfBlob(pdfUrl, {
   label = "PDF",
   fetchTimeoutMs = 10000,
+  deadlineMs = PDF_WAIT_DEADLINE_MS,
+  signal,
   onProgress,
 } = {}) {
   const href = String(pdfUrl || "").trim();
   if (!href) throw new Error(`No se recibió la URL del PDF del ${label}.`);
 
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+  const cancelled = () =>
+    pendingWaitError(
+      `Se canceló la espera del PDF del ${label}. El ${label} ya está emitido en Bejerman.`,
+      PDF_WAIT_CANCELLED,
+      { elapsedMs: elapsed() },
+    );
+  const timedOut = (documentKey) =>
+    pendingWaitError(
+      `Bejerman todavía no devolvió el PDF del ${label}. El ${label} ya está emitido; se puede reintentar o reimprimirlo más tarde.`,
+      PDF_WAIT_TIMEOUT,
+      { elapsedMs: elapsed(), documentKey },
+    );
+
   let attempt = 0;
+  let documentKey = "";
 
   while (true) {
+    if (signal?.aborted) throw cancelled();
+    if (deadlineMs > 0 && elapsed() >= deadlineMs) throw timedOut(documentKey);
+
     attempt += 1;
     notifyProgress(onProgress, {
       state: "fetching",
       attempt,
+      elapsedMs: elapsed(),
       status: attempt === 1 ? `Buscando PDF del ${label}...` : `Esperando PDF del ${label}...`,
       detail: "Consultando Bejerman sin abrir una nueva ventana.",
     });
@@ -190,15 +249,25 @@ export async function waitForPdfBlob(pdfUrl, {
 
       if (response.status === 202) {
         const payload = await readResponsePayload(response);
+        documentKey = payload?.document_key || documentKey;
         const waitMs = retryDelayFrom(response, payload, attempt);
         notifyProgress(onProgress, {
           state: "pending",
           attempt,
           delayMs: waitMs,
-          status: `${label} emitido. Bejerman todavía está preparando el PDF.`,
-          detail: payload?.detail || "NEXORA volverá a consultar automáticamente.",
+          elapsedMs: elapsed(),
+          // El backend manda en qué etapa está; usarlo es la diferencia entre
+          // "algo pasa" y un spinner mudo que parece colgado.
+          pdfState: payload?.pdf_state || "",
+          stageLabel: payload?.stage_label || "",
+          workerAlive: payload?.worker_alive,
+          documentKey,
+          status: payload?.stage_label
+            ? `${label} emitido. ${payload.stage_label}.`
+            : `${label} emitido. Bejerman todavía está preparando el PDF.`,
+          detail: payload?.detail || "NEXORA vuelve a consultar automáticamente.",
         });
-        await delay(waitMs);
+        await delay(waitMs, signal);
         continue;
       }
 
@@ -213,6 +282,7 @@ export async function waitForPdfBlob(pdfUrl, {
         notifyProgress(onProgress, {
           state: "ready",
           attempt,
+          elapsedMs: elapsed(),
           status: `PDF del ${label} listo.`,
           detail: "Abriendo impresión.",
         });
@@ -220,36 +290,47 @@ export async function waitForPdfBlob(pdfUrl, {
       }
 
       const payload = await readResponsePayload(response);
+      documentKey = payload?.document_key || documentKey;
       if (isTransientPdfLookupMiss(response, payload)) {
         const waitMs = retryDelayFrom(response, payload, attempt);
         notifyProgress(onProgress, {
           state: "pending",
           attempt,
           delayMs: waitMs,
+          elapsedMs: elapsed(),
+          documentKey,
           status: `${label} emitido. Bejerman todavía no lo devuelve en la consulta.`,
-          detail: payload?.detail || "NEXORA volverá a consultar automáticamente.",
+          detail: payload?.detail || "NEXORA vuelve a consultar automáticamente.",
         });
-        await delay(waitMs);
+        await delay(waitMs, signal);
         continue;
       }
 
       const error = new Error(responseErrorMessage(response, payload, label));
       error.terminal = true;
+      error.code = payload?.code || "";
+      error.documentKey = documentKey;
+      // El comprobante está emitido y sólo falta el archivo: es reintentable,
+      // no un error del remito.
+      error.pending = ["BEJERMAN_PDF_WORKER_STALLED", "BEJERMAN_PDF_NOT_PUBLISHED"].includes(error.code);
       throw error;
     } catch (error) {
       if (timeout) window.clearTimeout(timeout);
       if (error?.terminal) {
         throw error;
       }
+      if (signal?.aborted) throw cancelled();
       const waitMs = Math.min(900 + attempt * 250, 2000);
       notifyProgress(onProgress, {
         state: "retrying",
         attempt,
         delayMs: waitMs,
+        elapsedMs: elapsed(),
+        documentKey,
         status: `La consulta del PDF del ${label} tardó demasiado.`,
-        detail: "NEXORA volverá a consultar automáticamente.",
+        detail: "NEXORA vuelve a consultar automáticamente.",
       });
-      await delay(waitMs);
+      await delay(waitMs, signal);
     }
   }
 }
