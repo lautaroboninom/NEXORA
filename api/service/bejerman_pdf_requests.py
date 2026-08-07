@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from .bejerman_companies import company_for_key
 from .bejerman_sdk import (
+    REMITO_COMPROBANTE_TYPES,
     BejermanPdfPendingError,
     BejermanPdfReference,
     BejermanSDKClient,
@@ -51,8 +52,8 @@ PROCESSABLE_STATES = (
 WORKER_OWNED_STATES = ("queued", "requesting", "waiting_sdk", "ready_direct")
 
 STAGE_LABELS = {
-    "queued": "En cola para solicitar la generación",
-    "requesting": "Solicitando la generación a Bejerman",
+    "queued": "En cola para generar el remito",
+    "requesting": "Generando el remito",
     "waiting_sdk": "Consultando el PDF oficial en Bejerman",
     "waiting_folder": "Esperando el archivo en la carpeta de Bejerman",
     "ready_direct": "Copiando el PDF a la carpeta configurada",
@@ -198,6 +199,149 @@ def _reference_values(client: BejermanSDKClient, reference: BejermanPdfReference
     return values
 
 
+def remito_pdf_enabled() -> bool:
+    """¿Genera NEXORA el PDF de los remitos?
+
+    `BEJERMAN_REMITO_PDF_FALLBACK_ENABLED` es el nombre viejo, de cuando esto era
+    sólo un último recurso; se sigue leyendo para no romper entornos ya configurados.
+    """
+
+    if getattr(settings, "BEJERMAN_REMITO_PDF_ENABLED", False):
+        return True
+    return bool(getattr(settings, "BEJERMAN_REMITO_PDF_FALLBACK_ENABLED", False))
+
+
+def is_remito_type(tipo: Any) -> bool:
+    """Las facturas quedan afuera: el renderer sólo reproduce remitos."""
+
+    return _clean(tipo).upper() in REMITO_COMPROBANTE_TYPES
+
+
+def _render_remito_pdf_bytes(comprobante: dict[str, Any], company_key: Any) -> bytes | None:
+    """Renderiza el remito. Devuelve None ante cualquier problema, nunca levanta."""
+
+    try:
+        from .bejerman_remito_pdf import render_remito_pdf
+        from .bejerman_remito_pdf_data import enrich_comprobante_for_pdf
+
+        pdf = render_remito_pdf(
+            enrich_comprobante_for_pdf(comprobante, company_key=company_key),
+            company_key=company_key,
+        )
+    except Exception:
+        logger.exception("bejerman_remito_pdf_render_failed", extra={"company_key": str(company_key)})
+        return None
+    return normalize_pdf_bytes(pdf) or None
+
+
+def store_rendered_remito_pdf(
+    comprobante: dict[str, Any],
+    *,
+    company_key: Any,
+    remito_group_id: str | None = None,
+    actor_user_id: int | None = None,
+) -> bool:
+    """Deja listo el PDF del remito apenas Bejerman devolvió el número.
+
+    Se llama desde los circuitos de emisión, con el comprobante que Bejerman acaba de
+    confirmar todavía en la mano — no hay que ir a desenterrarlo de lo guardado.
+
+    Escribe la fila directamente en `ready_direct`, que es el estado que el request ya
+    sabe servir, así que **todos los flujos de la interfaz quedan cubiertos sin
+    tocarlos**. La copia a la carpeta del ERP la hace después el worker por el camino
+    de siempre (`_process_direct_copy`).
+
+    Nunca levanta: cuando esto corre el remito YA está emitido en Bejerman, así que un
+    problema de PDF no puede tumbar la emisión. Devuelve si quedó guardado.
+    """
+
+    if not remito_pdf_enabled() or not isinstance(comprobante, dict):
+        return False
+    try:
+        tipo = _clean(comprobante.get("Comprobante_Tipo")).upper()
+        if not is_remito_type(tipo):
+            return False
+
+        client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
+        reference = BejermanPdfReference(
+            type=tipo,
+            number=_clean(comprobante.get("Comprobante_Numero")),
+            letter=_clean(comprobante.get("Comprobante_Letra")) or "R",
+            point_of_sale=_clean(comprobante.get("Comprobante_PtoVenta")),
+            issue_date=_clean(comprobante.get("Comprobante_FechaEmision")),
+            customer_code=_clean(comprobante.get("Cliente_Codigo")),
+        )
+        values = _reference_values(client, reference)
+        if not values["numero"] or not values["pto_venta"]:
+            return False
+
+        # Un lote de ingresos comparte el mismo remito y llama acá una vez por
+        # ingreso: si ya está resuelto, no se vuelve a renderizar.
+        existente = _load_request(values["document_key"])
+        if existente and _clean(existente.get("state")) in {"ready_direct", "ready_folder"}:
+            return True
+
+        pdf = _render_remito_pdf_bytes(comprobante, company_key)
+        if not pdf:
+            return False
+
+        checksum = hashlib.sha256(pdf).hexdigest()
+        with connection.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {TABLE_NAME} (
+                  document_key, remito_group_id, actor_user_id, company_key, customer_code,
+                  tipo, letra, pto_venta, numero, issue_date, state, ready_at,
+                  deadline_at, next_folder_check_at, remote_path, pdf_payload, payload_sha256
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, 'ready_direct',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '10 minutes',
+                        CURRENT_TIMESTAMP, %s, %s, %s)
+                ON CONFLICT (document_key) DO UPDATE
+                   SET state='ready_direct',
+                       ready_at=CURRENT_TIMESTAMP,
+                       lease_expires_at=NULL,
+                       next_folder_check_at=CURRENT_TIMESTAMP,
+                       pdf_payload=EXCLUDED.pdf_payload,
+                       payload_sha256=EXCLUDED.payload_sha256,
+                       remito_group_id=COALESCE({TABLE_NAME}.remito_group_id, EXCLUDED.remito_group_id),
+                       last_error_code=NULL, last_error_detail=NULL
+                 WHERE {TABLE_NAME}.state <> 'ready_folder'
+                """,
+                [
+                    values["document_key"],
+                    _clean(remito_group_id) or None,
+                    actor_user_id,
+                    values["company_key"],
+                    values["customer_code"],
+                    values["tipo"],
+                    values["letra"],
+                    values["pto_venta"],
+                    values["numero"],
+                    values["issue_date"],
+                    comprobante_pdf_output_path(client, reference),
+                    pdf,
+                    checksum,
+                ],
+            )
+    except Exception:
+        logger.exception(
+            "bejerman_remito_pdf_store_failed",
+            extra={"company_key": str(company_key), "remito_group_id": remito_group_id},
+        )
+        return False
+
+    logger.info(
+        "bejerman_remito_pdf_listo_al_emitir",
+        extra={
+            "document_key": values["document_key"],
+            "bytes": len(pdf),
+            "remito_group_id": remito_group_id,
+        },
+    )
+    return True
+
+
 def _row_from_cursor(cur) -> dict[str, Any] | None:
     raw = cur.fetchone()
     if raw is None:
@@ -308,10 +452,19 @@ def _pending_for(
     generation_requested = int(row.get("generation_attempt_count") or 0) > 0
     if retry_after_ms is None:
         retry_after_ms = 2500 if state in {"queued", "requesting"} else 5000
+    genera_nexora = remito_pdf_enabled() and is_remito_type(row.get("tipo"))
     if state == "queued":
-        detail = "El PDF oficial quedó en cola para solicitarse una sola vez a Bejerman."
+        detail = (
+            "El remito ya está emitido en Bejerman. NEXORA está preparando el PDF para imprimir."
+            if genera_nexora
+            else "El PDF oficial quedó en cola para solicitarse una sola vez a Bejerman."
+        )
     elif state == "requesting":
-        detail = "Bejerman está procesando la única solicitud de generación del PDF oficial."
+        detail = (
+            "NEXORA está generando el PDF del remito."
+            if genera_nexora
+            else "Bejerman está procesando la única solicitud de generación del PDF oficial."
+        )
     elif state == "waiting_sdk":
         detail = (
             "NEXORA está consultando el PDF oficial en Bejerman para guardarlo "
@@ -489,44 +642,39 @@ def requeue_pdf_request(
 
 
 def _render_own_remito_pdf(row: dict[str, Any]) -> bool:
-    """Último recurso: que el PDF lo genere NEXORA replicando el de Bejerman.
+    """Reproduce el remito a partir de la emisión guardada.
 
-    El comprobante ya está emitido y numerado en Bejerman; lo único que falta es
-    el papel. Cuando el servicio de PDF del ERP no lo entrega, NEXORA lo
-    reproduce a partir de la emisión guardada y lo deja como si hubiera llegado
-    del SDK, así el resto del circuito (incluida la copia a la carpeta del ERP)
-    sigue igual.
+    Es el camino para los comprobantes que no pasaron por `store_rendered_remito_pdf`
+    al emitirse: los anteriores a este cambio y los que se reimprimen. El comprobante
+    ya está emitido y numerado en Bejerman; lo único que falta es el papel. Se deja
+    como si hubiera llegado del SDK, así el resto del circuito (incluida la copia a la
+    carpeta del ERP) sigue igual.
     """
 
-    if not getattr(settings, "BEJERMAN_REMITO_PDF_FALLBACK_ENABLED", False):
+    if not remito_pdf_enabled() or not is_remito_type(row.get("tipo")):
         return False
     document_key = row["document_key"]
     try:
-        from .bejerman_remito_pdf import render_remito_pdf
-        from .bejerman_remito_pdf_data import enrich_comprobante_for_pdf, load_comprobante_for_document
+        from .bejerman_remito_pdf_data import load_comprobante_for_document
 
         comprobante = load_comprobante_for_document(row)
-        if not comprobante:
-            logger.warning("bejerman_remito_pdf_fallback_sin_payload", extra={"document_key": document_key})
-            return False
-        company_key = row.get("company_key")
-        pdf = render_remito_pdf(
-            enrich_comprobante_for_pdf(comprobante, company_key=company_key),
-            company_key=company_key,
-        )
     except Exception:
-        logger.exception("bejerman_remito_pdf_fallback_failed", extra={"document_key": document_key})
+        logger.exception("bejerman_remito_pdf_payload_failed", extra={"document_key": document_key})
+        return False
+    if not comprobante:
+        logger.warning("bejerman_remito_pdf_sin_payload", extra={"document_key": document_key})
         return False
 
-    if not normalize_pdf_bytes(pdf):
-        # Se valida acá y no en `_store_direct_pdf`, que ante un PDF inválido
-        # marca la fila como fallada culpando a Bejerman: si el que salió mal es
-        # el nuestro, corresponde dejar el error original de la cola.
-        logger.error("bejerman_remito_pdf_fallback_invalido", extra={"document_key": document_key})
+    # `_render_remito_pdf_bytes` ya valida los bytes. Se comprueba acá y no en
+    # `_store_direct_pdf`, que ante un PDF inválido marca la fila como fallada
+    # culpando a Bejerman: si el que salió mal es el nuestro, corresponde dejar el
+    # error original de la cola.
+    if not pdf:
+        logger.error("bejerman_remito_pdf_invalido", extra={"document_key": document_key})
         return False
 
     logger.info(
-        "bejerman_remito_pdf_fallback_generado",
+        "bejerman_remito_pdf_generado",
         extra={"document_key": document_key, "bytes": len(pdf)},
     )
     return _store_direct_pdf(row, pdf)
@@ -1329,6 +1477,14 @@ def _process_queued(row: dict[str, Any]) -> bool:
                 extra={"document_key": document_key},
             )
             return False
+
+        # Remitos emitidos antes de este cambio (o cuya emisión no llegó a guardar el
+        # PDF) no tienen la fila lista. Se reproducen acá en vez de pedirle a Bejerman
+        # un PDF que no entrega desde el 20/07. Va antes del claim y del register: así
+        # no consume el intento único ni paga la conexión al SDK.
+        if is_remito_type(current.get("tipo")) and _render_own_remito_pdf(current):
+            logger.info("bejerman_remito_pdf_generado_en_worker", extra={"document_key": document_key})
+            return True
 
         connect_timeout = _positive_int_setting("BEJERMAN_PDF_GENERATION_CONNECT_TIMEOUT", 10)
         read_timeout = _positive_int_setting("BEJERMAN_PDF_GENERATION_READ_TIMEOUT", 90)

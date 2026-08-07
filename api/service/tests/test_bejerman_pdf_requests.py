@@ -634,7 +634,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
 
         payload = pdf_error_metadata(ctx.exception)
         self.assertIs(payload["worker_alive"], True)
-        self.assertEqual(payload["stage_label"], "En cola para solicitar la generación")
+        self.assertEqual(payload["stage_label"], "En cola para generar el remito")
         self.assertEqual(payload["document_key"], document_key)
         self.assertGreaterEqual(payload["queued_seconds"], 300)
 
@@ -766,3 +766,130 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertFalse(second_pending.generation_requested)
         self.assertEqual(first_pending.pdf_state, "queued")
         self.assertEqual(self._count_rows(), 1)
+
+
+COMPROBANTE_EMITIDO = {
+    "Comprobante_Tipo": "RT",
+    "Comprobante_Letra": "R",
+    "Comprobante_PtoVenta": "00004",
+    "Comprobante_Numero": "00004345",
+    "Comprobante_FechaEmision": "2026-08-07",
+    "Cliente_Codigo": "TMD",
+    "Cliente_RazonSocial": "TERAPIAS MEDICAS DOMICILIARIAS S.A.",
+    "Comprobante_Items": [
+        {
+            "Item_NumeroRenglon": 1,
+            "Item_CodigoArticulo": "1204001",
+            "Item_CantidadUM1": "2",
+            "Item_DescripArticulo": "Jarra para aspirador",
+            "Item_Partida": "20260007",
+        }
+    ],
+}
+
+
+@skipUnless(connection.vendor == "postgresql", "El coordinador de PDFs requiere PostgreSQL")
+@override_settings(BEJERMAN_REMITO_PDF_ENABLED=True, BEJERMAN_REMITO_PDF_FALLBACK_ENABLED=False)
+class RemitoPdfGeneradoPorNexoraTests(TransactionTestCase):
+    """Bejerman da el número; el papel lo arma NEXORA.
+
+    El servicio de PDF del ERP no responde desde el 20/07, así que esperar su
+    archivo es un timeout garantizado en cada remito. Estos tests fijan que para los
+    remitos no se le pida nada, y que para las facturas se le siga pidiendo.
+    """
+
+    reset_sequences = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        call_command("apply_bejerman_worker_heartbeat_schema", verbosity=0)
+        call_command("apply_bejerman_pdf_requests_schema", verbosity=0)
+
+    def setUp(self):
+        super().setUp()
+        with connection.cursor() as cur:
+            cur.execute("DELETE FROM bejerman_pdf_requests")
+
+    @staticmethod
+    def _sin_pm():
+        """El PM sale por SSH a Bejerman; en tests no se sale a la red."""
+
+        return patch("service.bejerman_delivery._remote_bejerman_sql_csv", return_value=[])
+
+    def _guardar(self, comprobante=None, **kwargs):
+        from service.bejerman_pdf_requests import store_rendered_remito_pdf
+
+        with self._sin_pm():
+            return store_rendered_remito_pdf(
+                comprobante if comprobante is not None else COMPROBANTE_EMITIDO,
+                company_key=kwargs.pop("company_key", "SEPID"),
+                **kwargs,
+            )
+
+    def _fila(self, numero="00004345"):
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT state, pdf_payload, tipo FROM bejerman_pdf_requests WHERE numero=%s",
+                [numero],
+            )
+            return cur.fetchone()
+
+    def test_al_emitir_queda_el_pdf_listo_para_servir(self):
+        self.assertTrue(self._guardar())
+        state, payload, tipo = self._fila()
+        self.assertEqual(state, "ready_direct")
+        self.assertEqual(tipo, "RT")
+        self.assertTrue(bytes(payload).startswith(b"%PDF"))
+
+    def test_el_request_devuelve_el_pdf_sin_pedirle_nada_a_bejerman(self):
+        self._guardar()
+        client = BejermanSDKClient.__new__(BejermanSDKClient)
+        client.company_key = "SEPID"
+        client.actor_user_id = None
+        reference = BejermanPdfReference(
+            type="RT", number="00004345", letter="R",
+            point_of_sale="00004", issue_date="2026-08-07", customer_code="TMD",
+        )
+        with patch.object(BejermanSDKClient, "generar_comprobante_ventas_pdf") as generar:
+            pdf, content_type = fetch_or_enqueue_comprobante_pdf(client, reference)
+        generar.assert_not_called()
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertEqual(content_type, "application/pdf")
+
+    def test_las_facturas_se_le_siguen_pidiendo_a_bejerman(self):
+        # Candado del guard por tipo: el renderer sólo sabe remitos y una factura
+        # impresa con diseño de remito sería un comprobante fiscal mal emitido.
+        factura = dict(COMPROBANTE_EMITIDO, Comprobante_Tipo="FC", Comprobante_Numero="00009001")
+        self.assertFalse(self._guardar(factura))
+        self.assertIsNone(self._fila("00009001"))
+
+    def test_llamarlo_dos_veces_no_regenera(self):
+        # Un lote de ingresos comparte remito y llama una vez por ingreso.
+        self.assertTrue(self._guardar())
+        with patch("service.bejerman_pdf_requests._render_remito_pdf_bytes") as render:
+            self.assertTrue(self._guardar())
+        render.assert_not_called()
+
+    def test_si_el_render_falla_no_escribe_nada_y_no_levanta(self):
+        # La emisión ya ocurrió en Bejerman: un problema de PDF no puede tumbarla.
+        with patch(
+            "service.bejerman_pdf_requests._render_remito_pdf_bytes",
+            side_effect=RuntimeError("boom"),
+        ):
+            self.assertFalse(self._guardar())
+        self.assertIsNone(self._fila())
+
+    def test_un_comprobante_sin_numero_no_deja_basura(self):
+        self.assertFalse(self._guardar(dict(COMPROBANTE_EMITIDO, Comprobante_Numero="")))
+
+    @override_settings(BEJERMAN_REMITO_PDF_ENABLED=False, BEJERMAN_REMITO_PDF_FALLBACK_ENABLED=False)
+    def test_apagado_no_hace_nada(self):
+        self.assertFalse(self._guardar())
+        self.assertIsNone(self._fila())
+
+    def test_el_nombre_viejo_del_setting_sigue_valiendo(self):
+        from service.bejerman_pdf_requests import remito_pdf_enabled
+
+        with override_settings(BEJERMAN_REMITO_PDF_ENABLED=False, BEJERMAN_REMITO_PDF_FALLBACK_ENABLED=True):
+            self.assertTrue(remito_pdf_enabled())

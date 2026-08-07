@@ -140,6 +140,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "service.middleware.RequestTimingMiddleware",     # primero: mide el request completo
     "corsheaders.middleware.CorsMiddleware",          # debe ir arriba de CommonMiddleware
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -179,6 +180,10 @@ DATABASES = {
         "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
     }
 }
+
+# Umbral en ms a partir del cual RequestTimingMiddleware loguea un request.
+# 0 lo desactiva.
+REQUEST_TIMING_LOG_THRESHOLD_MS = int(os.getenv("REQUEST_TIMING_LOG_THRESHOLD_MS", "1000"))
 
 CACHES = {
     "default": {
@@ -332,6 +337,17 @@ BEJERMAN_STOCK_CORRECTION_CAUSA_EMISION = os.getenv("BEJERMAN_STOCK_CORRECTION_C
 BEJERMAN_ARTICLE_AUTO_MATCH = _bool_env("BEJERMAN_ARTICLE_AUTO_MATCH", "1")
 BEJERMAN_MAX_ATTEMPTS = int(os.getenv("BEJERMAN_MAX_ATTEMPTS", "8"))
 BEJERMAN_REQUEST_TIMEOUT = int(os.getenv("BEJERMAN_REQUEST_TIMEOUT", "30"))
+# Timeout más corto para los endpoints interactivos (buscador de artículos, stock
+# de una partida): ahí el usuario está esperando la respuesta y colgarse 30s
+# retiene un thread de gunicorn y una transacción de Postgres abiertos al pedo.
+# Con el cache de abajo la descarga completa pasa a ser esporádica, así que se
+# deja margen para que la primera (fría) igual llegue a completarse.
+BEJERMAN_INTERACTIVE_REQUEST_TIMEOUT = int(os.getenv("BEJERMAN_INTERACTIVE_REQUEST_TIMEOUT", "20"))
+# TTL de los volcados completos que el SDK devuelve sin filtrar (ver
+# service/bejerman_catalog_cache.py). 0 desactiva el cache.
+BEJERMAN_ARTICLES_CACHE_SECONDS = int(os.getenv("BEJERMAN_ARTICLES_CACHE_SECONDS", "300"))
+BEJERMAN_PARTIDAS_CACHE_SECONDS = int(os.getenv("BEJERMAN_PARTIDAS_CACHE_SECONDS", "60"))
+BEJERMAN_STOCK_CACHE_SECONDS = int(os.getenv("BEJERMAN_STOCK_CACHE_SECONDS", "30"))
 BEJERMAN_SYNC_TRANSIENT_MAX_ATTEMPTS = int(
     os.getenv("BEJERMAN_SYNC_TRANSIENT_MAX_ATTEMPTS", "12")
 )
@@ -407,9 +423,15 @@ BEJERMAN_PDF_COPY_RETRY_SECONDS = int(os.getenv("BEJERMAN_PDF_COPY_RETRY_SECONDS
 # llegó. Sin esto una sola generación fallida dejaba el comprobante sin PDF para
 # siempre, porque no había ningún camino de reintento.
 BEJERMAN_PDF_MAX_REGENERATIONS = int(os.getenv("BEJERMAN_PDF_MAX_REGENERATIONS", "2"))
-# Último recurso cuando Bejerman no entrega el PDF de un remito ya emitido: que lo
-# genere NEXORA replicando el del ERP. Arranca apagado a propósito — conviene
-# encenderlo después de comprobar el calce en el papel preimpreso de cada empresa.
+# Que el PDF de los remitos lo genere NEXORA replicando el del ERP. A Bejerman se le
+# pide el número (es el maestro de la numeración) y, con ese número, NEXORA arma el
+# papel: el servicio de PDF del ERP no lo entrega desde el 20/07. Sólo aplica a
+# remitos; las facturas se siguen pidiendo a Bejerman.
+# Arranca apagado a propósito — encenderlo después de comprobar el calce sobre el
+# papel preimpreso de cada empresa, que usan formularios distintos.
+BEJERMAN_REMITO_PDF_ENABLED = _bool_env("BEJERMAN_REMITO_PDF_ENABLED", "0")
+# Nombre anterior, de cuando esto era sólo un último recurso. Se sigue leyendo para no
+# romper los entornos que ya lo tienen configurado.
 BEJERMAN_REMITO_PDF_FALLBACK_ENABLED = _bool_env("BEJERMAN_REMITO_PDF_FALLBACK_ENABLED", "0")
 # Directorio con cour.ttf/courbd.ttf para embeber la Courier New real. Sin esto se
 # usa la Courier de ReportLab, que tiene el mismo avance (0.6 em) y cae en la misma

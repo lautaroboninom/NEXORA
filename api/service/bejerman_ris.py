@@ -59,7 +59,9 @@ from .bejerman_pdf_requests import (
     BejermanPdfWorkerStalledError,
     fetch_or_enqueue_comprobante_pdf,
     pdf_error_metadata,
+    store_rendered_remito_pdf,
 )
+from .bejerman_remito_pdf_data import comprobante_from_emission
 from .bejerman_sync import (
     BejermanBlockedError,
     BejermanConfigError,
@@ -1025,6 +1027,15 @@ def _update_ris_generated(
     if sync_ingreso_remito and remito_number:
         with connection.cursor() as cur:
             cur.execute("UPDATE ingresos SET remito_ingreso = %s WHERE id = %s", [remito_number, ingreso_id])
+
+    # Bejerman ya confirmó el número: con eso NEXORA arma el papel en el momento, en
+    # vez de pedirle un PDF que el ERP no entrega. El modo "registrar" queda afuera
+    # porque ese remito ya existe impreso (por eso su pdf_status es 'not_applicable').
+    if document_mode != RIS_DOCUMENT_MODE_REGISTER:
+        comprobante = comprobante_from_emission(response, payload)
+        if comprobante:
+            store_rendered_remito_pdf(comprobante, company_key=company_key)
+
     return dict(zip(cols, row)) if row else (_row_for_ingreso(ingreso_id) or {})
 
 

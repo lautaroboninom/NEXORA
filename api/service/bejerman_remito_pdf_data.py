@@ -183,6 +183,21 @@ def _find_comprobante(node: Any, depth: int = 0) -> dict[str, Any] | None:
     return None
 
 
+def comprobante_from_emission(*candidates: Any) -> dict[str, Any] | None:
+    """Saca el comprobante de la respuesta de emisión que todavía está en memoria.
+
+    Es el camino preferido: se llama apenas Bejerman confirmó el número, así que no
+    hay que ir a buscar nada a la base. Se le pasan la respuesta y el pedido, en ese
+    orden de prioridad.
+    """
+
+    for candidato in candidates:
+        comprobante = _find_comprobante(candidato)
+        if comprobante:
+            return comprobante
+    return None
+
+
 def load_comprobante_for_document(row: dict[str, Any]) -> dict[str, Any] | None:
     """Recupera el comprobante emitido a partir de la fila de la cola de PDF.
 

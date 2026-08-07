@@ -33,8 +33,6 @@ from .bejerman_sdk import (
     build_article_filters,
     build_article_sales_vat_map,
     build_article_stock_lots,
-    build_articles_result,
-    build_partida_rows,
     build_delivery_remito_comprobante,
     build_facturacion_result,
     build_occasional_customer_fields,
@@ -63,14 +61,19 @@ from .bejerman_sdk import (
     service_release_equipment_line,
     service_release_item_legend,
     sort_document_items,
+    _temporary_request_timeout,
+    filter_article_items,
 )
+from . import bejerman_catalog_cache
 from .bejerman_pdf_requests import (
     BejermanPdfFolderUnavailableError,
     BejermanPdfNotPublishedError,
     BejermanPdfWorkerStalledError,
     fetch_or_enqueue_comprobante_pdf,
     pdf_error_metadata,
+    store_rendered_remito_pdf,
 )
+from .bejerman_remito_pdf_data import comprobante_from_emission
 from .bejerman_sync import _records_for_partida_any_quantity, process_bejerman_jobs
 from .bejerman_companies import company_for_key
 from .bejerman_particular_customers import ensure_particular_customer_enabled
@@ -325,6 +328,18 @@ def _bridge_article(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _interactive_request_timeout() -> int:
+    """Timeout para las llamadas que ocurren con el usuario esperando en pantalla.
+
+    Bajarlo respecto de BEJERMAN_REQUEST_TIMEOUT es deliberado: acá cada segundo
+    de espera retiene un thread de gunicorn y, por ATOMIC_REQUESTS, una
+    transacción de Postgres abierta."""
+    try:
+        return max(1, int(getattr(settings, "BEJERMAN_INTERACTIVE_REQUEST_TIMEOUT", 20)))
+    except (TypeError, ValueError):
+        return 20
+
+
 def list_bejerman_articles(
     search: str | None = None,
     limit: Any = 20,
@@ -343,8 +358,11 @@ def list_bejerman_articles(
             actor_user_id=actor_user_id,
             allow_system_credentials=True,
         )
-        filters = build_article_filters(q) if q else []
-        data = build_articles_result(client.list_articulos(filters, clean_limit), {"search": q, "limit": clean_limit})
+        # ObtenerArticulos ignora los filtros y baja el catálogo entero, así que
+        # el filtro es local; lo caro es la descarga y el mapeo, que se cachean.
+        with _temporary_request_timeout(client, _interactive_request_timeout()):
+            catalog = bejerman_catalog_cache.article_catalog(client, normalized_company)
+        data = filter_article_items(catalog.items, {"search": q, "limit": clean_limit}, catalog.blobs)
     except Exception as exc:
         raise _sdk_error(exc) from exc
     return {
@@ -494,15 +512,17 @@ def list_bejerman_article_stock(
             actor_user_id=actor_user_id,
             allow_system_credentials=True,
         )
-        stock_response = client.obtener_stock_deposito(normalized_deposit)
-        partidas_response = client.obtener_partidas()
-        raw_stock_rows = build_stock_rows(stock_response)
-        lots = build_article_stock_lots(
-            raw_stock_rows,
-            build_partida_rows(partidas_response),
-            code,
-            normalized_deposit,
-        )
+        # Ambas operaciones devuelven la tabla completa (todo el stock del depósito
+        # y todas las partidas de la empresa), no lo del artículo pedido: sin cache
+        # esto se baja entero en cada click sobre una partida.
+        with _temporary_request_timeout(client, _interactive_request_timeout()):
+            raw_stock_rows = bejerman_catalog_cache.stock_rows(client, normalized_company, normalized_deposit)
+            lots = build_article_stock_lots(
+                raw_stock_rows,
+                bejerman_catalog_cache.partida_rows(client, normalized_company),
+                code,
+                normalized_deposit,
+            )
         total_available = None
         if code:
             target = code.casefold()
@@ -690,8 +710,9 @@ def list_rental_available_equipment(
     checked_at = timezone.now().isoformat()
     try:
         client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
-        stock_rows = build_stock_rows(client.obtener_stock_deposito(RENTAL_STOCK_DEPOSIT))
-        partida_rows = build_partida_rows(client.obtener_partidas())
+        with _temporary_request_timeout(client, _interactive_request_timeout()):
+            stock_rows = bejerman_catalog_cache.stock_rows(client, normalized_company, RENTAL_STOCK_DEPOSIT)
+            partida_rows = bejerman_catalog_cache.partida_rows(client, normalized_company)
     except Exception as exc:
         raise _sdk_error(exc) from exc
 
@@ -1806,10 +1827,16 @@ def _delivery_article_sales_vat_map(
     article_codes = _delivery_article_codes_requiring_vat(bridge_request, profile)
     if not article_codes:
         return {}
-    catalog = client.list_articulos([], max(50, len(article_codes)))
+    catalog = bejerman_catalog_cache.article_response(client)
     article_tax_by_code = build_article_sales_vat_map(catalog, article_codes)
     missing_codes = _missing_article_sales_vat_codes(article_codes, article_tax_by_code)
     if missing_codes:
+        # Reintento por código. En esta instalación ObtenerArticulos ignora los
+        # filtros (ver BejermanSDKClient.list_articulos), así que en producción
+        # devuelve lo mismo que el catálogo de arriba; se conserva porque es un
+        # camino de error — si el IVA sigue sin resolverse la emisión se aborta —
+        # y no encarece el caso normal, donde el catálogo cacheado ya resolvió
+        # todos los códigos y este bloque no llega a ejecutarse.
         responses = [client.list_articulos(build_article_filters(code, field="code"), 20) for code in missing_codes]
         article_tax_by_code.update(build_article_sales_vat_map(responses, missing_codes))
         missing_codes = _missing_article_sales_vat_codes(article_codes, article_tax_by_code)
@@ -6262,6 +6289,17 @@ def _finalize_delivery_remito_group(
             status="finalized",
             response_payload=response_summary,
         )
+        # Bejerman ya confirmó el número: con eso NEXORA arma el papel acá mismo, en
+        # vez de pedirle un PDF que el ERP no entrega. Va antes del aviso por mail,
+        # que adjunta el PDF con `get_remito_group_pdf`.
+        comprobante = comprobante_from_emission(response, bridge_data, bridge_request)
+        if comprobante:
+            store_rendered_remito_pdf(
+                comprobante,
+                company_key=compatibility["companyKey"],
+                remito_group_id=group_id,
+                actor_user_id=actor_user_id,
+            )
         for order_id in ids:
             create_event(
                 order_id,

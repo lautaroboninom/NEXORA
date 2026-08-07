@@ -6192,7 +6192,7 @@ def build_ingreso_bejerman_estado(ingreso_id: int, actor_user_id: int | None) ->
     }
 
 
-def _bejerman_estado_error_response(exc: Exception) -> Response:
+def _bejerman_estado_error_response(exc: Exception, ingreso_id: int | None = None) -> Response:
     detail = str(exc) or "No fue posible consultar Bejerman."
     lower = detail.lower()
     if isinstance(exc, BejermanSdkConfigError) and "credencial" in lower:
@@ -6205,6 +6205,18 @@ def _bejerman_estado_error_response(exc: Exception) -> Response:
         code = "BEJERMAN_SDK_ERROR"
     else:
         code = "BEJERMAN_ERROR"
+    # Hasta acá estos 503 sólo dejaban rastro como "Service Unavailable" en el log
+    # de django.request, sin el motivo: las excepciones del SDK se atrapan y se
+    # traducen sin loguearse. El motivo va en el mensaje y no en `extra` porque el
+    # formatter configurado ("%(asctime)s %(levelname)s %(name)s: %(message)s") no
+    # imprime los campos extra.
+    logger.warning(
+        "ingreso_bejerman_estado_sdk_error ingreso_id=%s code=%s exc=%s detail=%s",
+        ingreso_id if ingreso_id is not None else "-",
+        code,
+        type(exc).__name__,
+        detail[:300],
+    )
     return Response({"detail": detail, "code": code}, status=503)
 
 
@@ -6218,10 +6230,10 @@ class IngresoBejermanEstadoView(APIView):
         try:
             payload = build_ingreso_bejerman_estado(ingreso_id, actor_user_id)
         except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         except Exception as exc:
             logger.warning("ingreso_bejerman_estado_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         status_code = int(payload.pop("_status_code", 200))
         return Response(payload, status=status_code)
 
@@ -6245,10 +6257,10 @@ class IngresoBejermanEstadoAccionView(APIView):
         except BejermanRisError as exc:
             return Response({"detail": str(exc)}, status=409)
         except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         except Exception as exc:
             logger.warning("ingreso_bejerman_forzar_stock_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         state.pop("_status_code", None)
         return Response({"ok": True, "result": result, "state": state})
 
@@ -6266,10 +6278,10 @@ class IngresoAlquilerRemitoView(APIView):
         except RentalRemitoError as exc:
             return Response({"detail": exc.detail, "code": exc.code}, status=exc.status_code)
         except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         except Exception as exc:
             logger.warning("ingreso_alquiler_remito_estado_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         return Response(state)
 
 
@@ -6293,14 +6305,14 @@ class IngresoAlquilerRemitoAccionView(APIView):
         except RentalRemitoError as exc:
             return Response({"detail": exc.detail, "code": exc.code}, status=exc.status_code)
         except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         except Exception as exc:
             logger.warning(
                 "ingreso_alquiler_remito_accion_failed",
                 exc_info=True,
                 extra={"ingreso_id": ingreso_id, "action": action},
             )
-            return _bejerman_estado_error_response(exc)
+            return _bejerman_estado_error_response(exc, ingreso_id)
         return Response(result)
 
 

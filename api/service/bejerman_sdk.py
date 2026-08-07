@@ -670,6 +670,20 @@ class BejermanSDKClient:
             filters.append(bejerman_filter("Proveedor_Codigo", "IGUAL", provider_code))
         return self.list_comprobantes_compras(filters, en_mon_ext)
 
+    def _drop_cached_stock(self) -> None:
+        """Marca como vencido el stock cacheado de la empresa.
+
+        Se llama después de cualquier ingreso de comprobante, incluso si falló:
+        un timeout no confirma que el movimiento no se haya registrado, así que
+        lo seguro es asumir que el stock cambió. El import es diferido porque
+        `bejerman_catalog_cache` importa de este módulo."""
+        try:
+            from . import bejerman_catalog_cache
+
+            bejerman_catalog_cache.invalidate_stock(self.company_key or None)
+        except Exception:  # nunca romper una emisión por el cache
+            pass
+
     def ingresar_comprobante_ventas_json(
         self,
         comprobante: dict[str, Any],
@@ -679,7 +693,10 @@ class BejermanSDKClient:
         numera_flex: str = "S",
         emite_reg: str = "E",
     ) -> dict[str, str]:
-        return self.execute(circuito, operacion, params_json=[_json_param([comprobante]), numera_flex, emite_reg])
+        try:
+            return self.execute(circuito, operacion, params_json=[_json_param([comprobante]), numera_flex, emite_reg])
+        finally:
+            self._drop_cached_stock()
 
     def ingresar_lista_comprobantes_stock_json(
         self,
@@ -687,7 +704,10 @@ class BejermanSDKClient:
         *,
         numera_flex: str = "N",
     ) -> dict[str, str]:
-        return self.execute("STOCK", "IngresarListaComprobantesJSON", params_json=[_json_param(comprobantes), numera_flex])
+        try:
+            return self.execute("STOCK", "IngresarListaComprobantesJSON", params_json=[_json_param(comprobantes), numera_flex])
+        finally:
+            self._drop_cached_stock()
 
     def ingresar_lista_comprobantes_compras_json(
         self,
@@ -700,7 +720,10 @@ class BejermanSDKClient:
         params_json: list[Any] = [_json_param(comprobantes), numera_flex, emite_reg]
         if maximo_valor_ajuste is not None:
             params_json.append(maximo_valor_ajuste)
-        return self.execute("COMPRAS", "IngresarListaComprobantesJSON", params_json=params_json)
+        try:
+            return self.execute("COMPRAS", "IngresarListaComprobantesJSON", params_json=params_json)
+        finally:
+            self._drop_cached_stock()
 
     def obtener_stock_partida(self, partida: str) -> dict[str, str]:
         return self.execute("STOCK", "ObtenerStockPartida", params=[partida])
@@ -806,23 +829,49 @@ def map_article(record: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def build_articles_result(responses: list[dict[str, Any]] | dict[str, Any], query: dict[str, Any] | None = None) -> dict[str, Any]:
-    query = query or {}
+def map_article_items(responses: list[dict[str, Any]] | dict[str, Any]) -> list[dict[str, Any]]:
+    """Mapea y deduplica el volcado crudo de ObtenerArticulos.
+
+    Separado de `build_articles_result` para poder cachear el catálogo mapeado
+    (ver `bejerman_catalog_cache`) y aplicar después el filtro de búsqueda sobre
+    esa lista, en vez de re-mapear el catálogo entero en cada tecla."""
     response_list = responses if isinstance(responses, list) else [responses]
     mapped = [article for response in response_list for article in (map_article(record) for record in records_from_response(response)) if article]
     unique: dict[str, dict[str, Any]] = {}
     for item in mapped:
         key = normalize_search(item.get("code") or item.get("name") or item.get("id"))
         unique.setdefault(key, item)
+    return list(unique.values())
+
+
+def article_search_blob(item: dict[str, Any]) -> str:
+    return normalize_search(f"{item.get('code')} {item.get('name')} {item.get('description')}")
+
+
+def filter_article_items(
+    items: list[dict[str, Any]],
+    query: dict[str, Any] | None = None,
+    blobs: list[str] | None = None,
+) -> dict[str, Any]:
+    """Aplica búsqueda y límite sobre un catálogo ya mapeado.
+
+    `blobs` es el texto normalizado de cada ítem precalculado en el mismo orden;
+    si viene, evita normalizar el catálogo completo en cada búsqueda."""
+    query = query or {}
     search = normalize_search(query.get("search"))
-    items = list(unique.values())
     if search:
-        items = [item for item in items if search in normalize_search(f"{item.get('code')} {item.get('name')} {item.get('description')}")]
+        if blobs is None or len(blobs) != len(items):
+            blobs = [article_search_blob(item) for item in items]
+        items = [item for item, blob in zip(items, blobs) if search in blob]
     try:
         limit = max(1, min(50, int(query.get("limit") or 20)))
     except (TypeError, ValueError):
         limit = 20
     return {"items": items[:limit], "pagination": create_pagination(len(items), 1, limit)}
+
+
+def build_articles_result(responses: list[dict[str, Any]] | dict[str, Any], query: dict[str, Any] | None = None) -> dict[str, Any]:
+    return filter_article_items(map_article_items(responses), query)
 
 
 def normalize_article_code(value: Any) -> str:

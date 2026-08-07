@@ -491,25 +491,17 @@ def _delivery_partida_stock_lots(
     actor_user_id: int | None,
     cache: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    from .bejerman_sdk import (
-        BejermanSDKClient,
-        build_article_stock_lots,
-        build_partida_rows,
-        build_stock_rows,
-    )
+    from .bejerman_sdk import BejermanSDKClient, build_article_stock_lots
+    from . import bejerman_catalog_cache
 
     company_cache = cache.setdefault(company_key, {})
-    if "partida_rows" not in company_cache:
+    client = company_cache.get("client")
+    if client is None:
         client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
         company_cache["client"] = client
-        company_cache["partida_rows"] = build_partida_rows(client.obtener_partidas())
-    client = company_cache["client"]
-    stock_rows_by_deposit = company_cache.setdefault("stock_rows_by_deposit", {})
-    if deposit_code not in stock_rows_by_deposit:
-        stock_rows_by_deposit[deposit_code] = build_stock_rows(client.obtener_stock_deposito(deposit_code))
     return build_article_stock_lots(
-        stock_rows_by_deposit[deposit_code],
-        company_cache["partida_rows"],
+        bejerman_catalog_cache.stock_rows(client, company_key, deposit_code),
+        bejerman_catalog_cache.partida_rows(client, company_key),
         article_code,
         deposit_code,
     )
@@ -526,19 +518,17 @@ def _delivery_article_available_quantity(
     articleCode (sin agrupar por partida) — a diferencia de `_delivery_partida_stock_lots`,
     sirve para artículos que no llevan partida (article_requires_partida=false), que
     build_article_stock_lots descarta por no tener partida informada."""
-    from .bejerman_sdk import BejermanSDKClient, build_stock_rows
+    from .bejerman_sdk import BejermanSDKClient
+    from . import bejerman_catalog_cache
 
     company_cache = cache.setdefault(company_key, {})
     client = company_cache.get("client")
     if client is None:
         client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
         company_cache["client"] = client
-    stock_rows_by_deposit = company_cache.setdefault("stock_rows_by_deposit", {})
-    if deposit_code not in stock_rows_by_deposit:
-        stock_rows_by_deposit[deposit_code] = build_stock_rows(client.obtener_stock_deposito(deposit_code))
     target = article_code.casefold()
     total = Decimal("0")
-    for row in stock_rows_by_deposit[deposit_code]:
+    for row in bejerman_catalog_cache.stock_rows(client, company_key, deposit_code):
         if str(row.get("articleCode") or "").casefold() != target:
             continue
         total += _decimal(row.get("availableQuantity"), "0")
@@ -1593,35 +1583,48 @@ def _lookup_article_requires_partida(
     company_key: str,
     actor_user_id: int | None,
     cache: dict[str, Any],
+    *,
+    allow_remote_fetch: bool = True,
 ) -> bool | None:
-    from .bejerman_sdk import BejermanSDKClient, build_article_filters, build_articles_result
+    from .bejerman_sdk import BejermanSDKClient
+    from . import bejerman_catalog_cache
 
     code_key = _article_code_key(article_code)
     lookup_key = f"{company_key}|{code_key}"
     if lookup_key in cache:
         return cache[lookup_key]
 
+    # ObtenerArticulos devuelve el catálogo completo aunque se le pase un filtro
+    # por código, así que se indexa una vez por empresa en lugar de repetir la
+    # descarga por cada artículo de la orden.
     company_cache = cache.setdefault(f"client:{company_key}", {})
-    client = company_cache.get("client")
-    if client is None:
-        client = BejermanSDKClient(
-            company_key=company_key,
-            actor_user_id=actor_user_id,
-            allow_system_credentials=True,
-        )
-        company_cache["client"] = client
+    articles_by_code = company_cache.get("articles_by_code")
+    if articles_by_code is None:
+        if allow_remote_fetch:
+            client = company_cache.get("client")
+            if client is None:
+                client = BejermanSDKClient(
+                    company_key=company_key,
+                    actor_user_id=actor_user_id,
+                    allow_system_credentials=True,
+                )
+                company_cache["client"] = client
+            catalog = bejerman_catalog_cache.article_catalog(client, company_key)
+        else:
+            catalog = bejerman_catalog_cache.article_catalog_if_cached(company_key)
+            if catalog is None:
+                # Sin catálogo caliente se deja el flag sin resolver en vez de
+                # bloquear al usuario con una descarga completa por SOAP.
+                return None
+        articles_by_code = {}
+        for article in catalog.items:
+            articles_by_code.setdefault(_article_code_key(article.get("code")), article)
+        company_cache["articles_by_code"] = articles_by_code
 
-    data = build_articles_result(
-        client.list_articulos(build_article_filters(article_code, field="code"), 50),
-        {"search": article_code, "limit": 50},
-    )
-    for article in data.get("items") or []:
-        if _article_code_key(article.get("code")) == code_key:
-            result = _nullable_bool(article.get("requiresPartida"))
-            cache[lookup_key] = result
-            return result
-    cache[lookup_key] = None
-    return None
+    article = articles_by_code.get(code_key)
+    result = _nullable_bool(article.get("requiresPartida")) if article else None
+    cache[lookup_key] = result
+    return result
 
 
 def refresh_delivery_order_article_partida_flags(
@@ -1630,7 +1633,13 @@ def refresh_delivery_order_article_partida_flags(
     *,
     strict: bool = False,
     action: str = "continuar",
+    allow_remote_fetch: bool = True,
 ) -> dict[str, Any]:
+    """Resuelve contra Bejerman si los artículos de la orden llevan partida.
+
+    `allow_remote_fetch=False` limita la resolución al catálogo ya cacheado: sirve
+    para las lecturas de pantalla, donde conviene mostrar el dato si está a mano
+    pero no hacer esperar al usuario una descarga completa del catálogo."""
     if normalize_delivery_type(order.get("deliveryType") or order.get("delivery_type")) not in {"sale", "demo"}:
         return order
 
@@ -1642,7 +1651,13 @@ def refresh_delivery_order_article_partida_flags(
             continue
         article_code = _optional_text(item.get("articleCode") or item.get("article_code"))
         try:
-            requires_partida = _lookup_article_requires_partida(article_code, company_key, actor_user_id, cache)
+            requires_partida = _lookup_article_requires_partida(
+                article_code,
+                company_key,
+                actor_user_id,
+                cache,
+                allow_remote_fetch=allow_remote_fetch,
+            )
         except Exception as exc:
             logger.warning(
                 "delivery_order_article_partida_policy_lookup_failed",
@@ -3089,6 +3104,7 @@ def get_delivery_order(
     for_update: bool = False,
     actor_user_id: int | None = None,
     refresh_article_flags: bool = False,
+    refresh_article_flags_allow_fetch: bool = True,
 ) -> dict[str, Any]:
     suffix = "FOR UPDATE" if for_update else ""
     with connection.cursor() as cur:
@@ -3131,7 +3147,12 @@ def get_delivery_order(
             ]
     order = serialize_order(row)
     if refresh_article_flags:
-        order = refresh_delivery_order_article_partida_flags(order, actor_user_id, strict=False)
+        order = refresh_delivery_order_article_partida_flags(
+            order,
+            actor_user_id,
+            strict=False,
+            allow_remote_fetch=refresh_article_flags_allow_fetch,
+        )
     return order
 
 

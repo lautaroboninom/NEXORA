@@ -531,31 +531,44 @@ function ArticleStockBadge({ order, item }) {
   );
 }
 
+function savedPartidaRows(order, item) {
+  if (Array.isArray(item.partidas) && item.partidas.length) {
+    return item.partidas.map((partida) => ({
+      ingresoId: partida.ingresoId == null ? "" : String(partida.ingresoId),
+      deviceId: partida.deviceId == null ? "" : String(partida.deviceId),
+      partida: clean(partida.partida),
+      assignedQuantity: String(partida.assignedQuantity || item.quantity || 1),
+      partidaExpirationDate: clean(partida.partidaExpirationDate),
+      stockDepositCode: clean(partida.stockDepositCode),
+      stockAvailableQuantity: partida.stockAvailableQuantity == null ? "" : String(partida.stockAvailableQuantity),
+      stockCheckedAt: clean(partida.stockCheckedAt),
+    }));
+  }
+  return [
+    {
+      ingresoId: item?.ingresoId == null ? "" : String(item.ingresoId),
+      deviceId: item?.deviceId == null ? "" : String(item.deviceId),
+      partida: deliveryOrderItemEffectivePartida(item, order),
+      assignedQuantity: String(item.quantity || 1),
+      partidaExpirationDate: clean(item.partidaExpirationDate),
+      stockDepositCode: clean(item.stockDepositCode),
+      stockAvailableQuantity: item.stockAvailableQuantity == null ? "" : String(item.stockAvailableQuantity),
+      stockCheckedAt: clean(item.stockCheckedAt),
+    },
+  ];
+}
+
+// Lo escrito en el editor no vale hasta que se guarda: el resumen "Asignado x / y" contaba
+// las filas locales y daba por completo un renglón que para la emisión seguía vacío.
+function partidaRowsFingerprint(rows) {
+  return (rows || [])
+    .filter((row) => clean(row?.partida))
+    .map((row) => `${clean(row.partida).toLowerCase()}:${numberOf(row?.assignedQuantity, 0)}`)
+    .join("|");
+}
+
 function PartidasEditor({ order, item, onUpdated, disabled }) {
-  const initial = Array.isArray(item.partidas) && item.partidas.length
-    ? item.partidas.map((partida) => ({
-        ingresoId: partida.ingresoId == null ? "" : String(partida.ingresoId),
-        deviceId: partida.deviceId == null ? "" : String(partida.deviceId),
-        partida: clean(partida.partida),
-        assignedQuantity: String(partida.assignedQuantity || item.quantity || 1),
-        partidaExpirationDate: clean(partida.partidaExpirationDate),
-        stockDepositCode: clean(partida.stockDepositCode),
-        stockAvailableQuantity: partida.stockAvailableQuantity == null ? "" : String(partida.stockAvailableQuantity),
-        stockCheckedAt: clean(partida.stockCheckedAt),
-      }))
-    : [
-        {
-          ingresoId: item?.ingresoId == null ? "" : String(item.ingresoId),
-          deviceId: item?.deviceId == null ? "" : String(item.deviceId),
-          partida: deliveryOrderItemEffectivePartida(item, order),
-          assignedQuantity: String(item.quantity || 1),
-          partidaExpirationDate: clean(item.partidaExpirationDate),
-          stockDepositCode: clean(item.stockDepositCode),
-          stockAvailableQuantity: item.stockAvailableQuantity == null ? "" : String(item.stockAvailableQuantity),
-          stockCheckedAt: clean(item.stockCheckedAt),
-        },
-      ];
-  const [rows, setRows] = useState(initial);
+  const [rows, setRows] = useState(() => savedPartidaRows(order, item));
   const [stock, setStock] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -604,16 +617,30 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
     setRows((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...changes } : row)));
   };
 
+  // Elegir la partida del stock ya deja el renglón completo: guardarla sola evita que la
+  // emisión quede bloqueada por filas cargadas pero nunca confirmadas.
+  const applyRows = (nextRows) => {
+    setRows(nextRows);
+    setError("");
+    const assignedTotal = nextRows.reduce(
+      (sum, row) => sum + (clean(row.partida) ? numberOf(row.assignedQuantity, 0) : 0),
+      0,
+    );
+    if (Math.abs(assignedTotal - numberOf(item.quantity, 1)) <= 0.0001) {
+      void save(nextRows);
+    }
+  };
+
   const chooseStockLot = (lot) => {
     const available = lotAvailableQuantity(lot);
     const assignedQuantity = Math.min(Math.max(numberOf(item.quantity, 1), 1), available || Math.max(numberOf(item.quantity, 1), 1));
     const nextRow = lotDraft(lot, assignedQuantity);
-    setRows((current) => {
-      const firstEmptyIndex = current.findIndex((row) => !clean(row.partida));
-      if (firstEmptyIndex < 0) return [...current, nextRow];
-      return current.map((row, index) => (index === firstEmptyIndex ? nextRow : row));
-    });
-    setError("");
+    const firstEmptyIndex = rows.findIndex((row) => !clean(row.partida));
+    applyRows(
+      firstEmptyIndex < 0
+        ? [...rows, nextRow]
+        : rows.map((row, index) => (index === firstEmptyIndex ? nextRow : row)),
+    );
   };
 
   const completeTypedPartida = (index) => {
@@ -625,12 +652,12 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
       setError("La partida no figura para este artículo en el depósito seleccionado.");
       return;
     }
-    updateRow(index, lotDraft(matchingLot, clean(row.assignedQuantity) || "1"));
-    setError("");
+    const nextRow = lotDraft(matchingLot, clean(row.assignedQuantity) || "1");
+    applyRows(rows.map((current, rowIndex) => (rowIndex === index ? nextRow : current)));
   };
 
-  const save = async () => {
-    const partidas = rows
+  const save = async (rowsToSave = rows) => {
+    const partidas = rowsToSave
       .map((row, index) => ({
         ingresoId: clean(row.ingresoId) ? Number(row.ingresoId) : null,
         deviceId: clean(row.deviceId) ? Number(row.deviceId) : null,
@@ -689,15 +716,34 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
   const assigned = rows.reduce((sum, row) => sum + (clean(row.partida) ? numberOf(row.assignedQuantity, 0) : 0), 0);
   const quantity = numberOf(item.quantity, 1);
   const quantityMismatch = Math.abs(assigned - quantity) > 0.0001;
+  const savedRows = savedPartidaRows(order, item);
+  const savedFingerprint = partidaRowsFingerprint(savedRows);
+  const pendingSave = partidaRowsFingerprint(rows) !== savedFingerprint;
 
   return (
     <div className="rounded border border-sky-200 bg-sky-50 p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm font-medium text-sky-900">Completar partidas</div>
-        <div className={`text-xs ${quantityMismatch ? "text-red-700" : "text-sky-800"}`}>
-          Asignado {formatQuantity(assigned)} / {formatQuantity(quantity)}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {pendingSave ? (
+            <span className="rounded border border-amber-300 bg-amber-100 px-2 py-0.5 font-medium text-amber-900">
+              Sin guardar
+            </span>
+          ) : savedFingerprint ? (
+            <span className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 font-medium text-emerald-800">
+              Guardado
+            </span>
+          ) : null}
+          <span className={quantityMismatch ? "text-red-700" : "text-sky-800"}>
+            Asignado {formatQuantity(assigned)} / {formatQuantity(quantity)}
+          </span>
         </div>
       </div>
+      {pendingSave && !saving && !quantityMismatch && (
+        <div className="mb-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          Las partidas cargadas todavía no están guardadas: use Guardar partidas para que la emisión las tome.
+        </div>
+      )}
       {quantityMismatch && (
         <div className="mb-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           La suma de las cantidades por partida debe ser igual a la cantidad del artículo ({formatQuantity(quantity)}).
@@ -759,8 +805,15 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
         <button type="button" onClick={() => setRows((current) => [...current, { ingresoId: "", deviceId: "", partida: "", assignedQuantity: "1", partidaExpirationDate: "", stockDepositCode: "", stockAvailableQuantity: "", stockCheckedAt: "" }])} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={disabled || saving}>
           Agregar partida
         </button>
-        <button type="button" onClick={save} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-50" disabled={disabled || saving || quantityMismatch}>
-          Guardar partidas
+        <button
+          type="button"
+          onClick={() => void save()}
+          className={`rounded border px-3 py-1.5 text-sm disabled:opacity-50 ${
+            pendingSave ? "border-sky-600 bg-sky-600 font-medium text-white hover:bg-sky-700" : "bg-white hover:bg-gray-50"
+          }`}
+          disabled={disabled || saving || quantityMismatch}
+        >
+          {saving ? "Guardando..." : "Guardar partidas"}
         </button>
       </div>
       {error && <div className="mt-2 text-xs text-red-700">{error}</div>}
@@ -987,9 +1040,13 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         waitStartedAt={pdfWait.startedAt}
         onCancel={pdfWait.startedAt ? () => pdfWaitAbortRef.current?.abort() : undefined}
       />
-      <ResponsiveModalOverlay role="dialog" aria-modal="true" onClick={onClose}>
-        <ResponsiveModalPanel className="max-w-6xl overflow-hidden" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-start justify-between gap-4 border-b px-4 py-3 sm:px-5 sm:py-4">
+      <ResponsiveModalOverlay role="dialog" aria-modal="true" align="center" onClick={onClose}>
+        <ResponsiveModalPanel
+          scroll={false}
+          className="flex max-w-6xl flex-col"
+          onClick={(event) => event.stopPropagation()}
+        >
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b px-4 py-3 sm:px-5 sm:py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Generar remito Bejerman</h2>
             <p className="text-sm text-gray-600">Complete artículos y partidas antes de emitir.</p>
@@ -999,7 +1056,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           </button>
         </div>
 
-        <div className="max-h-[calc(100dvh-9rem)] overflow-y-auto p-3 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
           {issues.length > 0 && (
             <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
               {issues.map((issue) => (
@@ -1096,7 +1153,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           </label>
         </div>
 
-        <div className="flex justify-end gap-2 border-t px-5 py-4">
+        <div className="flex shrink-0 justify-end gap-2 border-t bg-white px-4 py-3 sm:px-5 sm:py-4">
           <button type="button" className="rounded border px-4 py-2 text-sm hover:bg-gray-50" onClick={onClose} disabled={saving}>
             Cancelar
           </button>

@@ -36,10 +36,10 @@ export function DesktopTableWrap({ children, className = "" }) {
   return <div className={`desktop-data-table hidden overflow-x-auto rounded-md border border-slate-200 bg-white md:block ${className}`}>{children}</div>;
 }
 
-export function ResponsiveModalOverlay({ children, className = "", ...props }) {
+export function ResponsiveModalOverlay({ children, className = "", align = "start", ...props }) {
   return (
     <div
-      className={`fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-2 sm:p-4 ${className}`}
+      className={`fixed inset-0 z-50 flex ${align === "center" ? "items-center" : "items-start"} justify-center overflow-y-auto bg-black/50 p-2 sm:p-4 ${className}`}
       {...props}
     >
       {children}
@@ -47,10 +47,13 @@ export function ResponsiveModalOverlay({ children, className = "", ...props }) {
   );
 }
 
-export function ResponsiveModalPanel({ children, className = "", ...props }) {
+// El alto máximo descuenta el padding del overlay y el margen propio: si no, el panel
+// desborda por esos milímetros y el overlay abre una segunda barra de desplazamiento.
+// `scroll={false}` deja que el contenido interno maneje su propio scroll (una sola barra).
+export function ResponsiveModalPanel({ children, className = "", scroll = true, ...props }) {
   return (
     <div
-      className={`my-2 max-h-[calc(100dvh-1rem)] w-full overflow-y-auto rounded bg-white shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] ${className}`}
+      className={`my-2 max-h-[calc(100dvh-2rem)] w-full ${scroll ? "overflow-y-auto" : "overflow-hidden"} rounded bg-white shadow-xl sm:my-4 sm:max-h-[calc(100dvh-4rem)] ${className}`}
       {...props}
     >
       {children}

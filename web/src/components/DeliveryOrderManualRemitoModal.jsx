@@ -395,9 +395,9 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
   };
 
   return (
-    <ResponsiveModalOverlay role="dialog" aria-modal="true" onClick={() => !saving && onClose()}>
-      <ResponsiveModalPanel className="max-w-5xl overflow-hidden" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-start justify-between gap-4 border-b px-4 py-3 sm:px-5 sm:py-4">
+    <ResponsiveModalOverlay role="dialog" aria-modal="true" align="center" onClick={() => !saving && onClose()}>
+      <ResponsiveModalPanel scroll={false} className="flex max-w-5xl flex-col" onClick={(event) => event.stopPropagation()}>
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b px-4 py-3 sm:px-5 sm:py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Cargar remito</h2>
             <p className="text-sm text-gray-600">
@@ -415,7 +415,7 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
           </button>
         </div>
 
-        <div className="max-h-[calc(100dvh-9rem)] overflow-y-auto p-3 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
           {suggestedDraftCount(order) > 1 && (
             <div className="mb-4 rounded border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
               {partialRecovery
@@ -566,7 +566,7 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
           )}
         </div>
 
-        <div className="flex flex-col-reverse gap-2 border-t px-4 py-3 sm:flex-row sm:justify-end sm:px-5 sm:py-4">
+        <div className="flex shrink-0 flex-col-reverse gap-2 border-t bg-white px-4 py-3 sm:flex-row sm:justify-end sm:px-5 sm:py-4">
           <button type="button" onClick={onClose} disabled={saving} className="rounded border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50">
             Cancelar
           </button>

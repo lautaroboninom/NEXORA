@@ -144,7 +144,18 @@ class DeliveryOrderDetailView(DeliveryOrderPermissionMixin, APIView):
 
     def get(self, request, order_id):
         try:
-            return Response(get_delivery_order(order_id, actor_user_id=_actor_id(request), refresh_article_flags=True))
+            # Abrir el detalle no debe esperar a Bejerman: el flag de partida se
+            # completa si el catálogo ya está cacheado, y si no queda sin
+            # resolver. Preparar y emitir el remito lo resuelven en firme
+            # (strict=True), que es donde el dato realmente hace falta.
+            return Response(
+                get_delivery_order(
+                    order_id,
+                    actor_user_id=_actor_id(request),
+                    refresh_article_flags=True,
+                    refresh_article_flags_allow_fetch=False,
+                )
+            )
         except Exception as exc:
             return _error_response(exc)
 

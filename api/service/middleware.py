@@ -4,6 +4,10 @@ from .activity_audit import should_audit_read_request
 from .ip_utils import get_client_ip
 from .views.helpers import _set_audit_user
 import json
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 
 SENSITIVE_AUDIT_KEYS = {
@@ -40,6 +44,54 @@ def _safe_clear_rollback():
         transaction.set_rollback(False)
     except Exception:
         pass
+
+
+class RequestTimingMiddleware:
+    """Registra los requests que superan un umbral de duración.
+
+    Sin esto, un request lento pero exitoso es invisible: el log sólo muestra los
+    que fallan, así que no hay forma de saber qué pantalla está tardando ni por
+    qué. Va lo más arriba posible de la cadena para medir el request completo,
+    middlewares incluidos.
+
+    Umbral en `REQUEST_TIMING_LOG_THRESHOLD_MS`; 0 lo desactiva.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        try:
+            self.threshold_ms = int(getattr(settings, "REQUEST_TIMING_LOG_THRESHOLD_MS", 1000))
+        except (TypeError, ValueError):
+            self.threshold_ms = 1000
+
+    def __call__(self, request):
+        if self.threshold_ms <= 0:
+            return self.get_response(request)
+        started = time.monotonic()
+        try:
+            response = self.get_response(request)
+        except Exception:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            # Una excepción que tardó también es información: distingue "falló
+            # rápido" (config/credenciales) de "falló por timeout" (red).
+            logger.warning(
+                "slow_request method=%s path=%s status=exception ms=%s",
+                request.method,
+                request.path,
+                elapsed_ms,
+            )
+            raise
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if elapsed_ms >= self.threshold_ms:
+            # Los datos van en el mensaje: el formatter configurado no imprime `extra`.
+            logger.warning(
+                "slow_request method=%s path=%s status=%s ms=%s",
+                request.method,
+                request.path,
+                getattr(response, "status_code", "-"),
+                elapsed_ms,
+            )
+        return response
 
 
 class RLSMiddleware:

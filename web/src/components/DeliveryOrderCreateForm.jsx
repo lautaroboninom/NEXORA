@@ -23,6 +23,11 @@ const SELLERS = [
   { code: "TOM", name: "Tomas Perez Avila", label: "TOM Tomas Perez Avila" },
 ];
 const RENTAL_SELLER_CODE = "ADM";
+// El backend resuelve la búsqueda contra el catálogo completo de Bejerman (el SDK
+// no filtra del lado del servidor), así que disparar en cada tecla multiplica esa
+// descarga por la cantidad de caracteres tipeados.
+const ARTICLE_SEARCH_DEBOUNCE_MS = 350;
+const ARTICLE_SEARCH_MIN_CHARS = 2;
 const REMITO_PROFILE_BY_TYPE = {
   sale: "RT / MC / VAL",
   rental: "RTA / ALQ / STL",
@@ -494,6 +499,12 @@ export default function DeliveryOrderCreateForm({
   const [articleUnavailable, setArticleUnavailable] = useState(false);
   const [partidaScanWarnings, setPartidaScanWarnings] = useState({});
   const partidaInputRefs = useRef({});
+  const articleSearchTimers = useRef({});
+  const articleSearchSeq = useRef({});
+  useEffect(() => {
+    const timers = articleSearchTimers.current;
+    return () => Object.values(timers).forEach((timer) => window.clearTimeout(timer));
+  }, []);
   const [rentalSearch, setRentalSearch] = useState("");
   const [rentalEquipment, setRentalEquipment] = useState({ items: [], loading: false, unavailable: false, warning: "" });
   const [saving, setSaving] = useState(false);
@@ -1017,7 +1028,35 @@ export default function DeliveryOrderCreateForm({
     setPartidasOpenByItem((current) => ({ ...current, [itemIndex]: false }));
   };
 
-  const searchArticles = async (index, value) => {
+  const fetchArticleOptions = async (index, q) => {
+    // Descarta las respuestas que llegan fuera de orden: sin esto, la búsqueda de
+    // "MAS" puede pisar a la de "MASCARA" si el servidor contesta más tarde.
+    const seq = (articleSearchSeq.current[index] || 0) + 1;
+    articleSearchSeq.current[index] = seq;
+    const isCurrent = () => articleSearchSeq.current[index] === seq;
+
+    setArticleLoading((current) => ({ ...current, [index]: true }));
+    setArticleEmpty((current) => ({ ...current, [index]: false }));
+    try {
+      const data = await getDeliveryOrderBejermanArticles({ q, search: q, limit: 8, companyKey: effectiveCompanyKey });
+      if (!isCurrent()) return;
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setArticleUnavailable(Boolean(data?.unavailable));
+      setArticleOptions((current) => ({ ...current, [index]: items }));
+      setArticleEmpty((current) => ({ ...current, [index]: items.length === 0 }));
+    } catch {
+      if (!isCurrent()) return;
+      setArticleUnavailable(true);
+      setArticleOptions((current) => ({ ...current, [index]: [] }));
+      setArticleEmpty((current) => ({ ...current, [index]: true }));
+    } finally {
+      if (isCurrent()) {
+        setArticleLoading((current) => ({ ...current, [index]: false }));
+      }
+    }
+  };
+
+  const searchArticles = (index, value) => {
     if (readOnlyItems) return;
     setPartidaScanWarnings({});
     updateItem(index, {
@@ -1033,29 +1072,21 @@ export default function DeliveryOrderCreateForm({
       partidas: [emptyPartida("1", depositCode)],
     });
     setArticleStock((current) => ({ ...current, [index]: null }));
+    window.clearTimeout(articleSearchTimers.current[index]);
 
     const q = clean(value);
-    if (q.length < 2) {
+    if (q.length < ARTICLE_SEARCH_MIN_CHARS) {
+      // Invalida cualquier búsqueda en vuelo para que no repueble el listado.
+      articleSearchSeq.current[index] = (articleSearchSeq.current[index] || 0) + 1;
       setArticleOptions((current) => ({ ...current, [index]: [] }));
       setArticleEmpty((current) => ({ ...current, [index]: false }));
+      setArticleLoading((current) => ({ ...current, [index]: false }));
       return;
     }
 
-    setArticleLoading((current) => ({ ...current, [index]: true }));
-    setArticleEmpty((current) => ({ ...current, [index]: false }));
-    try {
-      const data = await getDeliveryOrderBejermanArticles({ q, search: q, limit: 8, companyKey: effectiveCompanyKey });
-      const items = Array.isArray(data?.items) ? data.items : [];
-      setArticleUnavailable(Boolean(data?.unavailable));
-      setArticleOptions((current) => ({ ...current, [index]: items }));
-      setArticleEmpty((current) => ({ ...current, [index]: items.length === 0 }));
-    } catch {
-      setArticleUnavailable(true);
-      setArticleOptions((current) => ({ ...current, [index]: [] }));
-      setArticleEmpty((current) => ({ ...current, [index]: true }));
-    } finally {
-      setArticleLoading((current) => ({ ...current, [index]: false }));
-    }
+    articleSearchTimers.current[index] = window.setTimeout(() => {
+      void fetchArticleOptions(index, q);
+    }, ARTICLE_SEARCH_DEBOUNCE_MS);
   };
 
   const loadArticleStock = async (index, articleCode, requestedDepositCode = depositCode) => {
@@ -1952,7 +1983,13 @@ export default function DeliveryOrderCreateForm({
         />
       </label>
 
-      <div className="flex justify-end gap-2">
+      {/* Dentro de un modal el formulario es largo (cabecera + renglones + partidas): sin
+          barra fija, el botón de guardar queda enterrado al final del scroll y no se ve. */}
+      <div
+        className={`flex justify-end gap-2 ${
+          compact ? "sticky bottom-0 z-10 -mx-1 border-t bg-white px-1 py-3" : ""
+        }`}
+      >
         {onCancel && (
           <button type="button" className="rounded border px-4 py-2 text-sm hover:bg-gray-50" onClick={onCancel} disabled={saving}>
             Cancelar

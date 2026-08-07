@@ -827,11 +827,22 @@ export default function DeliveryOrders() {
     setError("El navegador sigue bloqueando la ventana de impresión de la factura.");
   };
 
+  // Se guarda renglón por renglón: si uno falla, los anteriores ya quedaron guardados y los
+  // siguientes no, así que el error tiene que decir dónde se cortó.
   const saveDetailPartidas = async (itemsPayload) => {
     if (!partidasOrder?.id) return null;
     let saved = partidasOrder;
-    for (const item of itemsPayload || []) {
-      saved = await patchDeliveryOrderItemPartidas(partidasOrder.id, item.itemId, item.partidas || []);
+    const items = itemsPayload || [];
+    for (let index = 0; index < items.length; index += 1) {
+      try {
+        saved = await patchDeliveryOrderItemPartidas(partidasOrder.id, items[index].itemId, items[index].partidas || []);
+      } catch (err) {
+        const detail = err?.message || "no se pudieron guardar las partidas";
+        throw new Error(
+          `Renglón ${index + 1}: ${detail}` +
+            (index > 0 ? ` Los ${index} renglones anteriores sí se guardaron.` : "")
+        );
+      }
     }
     return saved;
   };
@@ -1537,12 +1548,13 @@ function DeliveryOrderDetailModal({
   ].filter(([, value]) => value);
 
   return (
-    <ResponsiveModalOverlay role="dialog" aria-modal="true" onClick={onClose}>
+    <ResponsiveModalOverlay role="dialog" aria-modal="true" align="center" onClick={onClose}>
       <ResponsiveModalPanel
-        className="max-w-6xl overflow-hidden"
+        scroll={false}
+        className="flex max-w-6xl flex-col"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-3 border-b px-4 py-3 sm:px-5 sm:py-4">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3 sm:px-5 sm:py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{order.orderNumber || "Orden de entrega"}</h2>
             <p className="text-sm text-gray-600">{order.customerName || "-"}</p>
@@ -1594,7 +1606,7 @@ function DeliveryOrderDetailModal({
           </div>
         </div>
 
-        <div className="max-h-[calc(100dvh-5rem)] overflow-auto p-3 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-auto p-3 sm:p-5">
           <div className="grid grid-cols-1 gap-3 rounded border bg-gray-50 p-3 sm:grid-cols-2 lg:grid-cols-4">
             <DetailField label="Cliente" value={order.customerName || "-"} className="lg:col-span-2" />
             <DetailField label="Cliente Bejerman" value={deliveryOrderBejermanCustomerLabel(order) || "-"} />
@@ -1903,12 +1915,13 @@ function NewDeliveryOrderModal({
   if (!open) return null;
 
   return (
-    <ResponsiveModalOverlay role="dialog" aria-modal="true">
+    <ResponsiveModalOverlay role="dialog" aria-modal="true" align="center">
       <ResponsiveModalPanel
-        className="max-w-6xl overflow-hidden"
+        scroll={false}
+        className="flex max-w-6xl flex-col"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-3 border-b px-4 py-3 sm:px-5 sm:py-4">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3 sm:px-5 sm:py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{title || (order?.id ? "Editar orden de entrega" : "Nueva orden de entrega")}</h2>
             <p className="text-sm text-gray-600">{description || "Clientes, artículos, partidas y detalle completo como en Portal."}</p>
@@ -1918,7 +1931,7 @@ function NewDeliveryOrderModal({
           </button>
         </div>
 
-        <div className="max-h-[calc(100dvh-5rem)] overflow-auto p-3 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-auto p-3 sm:p-5">
           <DeliveryOrderCreateForm
             compact
             initialOrder={order}

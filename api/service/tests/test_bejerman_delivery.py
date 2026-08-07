@@ -12,6 +12,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 from service.auth import issue_token
+from service import bejerman_catalog_cache
 from service.bejerman_companies import list_ingress_companies, require_company
 from service.bejerman_documents import (
     REGISTERED_REMITO_NO_PDF_CODE,
@@ -3160,6 +3161,14 @@ class BejermanBlockingStockSyncJobLookupTests(TestCase):
 
 
 class BejermanDeliveryArticleTests(SimpleTestCase):
+    def setUp(self):
+        # El cache de catálogos vive a nivel de proceso, así que sin esto el
+        # catálogo que dejó un test se le sirve al siguiente.
+        bejerman_catalog_cache.invalidate_all()
+
+    def tearDown(self):
+        bejerman_catalog_cache.invalidate_all()
+
     def test_sdk_article_catalog_fetches_full_catalog_without_search_parametros(self):
         client = BejermanSDKClient(company_key="SEPID")
         client.token = "TOKEN"
@@ -3188,7 +3197,10 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
         self.assertEqual(by_description["items"][0]["salesVatCode"], "01")
         self.assertEqual(by_description["items"][0]["salesVatRate"], 21)
         self.assertEqual(len({item["code"] for item in by_description["items"]}), len(by_description["items"]))
-        self.assertEqual(len(client.calls), 2)
+        # Las dos búsquedas comparten una sola descarga del catálogo: el SDK lo
+        # devuelve entero e ignora los filtros, así que se cachea y se filtra
+        # localmente (ver bejerman_catalog_cache).
+        self.assertEqual(len(client.calls), 1)
 
     def test_article_search_exposes_non_partida_articles(self):
         client = FakeArticleCatalogClient()
