@@ -488,6 +488,50 @@ def requeue_pdf_request(
     }
 
 
+def _render_own_remito_pdf(row: dict[str, Any]) -> bool:
+    """Último recurso: que el PDF lo genere NEXORA replicando el de Bejerman.
+
+    El comprobante ya está emitido y numerado en Bejerman; lo único que falta es
+    el papel. Cuando el servicio de PDF del ERP no lo entrega, NEXORA lo
+    reproduce a partir de la emisión guardada y lo deja como si hubiera llegado
+    del SDK, así el resto del circuito (incluida la copia a la carpeta del ERP)
+    sigue igual.
+    """
+
+    if not getattr(settings, "BEJERMAN_REMITO_PDF_FALLBACK_ENABLED", False):
+        return False
+    document_key = row["document_key"]
+    try:
+        from .bejerman_remito_pdf import render_remito_pdf
+        from .bejerman_remito_pdf_data import enrich_comprobante_for_pdf, load_comprobante_for_document
+
+        comprobante = load_comprobante_for_document(row)
+        if not comprobante:
+            logger.warning("bejerman_remito_pdf_fallback_sin_payload", extra={"document_key": document_key})
+            return False
+        company_key = row.get("company_key")
+        pdf = render_remito_pdf(
+            enrich_comprobante_for_pdf(comprobante, company_key=company_key),
+            company_key=company_key,
+        )
+    except Exception:
+        logger.exception("bejerman_remito_pdf_fallback_failed", extra={"document_key": document_key})
+        return False
+
+    if not normalize_pdf_bytes(pdf):
+        # Se valida acá y no en `_store_direct_pdf`, que ante un PDF inválido
+        # marca la fila como fallada culpando a Bejerman: si el que salió mal es
+        # el nuestro, corresponde dejar el error original de la cola.
+        logger.error("bejerman_remito_pdf_fallback_invalido", extra={"document_key": document_key})
+        return False
+
+    logger.info(
+        "bejerman_remito_pdf_fallback_generado",
+        extra={"document_key": document_key, "bytes": len(pdf)},
+    )
+    return _store_direct_pdf(row, pdf)
+
+
 def _fail_or_requeue(row: dict[str, Any], *, code: str, detail: str, reason: str) -> None:
     """Antes de dar un PDF por perdido, abrir un ciclo nuevo si quedan intentos."""
 
@@ -497,6 +541,9 @@ def _fail_or_requeue(row: dict[str, Any], *, code: str, detail: str, reason: str
         result = requeue_pdf_request(document_key, reason=reason)
         if result.get("outcome") in {"ready", "requeued"}:
             return
+    # Agotados los reintentos contra Bejerman, mejor un PDF nuestro que ninguno.
+    if _render_own_remito_pdf(row):
+        return
     _mark_failed(document_key, code, detail)
 
 

@@ -407,6 +407,14 @@ BEJERMAN_PDF_COPY_RETRY_SECONDS = int(os.getenv("BEJERMAN_PDF_COPY_RETRY_SECONDS
 # llegó. Sin esto una sola generación fallida dejaba el comprobante sin PDF para
 # siempre, porque no había ningún camino de reintento.
 BEJERMAN_PDF_MAX_REGENERATIONS = int(os.getenv("BEJERMAN_PDF_MAX_REGENERATIONS", "2"))
+# Último recurso cuando Bejerman no entrega el PDF de un remito ya emitido: que lo
+# genere NEXORA replicando el del ERP. Arranca apagado a propósito — conviene
+# encenderlo después de comprobar el calce en el papel preimpreso de cada empresa.
+BEJERMAN_REMITO_PDF_FALLBACK_ENABLED = _bool_env("BEJERMAN_REMITO_PDF_FALLBACK_ENABLED", "0")
+# Directorio con cour.ttf/courbd.ttf para embeber la Courier New real. Sin esto se
+# usa la Courier de ReportLab, que tiene el mismo avance (0.6 em) y cae en la misma
+# posición; sólo cambian los trazos de los glifos.
+BEJERMAN_REMITO_PDF_FONT_DIR = os.getenv("BEJERMAN_REMITO_PDF_FONT_DIR", "")
 # El worker declara su propia ventana de validez: el peor tick legítimo ronda los
 # 220s (SSH 20 + register 100 + generación 100), así que la API no puede adivinar
 # un umbral propio sin dar falsos "worker muerto".

@@ -133,6 +133,90 @@ SELECT LTRIM(RTRIM(COALESCE(a.art_CodGen, '') + COALESCE(a.art_CodEle1, '')
     return resultado
 
 
+def _find_comprobante(node: Any, depth: int = 0) -> dict[str, Any] | None:
+    """Busca, dentro de un JSON guardado, el dict que parece el comprobante.
+
+    Los dos circuitos guardan la emisión con forma distinta (el de ingreso en
+    `bejerman_ingreso_remitos`, el de órdenes de entrega en
+    `bejerman_integration_attempts`) y además el SDK a veces anida la respuesta.
+    En vez de codificar cada forma, se busca el dict que trae los renglones, que
+    es lo único que el renderer necesita sí o sí.
+    """
+
+    if depth > 6:
+        return None
+    if isinstance(node, dict):
+        if isinstance(node.get("Comprobante_Items"), list) and node["Comprobante_Items"]:
+            return node
+        for value in node.values():
+            encontrado = _find_comprobante(value, depth + 1)
+            if encontrado is not None:
+                return encontrado
+    elif isinstance(node, list):
+        for value in node:
+            encontrado = _find_comprobante(value, depth + 1)
+            if encontrado is not None:
+                return encontrado
+    return None
+
+
+def load_comprobante_for_document(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Recupera el comprobante emitido a partir de la fila de la cola de PDF.
+
+    Se mira primero lo que respondió Bejerman y después lo que se le mandó: la
+    respuesta es la fuente de verdad, pero si vino recortada el pedido tiene los
+    mismos renglones.
+    """
+
+    tipo, punto = _clean(row.get("tipo")), _clean(row.get("pto_venta"))
+    numero, empresa = _clean(row.get("numero")), _clean(row.get("company_key"))
+    grupo = _clean(row.get("remito_group_id"))
+
+    consultas: list[tuple[str, list[Any]]] = [
+        (
+            """
+            SELECT response_payload, request_payload
+              FROM bejerman_ingreso_remitos
+             WHERE COALESCE(comprobante_tipo, '') = %s
+               AND COALESCE(comprobante_pto_venta, '') = %s
+               AND COALESCE(comprobante_numero, '') = %s
+               AND (%s = '' OR COALESCE(company_key, '') = %s)
+             ORDER BY id DESC
+             LIMIT 3
+            """,
+            [tipo, punto, numero, empresa, empresa],
+        )
+    ]
+    if grupo:
+        consultas.append(
+            (
+                """
+                SELECT response_payload, request_payload
+                  FROM bejerman_integration_attempts
+                 WHERE group_id = %s
+                 ORDER BY id DESC
+                 LIMIT 5
+                """,
+                [grupo],
+            )
+        )
+
+    for sql, params in consultas:
+        try:
+            with connection.cursor() as cur:
+                cur.execute(sql, params)
+                filas = cur.fetchall()
+        except Exception:
+            logger.warning("bejerman_remito_pdf_payload_query_failed", exc_info=True)
+            continue
+        for respuesta, pedido in filas or []:
+            for candidato in (respuesta, pedido):
+                comprobante = _find_comprobante(candidato)
+                if comprobante:
+                    return comprobante
+    return None
+
+
 def enrich_comprobante_for_pdf(comprobante: dict[str, Any], *, company_key: Any = None) -> dict[str, Any]:
     """Devuelve una copia del comprobante con PM y VTO cargados en cada renglón.
 

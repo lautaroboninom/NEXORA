@@ -171,3 +171,30 @@ class RemitoPdfDatosTests(TestCase):
 
     def test_un_comprobante_sin_renglones_pasa_de_largo(self):
         self.assertEqual(enrich_comprobante_for_pdf({"Comprobante_Items": []}), {"Comprobante_Items": []})
+
+
+class RemitoPdfPayloadLookupTests(TestCase):
+    """Recuperar el comprobante emitido para poder reproducir el PDF."""
+
+    def test_encuentra_el_comprobante_aunque_venga_anidado(self):
+        from service.bejerman_remito_pdf_data import _find_comprobante
+
+        comprobante = {"Comprobante_Items": [{"Item_CodigoArticulo": "1204001"}]}
+        self.assertIs(_find_comprobante({"response": {"DatosJSON": comprobante}}), comprobante)
+        self.assertIs(_find_comprobante([{"a": 1}, {"b": comprobante}]), comprobante)
+        self.assertIs(_find_comprobante(comprobante), comprobante)
+
+    def test_ignora_lo_que_no_tiene_renglones(self):
+        from service.bejerman_remito_pdf_data import _find_comprobante
+
+        self.assertIsNone(_find_comprobante({"Comprobante_Numero": "00004342"}))
+        self.assertIsNone(_find_comprobante({"Comprobante_Items": []}))
+        self.assertIsNone(_find_comprobante(None))
+
+    def test_no_se_cuelga_con_estructuras_muy_anidadas(self):
+        from service.bejerman_remito_pdf_data import _find_comprobante
+
+        nodo = {"Comprobante_Items": [{"x": 1}]}
+        for _ in range(20):
+            nodo = {"n": nodo}
+        self.assertIsNone(_find_comprobante(nodo))
