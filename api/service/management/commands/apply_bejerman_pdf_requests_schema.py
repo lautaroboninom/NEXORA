@@ -18,6 +18,8 @@ REQUIRED_COLUMNS = {
     "state",
     "generation_attempt_count",
     "generation_requested_at",
+    "regeneration_count",
+    "last_regenerated_at",
     "lease_expires_at",
     "deadline_at",
     "next_folder_check_at",
@@ -75,6 +77,8 @@ class Command(BaseCommand):
                       state                        TEXT NOT NULL DEFAULT 'queued',
                       generation_attempt_count     INTEGER NOT NULL DEFAULT 0,
                       generation_requested_at      TIMESTAMPTZ NULL,
+                      regeneration_count           INTEGER NOT NULL DEFAULT 0,
+                      last_regenerated_at          TIMESTAMPTZ NULL,
                       lease_expires_at             TIMESTAMPTZ NULL,
                       deadline_at                  TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '10 minutes'),
                       next_folder_check_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -126,6 +130,17 @@ class Command(BaseCommand):
                       ADD CONSTRAINT chk_bejerman_pdf_requests_state
                       CHECK (state IN ('queued','requesting','waiting_sdk','waiting_folder','ready_direct','ready_folder','failed'))
                     """
+                )
+                # `generation_attempt_count` sigue acotado a 0..1 porque cuenta los
+                # intentos *dentro de un ciclo*. Reencolar abre un ciclo nuevo (lo
+                # vuelve a 0) y suma uno a `regeneration_count`, así que Bejerman
+                # nunca recibe dos WS_GenerarComprobantePDF por el mismo ciclo, pero
+                # un PDF trabado deja de ser irrecuperable.
+                cur.execute(
+                    "ALTER TABLE bejerman_pdf_requests ADD COLUMN IF NOT EXISTS regeneration_count INTEGER NOT NULL DEFAULT 0"
+                )
+                cur.execute(
+                    "ALTER TABLE bejerman_pdf_requests ADD COLUMN IF NOT EXISTS last_regenerated_at TIMESTAMPTZ NULL"
                 )
                 cur.execute(
                     """

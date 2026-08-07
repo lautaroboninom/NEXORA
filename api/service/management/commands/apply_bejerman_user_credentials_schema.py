@@ -24,6 +24,19 @@ class Command(BaseCommand):
                 )
                 cur.execute(
                     """
+                    ALTER TABLE users
+                      ADD COLUMN IF NOT EXISTS bejerman_workstation TEXT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE users
+                      ADD COLUMN IF NOT EXISTS bejerman_credentials_prompt_dismissed
+                        BOOLEAN NOT NULL DEFAULT FALSE
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS user_bejerman_credentials (
                       user_id             INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
                       bejerman_username   TEXT NOT NULL,
@@ -82,5 +95,30 @@ class Command(BaseCommand):
                 missing = sorted(required - columns)
                 if missing:
                     raise RuntimeError("No se aplicaron columnas: " + ", ".join(missing))
+                cur.execute(
+                    """
+                    SELECT column_name
+                      FROM information_schema.columns
+                     WHERE table_schema = ANY(current_schemas(true))
+                       AND table_name = 'users'
+                       AND column_name IN (
+                         'bejerman_workstation',
+                         'bejerman_credentials_prompt_dismissed'
+                       )
+                    """
+                )
+                user_columns = {row[0] for row in cur.fetchall()}
+                missing_user_columns = sorted(
+                    {
+                        "bejerman_workstation",
+                        "bejerman_credentials_prompt_dismissed",
+                    }
+                    - user_columns
+                )
+                if missing_user_columns:
+                    raise RuntimeError(
+                        "No se aplicaron columnas en users: "
+                        + ", ".join(missing_user_columns)
+                    )
 
         self.stdout.write(self.style.SUCCESS("Esquema de credenciales Bejerman aplicado"))

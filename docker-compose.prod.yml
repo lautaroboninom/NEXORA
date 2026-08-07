@@ -15,9 +15,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+      start_period: 20s
+    shm_size: 256m
+    cpu_shares: 2048
+    mem_limit: 3g
+    mem_reservation: 1g
+    oom_score_adj: -800
+    stop_grace_period: 60s
     restart: unless-stopped
 
   api:
+    image: nexora-backend:latest
     build:
       context: ./api
       dockerfile: Dockerfile.prod
@@ -30,21 +38,9 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      bash -lc "python manage.py migrate --noinput && \
-      python manage.py apply_ticket_sale_states_schema && \
-      python manage.py apply_no_se_repara_schema && \
-      python manage.py apply_delivery_orders_schema && \
-      python manage.py apply_route_sheet_schema && \
-      python manage.py apply_bejerman_purchase_entries_schema && \
-      python manage.py apply_bejerman_user_credentials_schema && \
-      python manage.py apply_bejerman_pdf_settings_schema && \
-      python manage.py apply_bejerman_pdf_requests_schema && \
-      python manage.py apply_customer_bejerman_schema && \
-      python manage.py apply_customer_alias_schema --seed-examples && \
-      python manage.py apply_bejerman_sale_items_schema && \
-      python manage.py apply_notifications_schema && \
-      python manage.py apply_assignment_requests_schema && \
-      python manage.py collectstatic --noinput && \
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
+      python manage.py prepare_production_schema && \
+      python manage.py check_bejerman_sdk --skip-live && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:
       - staticfiles:/app/staticfiles
@@ -63,12 +59,26 @@ services:
         source: "C:/trazabilidad_general"
         target: /trazabilidad
         read_only: true
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; request = urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'Host': 'nexora.tail7bb880.ts.net', 'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(request, timeout=4).read()\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    init: true
+    cpu_shares: 2048
+    mem_limit: 3g
+    mem_reservation: 768m
+    oom_score_adj: -500
+    stop_grace_period: 45s
     restart: unless-stopped
 
   bejerman-sync:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.prod
+    image: nexora-backend:latest
     container_name: nexora-bejerman-sync
     env_file: .env.prod
     environment:
@@ -78,18 +88,36 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      bash -lc "python manage.py apply_bejerman_user_credentials_schema && \
-      python manage.py apply_customer_bejerman_schema && \
-      python manage.py apply_customer_alias_schema --seed-examples && \
-      python manage.py apply_bejerman_sync_schema && \
-      python manage.py apply_bejerman_sale_items_schema && \
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
+      python manage.py check_bejerman_sdk --skip-live && \
       python manage.py run_bejerman_sync_loop --interval 30 --limit 10"
+    init: true
+    cpu_shares: 1536
+    mem_limit: 1536m
+    mem_reservation: 256m
+    restart: unless-stopped
+
+  bejerman-articulos-sync:
+    image: nexora-backend:latest
+    container_name: nexora-bejerman-articulos-sync
+    env_file: .env.prod
+    environment:
+      - DJANGO_SETTINGS_MODULE=app.settings_prod
+      - TZ=${TZ:-America/Argentina/Buenos_Aires}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
+      python manage.py run_bejerman_article_catalog_sync --interval-hours 6"
+    init: true
+    cpu_shares: 1536
+    mem_limit: 1536m
+    mem_reservation: 256m
     restart: unless-stopped
 
   billing-postponements:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.prod
+    image: nexora-backend:latest
     container_name: nexora-billing-postponements
     env_file: .env.prod
     environment:
@@ -99,15 +127,16 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      bash -lc "python manage.py apply_delivery_orders_schema && \
-      python manage.py apply_notifications_schema && \
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
       python manage.py run_billing_postponements --interval 60"
+    init: true
+    cpu_shares: 768
+    mem_limit: 768m
+    mem_reservation: 128m
     restart: unless-stopped
 
   billing-summary:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.prod
+    image: nexora-backend:latest
     container_name: nexora-billing-summary
     env_file: .env.prod
     environment:
@@ -116,13 +145,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: python manage.py run_billing_pending_notifications
+    command: >
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
+      python manage.py run_billing_pending_notifications"
+    init: true
+    cpu_shares: 768
+    mem_limit: 768m
+    mem_reservation: 128m
     restart: unless-stopped
 
   email-outbox:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.prod
+    image: nexora-backend:latest
     container_name: nexora-email-outbox
     env_file: .env.prod
     environment:
@@ -132,15 +165,16 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      bash -lc "python manage.py apply_notifications_schema && \
-      python manage.py apply_bejerman_pdf_requests_schema && \
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
       python manage.py run_notification_email_outbox --interval 10 --limit 50"
+    init: true
+    cpu_shares: 768
+    mem_limit: 768m
+    mem_reservation: 128m
     restart: unless-stopped
 
   bejerman-pdf-worker:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.prod
+    image: nexora-backend:latest
     container_name: nexora-bejerman-pdf
     env_file: .env.prod
     environment:
@@ -154,8 +188,12 @@ services:
         source: "${BEJERMAN_PDF_WINDOWS_Z_HOST_DIR:-Z:/}"
         target: ${BEJERMAN_PDF_WINDOWS_Z_CONTAINER_DIR:-/mnt/nexora-z}
     command: >
-      bash -lc "python manage.py apply_bejerman_pdf_requests_schema && \
+      bash -lc "python manage.py wait_for_database --timeout 180 && \
       python manage.py run_bejerman_pdf_requests --interval 2 --limit 1"
+    init: true
+    cpu_shares: 1024
+    mem_limit: 768m
+    mem_reservation: 128m
     restart: unless-stopped
 
   web:
@@ -176,13 +214,17 @@ services:
       - TZ=${TZ:-America/Argentina/Buenos_Aires}
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - staticfiles:/static:ro
       - ${SEPID_CERTS_DIR:-C:/sepid_certs}:/etc/nginx/certs:ro
+    cpu_shares: 1024
+    mem_limit: 256m
+    mem_reservation: 64m
+    oom_score_adj: -300
     restart: unless-stopped
 
   nginx:

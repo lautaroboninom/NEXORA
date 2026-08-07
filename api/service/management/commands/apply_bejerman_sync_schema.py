@@ -117,8 +117,23 @@ class Command(BaseCommand):
                     "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS confirmed_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL",
                     "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ NULL",
                     "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP",
+                    "ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS company_key TEXT",
                 ):
                     cur.execute(statement)
+                # SEPID y MG BIO son catálogos de artículos independientes en Bejerman: un mismo
+                # código numérico puede significar artículos distintos en cada empresa. Antes esta
+                # tabla mapeaba (model_id, variante) -> código sin distinguir empresa, lo que hacía
+                # que un código "aprendido" en una empresa se reutilizara para emitir documentos en
+                # la otra (causa del RDA con descripción/código no relacionados de Praxair/MG BIO).
+                cur.execute(
+                    "UPDATE bejerman_article_mappings SET company_key = 'SEPID' "
+                    "WHERE NULLIF(TRIM(COALESCE(company_key, '')), '') IS NULL"
+                )
+                cur.execute("ALTER TABLE bejerman_article_mappings ALTER COLUMN company_key SET DEFAULT 'SEPID'")
+                cur.execute("ALTER TABLE bejerman_article_mappings ALTER COLUMN company_key SET NOT NULL")
+                cur.execute(
+                    "DROP INDEX IF EXISTS uq_bejerman_article_mappings_model_variant"
+                )
                 cur.execute(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_ingreso
@@ -164,14 +179,20 @@ class Command(BaseCommand):
                 )
                 cur.execute(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
-                      ON bejerman_article_mappings(model_id, variante_norm)
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant_company
+                      ON bejerman_article_mappings(model_id, variante_norm, company_key)
                     """
                 )
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_article_code
                       ON bejerman_article_mappings(article_code)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_company_key
+                      ON bejerman_article_mappings(company_key)
                     """
                 )
 
@@ -222,6 +243,7 @@ class Command(BaseCommand):
                         "article_code",
                         "match_source",
                         "source_payload",
+                        "company_key",
                     },
                 }
                 for table_name, columns in required_columns.items():

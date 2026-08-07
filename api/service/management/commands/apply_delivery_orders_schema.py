@@ -7,6 +7,8 @@ TABLES = [
     "delivery_order_items",
     "delivery_order_item_partidas",
     "bejerman_remito_groups",
+    "delivery_order_remito_links",
+    "delivery_order_remito_item_allocations",
     "delivery_order_events",
     "bejerman_integration_attempts",
 ]
@@ -61,6 +63,27 @@ REQUIRED_COLUMNS = {
         "last_attempt_at",
         "next_retry_at",
         "last_error",
+    },
+    "delivery_order_remito_links": {
+        "id",
+        "order_id",
+        "remito_group_id",
+        "batch_id",
+        "sequence",
+        "expected_count",
+        "allocation_status",
+        "created_at",
+        "updated_at",
+    },
+    "delivery_order_remito_item_allocations": {
+        "id",
+        "link_id",
+        "order_item_id",
+        "order_item_partida_id",
+        "assigned_quantity",
+        "sort_order",
+        "created_at",
+        "updated_at",
     },
     "delivery_order_events": {"id", "order_id", "event_type", "metadata"},
     "bejerman_integration_attempts": {
@@ -534,6 +557,223 @@ class Command(BaseCommand):
                     CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'))
                     """
                 )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS delivery_order_remito_links (
+                      id                 TEXT PRIMARY KEY,
+                      order_id           TEXT NOT NULL REFERENCES delivery_orders(id) ON DELETE CASCADE,
+                      remito_group_id     TEXT NOT NULL REFERENCES bejerman_remito_groups(id) ON DELETE CASCADE,
+                      batch_id            TEXT NOT NULL,
+                      sequence            INTEGER NOT NULL DEFAULT 1,
+                      expected_count      INTEGER NOT NULL DEFAULT 1,
+                      allocation_status   TEXT NOT NULL DEFAULT 'external_unknown',
+                      created_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_delivery_order_remito_links_sequence CHECK (sequence > 0),
+                      CONSTRAINT chk_delivery_order_remito_links_expected_count CHECK (expected_count > 0),
+                      CONSTRAINT chk_delivery_order_remito_links_sequence_range CHECK (sequence <= expected_count),
+                      CONSTRAINT chk_delivery_order_remito_links_allocation_status
+                        CHECK (allocation_status IN ('known','external_unknown')),
+                      CONSTRAINT uq_delivery_order_remito_links_order_group
+                        UNIQUE (order_id, remito_group_id),
+                      CONSTRAINT uq_delivery_order_remito_links_order_batch_sequence
+                        UNIQUE (order_id, batch_id, sequence)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS delivery_order_remito_item_allocations (
+                      id                       TEXT PRIMARY KEY,
+                      link_id                  TEXT NOT NULL REFERENCES delivery_order_remito_links(id) ON DELETE CASCADE,
+                      order_item_id            TEXT NOT NULL REFERENCES delivery_order_items(id) ON DELETE CASCADE,
+                      order_item_partida_id    TEXT NULL REFERENCES delivery_order_item_partidas(id) ON DELETE CASCADE,
+                      assigned_quantity        NUMERIC NOT NULL,
+                      sort_order               INTEGER NOT NULL DEFAULT 0,
+                      created_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_delivery_order_remito_allocations_quantity CHECK (assigned_quantity > 0),
+                      CONSTRAINT chk_delivery_order_remito_allocations_sort_order CHECK (sort_order >= 0)
+                    )
+                    """
+                )
+
+                # Migra la proyección singular histórica al vínculo canónico. El
+                # identificador determinístico hace que el backfill sea idempotente.
+                cur.execute(
+                    """
+                    INSERT INTO delivery_order_remito_links (
+                      id, order_id, remito_group_id, batch_id, sequence,
+                      expected_count, allocation_status, created_at, updated_at
+                    )
+                    SELECT
+                      'dorl-' || md5(o.id || ':' || o.bejerman_remito_group_id),
+                      o.id,
+                      o.bejerman_remito_group_id,
+                      o.bejerman_remito_group_id,
+                      1,
+                      1,
+                      CASE
+                        WHEN LOWER(COALESCE(
+                          NULLIF(BTRIM(g.response_summary ->> 'documentMode'), ''),
+                          NULLIF(BTRIM(g.response_summary ->> 'document_mode'), ''),
+                          NULLIF(BTRIM(g.response_summary ->> 'mode'), ''),
+                          ''
+                        )) IN ('existing', 'existente')
+                        THEN 'external_unknown'
+                        ELSE 'known'
+                      END,
+                      COALESCE(g.created_at, o.created_at, CURRENT_TIMESTAMP),
+                      CURRENT_TIMESTAMP
+                    FROM delivery_orders AS o
+                    JOIN bejerman_remito_groups AS g
+                      ON g.id = o.bejerman_remito_group_id
+                    WHERE NULLIF(BTRIM(o.bejerman_remito_group_id), '') IS NOT NULL
+                    ON CONFLICT (order_id, remito_group_id) DO NOTHING
+                    """
+                )
+
+                # Un apply anterior pudo haber creado asignaciones para un
+                # remito existente antes de distinguir su distribución como
+                # desconocida. Corrige esos vínculos escalares y elimina el
+                # detalle inventado de forma idempotente.
+                cur.execute(
+                    """
+                    WITH corrected_existing_links AS (
+                      UPDATE delivery_order_remito_links AS link
+                         SET allocation_status = 'external_unknown',
+                             updated_at = CURRENT_TIMESTAMP
+                        FROM delivery_orders AS legacy_order,
+                             bejerman_remito_groups AS remito_group
+                       WHERE legacy_order.id = link.order_id
+                         AND legacy_order.bejerman_remito_group_id = link.remito_group_id
+                         AND remito_group.id = link.remito_group_id
+                         AND link.batch_id = link.remito_group_id
+                         AND link.sequence = 1
+                         AND link.expected_count = 1
+                         AND LOWER(COALESCE(
+                           NULLIF(BTRIM(remito_group.response_summary ->> 'documentMode'), ''),
+                           NULLIF(BTRIM(remito_group.response_summary ->> 'document_mode'), ''),
+                           NULLIF(BTRIM(remito_group.response_summary ->> 'mode'), ''),
+                           ''
+                         )) IN ('existing', 'existente')
+                         AND (
+                           link.allocation_status <> 'external_unknown'
+                           OR EXISTS (
+                             SELECT 1
+                               FROM delivery_order_remito_item_allocations AS allocation
+                              WHERE allocation.link_id = link.id
+                           )
+                         )
+                      RETURNING link.id
+                    )
+                    DELETE FROM delivery_order_remito_item_allocations AS allocation
+                     USING corrected_existing_links AS corrected
+                     WHERE allocation.link_id = corrected.id
+                    """
+                )
+
+                # En órdenes asociadas a un único grupo histórico, la pertenencia
+                # de todos los artículos es conocida. Si las partidas existentes
+                # explican exactamente la cantidad del artículo se conservan; de
+                # lo contrario se registra la cantidad completa a nivel artículo.
+                cur.execute(
+                    """
+                    WITH single_links AS (
+                      SELECT l.id AS link_id, l.order_id
+                        FROM delivery_order_remito_links AS l
+                        JOIN delivery_orders AS legacy_order
+                          ON legacy_order.id = l.order_id
+                         AND legacy_order.bejerman_remito_group_id = l.remito_group_id
+                       WHERE l.allocation_status = 'known'
+                         AND l.batch_id = l.remito_group_id
+                         AND l.sequence = 1
+                         AND l.expected_count = 1
+                         AND (
+                         SELECT COUNT(*)
+                           FROM delivery_order_remito_links AS sibling
+                          WHERE sibling.order_id = l.order_id
+                       ) = 1
+                    ),
+                    partida_totals AS (
+                      SELECT p.order_item_id,
+                             COUNT(*) AS partida_count,
+                             COALESCE(SUM(p.assigned_quantity), 0) AS assigned_quantity
+                        FROM delivery_order_item_partidas AS p
+                       GROUP BY p.order_item_id
+                    )
+                    INSERT INTO delivery_order_remito_item_allocations (
+                      id, link_id, order_item_id, order_item_partida_id,
+                      assigned_quantity, sort_order, created_at, updated_at
+                    )
+                    SELECT
+                      'doria-' || md5(sl.link_id || ':' || item.id || ':item'),
+                      sl.link_id,
+                      item.id,
+                      NULL,
+                      item.quantity,
+                      item.sort_order,
+                      COALESCE(item.created_at, CURRENT_TIMESTAMP),
+                      CURRENT_TIMESTAMP
+                    FROM single_links AS sl
+                    JOIN delivery_order_items AS item ON item.order_id = sl.order_id
+                    LEFT JOIN partida_totals AS total ON total.order_item_id = item.id
+                    WHERE COALESCE(total.partida_count, 0) = 0
+                       OR total.assigned_quantity <> item.quantity
+                    ON CONFLICT DO NOTHING
+                    """
+                )
+                cur.execute(
+                    """
+                    WITH single_links AS (
+                      SELECT l.id AS link_id, l.order_id
+                        FROM delivery_order_remito_links AS l
+                        JOIN delivery_orders AS legacy_order
+                          ON legacy_order.id = l.order_id
+                         AND legacy_order.bejerman_remito_group_id = l.remito_group_id
+                       WHERE l.allocation_status = 'known'
+                         AND l.batch_id = l.remito_group_id
+                         AND l.sequence = 1
+                         AND l.expected_count = 1
+                         AND (
+                         SELECT COUNT(*)
+                           FROM delivery_order_remito_links AS sibling
+                          WHERE sibling.order_id = l.order_id
+                       ) = 1
+                    ),
+                    partida_totals AS (
+                      SELECT p.order_item_id,
+                             COUNT(*) AS partida_count,
+                             COALESCE(SUM(p.assigned_quantity), 0) AS assigned_quantity
+                        FROM delivery_order_item_partidas AS p
+                       GROUP BY p.order_item_id
+                    )
+                    INSERT INTO delivery_order_remito_item_allocations (
+                      id, link_id, order_item_id, order_item_partida_id,
+                      assigned_quantity, sort_order, created_at, updated_at
+                    )
+                    SELECT
+                      'doria-' || md5(sl.link_id || ':' || item.id || ':' || partida.id),
+                      sl.link_id,
+                      item.id,
+                      partida.id,
+                      partida.assigned_quantity,
+                      partida.sort_order,
+                      COALESCE(partida.created_at, item.created_at, CURRENT_TIMESTAMP),
+                      CURRENT_TIMESTAMP
+                    FROM single_links AS sl
+                    JOIN delivery_order_items AS item ON item.order_id = sl.order_id
+                    JOIN partida_totals AS total
+                      ON total.order_item_id = item.id
+                     AND total.partida_count > 0
+                     AND total.assigned_quantity = item.quantity
+                    JOIN delivery_order_item_partidas AS partida
+                      ON partida.order_item_id = item.id
+                    ON CONFLICT DO NOTHING
+                    """
+                )
+
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS bejerman_integration_attempts (
@@ -641,6 +881,13 @@ class Command(BaseCommand):
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_item ON delivery_order_item_partidas(order_item_id, sort_order, created_at)",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_ingreso ON delivery_order_item_partidas(ingreso_id) WHERE ingreso_id IS NOT NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_device ON delivery_order_item_partidas(device_id) WHERE device_id IS NOT NULL",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_links_group ON delivery_order_remito_links(remito_group_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_links_order_batch ON delivery_order_remito_links(order_id, batch_id, sequence)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_allocations_link ON delivery_order_remito_item_allocations(link_id, sort_order, id)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_allocations_item ON delivery_order_remito_item_allocations(order_item_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_allocations_partida ON delivery_order_remito_item_allocations(order_item_partida_id) WHERE order_item_partida_id IS NOT NULL",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_delivery_order_remito_allocations_partida ON delivery_order_remito_item_allocations(link_id, order_item_id, order_item_partida_id) WHERE order_item_partida_id IS NOT NULL",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_delivery_order_remito_allocations_item_without_partida ON delivery_order_remito_item_allocations(link_id, order_item_id) WHERE order_item_partida_id IS NULL",
                     "CREATE INDEX IF NOT EXISTS ix_delivery_order_events_order ON delivery_order_events(order_id, created_at)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC)",
                     "CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC)",
@@ -669,6 +916,16 @@ class Command(BaseCommand):
                       IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_item_partidas_set_updated_at') THEN
                         CREATE TRIGGER trg_delivery_order_item_partidas_set_updated_at
                         BEFORE UPDATE ON delivery_order_item_partidas
+                        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                      END IF;
+                      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_remito_links_set_updated_at') THEN
+                        CREATE TRIGGER trg_delivery_order_remito_links_set_updated_at
+                        BEFORE UPDATE ON delivery_order_remito_links
+                        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                      END IF;
+                      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_remito_allocations_set_updated_at') THEN
+                        CREATE TRIGGER trg_delivery_order_remito_allocations_set_updated_at
+                        BEFORE UPDATE ON delivery_order_remito_item_allocations
                         FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                       END IF;
                     END $$;
@@ -732,6 +989,156 @@ class Command(BaseCommand):
                 if missing_statuses:
                     raise RuntimeError(
                         "El constraint chk_bejerman_remito_groups_status no contempla: " + ", ".join(missing_statuses)
+                    )
+
+                required_remito_constraints = {
+                    "chk_delivery_order_remito_links_sequence",
+                    "chk_delivery_order_remito_links_expected_count",
+                    "chk_delivery_order_remito_links_sequence_range",
+                    "chk_delivery_order_remito_links_allocation_status",
+                    "uq_delivery_order_remito_links_order_group",
+                    "uq_delivery_order_remito_links_order_batch_sequence",
+                    "chk_delivery_order_remito_allocations_quantity",
+                    "chk_delivery_order_remito_allocations_sort_order",
+                }
+                cur.execute(
+                    """
+                    SELECT constraint_name
+                      FROM information_schema.table_constraints
+                     WHERE table_schema = ANY(current_schemas(true))
+                       AND table_name IN (
+                         'delivery_order_remito_links',
+                         'delivery_order_remito_item_allocations'
+                       )
+                       AND constraint_name = ANY(%s)
+                    """,
+                    [list(required_remito_constraints)],
+                )
+                found_remito_constraints = {row[0] for row in cur.fetchall()}
+                missing_remito_constraints = sorted(required_remito_constraints - found_remito_constraints)
+                if missing_remito_constraints:
+                    raise RuntimeError(
+                        "No se aplicaron constraints multi-remito: " + ", ".join(missing_remito_constraints)
+                    )
+
+                required_remito_indexes = {
+                    "ix_delivery_order_remito_links_group",
+                    "ix_delivery_order_remito_links_order_batch",
+                    "ix_delivery_order_remito_allocations_link",
+                    "ix_delivery_order_remito_allocations_item",
+                    "ix_delivery_order_remito_allocations_partida",
+                    "uq_delivery_order_remito_allocations_partida",
+                    "uq_delivery_order_remito_allocations_item_without_partida",
+                }
+                cur.execute(
+                    """
+                    SELECT indexname
+                      FROM pg_indexes
+                     WHERE schemaname = ANY(current_schemas(true))
+                       AND indexname = ANY(%s)
+                    """,
+                    [list(required_remito_indexes)],
+                )
+                found_remito_indexes = {row[0] for row in cur.fetchall()}
+                missing_remito_indexes = sorted(required_remito_indexes - found_remito_indexes)
+                if missing_remito_indexes:
+                    raise RuntimeError(
+                        "No se aplicaron índices multi-remito: " + ", ".join(missing_remito_indexes)
+                    )
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                      FROM delivery_orders AS o
+                     WHERE NULLIF(BTRIM(o.bejerman_remito_group_id), '') IS NOT NULL
+                       AND NOT EXISTS (
+                         SELECT 1
+                           FROM delivery_order_remito_links AS link
+                          WHERE link.order_id = o.id
+                            AND link.remito_group_id = o.bejerman_remito_group_id
+                       )
+                    """
+                )
+                missing_legacy_links = int((cur.fetchone() or [0])[0] or 0)
+                if missing_legacy_links:
+                    raise RuntimeError(
+                        f"Quedaron {missing_legacy_links} asociaciones escalares sin vínculo multi-remito"
+                    )
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                      FROM delivery_order_remito_links AS link
+                      JOIN delivery_orders AS legacy_order
+                        ON legacy_order.id = link.order_id
+                       AND legacy_order.bejerman_remito_group_id = link.remito_group_id
+                      JOIN bejerman_remito_groups AS remito_group
+                        ON remito_group.id = link.remito_group_id
+                     WHERE link.batch_id = link.remito_group_id
+                       AND link.sequence = 1
+                       AND link.expected_count = 1
+                       AND LOWER(COALESCE(
+                         NULLIF(BTRIM(remito_group.response_summary ->> 'documentMode'), ''),
+                         NULLIF(BTRIM(remito_group.response_summary ->> 'document_mode'), ''),
+                         NULLIF(BTRIM(remito_group.response_summary ->> 'mode'), ''),
+                         ''
+                       )) IN ('existing', 'existente')
+                       AND (
+                         link.allocation_status <> 'external_unknown'
+                         OR EXISTS (
+                           SELECT 1
+                             FROM delivery_order_remito_item_allocations AS allocation
+                            WHERE allocation.link_id = link.id
+                         )
+                       )
+                    """
+                )
+                invalid_existing_allocations = int((cur.fetchone() or [0])[0] or 0)
+                if invalid_existing_allocations:
+                    raise RuntimeError(
+                        "Quedaron remitos existentes históricos con distribución conocida o asignaciones: "
+                        f"{invalid_existing_allocations} vínculos"
+                    )
+
+                cur.execute(
+                    """
+                    WITH single_legacy_links AS (
+                      SELECT link.id AS link_id, link.order_id
+                        FROM delivery_order_remito_links AS link
+                        JOIN delivery_orders AS o
+                          ON o.id = link.order_id
+                         AND o.bejerman_remito_group_id = link.remito_group_id
+                       WHERE link.allocation_status = 'known'
+                         AND link.batch_id = link.remito_group_id
+                         AND link.sequence = 1
+                         AND link.expected_count = 1
+                         AND (
+                         SELECT COUNT(*)
+                           FROM delivery_order_remito_links AS sibling
+                          WHERE sibling.order_id = link.order_id
+                       ) = 1
+                    ),
+                    allocated AS (
+                      SELECT allocation.link_id,
+                             allocation.order_item_id,
+                             SUM(allocation.assigned_quantity) AS assigned_quantity
+                        FROM delivery_order_remito_item_allocations AS allocation
+                       GROUP BY allocation.link_id, allocation.order_item_id
+                    )
+                    SELECT COUNT(*)
+                      FROM single_legacy_links AS link
+                      JOIN delivery_order_items AS item ON item.order_id = link.order_id
+                      LEFT JOIN allocated
+                        ON allocated.link_id = link.link_id
+                       AND allocated.order_item_id = item.id
+                     WHERE allocated.assigned_quantity IS DISTINCT FROM item.quantity
+                    """
+                )
+                incomplete_legacy_allocations = int((cur.fetchone() or [0])[0] or 0)
+                if incomplete_legacy_allocations:
+                    raise RuntimeError(
+                        "Quedaron asignaciones históricas multi-remito incompletas: "
+                        f"{incomplete_legacy_allocations} artículos"
                     )
 
                 cur.execute(

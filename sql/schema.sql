@@ -234,8 +234,21 @@ CREATE TABLE IF NOT EXISTS users (
   hash_pw          TEXT,
   rol              TEXT NOT NULL,
   activo           BOOLEAN     NOT NULL DEFAULT TRUE,
+  bejerman_workstation TEXT NULL,
+  bejerman_credentials_prompt_dismissed BOOLEAN NOT NULL DEFAULT FALSE,
+  last_login_at    TIMESTAMPTZ NULL,
+  last_login_ip    INET NULL,
+  last_login_user_agent TEXT NULL,
   creado_en        TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_workstation TEXT NULL;
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS bejerman_credentials_prompt_dismissed
+    BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip INET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_user_agent TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS user_bejerman_credentials (
   user_id             INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -287,14 +300,17 @@ CREATE TABLE IF NOT EXISTS marcas (
   CONSTRAINT uq_marcas_nombre UNIQUE (nombre)
 );
 
+-- Un modelo se identifica por marca + nombre + tipo de equipo. Dos equipos distintos
+-- pueden compartir el nombre de modelo (ej. el CPAP "DM26" y el calentador humidificador
+-- "DM26" que va con él): son cosas diferentes y conviven como filas separadas.
+-- La unicidad real la impone uq_models_marca_nombre_tipo_ci (más abajo).
 CREATE TABLE IF NOT EXISTS models (
   id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   marca_id    INTEGER NOT NULL REFERENCES marcas(id) ON DELETE RESTRICT,
   nombre      TEXT NOT NULL,
   tecnico_id  INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   tipo_equipo TEXT NULL,
-  variante    TEXT NULL,
-  CONSTRAINT uq_models_marca_nombre UNIQUE (marca_id, nombre)
+  variante    TEXT NULL
 );
 
 CREATE TABLE IF NOT EXISTS locations (
@@ -1312,6 +1328,196 @@ ALTER TABLE bejerman_remito_groups
   ADD CONSTRAINT chk_bejerman_remito_groups_status
   CHECK (status IN ('pending','reserved','sending','sent_unknown','reconciled','failed_review','generated','failed'));
 
+CREATE TABLE IF NOT EXISTS delivery_order_remito_links (
+  id                 TEXT PRIMARY KEY,
+  order_id           TEXT NOT NULL REFERENCES delivery_orders(id) ON DELETE CASCADE,
+  remito_group_id     TEXT NOT NULL REFERENCES bejerman_remito_groups(id) ON DELETE CASCADE,
+  batch_id            TEXT NOT NULL,
+  sequence            INTEGER NOT NULL DEFAULT 1,
+  expected_count      INTEGER NOT NULL DEFAULT 1,
+  allocation_status   TEXT NOT NULL DEFAULT 'external_unknown',
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_delivery_order_remito_links_sequence CHECK (sequence > 0),
+  CONSTRAINT chk_delivery_order_remito_links_expected_count CHECK (expected_count > 0),
+  CONSTRAINT chk_delivery_order_remito_links_sequence_range CHECK (sequence <= expected_count),
+  CONSTRAINT chk_delivery_order_remito_links_allocation_status
+    CHECK (allocation_status IN ('known','external_unknown')),
+  CONSTRAINT uq_delivery_order_remito_links_order_group
+    UNIQUE (order_id, remito_group_id),
+  CONSTRAINT uq_delivery_order_remito_links_order_batch_sequence
+    UNIQUE (order_id, batch_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS delivery_order_remito_item_allocations (
+  id                       TEXT PRIMARY KEY,
+  link_id                  TEXT NOT NULL REFERENCES delivery_order_remito_links(id) ON DELETE CASCADE,
+  order_item_id            TEXT NOT NULL REFERENCES delivery_order_items(id) ON DELETE CASCADE,
+  order_item_partida_id    TEXT NULL REFERENCES delivery_order_item_partidas(id) ON DELETE CASCADE,
+  assigned_quantity        NUMERIC NOT NULL,
+  sort_order               INTEGER NOT NULL DEFAULT 0,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_delivery_order_remito_allocations_quantity CHECK (assigned_quantity > 0),
+  CONSTRAINT chk_delivery_order_remito_allocations_sort_order CHECK (sort_order >= 0)
+);
+
+-- Backfill idempotente de la proyección singular histórica.
+INSERT INTO delivery_order_remito_links (
+  id, order_id, remito_group_id, batch_id, sequence,
+  expected_count, allocation_status, created_at, updated_at
+)
+SELECT
+  'dorl-' || md5(o.id || ':' || o.bejerman_remito_group_id),
+  o.id,
+  o.bejerman_remito_group_id,
+  o.bejerman_remito_group_id,
+  1,
+  1,
+  CASE
+    WHEN LOWER(COALESCE(
+      NULLIF(BTRIM(g.response_summary ->> 'documentMode'), ''),
+      NULLIF(BTRIM(g.response_summary ->> 'document_mode'), ''),
+      NULLIF(BTRIM(g.response_summary ->> 'mode'), ''),
+      ''
+    )) IN ('existing', 'existente')
+    THEN 'external_unknown'
+    ELSE 'known'
+  END,
+  COALESCE(g.created_at, o.created_at, CURRENT_TIMESTAMP),
+  CURRENT_TIMESTAMP
+FROM delivery_orders AS o
+JOIN bejerman_remito_groups AS g
+  ON g.id = o.bejerman_remito_group_id
+WHERE NULLIF(BTRIM(o.bejerman_remito_group_id), '') IS NOT NULL
+ON CONFLICT (order_id, remito_group_id) DO NOTHING;
+
+-- Corrige applies previos que trataron como conocida la distribución de un
+-- remito existente asociado mediante la proyección singular histórica.
+WITH corrected_existing_links AS (
+  UPDATE delivery_order_remito_links AS link
+     SET allocation_status = 'external_unknown',
+         updated_at = CURRENT_TIMESTAMP
+    FROM delivery_orders AS legacy_order,
+         bejerman_remito_groups AS remito_group
+   WHERE legacy_order.id = link.order_id
+     AND legacy_order.bejerman_remito_group_id = link.remito_group_id
+     AND remito_group.id = link.remito_group_id
+     AND link.batch_id = link.remito_group_id
+     AND link.sequence = 1
+     AND link.expected_count = 1
+     AND LOWER(COALESCE(
+       NULLIF(BTRIM(remito_group.response_summary ->> 'documentMode'), ''),
+       NULLIF(BTRIM(remito_group.response_summary ->> 'document_mode'), ''),
+       NULLIF(BTRIM(remito_group.response_summary ->> 'mode'), ''),
+       ''
+     )) IN ('existing', 'existente')
+     AND (
+       link.allocation_status <> 'external_unknown'
+       OR EXISTS (
+         SELECT 1
+           FROM delivery_order_remito_item_allocations AS allocation
+          WHERE allocation.link_id = link.id
+       )
+     )
+  RETURNING link.id
+)
+DELETE FROM delivery_order_remito_item_allocations AS allocation
+ USING corrected_existing_links AS corrected
+ WHERE allocation.link_id = corrected.id;
+
+-- Si las partidas explican exactamente la cantidad del artículo se conserva
+-- ese detalle. En cualquier inconsistencia histórica se asigna la cantidad
+-- completa a nivel artículo para no inventar una distribución por partida.
+WITH single_links AS (
+  SELECT l.id AS link_id, l.order_id
+    FROM delivery_order_remito_links AS l
+    JOIN delivery_orders AS legacy_order
+      ON legacy_order.id = l.order_id
+     AND legacy_order.bejerman_remito_group_id = l.remito_group_id
+   WHERE l.allocation_status = 'known'
+     AND l.batch_id = l.remito_group_id
+     AND l.sequence = 1
+     AND l.expected_count = 1
+     AND (
+     SELECT COUNT(*)
+       FROM delivery_order_remito_links AS sibling
+      WHERE sibling.order_id = l.order_id
+   ) = 1
+),
+partida_totals AS (
+  SELECT p.order_item_id,
+         COUNT(*) AS partida_count,
+         COALESCE(SUM(p.assigned_quantity), 0) AS assigned_quantity
+    FROM delivery_order_item_partidas AS p
+   GROUP BY p.order_item_id
+)
+INSERT INTO delivery_order_remito_item_allocations (
+  id, link_id, order_item_id, order_item_partida_id,
+  assigned_quantity, sort_order, created_at, updated_at
+)
+SELECT
+  'doria-' || md5(sl.link_id || ':' || item.id || ':item'),
+  sl.link_id,
+  item.id,
+  NULL,
+  item.quantity,
+  item.sort_order,
+  COALESCE(item.created_at, CURRENT_TIMESTAMP),
+  CURRENT_TIMESTAMP
+FROM single_links AS sl
+JOIN delivery_order_items AS item ON item.order_id = sl.order_id
+LEFT JOIN partida_totals AS total ON total.order_item_id = item.id
+WHERE COALESCE(total.partida_count, 0) = 0
+   OR total.assigned_quantity <> item.quantity
+ON CONFLICT DO NOTHING;
+
+WITH single_links AS (
+  SELECT l.id AS link_id, l.order_id
+    FROM delivery_order_remito_links AS l
+    JOIN delivery_orders AS legacy_order
+      ON legacy_order.id = l.order_id
+     AND legacy_order.bejerman_remito_group_id = l.remito_group_id
+   WHERE l.allocation_status = 'known'
+     AND l.batch_id = l.remito_group_id
+     AND l.sequence = 1
+     AND l.expected_count = 1
+     AND (
+     SELECT COUNT(*)
+       FROM delivery_order_remito_links AS sibling
+      WHERE sibling.order_id = l.order_id
+   ) = 1
+),
+partida_totals AS (
+  SELECT p.order_item_id,
+         COUNT(*) AS partida_count,
+         COALESCE(SUM(p.assigned_quantity), 0) AS assigned_quantity
+    FROM delivery_order_item_partidas AS p
+   GROUP BY p.order_item_id
+)
+INSERT INTO delivery_order_remito_item_allocations (
+  id, link_id, order_item_id, order_item_partida_id,
+  assigned_quantity, sort_order, created_at, updated_at
+)
+SELECT
+  'doria-' || md5(sl.link_id || ':' || item.id || ':' || partida.id),
+  sl.link_id,
+  item.id,
+  partida.id,
+  partida.assigned_quantity,
+  partida.sort_order,
+  COALESCE(partida.created_at, item.created_at, CURRENT_TIMESTAMP),
+  CURRENT_TIMESTAMP
+FROM single_links AS sl
+JOIN delivery_order_items AS item ON item.order_id = sl.order_id
+JOIN partida_totals AS total
+  ON total.order_item_id = item.id
+ AND total.partida_count > 0
+ AND total.assigned_quantity = item.quantity
+JOIN delivery_order_item_partidas AS partida
+  ON partida.order_item_id = item.id
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS bejerman_pdf_requests (
   document_key                 TEXT PRIMARY KEY,
   remito_group_id              TEXT NULL REFERENCES bejerman_remito_groups(id) ON DELETE SET NULL,
@@ -1326,6 +1532,8 @@ CREATE TABLE IF NOT EXISTS bejerman_pdf_requests (
   state                        TEXT NOT NULL DEFAULT 'queued',
   generation_attempt_count     INTEGER NOT NULL DEFAULT 0,
   generation_requested_at      TIMESTAMPTZ NULL,
+  regeneration_count           INTEGER NOT NULL DEFAULT 0,
+  last_regenerated_at          TIMESTAMPTZ NULL,
   lease_expires_at             TIMESTAMPTZ NULL,
   deadline_at                  TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '10 minutes'),
   next_folder_check_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1368,6 +1576,16 @@ ALTER TABLE bejerman_pdf_requests
   ADD CONSTRAINT chk_bejerman_pdf_requests_state
   CHECK (state IN ('queued','requesting','waiting_sdk','waiting_folder','ready_direct','ready_folder','failed'));
 
+-- Reencolado: `generation_attempt_count` sigue acotado a 0..1 porque cuenta los
+-- intentos *dentro de un ciclo*. Reencolar abre un ciclo nuevo (lo vuelve a 0) y
+-- suma uno a `regeneration_count`, así que Bejerman nunca recibe dos
+-- WS_GenerarComprobantePDF por el mismo ciclo, pero un PDF trabado deja de ser
+-- irrecuperable.
+ALTER TABLE bejerman_pdf_requests
+  ADD COLUMN IF NOT EXISTS regeneration_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bejerman_pdf_requests
+  ADD COLUMN IF NOT EXISTS last_regenerated_at TIMESTAMPTZ NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_pdf_requests_document
   ON bejerman_pdf_requests(company_key, tipo, letra, pto_venta, numero, issue_date);
 DROP INDEX IF EXISTS ix_bejerman_pdf_requests_state_next_check;
@@ -1382,6 +1600,37 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_pdf_requests_set_updated_at') THEN
     CREATE TRIGGER trg_bejerman_pdf_requests_set_updated_at
     BEFORE UPDATE ON bejerman_pdf_requests
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+END $$;
+
+-- Latido del worker de PDF. Lo escribe el propio loop (no un hilo aparte: un hilo
+-- seguiría latiendo con el loop colgado en un socket SSH muerto). El worker declara
+-- su propia ventana de validez en `beat_expires_at`, así la API no tiene que
+-- adivinar un umbral contra un tick legítimo que puede durar minutos.
+-- Sin FK a propósito: tiene que poder aplicarse suelta y no bloquear nunca.
+CREATE TABLE IF NOT EXISTS bejerman_worker_heartbeats (
+  worker_key            TEXT PRIMARY KEY,
+  instance_id           TEXT NOT NULL DEFAULT '',
+  hostname              TEXT NOT NULL DEFAULT '',
+  pid                   INTEGER NULL,
+  started_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_beat_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  beat_expires_at       TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '5 minutes'),
+  stage                 TEXT NOT NULL DEFAULT '',
+  current_document_key  TEXT NULL,
+  tick_count            BIGINT NOT NULL DEFAULT 0,
+  last_error_detail     TEXT NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_worker_heartbeats_key
+    CHECK (NULLIF(TRIM(worker_key), '') IS NOT NULL)
+);
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_worker_heartbeats_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_worker_heartbeats_set_updated_at
+    BEFORE UPDATE ON bejerman_worker_heartbeats
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;
@@ -1474,6 +1723,23 @@ CREATE INDEX IF NOT EXISTS ix_delivery_order_items_device ON delivery_order_item
 CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_item ON delivery_order_item_partidas(order_item_id, sort_order, created_at);
 CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_ingreso ON delivery_order_item_partidas(ingreso_id) WHERE ingreso_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_delivery_order_item_partidas_device ON delivery_order_item_partidas(device_id) WHERE device_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_links_group
+  ON delivery_order_remito_links(remito_group_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_links_order_batch
+  ON delivery_order_remito_links(order_id, batch_id, sequence);
+CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_allocations_link
+  ON delivery_order_remito_item_allocations(link_id, sort_order, id);
+CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_allocations_item
+  ON delivery_order_remito_item_allocations(order_item_id);
+CREATE INDEX IF NOT EXISTS ix_delivery_order_remito_allocations_partida
+  ON delivery_order_remito_item_allocations(order_item_partida_id)
+  WHERE order_item_partida_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_delivery_order_remito_allocations_partida
+  ON delivery_order_remito_item_allocations(link_id, order_item_id, order_item_partida_id)
+  WHERE order_item_partida_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_delivery_order_remito_allocations_item_without_partida
+  ON delivery_order_remito_item_allocations(link_id, order_item_id)
+  WHERE order_item_partida_id IS NULL;
 CREATE INDEX IF NOT EXISTS ix_delivery_order_events_order ON delivery_order_events(order_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_status ON bejerman_remito_groups(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_bejerman_remito_groups_company_key ON bejerman_remito_groups(company_key, created_at DESC);
@@ -1500,6 +1766,16 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_item_partidas_set_updated_at') THEN
     CREATE TRIGGER trg_delivery_order_item_partidas_set_updated_at
     BEFORE UPDATE ON delivery_order_item_partidas
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_remito_links_set_updated_at') THEN
+    CREATE TRIGGER trg_delivery_order_remito_links_set_updated_at
+    BEFORE UPDATE ON delivery_order_remito_links
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_delivery_order_remito_allocations_set_updated_at') THEN
+    CREATE TRIGGER trg_delivery_order_remito_allocations_set_updated_at
+    BEFORE UPDATE ON delivery_order_remito_item_allocations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;
@@ -1676,18 +1952,47 @@ CREATE TABLE IF NOT EXISTS bejerman_purchase_entries (
   request_payload            JSONB NOT NULL DEFAULT '{}'::jsonb,
   response_payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
   last_error                 TEXT NULL,
+  attempt_count              INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at            TIMESTAMPTZ NULL,
+  request_fingerprint        VARCHAR(64) NOT NULL DEFAULT '',
   created_by_user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   updated_by_user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   generated_by_user_id       INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
   generated_at               TIMESTAMPTZ NULL,
   created_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at                 TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT chk_bejerman_purchase_entries_status CHECK (status IN ('draft','validated','running','generated','failed','cancelled')),
+  CONSTRAINT chk_bejerman_purchase_entries_status CHECK (status IN ('draft','validated','running','verifying','generated','failed','failed_review','cancelled')),
   CONSTRAINT chk_bejerman_purchase_entries_company CHECK (company_key = 'SEPID'),
   CONSTRAINT chk_bejerman_purchase_entries_type CHECK (comprobante_tipo = 'RT'),
   CONSTRAINT chk_bejerman_purchase_entries_operation CHECK (operation_code = 'MC'),
   CONSTRAINT chk_bejerman_purchase_entries_totals CHECK (total_quantity >= 0 AND total_value >= 0)
 );
+
+ALTER TABLE bejerman_purchase_entries
+  ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS request_fingerprint VARCHAR(64) NOT NULL DEFAULT '';
+
+UPDATE bejerman_purchase_entries
+   SET attempt_count = 0
+ WHERE attempt_count IS NULL;
+
+UPDATE bejerman_purchase_entries
+   SET request_fingerprint = ''
+ WHERE request_fingerprint IS NULL;
+
+ALTER TABLE bejerman_purchase_entries
+  ALTER COLUMN attempt_count SET DEFAULT 0,
+  ALTER COLUMN attempt_count SET NOT NULL,
+  ALTER COLUMN request_fingerprint SET DEFAULT '',
+  ALTER COLUMN request_fingerprint SET NOT NULL;
+
+ALTER TABLE bejerman_purchase_entries
+  DROP CONSTRAINT IF EXISTS chk_bejerman_purchase_entries_status;
+
+ALTER TABLE bejerman_purchase_entries
+  ADD CONSTRAINT chk_bejerman_purchase_entries_status
+  CHECK (status IN ('draft','validated','running','verifying','generated','failed','failed_review','cancelled'));
 
 CREATE TABLE IF NOT EXISTS bejerman_purchase_entry_lines (
   id                         TEXT PRIMARY KEY,
@@ -1745,14 +2050,18 @@ CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_scans_entry
   ON bejerman_purchase_entry_scans(entry_id, sort_order);
 CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_scans_line
   ON bejerman_purchase_entry_scans(line_id, sort_order);
+CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_scans_barcode_norm
+  ON bejerman_purchase_entry_scans(barcode_norm)
+  WHERE barcode_norm <> '';
 CREATE INDEX IF NOT EXISTS ix_bejerman_purchase_events_entry
   ON bejerman_purchase_entry_events(entry_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_purchase_entry_scans_barcode
   ON bejerman_purchase_entry_scans(entry_id, barcode_norm)
   WHERE barcode_norm <> '';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_purchase_entries_document_active
+DROP INDEX IF EXISTS uq_bejerman_purchase_entries_document_active;
+CREATE UNIQUE INDEX uq_bejerman_purchase_entries_document_active
   ON bejerman_purchase_entries(company_key, supplier_code, comprobante_tipo, comprobante_letra, comprobante_pto_venta, comprobante_numero)
-  WHERE status IN ('running','generated') AND supplier_code <> '' AND comprobante_numero <> '';
+  WHERE status IN ('running','verifying','generated','failed_review') AND supplier_code <> '' AND comprobante_numero <> '';
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_purchase_entries_set_updated_at') THEN
@@ -2847,7 +3156,13 @@ CREATE INDEX IF NOT EXISTS idx_mh_var    ON model_hierarchy(variante_id);
 
 -- Unicidad case-insensitive (nombres) mediante índices únicos funcionales
 CREATE UNIQUE INDEX IF NOT EXISTS uq_marcas_nombre_ci ON marcas ((LOWER(nombre)));
-CREATE UNIQUE INDEX IF NOT EXISTS uq_models_marca_nombre_ci ON models (marca_id, (LOWER(nombre)));
+-- Modelos: la clave es marca + nombre + tipo de equipo. El mismo nombre bajo otro tipo
+-- es otro equipo (ej. CPAP "DM26" y calentador humidificador "DM26"), así que convive.
+-- Se descartan las claves viejas (marca+nombre) que forzaban a pisar uno con el otro.
+ALTER TABLE models DROP CONSTRAINT IF EXISTS uq_models_marca_nombre;
+DROP INDEX IF EXISTS uq_models_marca_nombre_ci;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_models_marca_nombre_tipo_ci
+  ON models (marca_id, (LOWER(nombre)), (LOWER(COALESCE(TRIM(tipo_equipo), ''))));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_accesorios_nombre_ci ON catalogo_accesorios ((LOWER(nombre)));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_catalogo_tipos_equipo_nombre_ci ON catalogo_tipos_equipo ((LOWER(nombre)));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_mte_ci ON marca_tipos_equipo (marca_id, (LOWER(nombre)));

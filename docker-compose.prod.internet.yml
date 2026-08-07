@@ -61,17 +61,8 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      bash -lc "python manage.py migrate --noinput && \
-      python manage.py apply_ticket_sale_states_schema && \
-      python manage.py apply_no_se_repara_schema && \
-      python manage.py apply_delivery_orders_schema && \
-      python manage.py apply_route_sheet_schema && \
-      python manage.py apply_bejerman_pdf_settings_schema && \
-      python manage.py apply_bejerman_pdf_requests_schema && \
-      python manage.py apply_customer_alias_schema --seed-examples && \
-      python manage.py apply_bejerman_sale_items_schema && \
-      python manage.py apply_notifications_schema && \
-      python manage.py apply_assignment_requests_schema && \
+      bash -lc "python manage.py prepare_production_schema && \
+      python manage.py check_bejerman_sdk --skip-live && \
       gunicorn app.wsgi:application -w 3 -k gthread --threads 8 -b 0.0.0.0:8000"
     volumes:
       - staticfiles:/app/staticfiles
@@ -153,7 +144,8 @@ services:
         source: "${BEJERMAN_PDF_WINDOWS_Z_HOST_DIR:-Z:/}"
         target: ${BEJERMAN_PDF_WINDOWS_Z_CONTAINER_DIR:-/mnt/nexora-z}
     command: >
-      sh -lc "python manage.py apply_bejerman_pdf_requests_schema &&
+      sh -lc "python manage.py apply_bejerman_worker_heartbeat_schema &&
+      python manage.py apply_bejerman_pdf_requests_schema &&
       python manage.py run_bejerman_pdf_requests --interval 2 --limit 1"
     restart: unless-stopped
     networks:

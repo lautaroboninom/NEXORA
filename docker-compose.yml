@@ -52,19 +52,7 @@ services:
         echo 'Waiting for database... retrying in 2s';
         sleep 2;
       done &&
-      python manage.py apply_ticket_sale_states_schema &&
-      python manage.py apply_no_se_repara_schema &&
-      python manage.py apply_delivery_orders_schema &&
-      python manage.py apply_route_sheet_schema &&
-      python manage.py apply_bejerman_purchase_entries_schema &&
-      python manage.py apply_bejerman_user_credentials_schema &&
-      python manage.py apply_bejerman_pdf_settings_schema &&
-      python manage.py apply_bejerman_pdf_requests_schema &&
-      python manage.py apply_customer_bejerman_schema &&
-      python manage.py apply_customer_alias_schema --seed-examples &&
-      python manage.py apply_bejerman_sale_items_schema &&
-      python manage.py apply_notifications_schema &&
-      python manage.py apply_assignment_requests_schema &&
+      python manage.py prepare_production_schema &&
       python manage.py seed_dev_minimo &&
        gunicorn app.wsgi:application --bind 0.0.0.0:8000 --workers 2
        "
@@ -107,6 +95,7 @@ services:
         target: ${BEJERMAN_PDF_WINDOWS_Z_CONTAINER_DIR:-/mnt/nexora-z}
     command: >
       bash -lc "
+      python manage.py apply_bejerman_worker_heartbeat_schema &&
       python manage.py apply_bejerman_pdf_requests_schema &&
       python manage.py run_bejerman_pdf_requests --interval 2 --limit 1
       "
