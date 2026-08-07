@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -182,6 +182,61 @@ _SALES_QUERY_SCHEMA_MARKERS = ("IMPORTE_TOTAL", "ConvMonLocal", "CabVenta.", "OR
 def is_bejerman_sales_query_schema_message(value: Any) -> bool:
     text = as_string(value)
     return any(marker in text for marker in _SALES_QUERY_SCHEMA_MARKERS)
+
+
+# Clasificadores compartidos de mensajes de error de Bejerman. Delivery los usa
+# para diagnóstico y el worker de sincronización reutiliza los transitorios para
+# decidir reintentos, backoff y reapertura automática.
+_CUSTOMER_RESOLUTION_MARKERS = (
+    "customer_not_found",
+    "customer_vat_missing",
+    "customer_document_type_missing",
+    "customer_document_missing",
+)
+
+
+def is_bejerman_customer_resolution_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _CUSTOMER_RESOLUTION_MARKERS)
+
+
+_PARTIDA_INEXISTENTE_MARKERS = ("partida inexistente",)
+
+
+def is_bejerman_partida_inexistente_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _PARTIDA_INEXISTENTE_MARKERS)
+
+
+_STOCK_INSUFICIENTE_MARKERS = ("no hay stock suficiente",)
+
+
+def is_bejerman_stock_insuficiente_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _STOCK_INSUFICIENTE_MARKERS)
+
+
+# Mismo defecto de bloqueo de tablas que la "carrera expCuotasV" (ver
+# _SDK_RACE_MARKERS) pero con un texto de respuesta distinto: Bejerman
+# devuelve esto cuando el importador no pudo tomar el lock de la tabla
+# porque otra operación la estaba usando en simultáneo. Es transitorio.
+_TABLE_UPDATE_TRANSIENT_MARKERS = (
+    "no ha sido posible actualizar los datos en la tabla",
+    "no se ha podido actualizar los datos en la tabla",
+)
+
+
+def is_bejerman_table_update_transient_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _TABLE_UPDATE_TRANSIENT_MARKERS)
+
+
+_DUPLICATE_CANDIDATE_MARKERS = ("coincidentes para",)
+
+
+def is_bejerman_duplicate_candidate_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _DUPLICATE_CANDIDATE_MARKERS)
 
 
 def _sdk_race_retry_attempts() -> int:
@@ -417,6 +472,7 @@ class BejermanSDKClient:
             self.company_key = ""
             self.company = _clean(_setting("BEJERMAN_COMPANY"))
         self.token = ""
+        self._http = requests.Session()
 
     def _credentials(self) -> tuple[str, str]:
         if self.bejerman_username and self.bejerman_password:
@@ -450,7 +506,7 @@ class BejermanSDKClient:
             "</s:Envelope>"
         )
         try:
-            response = requests.post(
+            response = self._http.post(
                 self.endpoint_url,
                 data=envelope.encode("utf-8"),
                 headers={"Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": action},
@@ -478,6 +534,9 @@ class BejermanSDKClient:
             error = parsed.get("ErrorMsg") or parsed.get("Fault") or parsed.get("Resultado") or "Respuesta no OK de Bejerman"
             raise BejermanSdkResponseError(error)
         return parsed
+
+    def close(self) -> None:
+        self._http.close()
 
     def register(self) -> str:
         username, password = self._credentials()
@@ -552,6 +611,8 @@ class BejermanSDKClient:
         return self.execute("VENTAS", "DetalleComprobanteJSON", params_json=[str(comprobante_id)])
 
     def consultar_comprobante_ventas_pdf(self, reference: BejermanPdfReference) -> dict[str, str]:
+        # Misma fecha dd/mm/aaaa que WS_GenerarComprobantePDF: las dos operaciones
+        # filtran por el mismo comprobante y mandaban formatos distintos.
         return self.execute(
             "VENTAS",
             "WS_ConsultarComprobantePDF",
@@ -560,7 +621,7 @@ class BejermanSDKClient:
                 reference.number,
                 reference.letter,
                 reference.point_of_sale,
-                reference.issue_date,
+                format_pdf_generation_date(reference.issue_date),
             ],
         )
 
@@ -589,6 +650,11 @@ class BejermanSDKClient:
     def list_clientes(self) -> dict[str, str]:
         return self.execute("TABLAS", "ObtenerClientes", params_json=[])
 
+    def modificar_cliente(self, cliente: dict[str, Any]) -> dict[str, str]:
+        """Modifica una ficha del maestro de clientes. Es read-modify-write: Bejerman espera la
+        ficha completa (ver build_customer_toggle_payload), no un parche de los campos a cambiar."""
+        return self.execute("TABLAS", "ModificarCliente", params_json=[_json_param(cliente)])
+
     def list_proveedores(self) -> dict[str, str]:
         return self.execute("TABLAS", "ObtenerProveedores", params_json=[])
 
@@ -597,6 +663,12 @@ class BejermanSDKClient:
 
     def detalle_comprobante_compras(self, comprobante_id: str | int) -> dict[str, str]:
         return self.execute("COMPRAS", "DetalleComprobanteJSON", params_json=[str(comprobante_id)])
+
+    def list_ordenes_compra(self, provider_code: str = "", en_mon_ext: str = "N") -> dict[str, str]:
+        filters = [bejerman_filter("Comprobante_Tipo", "IGUAL", "OC")]
+        if provider_code:
+            filters.append(bejerman_filter("Proveedor_Codigo", "IGUAL", provider_code))
+        return self.list_comprobantes_compras(filters, en_mon_ext)
 
     def ingresar_comprobante_ventas_json(
         self,
@@ -1147,6 +1219,54 @@ def create_pagination(total: int, page: int, page_size: int) -> dict[str, Any]:
     }
 
 
+def _document_natural_key(value: Any):
+    text = as_string(value).strip().casefold()
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in re.split(r"(\d+)", text)
+        if part != ""
+    )
+
+
+def _document_sort_value(item: dict[str, Any], field: str):
+    accessors = {
+        "fecha": lambda row: row.get("issueDate") or row.get("date"),
+        "cliente": lambda row: row.get("customerName") or row.get("cliente") or row.get("razonSocial"),
+        "comprobante": lambda row: row.get("type") or row.get("comprobanteTipo"),
+        "tipo": lambda row: row.get("type") or row.get("comprobanteTipo"),
+        "numero": lambda row: row.get("documentNumber") or row.get("numero") or row.get("number"),
+        "total": lambda row: row.get("totalAmount") if row.get("totalAmount") is not None else row.get("amount"),
+        "codigo": lambda row: row.get("bejermanCustomerCode") or row.get("customerCode"),
+        "operacion": lambda row: row.get("operationLabel") or row.get("operationCode") or row.get("origin"),
+    }
+    value = accessors[field](item)
+    if field == "total":
+        return as_number(value)
+    return _document_natural_key(value)
+
+
+def sort_document_items(
+    items: list[dict[str, Any]],
+    sort_raw: Any,
+    allowed_fields: set[str],
+) -> list[dict[str, Any]]:
+    raw = as_string(sort_raw).strip()
+    descending = raw.startswith("-")
+    field = raw[1:] if descending else raw
+    if field not in allowed_fields:
+        return list(items)
+    non_empty = []
+    empty = []
+    for item in items:
+        raw_value = _document_sort_value(item, field)
+        is_empty = raw_value is None or raw_value == () or raw_value == ""
+        (empty if is_empty else non_empty).append(item)
+    non_empty.sort(key=lambda row: _document_natural_key(row.get("documentId") or row.get("id")), reverse=descending)
+    non_empty.sort(key=lambda row: _document_sort_value(row, field), reverse=descending)
+    empty.sort(key=lambda row: _document_natural_key(row.get("documentId") or row.get("id")), reverse=descending)
+    return non_empty + empty
+
+
 def build_facturacion_result(
     response: dict[str, Any] | list[dict[str, Any]],
     customer_code: str,
@@ -1174,7 +1294,15 @@ def build_facturacion_result(
             items = [item for item in items if item.get("origin") == origin]
     if search:
         items = [item for item in items if search in normalize_search(flatten_text(item))]
-    items.sort(key=lambda item: (item.get("issueDate") or "", item.get("documentNumber") or ""), reverse=True)
+    sort_raw = query.get("sort")
+    if as_string(sort_raw).lstrip("-") in {"fecha", "cliente", "comprobante", "numero", "total"}:
+        items = sort_document_items(
+            items,
+            sort_raw,
+            {"fecha", "cliente", "comprobante", "numero", "total"},
+        )
+    else:
+        items.sort(key=lambda item: (item.get("issueDate") or "", item.get("documentNumber") or ""), reverse=True)
     try:
         page = int(query.get("page") or 1)
     except (TypeError, ValueError):
@@ -1226,7 +1354,15 @@ def build_remitos_result(
         items = [item for item in items if as_string(item.get("operationCode")).upper() == operation_type]
     if search:
         items = [item for item in items if search in normalize_search(flatten_text(item))]
-    items.sort(key=lambda item: (item.get("issueDate") or "", item.get("documentNumber") or ""), reverse=True)
+    sort_raw = query.get("sort")
+    if as_string(sort_raw).lstrip("-") in {"fecha", "cliente", "codigo", "tipo", "operacion", "numero", "total"}:
+        items = sort_document_items(
+            items,
+            sort_raw,
+            {"fecha", "cliente", "codigo", "tipo", "operacion", "numero", "total"},
+        )
+    else:
+        items.sort(key=lambda item: (item.get("issueDate") or "", item.get("documentNumber") or ""), reverse=True)
     try:
         page = int(query.get("page") or 1)
     except (TypeError, ValueError):
@@ -1383,12 +1519,36 @@ def _numeric_pdf_filename_part(value: Any, width: int) -> str:
     return digits.zfill(width) if digits else text
 
 
+def _erp_customer_filename_part(value: Any) -> str:
+    """Código de cliente como lo escribe el ERP: 6 caracteres, justificado a la derecha.
+
+    Ej.: `NOV` -> `   NOV`, `BIOMED` -> `BIOMED`. Los espacios quedan en el medio del
+    nombre (nunca al final), así que son válidos en Windows.
+    """
+
+    text = as_string(value).upper()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", text).strip(". ")
+    return text[:6].rjust(6) if text else ""
+
+
 def _comprobante_pdf_filename(reference: BejermanPdfReference) -> str:
+    """Nombre con el que NEXORA guarda su copia.
+
+    Usa la misma convención que el ERP para que no convivan dos formas distintas de
+    escribir el mismo comprobante. La búsqueda sigue contemplando las tres
+    convenciones (ver `_comprobante_pdf_filename_candidates`), así que los archivos
+    guardados con el formato anterior se siguen encontrando.
+    """
+
     tipo = _safe_pdf_filename_part(reference.type, "COMP")
     letter = _safe_pdf_filename_part(reference.letter)
     point = _numeric_pdf_filename_part(reference.point_of_sale, 5)
     number = _numeric_pdf_filename_part(reference.number, 8)
-    customer = _safe_pdf_filename_part(reference.customer_code)
+    customer = _erp_customer_filename_part(reference.customer_code)
     stem = f"{tipo}{letter}{point}-{number}" if point or number else tipo
     if customer:
         stem = f"{stem}-{customer}"
@@ -1396,14 +1556,41 @@ def _comprobante_pdf_filename(reference: BejermanPdfReference) -> str:
 
 
 def _comprobante_pdf_filename_candidates(reference: BejermanPdfReference) -> list[str]:
+    """Nombres con los que puede estar publicado el PDF.
+
+    Conviven tres convenciones en las carpetas de Bejerman y hay que probarlas todas:
+
+    * la de NEXORA (`_comprobante_pdf_filename`), que sanea y quita espacios:
+      `RISR00004-00004252-NOV.pdf`;
+    * la del ERP al imprimir, que **rellena el código de cliente a 6 con espacios a
+      la izquierda**: `RISR00004-00004252-   NOV.pdf`. Buscar sólo el nombre propio
+      hacía que un PDF que estaba en la carpeta se diera por ausente;
+    * la del SDK (documentada en "10. Generación y Consulta de comprobantes
+      emitidos"): `V-RT -R-00004-00004856-20072026-ARGAS .pdf`.
+    """
+
     tipo = _safe_pdf_filename_part(reference.type, "COMP")
     letter = _safe_pdf_filename_part(reference.letter)
     point = _numeric_pdf_filename_part(reference.point_of_sale, 5)
     number = _numeric_pdf_filename_part(reference.number, 8)
     base = f"{tipo}{letter}{point}-{number}" if point or number else tipo
-    candidates = [_comprobante_pdf_filename(reference)]
+    candidates = [_comprobante_pdf_filename(reference)]  # ERP (lo que NEXORA escribe hoy)
     if base:
-        candidates.append(f"{base}.pdf")
+        candidates.append(f"{base}.pdf")  # sin código de cliente
+        # Formato con el que NEXORA guardaba antes de unificar con el ERP: sin
+        # relleno. Los archivos ya escritos así se tienen que seguir encontrando.
+        legacy_customer = _safe_pdf_filename_part(reference.customer_code)
+        if legacy_customer:
+            candidates.append(f"{base}-{legacy_customer}.pdf")
+        # Códigos ocasionales (@@@#@@) también aparecen saneados a alfanuméricos.
+        alnum = "".join(ch for ch in as_string(reference.customer_code).upper() if ch.isalnum())
+        if alnum:
+            candidates.append(f"{base}-{alnum}.pdf")
+            candidates.append(f"{base}-{alnum[:6].rjust(6)}.pdf")
+    try:
+        candidates.append(_samtronic_sdk_remito_facturas_filename(reference))
+    except Exception:  # nombre opcional: nunca debe romper el sondeo
+        pass
     unique: list[str] = []
     for candidate in candidates:
         if candidate and candidate not in unique:
@@ -1417,6 +1604,17 @@ def _comprobante_pdf_filename_prefix(reference: BejermanPdfReference) -> str:
     point = _numeric_pdf_filename_part(reference.point_of_sale, 5)
     number = _numeric_pdf_filename_part(reference.number, 8)
     return f"{tipo}{letter}{point}-{number}" if point or number else tipo
+
+
+def _comprobante_pdf_filename_prefixes(reference: BejermanPdfReference) -> list[str]:
+    """Prefijos para el barrido de carpeta, en las dos convenciones que existen."""
+
+    prefixes = [_comprobante_pdf_filename_prefix(reference)]
+    try:
+        prefixes.append(_samtronic_sdk_remito_facturas_prefix(reference))
+    except Exception:
+        pass
+    return [prefix for prefix in dict.fromkeys(prefixes) if prefix]
 
 
 def _reference_issue_date_for_sdk_filename(reference: BejermanPdfReference) -> str:
@@ -1441,6 +1639,19 @@ def _sdk_customer_filename_part(value: Any) -> str:
     if text.isdigit():
         return str(int(text)).zfill(6)
     return text[:6].ljust(6)
+
+
+def _sdk_pdf_output_dir() -> str:
+    """Directorio `DirPDFSDK` de Bejerman (Parámetros Especiales, módulo GENPDF).
+
+    Es donde el SDK deja los PDF que genera, con la convención `V-...`. No coincide
+    necesariamente con la carpeta donde el ERP imprime cada tipo de comprobante.
+    """
+
+    try:
+        return _samtronic_sdk_remito_facturas_dir_uri()
+    except Exception:
+        return ""
 
 
 def _samtronic_sdk_remito_facturas_dir_uri() -> str:
@@ -1567,6 +1778,7 @@ def _probe_comprobante_pdf_copy(
     reference: BejermanPdfReference,
     *,
     interactive: bool,
+    allow_directory_scan: bool = True,
 ) -> tuple[bytes | None, str]:
     try:
         output_dir = _configured_pdf_output_dir(client, reference)
@@ -1580,41 +1792,64 @@ def _probe_comprobante_pdf_copy(
         return None, "error"
 
     filenames = _comprobante_pdf_filename_candidates(reference)
-    prefix = _comprobante_pdf_filename_prefix(reference)
-    try:
-        if is_remote_pdf_path(output_dir):
-            raw, path_label = read_remote_pdf_candidates(output_dir, filenames, [prefix])
-        else:
-            folder = Path(output_dir)
-            raw = None
-            path_label = ""
-            for filename in filenames:
-                path = folder / filename
-                if path.exists():
-                    path_label = str(path)
-                    raw = path.read_bytes()
-                    break
-            if raw is None and prefix:
-                matches = sorted(
-                    folder.glob(f"{prefix}*.pdf"),
-                    key=lambda item: item.stat().st_mtime if item.exists() else 0,
-                    reverse=True,
+    # El listado completo del directorio (fallback por prefijo) es caro contra la
+    # carpeta remota de Bejerman/Samtronic (puede tardar minutos con miles de
+    # archivos), así que se paga solo donde el llamador lo habilita. Los nombres
+    # exactos cubren tanto el archivo que escribe NEXORA como el que publica
+    # Bejerman; los prefijos son la red para las variantes que no adivinamos.
+    prefixes = _comprobante_pdf_filename_prefixes(reference) if allow_directory_scan else []
+    # El ERP imprime en la carpeta del tipo de comprobante (REMITOS / FACTURAS),
+    # pero el SDK escribe todo junto en el directorio de `DirPDFSDK`, que puede ser
+    # otro. Hay que mirar los dos: buscar sólo en el del tipo dejaba invisibles los
+    # PDF que genera el SDK.
+    search_dirs = [output_dir]
+    sdk_dir = _sdk_pdf_output_dir()
+    if sdk_dir and sdk_dir not in search_dirs:
+        search_dirs.append(sdk_dir)
+
+    raw = None
+    path_label = ""
+    for directory in search_dirs:
+        try:
+            if is_remote_pdf_path(directory):
+                # Los chequeos interactivos y de última oportunidad van contra el
+                # listado fresco; el ciclo normal del worker reutiliza el cacheado.
+                raw, path_label = read_remote_pdf_candidates(
+                    directory, filenames, prefixes or None, use_cache=not interactive,
                 )
-                for path in matches:
-                    path_label = str(path)
-                    raw = path.read_bytes()
-                    if raw:
+            else:
+                folder = Path(directory)
+                for filename in filenames:
+                    path = folder / filename
+                    if path.exists():
+                        path_label = str(path)
+                        raw = path.read_bytes()
                         break
-    except Exception as exc:
-        logger.warning(
-            "bejerman_pdf_copy_read_failed",
-            extra={
-                **_pdf_log_context(reference, interactive=interactive),
-                "bejerman_pdf_path": output_dir,
-                "error": str(exc),
-            },
-        )
-        return None, "error"
+                if raw is None and prefixes:
+                    matches: list[Path] = []
+                    for prefix in prefixes:
+                        matches.extend(folder.glob(f"{prefix}*.pdf"))
+                    for path in sorted(
+                        dict.fromkeys(matches),
+                        key=lambda item: item.stat().st_mtime if item.exists() else 0,
+                        reverse=True,
+                    ):
+                        path_label = str(path)
+                        raw = path.read_bytes()
+                        if raw:
+                            break
+        except Exception as exc:
+            logger.warning(
+                "bejerman_pdf_copy_read_failed",
+                extra={
+                    **_pdf_log_context(reference, interactive=interactive),
+                    "bejerman_pdf_path": directory,
+                    "error": str(exc),
+                },
+            )
+            return None, "error"
+        if raw:
+            break
 
     if not raw:
         return None, "missing"
@@ -1632,8 +1867,16 @@ def _probe_comprobante_pdf_copy(
     return pdf, "ready"
 
 
-def _load_comprobante_pdf_copy(client: BejermanSDKClient, reference: BejermanPdfReference, *, interactive: bool) -> bytes | None:
-    pdf, _status = _probe_comprobante_pdf_copy(client, reference, interactive=interactive)
+def _load_comprobante_pdf_copy(
+    client: BejermanSDKClient,
+    reference: BejermanPdfReference,
+    *,
+    interactive: bool,
+    allow_directory_scan: bool = True,
+) -> bytes | None:
+    pdf, _status = _probe_comprobante_pdf_copy(
+        client, reference, interactive=interactive, allow_directory_scan=allow_directory_scan,
+    )
     return pdf
 
 
@@ -1642,10 +1885,13 @@ def load_comprobante_pdf_copy(
     reference: BejermanPdfReference,
     *,
     interactive: bool = True,
+    allow_directory_scan: bool = True,
 ) -> bytes | None:
     """Lee y valida el PDF durable configurado para la empresa."""
 
-    return _load_comprobante_pdf_copy(client, reference, interactive=interactive)
+    return _load_comprobante_pdf_copy(
+        client, reference, interactive=interactive, allow_directory_scan=allow_directory_scan,
+    )
 
 
 def probe_comprobante_pdf_copy(
@@ -1653,10 +1899,21 @@ def probe_comprobante_pdf_copy(
     reference: BejermanPdfReference,
     *,
     interactive: bool = True,
+    allow_directory_scan: bool = True,
 ) -> tuple[bytes | None, str]:
-    """Distingue archivo listo, ausente y error de acceso/configuración."""
+    """Distingue archivo listo, ausente y error de acceso/configuración.
 
-    return _probe_comprobante_pdf_copy(client, reference, interactive=interactive)
+    `allow_directory_scan` habilita el fallback caro de listar toda la carpeta
+    remota por prefijo cuando los nombres exactos no coinciden (ver
+    `_comprobante_pdf_filename_candidates`). Dejarlo en False en los caminos
+    calientes (sondeo HTTP recurrente, ciclo normal del worker) y reservarlo
+    para los chequeos de última oportunidad (recheck de estados terminales,
+    vencimiento del deadline).
+    """
+
+    return _probe_comprobante_pdf_copy(
+        client, reference, interactive=interactive, allow_directory_scan=allow_directory_scan,
+    )
 
 
 def store_comprobante_pdf_copy(
@@ -1823,6 +2080,44 @@ def find_bejerman_client_record(response: dict[str, Any], customer_code: str) ->
     return None
 
 
+CUSTOMER_DOCUMENT_RECORD_KEYS = ("Cliente_CUIT", "Cliente_NroDocumento", "Cliente_Cuit", "CUIT", "Cuit")
+
+
+def find_bejerman_client_record_by_document(
+    response: dict[str, Any], nro_documento: Any
+) -> dict[str, Any] | None:
+    """Hermano de find_bejerman_client_record, pero buscando por numero de documento.
+
+    Es la misma busqueda que hace Bejerman cuando recibe el codigo ocasional '@@@#@@'. Compara solo
+    digitos porque el maestro guarda el documento sin puntos ni guiones pero el dato local puede
+    venir de cualquier forma. ObtenerClientes devuelve tambien las fichas deshabilitadas, asi que
+    esta busqueda las encuentra igual (verificado contra el maestro real).
+    """
+    documento = _occasional_customer_digits(nro_documento)
+    if not documento:
+        return None
+    for record in records_from_response(response):
+        record_document = _occasional_customer_digits(first_value(record, CUSTOMER_DOCUMENT_RECORD_KEYS))
+        if record_document and record_document == documento:
+            return record
+    return None
+
+
+def build_customer_toggle_payload(record: dict[str, Any], *, habilitado: bool) -> dict[str, Any]:
+    """Payload de ModificarCliente que cambia unicamente Cliente_Habilitado.
+
+    ModificarCliente exige la ficha completa (razon social, provincia, situacion de IVA, vendedor,
+    condicion de venta, etc. son obligatorios), asi que se reenvia tal cual vino de ObtenerClientes
+    y se pisa un solo campo. Quien llame tiene que leer la ficha justo antes de escribir, para no
+    revertir una edicion hecha desde el escritorio en el medio.
+    """
+    return {**record, "Cliente_Habilitado": bool(habilitado)}
+
+
+def bejerman_client_record_is_enabled(record: dict[str, Any]) -> bool:
+    return as_bool(first_value(record, ("Cliente_Habilitado", "ClienteHabilitado", "Habilitado")))
+
+
 def build_customer_document_fields(response: dict[str, Any], customer_code: str) -> dict[str, str] | None:
     record = find_bejerman_client_record(response, customer_code)
     if not record:
@@ -1863,6 +2158,145 @@ def resolve_customer_document_fields(client: BejermanSDKClient, customer_code: s
     return fields
 
 
+# Código especial documentado por Bejerman ("Estructuras de datos - Ventas", nota *3): en vez
+# de buscar el cliente por Cliente_Codigo, el ERP lo busca (o da de alta automáticamente) por
+# Cliente_NroDocumento. Es el equivalente API del checkbox "Cliente Vario" de su UI de escritorio.
+BEJERMAN_OCCASIONAL_CUSTOMER_CODE = "@@@#@@"
+
+
+def _occasional_customer_digits(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+# Razones sociales locales que no son un cliente real de Bejerman sino el placeholder bajo el cual
+# se cargan los particulares. Se comparan normalizadas (sin acentos, sin espacios, minúsculas).
+OCCASIONAL_CUSTOMER_NAMES = frozenset({"particular", "particulares", "consumidorfinal", "clientevario"})
+
+
+def _normalize_customer_name(value: Any) -> str:
+    text = unicodedata.normalize("NFD", str(value or ""))
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def is_occasional_customer_name(razon_social: Any) -> bool:
+    """True si la razón social local marca un cliente ocasional (particular)."""
+    return _normalize_customer_name(razon_social) in OCCASIONAL_CUSTOMER_NAMES
+
+
+def bejerman_customer_code_for(razon_social: Any, cod_empresa: Any) -> str:
+    """Código Bejerman a usar para un cliente local, o '' si es el placeholder de particulares.
+
+    El maestro local puede tener cargado un código en la fila 'Particular' (históricamente 'PTL'),
+    pero ese código no existe en Bejerman: los particulares se emiten como cliente ocasional. Devolver
+    '' acá es lo que enciende el camino ocasional en todas las guardas `if not customer_code`.
+    """
+    if is_occasional_customer_name(razon_social):
+        return ""
+    return _clean(cod_empresa)
+
+
+def build_occasional_customer_fields(razon_social: Any, nro_documento: Any) -> dict[str, str]:
+    """Arma los campos Cliente_* para el código especial de cliente ocasional, sin consultar
+    Bejerman. Se usa para el cliente placeholder 'Particular' (cod_empresa NULL) cuando el
+    ingreso ya capturó nombre y documento del propietario ocasional."""
+    nombre = _clean(razon_social)
+    if not nombre:
+        raise BejermanSdkResponseError("BEJERMAN_OCCASIONAL_CUSTOMER_NAME_MISSING")
+    documento = _occasional_customer_digits(nro_documento)
+    if not documento:
+        raise BejermanSdkResponseError("BEJERMAN_OCCASIONAL_CUSTOMER_DOCUMENT_MISSING")
+    tipo_documento = "1" if len(documento) == 11 else "5"  # C.U.I.T. (11 dígitos) vs D.N.I.
+    return {
+        "Cliente_RazonSocial": nombre,
+        "Cliente_TipoDocumento": tipo_documento,
+        "Cliente_NroDocumento": documento[:11],
+        "Cliente_SitIVA": "3",  # Consumidor Final
+        # Obligatorios segun "Estructuras de datos - Ventas": el cliente ocasional no los tiene, pero
+        # la doc pide mandarlos vacios, no omitirlos.
+        "Cliente_Provincia": "",
+        "Cliente_NumeroIIBB": "",
+    }
+
+
+CUSTOMER_DOCUMENT_CACHE_REQUIRED_FIELDS = (
+    "Cliente_RazonSocial",
+    "Cliente_TipoDocumento",
+    "Cliente_NroDocumento",
+    "Cliente_Provincia",
+    "Cliente_SitIVA",
+)
+
+
+def _customer_resolution_retry_delay_seconds(configured_value: Any = None) -> float:
+    raw_value = (
+        _setting("BEJERMAN_CUSTOMER_RESOLUTION_RETRY_DELAY_SECONDS", 2)
+        if configured_value is None
+        else configured_value
+    )
+    try:
+        delay = float(raw_value)
+    except (TypeError, ValueError):
+        delay = 2.0
+    return max(0.0, min(30.0, delay))
+
+
+def resolve_customer_document_fields_cached(
+    client: BejermanSDKClient,
+    customer_code: str,
+    local_lookup: Callable[[BejermanSDKClient, str], dict[str, str] | None],
+    *,
+    retry_delay_seconds: float | None = None,
+) -> dict[str, str]:
+    """Prioriza la caché local y reintenta una sola vez la resolución en vivo.
+
+    El callback mantiene a esta capa desacoplada de la base de datos. Un error
+    o un resultado incompleto de caché no bloquea la emisión: se continúa con
+    el lookup normal de Bejerman. Solo se reintentan los errores específicos
+    de resolución de cliente, nunca errores genéricos o de configuración.
+    """
+
+    try:
+        cached_fields = local_lookup(client, customer_code)
+    except Exception:
+        logger.warning(
+            "bejerman_customer_cache_lookup_failed",
+            extra={
+                "company_key": as_string(getattr(client, "company_key", "")),
+                "customer_code": as_string(customer_code),
+            },
+            exc_info=True,
+        )
+        cached_fields = None
+
+    if cached_fields and all(
+        as_string(cached_fields.get(field))
+        for field in CUSTOMER_DOCUMENT_CACHE_REQUIRED_FIELDS
+    ):
+        return dict(cached_fields)
+
+    delay = _customer_resolution_retry_delay_seconds(retry_delay_seconds)
+    for attempt in range(2):
+        try:
+            return resolve_customer_document_fields(client, customer_code)
+        except BejermanSdkResponseError as exc:
+            if attempt > 0 or not is_bejerman_customer_resolution_message(exc):
+                raise
+            logger.info(
+                "bejerman_customer_resolution_retry",
+                extra={
+                    "company_key": as_string(getattr(client, "company_key", "")),
+                    "customer_code": as_string(customer_code),
+                    "delay_seconds": delay,
+                    "error": str(exc)[:300],
+                },
+            )
+            if delay:
+                time.sleep(delay)
+
+    raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_NOT_FOUND")  # inalcanzable
+
+
 def equipment_label(equipment: dict[str, Any]) -> str:
     explicit = as_string(equipment.get("equipmentLabel"))
     if explicit:
@@ -1872,6 +2306,14 @@ def equipment_label(equipment: dict[str, Any]) -> str:
 
 
 def equipment_article_description(equipment: dict[str, Any], fallback: str) -> str:
+    # El código de artículo es la referencia maestra: si Bejerman ya tiene registrada una
+    # descripción para ese código (mappedArticleName), esa es la que se manda, para que la
+    # línea del comprobante coincida con lo que Bejerman resuelve por código en sus propias
+    # queries. El rótulo armado localmente (equipmentLabel) solo se usa como respaldo cuando
+    # todavía no se conoce la descripción real de Bejerman para ese artículo.
+    mapped = as_string(equipment.get("mappedArticleName"))
+    if mapped:
+        return mapped
     explicit = as_string(equipment.get("equipmentLabel"))
     if explicit:
         return explicit
@@ -2307,7 +2749,11 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
             "Comprobante_FechaEmision": issue_date,
             "Cliente_Codigo": payload.get("customerCode"),
             "Cliente_RazonSocial": customer_fields.get("Cliente_RazonSocial") or payload.get("customerName"),
-            **{key: value for key, value in customer_fields.items() if key != "Cliente_RazonSocial" and value},
+            # `is not None` y no `value`: para el cliente ocasional hay campos obligatorios que
+            # Bejerman espera presentes aunque vayan vacíos (Cliente_Provincia, Cliente_NumeroIIBB).
+            # Los clientes resueltos contra Bejerman no se ven afectados porque
+            # build_customer_document_fields ya descarta los vacíos antes de llegar acá.
+            **{key: value for key, value in customer_fields.items() if key != "Cliente_RazonSocial" and value is not None},
             "Vendedor_Codigo": seller,
             "Comprobante_CondVenta": payload.get("paymentTermCode"),
             "Comprobante_FechaVencimiento": issue_date,
@@ -2843,7 +3289,11 @@ def build_delivery_remito_comprobante(
             "Comprobante_FechaEmision": issue_date,
             "Cliente_Codigo": request.get("customerCode"),
             "Cliente_RazonSocial": customer_fields.get("Cliente_RazonSocial") or request.get("customerName"),
-            **{key: value for key, value in customer_fields.items() if key != "Cliente_RazonSocial" and value},
+            # `is not None` y no `value`: para el cliente ocasional hay campos obligatorios que
+            # Bejerman espera presentes aunque vayan vacíos (Cliente_Provincia, Cliente_NumeroIIBB).
+            # Los clientes resueltos contra Bejerman no se ven afectados porque
+            # build_customer_document_fields ya descarta los vacíos antes de llegar acá.
+            **{key: value for key, value in customer_fields.items() if key != "Cliente_RazonSocial" and value is not None},
             "Vendedor_Codigo": seller,
             "Comprobante_CondVenta": request.get("paymentTermCode"),
             "Comprobante_FechaVencimiento": issue_date,

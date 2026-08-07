@@ -291,6 +291,88 @@ class RentalRemitoStateTests(TestCase):
             cur.execute("SELECT COUNT(*) FROM ingreso_events WHERE ticket_id=%s AND comentario ILIKE %s", [self.ingreso_id, "%RTA R 00001-00004587%"])
             self.assertEqual(cur.fetchone()[0], 1)
 
+    def _make_particular_ingreso(self, *, propietario_nombre="Juan Perez", propietario_doc="30710698"):
+        with connection.cursor() as cur:
+            # 'PTL' a proposito: en produccion la fila Particular quedo con un codigo cargado que no
+            # existe en Bejerman. Con NULL aca el test pasaba en verde mientras el circuito real
+            # fallaba, porque el camino de cliente ocasional esta detras de guardas
+            # `if not customer_code`.
+            cur.execute(
+                "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s) RETURNING id",
+                ["PTL", "Particular", ""],
+            )
+            particular_customer_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, numero_interno, variante)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                RETURNING id
+                """,
+                [particular_customer_id, self.marca_id, self.model_id, "Y2A19608999", "MG 6799", "Y-25T"],
+            )
+            device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    device_id, estado, motivo, fecha_ingreso, resolucion, alquiler_a,
+                    empresa_bejerman, empresa_facturar, propietario_nombre, propietario_doc
+                )
+                VALUES (%s,%s,%s,CURRENT_TIMESTAMP,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+                """,
+                [
+                    device_id, "reparado", "reparacion", "reparado", "Particular",
+                    "SEPID", "SEPID", propietario_nombre, propietario_doc,
+                ],
+            )
+            return int(cur.fetchone()[0])
+
+    def test_point_one_habilita_registro_para_cliente_particular_con_propietario(self):
+        ingreso_id = self._make_particular_ingreso()
+
+        state = get_rental_remito_state(
+            ingreso_id,
+            "00001-00004999",
+            sales_client=FakeRentalSalesClient([]),
+            stock_client=FakeRentalStockClient([1]),
+        )
+
+        self.assertEqual(state["status"], "needs_stock_action")
+        self.assertEqual(state["action"]["type"], "register_rta_pv1")
+
+    def test_point_one_sigue_bloqueado_si_particular_no_tiene_propietario_doc(self):
+        ingreso_id = self._make_particular_ingreso(propietario_nombre="", propietario_doc="")
+
+        state = get_rental_remito_state(
+            ingreso_id,
+            "00001-00004999",
+            sales_client=FakeRentalSalesClient([]),
+            stock_client=FakeRentalStockClient([1]),
+        )
+
+        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["code"], "RENTAL_CUSTOMER_REQUIRED")
+
+    def test_register_rta_para_cliente_particular_usa_codigo_ocasional(self):
+        ingreso_id = self._make_particular_ingreso(propietario_nombre="Juan Perez", propietario_doc="30.710.698")
+        sales_client = FakeRentalSalesClient([])
+
+        result = execute_rental_remito_action(
+            ingreso_id,
+            "register_rta_pv1",
+            remito_number="00001-00004999",
+            sales_client=sales_client,
+            stock_client=FakeRentalStockClient([1, 0]),
+            actor_user_id=self.user.id,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        emitted = next(call for call in sales_client.calls if call[0] == "ingresar_comprobante_ventas_json")
+        comprobante = emitted[1]
+        self.assertEqual(comprobante["Cliente_Codigo"], "@@@#@@")
+        self.assertEqual(comprobante["Cliente_RazonSocial"], "Juan Perez")
+        self.assertFalse(any(call[0] == "list_clientes" for call in sales_client.calls))
+
 
 # Nota: las vistas IngresoAlquilerRemitoView/IngresoAlquilerRemitoAccionView se
 # eliminaron de permission_policy; el test de permisos que las cubría se quitó

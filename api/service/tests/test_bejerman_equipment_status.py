@@ -107,6 +107,60 @@ class IngresoBejermanEstadoViewTests(SimpleTestCase):
         self.assertEqual(response.data["status"], "zero_stock")
         self.assertIn("sin stock positivo", response.data["warning"])
 
+    def _zero_stock_client(self):
+        return FakeBejermanEstadoClient(
+            stock_records=[
+                {
+                    "Art_CodDeposito": "STC",
+                    "Art_Partida": "SN-001",
+                    "Art_CodGen": "1202018",
+                    "Art_RealUM1": 0,
+                    "Art_CompUM1": 0,
+                    "Art_DispUM1": 0,
+                }
+            ]
+        )
+
+    def test_zero_stock_con_ris_generado_sugiere_forzar_stock(self):
+        with (
+            patch(
+                "service.views.ingresos_views.get_ris_status_for_ingreso",
+                return_value={"status": "generated", "remito_number": "0001-00001234"},
+            ),
+            patch(
+                "service.views.ingresos_views._service_release_remito_salida_for_ingreso",
+                return_value="",
+            ),
+        ):
+            response, _ = self._response(self._row(), self._zero_stock_client())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "zero_stock")
+        self.assertEqual(
+            response.data["action"],
+            {"type": "force_stock_entry", "label": "Forzar ingreso de stock en Bejerman"},
+        )
+
+    def test_zero_stock_con_equipo_liberado_no_sugiere_forzar(self):
+        # Un equipo que ya salió por RSS (liberación) queda en cero stock de forma
+        # legítima: no hay que ofrecer "forzar ingreso de stock" para ese caso.
+        with (
+            patch(
+                "service.views.ingresos_views.get_ris_status_for_ingreso",
+                return_value={"status": "generated", "remito_number": "0001-00001234"},
+            ),
+            patch(
+                "service.views.ingresos_views._service_release_remito_salida_for_ingreso",
+                return_value="0002-00005678",
+            ),
+        ):
+            response, _ = self._response(self._row(), self._zero_stock_client())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "zero_stock")
+        self.assertIsNone(response.data["action"])
+        self.assertIn("liberado", response.data["warning"])
+
     def test_informa_no_encontrado(self):
         response, _ = self._response(self._row(), FakeBejermanEstadoClient())
 

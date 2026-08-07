@@ -34,6 +34,7 @@ class Command(BaseCommand):
             records, company_errors = load_bejerman_customer_records_for_companies(
                 user_id=user_id,
                 allow_system_credentials=use_system,
+                force_refresh=True,
             )
         else:
             records = load_bejerman_customer_records(

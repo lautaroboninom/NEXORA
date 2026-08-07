@@ -12,7 +12,12 @@ from .helpers import (
     _set_audit_user,
     require_roles,
 )
-from .tipo_equipo_utils import clean_tipo_equipo, preferred_row, sentence_case_tipo_equipo
+from .tipo_equipo_utils import (
+    clean_tipo_equipo,
+    preferred_row,
+    sentence_case_tipo_equipo,
+    tipo_equipo_key,
+)
 
 
 def _ensure_catalog_tipo(nombre: str) -> None:
@@ -318,36 +323,80 @@ class ModelosPorMarcaView(APIView):
             if not ok:
                 raise ValidationError("Técnico inválido")
 
-        if connection.vendor == "postgresql":
-            q(
-                """
-              INSERT INTO models(marca_id, nombre, tecnico_id, tipo_equipo, variante)
-              VALUES (%(b)s, %(n)s, %(t)s, NULLIF(%(te)s,''), NULLIF(%(va)s,''))
-              ON CONFLICT (marca_id, nombre) DO UPDATE
-                 SET tecnico_id = EXCLUDED.tecnico_id,
-                     tipo_equipo = COALESCE(EXCLUDED.tipo_equipo, models.tipo_equipo),
-                     variante = COALESCE(EXCLUDED.variante, models.variante)
+        # Un modelo es (marca, nombre, tipo de equipo). El mismo nombre bajo otro tipo es
+        # otro equipo distinto (ej. el CPAP "DM26" y el calentador humidificador "DM26" que
+        # va con él): se crea aparte en vez de pisar al que ya existe.
+        homonimos = q(
+            """
+            SELECT id,
+                   COALESCE(TRIM(tipo_equipo),'') AS tipo,
+                   COALESCE(TRIM(variante),'') AS variante
+            FROM models
+            WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+            ORDER BY id
             """,
-                {"b": bid, "n": n, "t": tecnico_id, "te": tipo_equipo, "va": variante},
-            )
-        else:
-            q(
+            [bid, n],
+        ) or []
+        buscado = tipo_equipo_key(tipo_equipo)
+        destino = next((r for r in homonimos if tipo_equipo_key(r["tipo"]) == buscado), None)
+        if destino is None:
+            sin_tipo = next((r for r in homonimos if not r["tipo"]), None)
+            if tipo_equipo:
+                # Modelo viejo cargado sin tipo: se le completa el tipo, no se duplica.
+                destino = sin_tipo
+            elif len(homonimos) == 1:
+                destino = homonimos[0]
+            elif homonimos:
+                return Response({
+                    "detail": "Ya hay varios modelos con ese nombre en la marca. "
+                              "Indicá el tipo de equipo para saber a cuál corresponde.",
+                    "tipos_existentes": [r["tipo"] for r in homonimos],
+                }, status=409)
+
+        if destino is None:
+            exec_void(
                 """
                 INSERT INTO models(marca_id, nombre, tecnico_id, tipo_equipo, variante)
                 VALUES (%s, %s, %s, NULLIF(%s,''), NULLIF(%s,''))
-                ON DUPLICATE KEY UPDATE
-                  tecnico_id = VALUES(tecnico_id),
-                  tipo_equipo = IFNULL(VALUES(tipo_equipo), tipo_equipo),
-                  variante = IFNULL(VALUES(variante), variante)
                 """,
-                [bid, n, tecnico_id, tipo_equipo, variante],
+                [bid, n, tecnico_id or None, tipo_equipo or "", variante or ""],
             )
+            creado = q(
+                """
+                SELECT id FROM models
+                WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+                  AND LOWER(COALESCE(TRIM(tipo_equipo),''))=LOWER(%s)
+                ORDER BY id DESC LIMIT 1
+                """,
+                [bid, n, tipo_equipo or ""],
+                one=True,
+            ) or {}
+            model_id = creado.get("id")
+            created = True
+        else:
+            model_id = destino["id"]
+            created = False
+            sets = []
+            params = []
+            # Solo se toca lo que vino en el pedido: un alta sin técnico no borra el que ya tenía.
+            if "tecnico_id" in d:
+                sets.append("tecnico_id=%s")
+                params.append(tecnico_id or None)
+            if tipo_equipo and not destino["tipo"]:
+                sets.append("tipo_equipo=%s")
+                params.append(tipo_equipo)
+            if variante and not destino["variante"]:
+                sets.append("variante=%s")
+                params.append(variante)
+            if sets:
+                params.append(model_id)
+                exec_void(f"UPDATE models SET {', '.join(sets)} WHERE id=%s", params)
 
         if tipo_equipo:
             _ensure_marca_tipo_id(bid, tipo_equipo, activo=True)
             _ensure_catalog_tipo(tipo_equipo)
 
-        return Response({"ok": True})
+        return Response({"ok": True, "id": model_id, "created": created})
 
 
 class MarcaDeleteView(APIView):
@@ -406,16 +455,29 @@ class ModeloDeleteView(APIView):
         nombre = (d.get("nombre") or d.get("name") or "").strip()
         if not nombre:
             return Response({"detail": "nombre requerido"}, status=400)
-        row = q("SELECT id, marca_id FROM models WHERE id=%s", [mid], one=True)
+        row = q(
+            "SELECT id, marca_id, COALESCE(TRIM(tipo_equipo),'') AS tipo FROM models WHERE id=%s",
+            [mid], one=True,
+        )
         if not row:
             return Response({"detail": "modelo no encontrado"}, status=404)
         marca_id = row.get("marca_id")
+        # Choca solo contra otro modelo del mismo tipo: el mismo nombre con otro tipo de
+        # equipo es otro equipo y puede convivir.
         clash = q(
-            "SELECT id FROM models WHERE marca_id=%s AND id<>%s AND LOWER(nombre)=LOWER(%s)",
-            [marca_id, mid, nombre], one=True,
+            """
+            SELECT id FROM models
+            WHERE marca_id=%s AND id<>%s
+              AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+              AND LOWER(COALESCE(TRIM(tipo_equipo),''))=LOWER(%s)
+            """,
+            [marca_id, mid, nombre, row.get("tipo") or ""], one=True,
         )
         if clash:
-            return Response({"detail": "ya existe un modelo con ese nombre para la marca"}, status=409)
+            return Response(
+                {"detail": "ya existe un modelo con ese nombre y tipo de equipo para la marca"},
+                status=409,
+            )
         exec_void("UPDATE models SET nombre=%s WHERE id=%s", [nombre, mid])
         return Response({"ok": True})
 
@@ -600,10 +662,18 @@ class MarcaMergeView(APIView):
         for mm in modelos:
             nombre = (mm.get("nombre") or "").strip()
             tipo_src = (mm.get("tipo") or "").strip()
-            # ¿Existe modelo con mismo nombre en la marca destino? (ignorando tipo)
+            # ¿Existe modelo con mismo nombre en la marca destino? Se prefiere el del mismo
+            # tipo de equipo: si hay homónimos de distinto tipo son equipos distintos y no
+            # deben emparejarse entre sí.
             dup_any = q(
-                "SELECT id, COALESCE(TRIM(tipo_equipo),'') AS tipo, variante FROM models WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s)) LIMIT 1",
-                [target_id, nombre],
+                """
+                SELECT id, COALESCE(TRIM(tipo_equipo),'') AS tipo, variante
+                FROM models
+                WHERE marca_id=%s AND LOWER(TRIM(nombre))=LOWER(TRIM(%s))
+                ORDER BY (LOWER(COALESCE(TRIM(tipo_equipo),'')) = LOWER(%s)) DESC, id
+                LIMIT 1
+                """,
+                [target_id, nombre, tipo_src],
                 one=True,
             )
             if dup_any:

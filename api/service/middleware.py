@@ -6,6 +6,35 @@ from .views.helpers import _set_audit_user
 import json
 
 
+SENSITIVE_AUDIT_KEYS = {
+    "password",
+    "clave",
+    "token",
+    "secret",
+    "secreto",
+    "encrypted_password",
+    "current_password",
+    "new_password",
+    "password_confirmation",
+}
+
+
+def redact_sensitive_audit_data(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            normalized = str(key or "").strip().lower().replace("-", "_")
+            redacted[key] = (
+                "[REDACTADO]"
+                if normalized in SENSITIVE_AUDIT_KEYS
+                else redact_sensitive_audit_data(item)
+            )
+        return redacted
+    if isinstance(value, list):
+        return [redact_sensitive_audit_data(item) for item in value]
+    return value
+
+
 def _safe_clear_rollback():
     try:
         transaction.set_rollback(False)
@@ -70,7 +99,9 @@ class ActivityLogMiddleware:
             try:
                 if request.body:
                     raw = request.body[: getattr(settings, "AUDIT_LOG_MAX_BODY", 4096)]
-                    body_json = json.loads(raw.decode("utf-8", errors="ignore"))
+                    body_json = redact_sensitive_audit_data(
+                        json.loads(raw.decode("utf-8", errors="ignore"))
+                    )
             except Exception:
                 _safe_clear_rollback()
                 body_json = None

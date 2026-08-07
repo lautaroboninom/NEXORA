@@ -2,6 +2,7 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from service.notification_email_outbox import summarize_email_deliveries
 from service.notifications import (
     add_notification_email_address,
     delete_notification_email_address,
@@ -49,6 +50,29 @@ class NotificacionesView(APIView):
             return Response({"items": [], "unread_count": 0})
         limit = request.GET.get("limit") or 20
         return Response(list_notifications_for_user(uid, limit=limit))
+
+
+class NotificacionesEmailEstadoView(APIView):
+    """Estado real de correos encolados, para poder confirmar un envío concreto."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        raw_ids = request.GET.get("ids") or ""
+        delivery_ids = []
+        for chunk in str(raw_ids).replace(";", ",").split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                delivery_ids.append(int(chunk))
+            except ValueError:
+                return Response({"detail": f"id de envío inválido: {chunk}"}, status=400)
+        if not delivery_ids:
+            return Response({"detail": "Debe informar al menos un id de envío."}, status=400)
+        if len(delivery_ids) > 50:
+            return Response({"detail": "Demasiados ids de envío (máximo 50)."}, status=400)
+        return Response(summarize_email_deliveries(delivery_ids))
 
 
 class NotificacionClickView(APIView):

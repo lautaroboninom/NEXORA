@@ -66,10 +66,10 @@ export default function ReleaseOrderModal({
 
   const currentResolution = normalizeReleaseValue(row?.resolucion);
   const selectedResolution = normalizeReleaseValue(resolution);
-  const missingResolution = !currentResolution && !flow.isReleased;
-  const canEditResolution = Boolean(canManageResolution && !flow.isReleased);
+  const missingResolution = !currentResolution && !flow.isReprint;
+  const canEditResolution = Boolean(canManageResolution && !flow.isReprint);
   const shouldPersistResolution = Boolean(
-    !flow.isReleased &&
+    !flow.isReprint &&
       canManageResolution &&
       selectedResolution &&
       (
@@ -82,7 +82,8 @@ export default function ReleaseOrderModal({
     !currentResolution &&
       flow.suggestedResolution &&
       selectedResolution === flow.suggestedResolution &&
-      !canManageResolution
+      !canManageResolution &&
+      !flow.isReprint
   );
   const resolutionBlockedByPermission = Boolean(
       missingResolution &&
@@ -100,7 +101,7 @@ export default function ReleaseOrderModal({
     ? ""
     : resolutionBlockedByPermission
       ? "Falta definir la resolución. Debe hacerlo un jefe antes de liberar."
-      : !selectedResolution && !flow.isReleased
+      : !selectedResolution && !flow.isReprint
       ? "Seleccioná la resolución de reparación."
       : needsCharge && !chargeValid
         ? "Ingresá el importe neto del presupuesto rechazado."
@@ -127,7 +128,8 @@ export default function ReleaseOrderModal({
         await postCerrarReparacion(ingresoId, payload);
       }
 
-      const blob = await getBlob(`/api/ingresos/${ingresoId}/remito/`);
+      const remitoPath = `/api/ingresos/${ingresoId}/remito/${flow.isReprint ? "?reprint=1" : ""}`;
+      const blob = await getBlob(remitoPath);
       if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
 
       const result = openPrintablePdf(blob, {
@@ -201,7 +203,7 @@ export default function ReleaseOrderModal({
             </div>
           </div>
 
-          {!flow.isReleased ? (
+          {!flow.isReprint ? (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">
                 <div className="mb-1 text-sm text-gray-600">Resolución de reparación</div>
@@ -287,7 +289,13 @@ export default function ReleaseOrderModal({
             aria-busy={saving ? "true" : "false"}
           >
             <Printer className="h-4 w-4" aria-hidden="true" />
-            {saving ? "Preparando..." : flow.isReleased ? "Reimprimir orden" : "Liberar e imprimir"}
+            {saving
+              ? "Preparando..."
+              : flow.isSoldDelivered
+                ? "Ver e imprimir salida"
+                : flow.isReprint
+                  ? "Ver y reimprimir orden"
+                  : "Liberar e imprimir"}
           </button>
         </div>
       </ResponsiveModalPanel>

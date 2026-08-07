@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buscarAccesorioPorRef } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, resolveFechaIngreso } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import useQueryState from "../hooks/useQueryState";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 export default function BuscarAccesorio() {
   const [sp] = useSearchParams();
@@ -11,6 +15,7 @@ export default function BuscarAccesorio() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [sort, setSort] = useQueryState("sort", "");
   const nav = useNavigate();
 
   useEffect(() => {
@@ -26,16 +31,30 @@ export default function BuscarAccesorio() {
   }, [ref]);
 
   const titulo = ref ? `Servicios con referencia: ${ref}` : "Búsqueda por referencia de accesorio";
+  const displayRows = useMemo(
+    () => sortRows(rows, sort, INGRESO_LIST_SORT_COLUMNS),
+    [rows, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "accesorio",
+    "referencia",
+    "cliente",
+    "equipo",
+    "identificacion",
+    "fecha_ingreso",
+  ]);
 
   return (
     <div className="max-w-5xl mx-auto p-4 space-y-4">
       <h1 className="text-2xl font-bold">{titulo}</h1>
       {err && <div className="bg-red-100 text-red-700 border border-red-300 p-2 rounded">{err}</div>}
       {loading ? "Cargando..." :
-        rows.length === 0 ? <div className="text-sm text-gray-500">No se encontraron servicios con esa referencia.</div> :
+        displayRows.length === 0 ? <div className="text-sm text-gray-500">No se encontraron servicios con esa referencia.</div> :
         <div>
+          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
           <MobileDataList>
-            {rows.map((r) => {
+            {displayRows.map((r) => {
               const ingresoId = r?.id ?? r?.ingreso_id;
               const equipo = [r?.marca, r?.modelo].filter(Boolean).join(" ");
               return (
@@ -65,17 +84,17 @@ export default function BuscarAccesorio() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th className="p-2">OS</th>
-                <th className="p-2">Accesorio</th>
-                <th className="p-2">Referencia</th>
-                <th className="p-2">Cliente</th>
-                <th className="p-2">Equipo</th>
-                <th className="p-2">Serie</th>
-                <th className="p-2">Fecha ingreso</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                <SortableTh field="accesorio" sort={sort} onSortChange={setSort} className="p-2">Accesorio</SortableTh>
+                <SortableTh field="referencia" sort={sort} onSortChange={setSort} className="p-2">Referencia</SortableTh>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
+                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
+                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
+                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2">Fecha ingreso</SortableTh>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {displayRows.map((r) => {
                 const ingresoId = r?.id ?? r?.ingreso_id;
                 const equipo = [r?.marca, r?.modelo].filter(Boolean).join(" ");
                 return (
@@ -98,7 +117,7 @@ export default function BuscarAccesorio() {
             </tbody>
           </table>
           </DesktopTableWrap>
-          <div className="text-xs text-gray-500 mt-2">Mostrando {rows.length} resultado(s).</div>
+          <div className="text-xs text-gray-500 mt-2">Mostrando {displayRows.length} resultado(s).</div>
         </div>}
     </div>
   );

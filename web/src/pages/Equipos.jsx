@@ -40,11 +40,14 @@ import {
   getSerialBarcodeBlob,
 } from "../lib/api";
 import { openPdfBlob } from "../lib/pdf";
+import { patrimonialEmailMessage, watchPatrimonialEmail } from "../lib/patrimonialEmail";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import { tipoEquipoOf } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort.js";
 
 const TAB_ITEMS = [
   { value: "equipos", label: "Equipos" },
@@ -85,6 +88,34 @@ const RENTAL_FILTER_OPTIONS = [
   { value: "", label: "Todos" },
   { value: "1", label: "Alquilados" },
   { value: "0", label: "No alquilados" },
+];
+
+const DEVICE_SORT_OPTIONS = [
+  { value: "id", label: "ID" },
+  { value: "propiedad", label: "Propiedad" },
+  { value: "cliente", label: "Último cliente/Dueño" },
+  { value: "ns", label: "Identificación" },
+  { value: "marca", label: "Marca" },
+  { value: "modelo", label: "Modelo" },
+  { value: "ubicacion", label: "Ubicación" },
+  { value: "alquiler", label: "Alquiler" },
+];
+
+const PREVENTIVE_SORT_OPTIONS = [
+  { value: "cliente", label: "Cliente" },
+  { value: "equipo", label: "Equipo" },
+  { value: "identificacion", label: "Identificación" },
+  { value: "ultima", label: "Última revisión" },
+  { value: "proxima", label: "Próxima revisión" },
+  { value: "estado", label: "Estado" },
+];
+
+const REVISION_SORT_OPTIONS = [
+  { value: "id", label: "ID" },
+  { value: "estado", label: "Estado" },
+  { value: "programada", label: "Fecha programada" },
+  { value: "realizada", label: "Fecha realizada" },
+  { value: "items", label: "Cantidad de ítems" },
 ];
 
 function todayISO() {
@@ -787,6 +818,9 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [emailNotice, setEmailNotice] = useState("");
+  const [emailStatus, setEmailStatus] = useState("");
+  const emailWatchRef = useRef(null);
 
   if (!row) return null;
 
@@ -800,9 +834,18 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
     setVentaCustomerId(row?.mg_venta_customer_id ? String(row.mg_venta_customer_id) : "");
     setVentaNumeroAlternativo(row?.mg_venta_numero_alternativo || "");
     setErr("");
+    setEmailNotice("");
+    setEmailStatus("");
     setAddCustomerOpen(false);
     setAddCustomerErr("");
   }, [row?.id, row?.mg_venta_fecha, row?.mg_venta_factura_numero, row?.mg_venta_remito_numero, row?.mg_venta_customer_id, row?.mg_venta_numero_alternativo]);
+
+  useEffect(
+    () => () => {
+      if (emailWatchRef.current) emailWatchRef.current();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!isVenta) return;
@@ -1044,44 +1087,77 @@ function MgVentaModal({ row, mode = "venta", onClose, onSaved }) {
           </div>
         )}
 
+        {emailNotice && (
+          <div
+            className={`border rounded p-2 mt-3 text-sm ${
+              emailStatus === "sent"
+                ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                : emailStatus === "failed" || emailStatus === "sin_destinatarios"
+                  ? "bg-red-100 text-red-800 border-red-300"
+                  : "bg-amber-50 text-amber-800 border-amber-300"
+            }`}
+          >
+            {emailNotice}
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 mt-4">
           <button className="px-3 py-1.5 rounded border" onClick={onClose} disabled={saving}>
-            Cancelar
+            {emailNotice ? "Cerrar" : "Cancelar"}
           </button>
-          <button
-            className={`px-3 py-1.5 rounded text-white disabled:opacity-50 ${isVenta ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-600 hover:bg-emerald-700"}`}
-            disabled={saving || (isVenta && (!(factura.trim() || remito.trim()) || !Number(ventaCustomerId || 0)))}
-            onClick={async () => {
-              setErr("");
-              try {
-                setSaving(true);
-                if (isVenta) {
-                  await postDeviceMgVenta(row.id, {
-                    factura_numero: factura.trim() || null,
-                    remito_numero: remito.trim() || null,
-                    fecha_venta: fechaVenta || null,
-                    observaciones: observaciones.trim() || null,
-                    venta_customer_id: Number(ventaCustomerId || 0),
-                    venta_numero_alternativo: ventaNumeroAlternativo.trim() || null,
-                    source: "equipos",
-                  });
-                } else {
+          {!emailNotice && (
+            <button
+              className={`px-3 py-1.5 rounded text-white disabled:opacity-50 ${isVenta ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-600 hover:bg-emerald-700"}`}
+              disabled={saving || (isVenta && (!(factura.trim() || remito.trim()) || !Number(ventaCustomerId || 0)))}
+              onClick={async () => {
+                setErr("");
+                try {
+                  setSaving(true);
+                  if (isVenta) {
+                    const resp = await postDeviceMgVenta(row.id, {
+                      factura_numero: factura.trim() || null,
+                      remito_numero: remito.trim() || null,
+                      fecha_venta: fechaVenta || null,
+                      observaciones: observaciones.trim() || null,
+                      venta_customer_id: Number(ventaCustomerId || 0),
+                      venta_numero_alternativo: ventaNumeroAlternativo.trim() || null,
+                      source: "equipos",
+                    });
+                    onSaved && onSaved();
+                    // La venta ya quedó registrada: el modal se mantiene abierto
+                    // mostrando qué pasó de verdad con el aviso patrimonial.
+                    const info = resp?.patrimonial_email;
+                    setEmailStatus(String(info?.status || ""));
+                    setEmailNotice(
+                      `Venta registrada. ${patrimonialEmailMessage(info, { evento: "venta_mg" })}`.trim(),
+                    );
+                    if (emailWatchRef.current) emailWatchRef.current();
+                    emailWatchRef.current = watchPatrimonialEmail(
+                      info,
+                      (msg, next) => {
+                        setEmailStatus(String(next?.status || ""));
+                        setEmailNotice(`Venta registrada. ${msg}`.trim());
+                      },
+                      { evento: "venta_mg" },
+                    );
+                    return;
+                  }
                   await postDeviceMgReactivar(row.id, {
                     observaciones: observaciones.trim() || null,
                     source: "equipos",
                   });
+                  onSaved && onSaved();
+                  onClose();
+                } catch (e) {
+                  setErr(e?.message || "No se pudo guardar el estado MG.");
+                } finally {
+                  setSaving(false);
                 }
-                onSaved && onSaved();
-                onClose();
-              } catch (e) {
-                setErr(e?.message || "No se pudo guardar el estado MG.");
-              } finally {
-                setSaving(false);
-              }
-            }}
-          >
-            {saving ? "Guardando..." : isVenta ? "Marcar vendido" : "Reactivar MG"}
-          </button>
+              }}
+            >
+              {saving ? "Guardando..." : isVenta ? "Marcar vendido" : "Reactivar MG"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -2200,7 +2276,11 @@ export default function Equipos() {
   const [mgModalRow, setMgModalRow] = useState(null);
   const [mgModalMode, setMgModalMode] = useState("venta");
   const [reloadDevicesKey, setReloadDevicesKey] = useState(0);
-  const [sort, setSort] = useState("-id");
+  const [sort, setSortState] = useState(searchParams.get("sort") || "");
+  const setSort = (nextSort) => {
+    setSortState(nextSort);
+    updateSearchParam("sort", nextSort);
+  };
   const [barcodeBusyId, setBarcodeBusyId] = useState(null);
 
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -2233,6 +2313,7 @@ export default function Equipos() {
   const [agendaEstado, setAgendaEstado] = useState("");
   const [agendaQ, setAgendaQ] = useState("");
   const [agendaCustomerId, setAgendaCustomerId] = useState("");
+  const [agendaSort, setAgendaSort] = useState("");
   const [repuestosCatalogOptions, setRepuestosCatalogOptions] = useState([]);
   const [repuestoModalCtx, setRepuestoModalCtx] = useState(null);
   const [repuestoModalSaving, setRepuestoModalSaving] = useState(false);
@@ -2249,6 +2330,7 @@ export default function Equipos() {
   const [instRevisionesLoading, setInstRevisionesLoading] = useState(false);
   const [instRevisionesErr, setInstRevisionesErr] = useState("");
   const [instRevisiones, setInstRevisiones] = useState([]);
+  const [instRevisionSort, setInstRevisionSort] = useState("");
   const [instPlan, setInstPlan] = useState(null);
 
   const [addInstitutionOpen, setAddInstitutionOpen] = useState(false);
@@ -2348,6 +2430,27 @@ export default function Equipos() {
   const institucionesConPreventivo = useMemo(
     () => sortedInstituciones.filter((it) => Boolean(it?.preventivo_plan_id || it?.plan?.id)),
     [sortedInstituciones]
+  );
+  const displayAgendaItems = useMemo(
+    () => sortRows(agendaItems, agendaSort, {
+      cliente: { accessor: (item) => item.customer_nombre },
+      equipo: { accessor: (item) => item.equipo_label || `${item.marca || ""} ${item.modelo || ""}` },
+      identificacion: { accessor: (item) => item.numero_interno || item.numero_serie },
+      ultima: { accessor: (item) => item.ultima_revision_fecha, type: "date" },
+      proxima: { accessor: (item) => item.proxima_revision_fecha, type: "date" },
+      estado: { accessor: (item) => item.preventivo_estado },
+    }),
+    [agendaItems, agendaSort],
+  );
+  const displayInstRevisiones = useMemo(
+    () => sortRows(instRevisiones, instRevisionSort, {
+      id: { accessor: (item) => item.id, type: "number" },
+      estado: { accessor: (item) => item.estado },
+      programada: { accessor: (item) => item.fecha_programada, type: "date" },
+      realizada: { accessor: (item) => item.fecha_realizada, type: "date" },
+      items: { accessor: (item) => item.total_items, type: "number" },
+    }),
+    [instRevisiones, instRevisionSort],
   );
 
   const activeFiltersCount = useMemo(() => activeDeviceFilterCount(deviceFilters), [deviceFilters]);
@@ -3137,6 +3240,12 @@ export default function Equipos() {
             <div className="text-sm text-gray-500">{hasDeviceFilters ? "No hay equipos para esos filtros." : "No hay resultados."}</div>
           ) : (
             <div>
+              <MobileSortControl
+                sort={sort}
+                onSortChange={setSort}
+                options={DEVICE_SORT_OPTIONS}
+                className="mb-3"
+              />
               <MobileDataList>
                 {rows.map((row) => {
                   const isHighlight = highlightId && String(highlightId) === String(row.id);
@@ -3237,14 +3346,14 @@ export default function Equipos() {
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="text-left">
-                    <SortableTh label="ID" field="id" sort={sort} setSort={setSort} />
-                    <th className="p-2">Propiedad</th>
-                    <SortableTh label="Último cliente/Dueño" field="cliente" sort={sort} setSort={setSort} />
-                    <SortableTh label="Identificación" field="ns" sort={sort} setSort={setSort} />
-                    <SortableTh label="Marca" field="marca" sort={sort} setSort={setSort} />
-                    <SortableTh label="Modelo" field="modelo" sort={sort} setSort={setSort} />
-                    <SortableTh label="Ubicación" field="ubicacion" sort={sort} setSort={setSort} />
-                    <th className="p-2">Alquiler</th>
+                    <SortableTh field="id" sort={sort} onSortChange={setSort} className="p-2">ID</SortableTh>
+                    <SortableTh field="propiedad" sort={sort} onSortChange={setSort} className="p-2">Propiedad</SortableTh>
+                    <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Último cliente/Dueño</SortableTh>
+                    <SortableTh field="ns" sort={sort} onSortChange={setSort} className="p-2">Identificación</SortableTh>
+                    <SortableTh field="marca" sort={sort} onSortChange={setSort} className="p-2">Marca</SortableTh>
+                    <SortableTh field="modelo" sort={sort} onSortChange={setSort} className="p-2">Modelo</SortableTh>
+                    <SortableTh field="ubicacion" sort={sort} onSortChange={setSort} className="p-2">Ubicación</SortableTh>
+                    <SortableTh field="alquiler" sort={sort} onSortChange={setSort} className="p-2">Alquiler</SortableTh>
                     <th className="p-2">Acciones</th>
                   </tr>
                 </thead>
@@ -3423,8 +3532,14 @@ export default function Equipos() {
             <div className="text-sm text-gray-500">Sin resultados.</div>
           ) : (
             <div>
+              <MobileSortControl
+                sort={agendaSort}
+                onSortChange={setAgendaSort}
+                options={PREVENTIVE_SORT_OPTIONS}
+                className="mb-3"
+              />
               <MobileDataList>
-                {agendaItems.map((item, idx) => {
+                {displayAgendaItems.map((item, idx) => {
                   const did = String(item.device_id || "");
                   const expanded = !!agendaExpanded[did];
                   const repState = agendaRepuestosByDevice[did] || { loading: false, err: "", items: [] };
@@ -3537,17 +3652,17 @@ export default function Equipos() {
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="text-left">
-                    <th className="p-2">Cliente</th>
-                    <th className="p-2">Equipo</th>
-                    <th className="p-2">Identificación</th>
-                    <th className="p-2">Última revisión</th>
-                    <th className="p-2">Próxima</th>
-                    <th className="p-2">Estado</th>
+                    <SortableTh field="cliente" sort={agendaSort} onSortChange={setAgendaSort} className="p-2">Cliente</SortableTh>
+                    <SortableTh field="equipo" sort={agendaSort} onSortChange={setAgendaSort} className="p-2">Equipo</SortableTh>
+                    <SortableTh field="identificacion" sort={agendaSort} onSortChange={setAgendaSort} className="p-2">Identificación</SortableTh>
+                    <SortableTh field="ultima" sort={agendaSort} onSortChange={setAgendaSort} className="p-2">Última revisión</SortableTh>
+                    <SortableTh field="proxima" sort={agendaSort} onSortChange={setAgendaSort} className="p-2">Próxima</SortableTh>
+                    <SortableTh field="estado" sort={agendaSort} onSortChange={setAgendaSort} className="p-2">Estado</SortableTh>
                     <th className="p-2">Acción</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {agendaItems.map((item, idx) => {
+                  {displayAgendaItems.map((item, idx) => {
                     const rowKey = `${item.plan_id || "sp"}-${item.device_id || idx}-${idx}`;
                     const did = String(item.device_id || "");
                     const expanded = !!agendaExpanded[did];
@@ -3812,19 +3927,25 @@ export default function Equipos() {
                   <div className="text-sm text-gray-500">Sin revisiones.</div>
                 ) : (
                   <div className="overflow-x-auto">
+                    <MobileSortControl
+                      sort={instRevisionSort}
+                      onSortChange={setInstRevisionSort}
+                      options={REVISION_SORT_OPTIONS}
+                      className="mb-3"
+                    />
                     <table className="min-w-full text-sm">
                       <thead>
                         <tr className="text-left">
-                          <th className="p-2">ID</th>
-                          <th className="p-2">Estado</th>
-                          <th className="p-2">Programada</th>
-                          <th className="p-2">Realizada</th>
-                          <th className="p-2">Items</th>
+                          <SortableTh field="id" sort={instRevisionSort} onSortChange={setInstRevisionSort} className="p-2">ID</SortableTh>
+                          <SortableTh field="estado" sort={instRevisionSort} onSortChange={setInstRevisionSort} className="p-2">Estado</SortableTh>
+                          <SortableTh field="programada" sort={instRevisionSort} onSortChange={setInstRevisionSort} className="p-2">Programada</SortableTh>
+                          <SortableTh field="realizada" sort={instRevisionSort} onSortChange={setInstRevisionSort} className="p-2">Realizada</SortableTh>
+                          <SortableTh field="items" sort={instRevisionSort} onSortChange={setInstRevisionSort} className="p-2">Ítems</SortableTh>
                           <th className="p-2">Acción</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {instRevisiones.map((rev) => (
+                        {displayInstRevisiones.map((rev) => (
                           <tr key={rev.id} className="border-t">
                             <td className="p-2">#{rev.id}</td>
                             <td className="p-2">{rev.estado}</td>
@@ -4363,26 +4484,4 @@ function Menu({ button, children }) {
     </div>
   );
 }
-
-function SortableTh({ label, field, sort, setSort }) {
-  const isAsc = sort === field;
-  const isDesc = sort === `-${field}`;
-  const next = () => {
-    if (isAsc) setSort(`-${field}`);
-    else if (isDesc) setSort("id");
-    else setSort(field);
-  };
-  return (
-    <th className="p-2 cursor-pointer select-none" onClick={next}>
-      <span className="inline-flex items-center gap-1">
-        {label}
-        {isAsc && <span aria-label="asc">^</span>}
-        {isDesc && <span aria-label="desc">v</span>}
-      </span>
-    </th>
-  );
-}
-
-
-
 

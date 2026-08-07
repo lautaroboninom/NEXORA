@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from typing import Any
 
+from django.core.cache import cache
 from django.db import connection, transaction
 from django.utils import timezone
 
@@ -12,7 +15,20 @@ from .bejerman_sdk import BejermanSDKClient, as_string, first_value, normalize_s
 from .bejerman_companies import company_for_key, list_ingress_companies
 
 
+logger = logging.getLogger(__name__)
+
+
 BEJERMAN_COMPANY_CONTEXT_KEY = "__nexora_bejerman_company_key"
+
+# El catálogo completo de clientes se trae por SOAP (sin filtro server-side),
+# así que se cachea unos minutos: evita repetir el fetch completo en cada
+# carga de la página de clientes y en cada búsqueda de candidatos.
+BEJERMAN_CUSTOMERS_CACHE_SECONDS = 300
+BEJERMAN_CUSTOMERS_CACHE_KEY_PREFIX = "bejerman_customer_records"
+
+
+def _bejerman_customers_cache_key(company_key: str) -> str:
+    return f"{BEJERMAN_CUSTOMERS_CACHE_KEY_PREFIX}:{company_key}"
 
 BEJERMAN_CUSTOMER_TEXT_COLUMNS = (
     "bejerman_cod_empresa",
@@ -53,6 +69,7 @@ BEJERMAN_CUSTOMER_FIELD_ALIASES = {
         "Cliente_TipoDocumentoCodigo",
         "Cliente_TipoDoc",
         "TipoDocumento",
+        "TipoDocumentoCodigo",
         "TipoDoc",
     ),
     "bejerman_domicilio": ("Cliente_Domicilio", "Cliente_Direccion", "Domicilio", "Direccion", "Dirección"),
@@ -159,6 +176,96 @@ def _client_company_key(client: BejermanSDKClient) -> str:
     return clean_upper(marker)
 
 
+LOCAL_CUSTOMER_DOCUMENT_FIELD_MAP = {
+    "Cliente_RazonSocial": "razon_social",
+    "Cliente_TipoDocumento": "bejerman_tipo_documento",
+    "Cliente_NroDocumento": "cuit",
+    "Cliente_Provincia": "bejerman_provincia",
+    "Cliente_SitIVA": "bejerman_condicion_iva",
+    "Cliente_NumeroIIBB": "bejerman_numero_iibb",
+}
+LOCAL_CUSTOMER_DOCUMENT_REQUIRED_FIELDS = (
+    "Cliente_RazonSocial",
+    "Cliente_TipoDocumento",
+    "Cliente_NroDocumento",
+    "Cliente_Provincia",
+    "Cliente_SitIVA",
+)
+
+
+def lookup_local_customer_document_fields(
+    client: BejermanSDKClient,
+    customer_code: str,
+) -> dict[str, str] | None:
+    """Resuelve los datos fiscales cacheados sin cruzar empresas Bejerman.
+
+    `bejerman_cod_empresa` es la identidad canónica. `cod_empresa` solo se usa
+    como compatibilidad para filas antiguas que todavía no tienen el código
+    Bejerman persistido. Ante duplicados, datos incompletos o un problema de
+    esquema se fuerza el fallback en vivo devolviendo `None`.
+    """
+
+    code = clean_upper(customer_code)
+    company_key = _client_company_key(client)
+    if not code or not company_key:
+        return None
+
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT razon_social,
+                       bejerman_tipo_documento,
+                       cuit,
+                       bejerman_provincia,
+                       bejerman_condicion_iva,
+                       bejerman_numero_iibb
+                  FROM customers
+                 WHERE UPPER(TRIM(COALESCE(bejerman_company_key, ''))) = %s
+                   AND (
+                        UPPER(TRIM(COALESCE(bejerman_cod_empresa, ''))) = %s
+                        OR (
+                            TRIM(COALESCE(bejerman_cod_empresa, '')) = ''
+                            AND UPPER(TRIM(COALESCE(cod_empresa, ''))) = %s
+                        )
+                   )
+                 ORDER BY CASE
+                            WHEN UPPER(TRIM(COALESCE(bejerman_cod_empresa, ''))) = %s THEN 0
+                            ELSE 1
+                          END,
+                          id ASC
+                 LIMIT 2
+                """,
+                [company_key, code, code, code],
+            )
+            names = [column[0] for column in cur.description]
+            rows = [dict(zip(names, row)) for row in cur.fetchall()]
+    except Exception:
+        logger.warning(
+            "bejerman_customer_local_lookup_failed",
+            extra={"company_key": company_key, "customer_code": code},
+            exc_info=True,
+        )
+        return None
+
+    if len(rows) != 1:
+        if len(rows) > 1:
+            logger.warning(
+                "bejerman_customer_local_lookup_ambiguous",
+                extra={"company_key": company_key, "customer_code": code},
+            )
+        return None
+
+    fields = {
+        sdk_field: clean(rows[0].get(local_column))
+        for sdk_field, local_column in LOCAL_CUSTOMER_DOCUMENT_FIELD_MAP.items()
+    }
+    fields = {key: value for key, value in fields.items() if value}
+    if any(not fields.get(field) for field in LOCAL_CUSTOMER_DOCUMENT_REQUIRED_FIELDS):
+        return None
+    return fields
+
+
 def _with_company_context(record: dict[str, Any], company_key: str) -> dict[str, Any]:
     if not company_key:
         return dict(record)
@@ -189,8 +296,14 @@ def load_bejerman_customer_records_for_companies(
     user_id: int | None = None,
     allow_system_credentials: bool = False,
     company_keys: list[str] | None = None,
+    force_refresh: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Carga clientes de todas las empresas Bejerman configuradas (excluye la de prueba).
+
+    El catálogo por empresa se cachea BEJERMAN_CUSTOMERS_CACHE_SECONDS ya que el SDK
+    no soporta filtrar server-side (hay que traer todo y filtrar en Python en cada
+    carga de clientes / búsqueda de candidatos). Usar force_refresh=True para forzar
+    un fetch en vivo (p.ej. al sincronizar manualmente).
 
     Devuelve (records, errors); solo lanza si ninguna empresa pudo consultarse.
     """
@@ -201,17 +314,43 @@ def load_bejerman_customer_records_for_companies(
 
     records: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    pending_keys: list[str] = []
     for key in keys:
-        try:
-            records.extend(
-                load_bejerman_customer_records(
+        cache_key = _bejerman_customers_cache_key(key)
+        cached = None if force_refresh else cache.get(cache_key)
+        if cached is not None:
+            records.extend(cached)
+        else:
+            pending_keys.append(key)
+
+    if pending_keys:
+        # Cada empresa pendiente implica un fetch SOAP en vivo (sin filtro server-side);
+        # se disparan en paralelo para no pagar la latencia de forma secuencial en el
+        # request que carga la página de clientes.
+        def _fetch(key: str):
+            try:
+                return key, load_bejerman_customer_records(
                     user_id=user_id,
                     allow_system_credentials=allow_system_credentials,
                     company_key=key,
-                )
-            )
-        except Exception as exc:
-            errors.append({"company": key, "error": clean(str(exc)) or exc.__class__.__name__})
+                ), None
+            except Exception as exc:  # noqa: BLE001 - se agrega a errors, no se relanza acá
+                return key, None, exc
+            finally:
+                # Cada thread abre su propia conexión de DB (credenciales del usuario);
+                # cerrarla evita dejar conexiones colgadas fuera del ciclo request/response.
+                connection.close()
+
+        with ThreadPoolExecutor(max_workers=len(pending_keys)) as executor:
+            futures = [executor.submit(_fetch, key) for key in pending_keys]
+            for future in as_completed(futures):
+                key, company_records, exc = future.result()
+                if exc is not None:
+                    errors.append({"company": key, "error": clean(str(exc)) or exc.__class__.__name__})
+                    continue
+                cache.set(_bejerman_customers_cache_key(key), company_records, BEJERMAN_CUSTOMERS_CACHE_SECONDS)
+                records.extend(company_records)
+
     if keys and errors and not records:
         raise RuntimeError("; ".join(f"{item['company']}: {item['error']}" for item in errors))
     return records, errors

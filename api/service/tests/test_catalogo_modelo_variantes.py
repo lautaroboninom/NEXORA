@@ -22,10 +22,19 @@ class ModeloVariantesAPITest(TestCase):
                     email VARCHAR(320) UNIQUE,
                     hash_pw TEXT,
                     rol TEXT,
-                    activo {bool_type} DEFAULT {bool_default}
+                    activo {bool_type} DEFAULT {bool_default},
+                    bejerman_seller_code TEXT NULL,
+                    bejerman_seller_code_confirmed_at TIMESTAMP NULL
                 )
                 """
             )
+            if vendor == "postgresql":
+                # users puede venir creada por otro módulo de test sin estas columnas.
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT NULL")
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                    "bejerman_seller_code_confirmed_at TIMESTAMP NULL"
+                )
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS user_permission_overrides (

@@ -2,6 +2,7 @@ from io import BytesIO
 from decimal import Decimal
 from django.db import connection
 from django.core.files.storage import default_storage
+from django.utils import timezone
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -38,6 +39,55 @@ def resolution_label(value: str) -> str:
     if not v:
         return ""
     return RESOLUTION_LABELS.get(v, v.replace("_", " ").capitalize())
+
+
+def _short_local_date(value) -> str:
+    if not value:
+        return ""
+    try:
+        resolved = (
+            timezone.localtime(value)
+            if isinstance(value, datetime) and timezone.is_aware(value)
+            else value
+        )
+        return resolved.strftime("%d/%m/%y")
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def _exit_order_date_context(head: dict) -> tuple[str, str]:
+    state = str(head.get("ingreso_estado") or "").strip().lower()
+    is_sale = state in {"vendido_pendiente_entrega", "vendido_entregado"}
+    if is_sale:
+        candidates = (
+            head.get("fecha_venta"),
+            head.get("mg_venta_fecha"),
+            head.get("fecha_entrega"),
+            head.get("fecha_liberacion"),
+        )
+        label = "Fecha venta"
+    else:
+        candidates = (head.get("fecha_liberacion"), head.get("fecha_entrega"))
+        label = "Fecha liberación"
+    value = next((candidate for candidate in candidates if candidate), None)
+    date_value = (
+        _short_local_date(value)
+        or _short_local_date(timezone.now())
+        or datetime.now().strftime("%d/%m/%y")
+    )
+    return label, date_value
+
+
+def _exit_order_observations(head: dict) -> str:
+    sections = []
+    description = str(head.get("descripcion_problema") or "").strip()
+    work_done = str(head.get("trabajos_realizados") or "").strip()
+    if description:
+        sections.append(f"Descripción del problema:\n{description}")
+    if work_done:
+        sections.append(f"Trabajos realizados:\n{work_done}")
+    return "\n\n".join(sections) or "-"
+
 
 # --- helpers de formato ---
 MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
@@ -150,6 +200,7 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
     head = _q(f"""
         SELECT
             t.id AS ingreso_id,
+            t.estado AS ingreso_estado,
             t.Resolucion,
             t.informe_preliminar,
             t.descripcion_problema,
@@ -171,6 +222,10 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
             COALESCE(d.propietario_doc, '') AS propietario_doc,
             d.numero_serie,
             COALESCE(d.numero_interno, '') AS numero_interno,
+            d.mg_venta_fecha,
+            t.fecha_entrega,
+            ev_dates.fecha_liberacion,
+            ev_dates.fecha_venta,
             COALESCE(t.garantia_fabrica, false) AS garantia,
             COALESCE(t.etiq_garantia_ok, true) AS etiq_ok,
             COALESCE(b.nombre,'') AS marca,
@@ -193,6 +248,18 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
         LEFT JOIN marcas b ON b.id=d.marca_id
         LEFT JOIN models m ON m.id=d.model_id
         LEFT JOIN quotes q ON q.id=%s AND q.ingreso_id=t.id
+        LEFT JOIN LATERAL (
+            SELECT
+                MAX(CASE WHEN CAST(ev.a_estado AS TEXT) = 'liberado' THEN ev.ts END) AS fecha_liberacion,
+                MAX(
+                    CASE
+                        WHEN CAST(ev.a_estado AS TEXT) IN ('vendido_pendiente_entrega', 'vendido_entregado')
+                        THEN ev.ts
+                    END
+                ) AS fecha_venta
+            FROM ingreso_events ev
+            WHERE ev.ticket_id=t.id
+        ) ev_dates ON TRUE
         WHERE t.id=%s
     """, [
         DEFAULT_AUTORIZADO_POR,
@@ -793,8 +860,8 @@ def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_intern
         c.setFont("Helvetica", 9); c.drawString(x + 5*mm, y - 7*mm, f"Equipo: {equipo}")
 
     if remito:
-        c.setFont("Helvetica", 9); c.drawString(w- 30*mm, y - 7*mm, "Remito Ingreso:")
-        c.setFont("Helvetica", 9); c.drawString(w- 30*mm + 70, y - 7*mm, str(remito))
+        c.setFont("Helvetica", 9); c.drawString(w- 50*mm, y - 7*mm, "Remito Ingreso:")
+        c.setFont("Helvetica", 9); c.drawString(w- 50*mm + 70, y - 7*mm, str(remito))
 
     col_ws = [w * 0.3, w * 0.3, w * 0.4]
     col_x = [x, x + col_ws[0], x + col_ws[0] + col_ws[1]]
@@ -1343,8 +1410,9 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         c.setFont("Helvetica-Bold", 8.5)
         c.drawString(x, y_top - 11.5 * mm, "ENTREGA DE EQUIPO")
         c.setFont("Helvetica", 9.2)
-        c.drawString(x + 35 * mm, y_top - 11.5 * mm, "  —    Fecha liberación: ")
-        c.drawString(x + 70 * mm, y_top - 11.5 * mm,datetime.now().strftime("%d/%m/%y"))
+        date_label, date_value = _exit_order_date_context(head)
+        c.drawString(x + 35 * mm, y_top - 11.5 * mm, f"  —    {date_label}: ")
+        c.drawString(x + 70 * mm, y_top - 11.5 * mm, date_value)
         c.setFont("Helvetica-Bold", 12.8)
 
     def field_grid(y_top, height):
@@ -1426,12 +1494,9 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         y -= (ROW_H + ROW_GAP)
 
         # Observaciones (Descripción + Trabajos)
-        obs_txt = " \n\n Trabajos a realizar:\n ".join(
-            [t for t in [(head.get("descripcion_problema") or "").strip(),
-                         (head.get("trabajos_realizados") or "").strip()] if t]
-        ) or "-"
+        obs_txt = _exit_order_observations(head)
         try:
-            if (head.get("Resolucion") or "").strip().lower() == "cambio":
+            if (head.get("resolucion") or "").strip().lower() == "cambio":
                 sc_val = (head.get("serial_cambio") or "").strip()
                 if sc_val:
                     obs_txt = f"Serie (Cambio): {sc_val}\n\n" + obs_txt

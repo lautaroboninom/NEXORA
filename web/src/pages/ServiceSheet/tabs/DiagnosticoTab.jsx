@@ -504,7 +504,6 @@ export default function DiagnosticoTab({
         </div>
       </div>
 
-      <h2 className="font-semibold mb-2">Descripción del problema (diagnóstico)</h2>
 
       <div className="flex flex-wrap items-end gap-3 mb-3">
         <div>
@@ -532,10 +531,10 @@ export default function DiagnosticoTab({
 
           {reparacionBloqueadaCotizacion && canHabilitarReparacionCotizacion ? (
             <button
-              className="bg-amber-700 text-white px-3 py-2 rounded disabled:opacity-60"
-              disabled={habilitandoReparacion}
-              onClick={habilitarReparacionCotizacion}
-              type="button"
+            className="bg-amber-700 text-white px-3 py-2 rounded disabled:opacity-60"
+            disabled={habilitandoReparacion}
+            onClick={habilitarReparacionCotizacion}
+            type="button"
             >
               {habilitandoReparacion ? "Habilitando..." : "Habilitar reparación"}
             </button>
@@ -543,11 +542,11 @@ export default function DiagnosticoTab({
 
           {puedeReparar ? (
             <button
-              className="bg-amber-600 text-white px-3 py-2 rounded disabled:opacity-60"
-              disabled={marcandoReparar || sinTecnicoAsignado || !puedeReparar}
-              onClick={marcarParaReparar}
-              title={sinTecnicoAsignado ? "Asigná un técnico para habilitar reparación" : undefined}
-              type="button"
+            className="bg-amber-600 text-white px-3 py-2 rounded disabled:opacity-60"
+            disabled={marcandoReparar || sinTecnicoAsignado || !puedeReparar}
+            onClick={marcarParaReparar}
+            title={sinTecnicoAsignado ? "Asigná un técnico para habilitar reparación" : undefined}
+            type="button"
             >
               {marcandoReparar ? "Avisando..." : "Reparar"}
             </button>
@@ -599,7 +598,7 @@ export default function DiagnosticoTab({
                   disabled={quitandoReparar}
                   onClick={quitarReparar}
                   type="button"
-                >
+                  >
                   {quitandoReparar ? "Guardando..." : "Quitar reparar"}
                 </button>
               ) : null}
@@ -645,15 +644,16 @@ export default function DiagnosticoTab({
         </div>
       </div>
 
-      <textarea
-        className="w-full border rounded p-2 min-h-[180px]"
-        value={descripcion}
-        onChange={(e) => setDescripcion(e.target.value)}
-        disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
-        placeholder="Ej.: Ingreso de agua; placa de control con óxido; válvula X no abre..."
-      />
-
       <div className="border rounded p-4 mt-4">
+        <h2 className="font-semibold mb-2">Descripción del problema (diagnóstico)</h2>
+        <textarea
+          className="w-full border rounded p-2 min-h-[180px]"
+          value={descripcion}
+          onChange={(e) => setDescripcion(e.target.value)}
+          disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
+          placeholder="Ej.: Ingreso de agua; placa de control con óxido; válvula X no abre..."
+        />
+
         <h2 className="font-semibold mb-2">Trabajos a realizar/realizados</h2>
         <textarea
           className="w-full border rounded p-2 min-h-[200px]"

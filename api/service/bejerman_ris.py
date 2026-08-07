@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import unicodedata
+import zlib
 from datetime import date, datetime
 from difflib import SequenceMatcher
 from typing import Any
@@ -14,6 +15,7 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import require_company
+from .bejerman_particular_customers import ensure_particular_customer_enabled
 from .bejerman_documents import (
     REMITO_COMPROBANTE_TYPES,
     RIS_REGISTERED_NO_PDF_CODE,
@@ -21,6 +23,7 @@ from .bejerman_documents import (
     registered_remito_no_pdf_detail,
 )
 from .bejerman_sdk import (
+    BEJERMAN_OCCASIONAL_CUSTOMER_CODE,
     BejermanPdfReference,
     BejermanPdfPendingError,
     BejermanSDKClient,
@@ -29,8 +32,10 @@ from .bejerman_sdk import (
     BejermanSdkUnavailable,
     as_bool,
     as_string,
+    bejerman_customer_code_for,
     bejerman_filter,
     build_customer_document_fields,
+    build_occasional_customer_fields,
     build_service_ingress_comprobante,
     comprobante_id_of,
     find_bejerman_client_record,
@@ -38,6 +43,7 @@ from .bejerman_sdk import (
     first_value,
     format_remito_number,
     is_bejerman_sales_query_schema_message,
+    is_occasional_customer_name,
     is_ok_response,
     normalize_serial_for_lookup,
     parse_remito_response,
@@ -50,6 +56,7 @@ from .bejerman_sdk import (
 from .bejerman_pdf_requests import (
     BejermanPdfFolderUnavailableError,
     BejermanPdfNotPublishedError,
+    BejermanPdfWorkerStalledError,
     fetch_or_enqueue_comprobante_pdf,
     pdf_error_metadata,
 )
@@ -62,6 +69,7 @@ from .bejerman_sync import (
     _article_description_from_record,
     _deposit_from_record,
     _partida_from_record,
+    _records_for_partida,
     _records_for_partida_any_quantity,
     normalize_article_variant,
     reopen_jobs_for_article_mapping,
@@ -1277,6 +1285,9 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
           c.id AS customer_id,
           COALESCE(c.cod_empresa, '') AS customer_code,
           COALESCE(c.razon_social, '') AS customer_name,
+          COALESCE(t.propietario_nombre, '') AS propietario_nombre,
+          COALESCE(t.propietario_contacto, '') AS propietario_contacto,
+          COALESCE(t.propietario_doc, '') AS propietario_doc,
           d.id AS device_id,
           d.customer_id AS device_customer_id,
           COALESCE(d.numero_serie, '') AS numero_serie,
@@ -1306,6 +1317,7 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
     )
     if not row:
         raise BejermanRisError("Ingreso no encontrado")
+    row["customer_code"] = bejerman_customer_code_for(row.get("customer_name"), row.get("customer_code"))
     accessories_items = _accessories_text_for_ingreso(ingreso_id)
     if accessories_items:
         existing = _clean(row.get("accesorios"))
@@ -1313,21 +1325,26 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
     return row
 
 
-def _article_mapping_for_context(model_id: Any, variante: str) -> dict[str, Any] | None:
+def _article_mapping_for_context(model_id: Any, variante: str, company_key: str = "SEPID") -> dict[str, Any] | None:
     if not model_id or not _table_exists("bejerman_article_mappings"):
         return None
+    try:
+        resolved_company = require_company(company_key or "SEPID").key
+    except ValueError:
+        resolved_company = "SEPID"
     return q(
         """
         SELECT *
           FROM bejerman_article_mappings
          WHERE model_id = %s
            AND variante_norm = %s
+           AND company_key = %s
          ORDER BY CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END,
                   confirmed_at DESC NULLS LAST,
                   updated_at DESC
          LIMIT 1
         """,
-        [model_id, normalize_article_variant(variante)],
+        [model_id, normalize_article_variant(variante), resolved_company],
         one=True,
     )
 
@@ -1354,22 +1371,34 @@ def _equipment_print_name(context: dict[str, Any], variante: str) -> str:
 
 def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
     customer_code = _clean(context.get("customer_code"))
+    propietario_nombre = _clean(context.get("propietario_nombre"))
+    propietario_doc = _clean(context.get("propietario_doc"))
     try:
         company = require_company(context.get("empresa_bejerman") or context.get("empresa_facturar") or "SEPID")
     except ValueError as exc:
         raise BejermanRisError(str(exc)) from exc
-    if not customer_code:
+    if not customer_code and not (propietario_nombre and propietario_doc):
+        if is_occasional_customer_name(context.get("customer_name")):
+            # Un particular no tiene código: se emite como cliente ocasional con los datos del
+            # propietario, así que lo que falta acá es el propietario, no el código.
+            raise BejermanRisError(
+                "El ingreso es de un particular: complete nombre y DNI/CUIT del propietario para emitir el remito"
+            )
         raise BejermanRisError("El cliente seleccionado no tiene código Bejerman")
     variante = _clean(context.get("equipo_variante")) or _clean(context.get("device_variante")) or _clean(context.get("modelo_variante"))
-    mapping = _article_mapping_for_context(context.get("model_id"), variante)
+    mapping = _article_mapping_for_context(context.get("model_id"), variante, company.key)
     mapped_article_code = _clean((mapping or {}).get("article_code"))
     allow_generic_article = bool(getattr(settings, "BEJERMAN_RIS_ALLOW_GENERIC_ARTICLE", False))
     article_code = mapped_article_code or (
         _clean(getattr(settings, "BEJERMAN_RIS_GENERIC_ARTICLE_CODE", "SERVICIO")) if allow_generic_article else ""
     )
-    mapped_article_name = _clean((mapping or {}).get("article_description")) or _clean(getattr(settings, "BEJERMAN_RIS_GENERIC_ARTICLE_NAME", "Equipo recibido para servicio técnico"))
+    # mapped_article_name es la descripción que Bejerman tiene registrada para este código en ESTA
+    # empresa (código como referencia maestra). Solo si Bejerman todavía no la tiene cargada localmente
+    # se usa el rótulo armado en NEXORA (equipment_label) como texto informativo de respaldo.
+    mapped_article_name = _clean((mapping or {}).get("article_description"))
+    generic_article_name = _clean(getattr(settings, "BEJERMAN_RIS_GENERIC_ARTICLE_NAME", "Equipo recibido para servicio técnico"))
     equipment_label = _equipment_print_name(context, variante)
-    article_name = equipment_label or mapped_article_name
+    article_name = mapped_article_name or equipment_label or generic_article_name
     document_profile = _ingress_document_profile(context, company.key)
     issue_date = _date_iso(context.get("fecha_ingreso")) or timezone.localdate().isoformat()
     serial_number = _clean(context.get("numero_serie"))
@@ -1384,6 +1413,8 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
         "issueDate": issue_date,
         "customerCode": customer_code,
         "customerName": _clean(context.get("customer_name")),
+        "propietarioNombre": propietario_nombre,
+        "propietarioDoc": propietario_doc,
         "sellerCode": _clean(getattr(settings, "BEJERMAN_RIS_SELLER_CODE", "ADM")),
         "paymentTermCode": _clean(getattr(settings, "BEJERMAN_RIS_PAYMENT_TERM", "30")),
         "notes": f"OS {os_label(context['id'])}",
@@ -1419,6 +1450,10 @@ def _build_batch_payload(ingreso_ids: list[int]) -> dict[str, Any]:
         raise BejermanRisError("Todos los ingresos del lote deben usar la misma empresa Bejerman")
     if len(customer_codes) != 1:
         raise BejermanRisError("Todos los ingresos del lote deben pertenecer al mismo cliente Bejerman")
+    if not next(iter(customer_codes)):
+        propietario_docs = {_digits_only(payload.get("propietarioDoc")) for payload in payloads}
+        if len(propietario_docs) != 1 or not next(iter(propietario_docs)):
+            raise BejermanRisError("Todos los ingresos del lote deben pertenecer al mismo cliente Bejerman")
     profile_mismatch = _document_profile_mismatch_message(payloads)
     if profile_mismatch:
         raise BejermanRisError(profile_mismatch)
@@ -1803,6 +1838,20 @@ def _equipment_remito_duplicate_message(duplicate: dict[str, Any]) -> str:
     )
 
 
+def _remote_duplicate_check_unavailable_issue(exc: Exception) -> dict[str, Any]:
+    # Si Bejerman devuelve un error de esquema de la consulta (columnas/joins que dependen de la
+    # instalación), no hay que filtrar el SQL crudo al usuario final: se muestra un mensaje
+    # genérico y se loguea el detalle real para diagnóstico.
+    if is_bejerman_sales_query_schema_message(str(exc)):
+        message = (
+            "No se pudo validar si el equipo ya tiene remito en Bejerman por un error interno "
+            "de la consulta. Reintentá en unos minutos o revisá manualmente en Bejerman antes de emitir."
+        )
+    else:
+        message = f"No se pudo validar si el equipo ya tiene remito en Bejerman: {exc}"
+    return _issue("BEJERMAN_UNAVAILABLE", message, scope="bejerman")
+
+
 def _validate_equipment_remito_not_duplicated(
     payload: dict[str, Any],
     issues: list[dict[str, Any]],
@@ -1830,13 +1879,8 @@ def _validate_equipment_remito_not_duplicated(
             BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id),
         )
     except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
-        issues.append(
-            _issue(
-                "BEJERMAN_UNAVAILABLE",
-                f"No se pudo validar si el equipo ya tiene remito en Bejerman: {exc}",
-                scope="bejerman",
-            )
-        )
+        logger.warning("bejerman_ris_duplicate_check_unavailable", extra={"error": str(exc)[:500]})
+        issues.append(_remote_duplicate_check_unavailable_issue(exc))
         return
     if remote_duplicate:
         issues.append(
@@ -1983,7 +2027,7 @@ def _customer_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         customer_id = int(customer_id)
     except (TypeError, ValueError):
         return None
-    return q(
+    row = q(
         f"""
         SELECT {_customer_sql_fields()}
           FROM customers c
@@ -1992,6 +2036,9 @@ def _customer_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         [customer_id],
         one=True,
     )
+    if row:
+        row["customer_code"] = bejerman_customer_code_for(row.get("customer_name"), row.get("customer_code"))
+    return row
 
 
 def _model_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -2107,6 +2154,7 @@ def _context_from_payload(payload: dict[str, Any], *, item_index: int | None = N
     if issues:
         return None, issues
     assert customer is not None and model is not None
+    propietario_payload = payload.get("propietario") if isinstance(payload.get("propietario"), dict) else {}
     device = _device_from_payload_equipment(equipment) or {}
     input_serial = _clean(equipment.get("numero_serie"))
     input_internal = _clean(equipment.get("numero_interno"))
@@ -2127,6 +2175,9 @@ def _context_from_payload(payload: dict[str, Any], *, item_index: int | None = N
         "customer_code": customer.get("customer_code") or "",
         "customer_name": customer.get("customer_name") or "",
         "cuit": customer.get("cuit") or "",
+        "propietario_nombre": _clean(propietario_payload.get("nombre")),
+        "propietario_contacto": _clean(propietario_payload.get("contacto")),
+        "propietario_doc": _clean(propietario_payload.get("doc")),
         "device_id": device.get("device_id"),
         "device_customer_id": device.get("device_customer_id") or customer.get("customer_id"),
         "numero_serie": input_serial or _clean(device.get("numero_serie")),
@@ -2180,6 +2231,10 @@ def _combined_payload(payloads: list[dict[str, Any]], issues: list[dict[str, Any
         issues.append(_issue("RIS_BATCH_COMPANY_MISMATCH", "Todos los equipos del RIS deben usar la misma empresa Bejerman."))
     if len(customer_codes) != 1:
         issues.append(_issue("RIS_BATCH_CUSTOMER_MISMATCH", "Todos los equipos del RIS deben pertenecer al mismo cliente Bejerman."))
+    elif not next(iter(customer_codes)):
+        propietario_docs = {_digits_only(payload.get("propietarioDoc")) for payload in payloads}
+        if len(propietario_docs) != 1 or not next(iter(propietario_docs)):
+            issues.append(_issue("RIS_BATCH_CUSTOMER_MISMATCH", "Todos los equipos del RIS deben pertenecer al mismo cliente Bejerman."))
     profile_mismatch = _document_profile_mismatch_message(payloads)
     if profile_mismatch:
         issues.append(
@@ -2232,10 +2287,11 @@ def _stock_article_candidates(
     *,
     limit: int = 5,
     actor_user_id: int | None = None,
+    company_key: str | None = None,
 ) -> list[dict[str, Any]]:
     if not serial:
         return []
-    client = SyncBejermanSDKClient(actor_user_id=actor_user_id)
+    client = SyncBejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
     response = client.stock_by_deposit_partida("", serial)
     return _stock_article_candidates_from_response(response, serial, limit=limit)
 
@@ -2309,6 +2365,7 @@ def _stock_article_candidates_for_payload(
     return _stock_article_candidates(
         _clean(equipment.get("serial")) or _clean(equipment.get("internalNumber")),
         actor_user_id=actor_user_id,
+        company_key=_clean(payload.get("companyKey")) or None,
     )
 
 
@@ -2316,6 +2373,7 @@ def _article_mapping_fix_from_candidates(
     candidates: list[dict[str, Any]],
     context: dict[str, Any],
     variante: str,
+    company_key: str = "",
 ) -> dict[str, Any]:
     if not context.get("model_id"):
         return {}
@@ -2323,6 +2381,7 @@ def _article_mapping_fix_from_candidates(
         "type": "article_mapping",
         "model_id": context.get("model_id"),
         "variante": variante,
+        "company_key": company_key,
     }
     if len(candidates) == 1:
         fix.update(
@@ -2379,6 +2438,7 @@ def _validate_article(
     mapping_required = bool(equipment.get("mappingRequired")) and not bool(
         getattr(settings, "BEJERMAN_RIS_ALLOW_GENERIC_ARTICLE", False)
     )
+    company_key = _clean(payload.get("companyKey")) or None
     if mapping_required:
         candidates: list[dict[str, Any]] = []
         try:
@@ -2403,7 +2463,7 @@ def _validate_article(
                 field="equipo.modelo_id",
                 item_index=item_index,
                 candidates=candidates,
-                fix=_article_mapping_fix_from_candidates(candidates, context, variante),
+                fix=_article_mapping_fix_from_candidates(candidates, context, variante, company_key or ""),
             )
         )
         return None
@@ -2421,7 +2481,7 @@ def _validate_article(
     try:
         return validate_bejerman_article_choice(
             article_code,
-            client=SyncBejermanSDKClient(actor_user_id=actor_user_id),
+            client=SyncBejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id),
             context=article_context,
         )
     except (BejermanBlockedError, BejermanConfigError, BejermanTransientError, ValueError) as exc:
@@ -2431,7 +2491,7 @@ def _validate_article(
         except Exception:
             candidates = []
         fix = {}
-        fix = _article_mapping_fix_from_candidates(candidates, context, variante)
+        fix = _article_mapping_fix_from_candidates(candidates, context, variante, company_key or "")
         issues.append(
             _issue(
                 "BEJERMAN_ARTICLE_INVALID",
@@ -2463,6 +2523,22 @@ def _validate_customer(
         "cuit": context.get("cuit") or "",
     }
     if not customer_code:
+        propietario_nombre = _clean(payload.get("propietarioNombre"))
+        propietario_doc = _clean(payload.get("propietarioDoc"))
+        if propietario_nombre and propietario_doc:
+            try:
+                return build_occasional_customer_fields(propietario_nombre, propietario_doc)
+            except BejermanSdkResponseError as exc:
+                issues.append(
+                    _issue(
+                        "BEJERMAN_OCCASIONAL_CUSTOMER_INVALID",
+                        f"No se pudo armar el cliente ocasional: {exc}",
+                        scope="cliente",
+                        field="cliente.propietario_doc",
+                        item_index=item_index,
+                    )
+                )
+                return None
         issues.append(
             _issue(
                 "BEJERMAN_CUSTOMER_CODE_MISSING",
@@ -2675,24 +2751,9 @@ def preflight_ris_for_request_payload(data: dict[str, Any], user_id: int | None 
     issues: list[dict[str, Any]] = []
     contexts: list[dict[str, Any]] = []
     document_mode = parse_ris_document_mode((data or {}).get("ris_mode") or (data or {}).get("document_mode"))
+    # El número manual se valida más abajo, después del preflight, para poder pasarle el
+    # document_profile resuelto (ver bloque `if document_mode == RIS_DOCUMENT_MODE_REGISTER`).
     manual_document: dict[str, str] | None = None
-    if False and document_mode == RIS_DOCUMENT_MODE_REGISTER:
-        try:
-            manual_document = normalize_manual_ris_remito_number(
-                (data or {}).get("manual_remito_number")
-                or (data or {}).get("manualRemitoNumber")
-                or (data or {}).get("remito_ingreso"),
-                require_complete=True,
-            )
-        except BejermanRisError as exc:
-            issues.append(
-                _issue(
-                    "MANUAL_REMITO_REQUIRED",
-                    str(exc),
-                    scope="remito",
-                    field="manual_remito_number",
-                )
-            )
     items = _payload_items_from_request(data or {})
     if not items:
         issues.append(_issue("RIS_EMPTY_BATCH", "Debe agregar al menos un equipo al RIS."))
@@ -2805,6 +2866,11 @@ def apply_customer_fix_from_bejerman(
     code = _clean(customer_code)
     if not customer_id or not code:
         raise BejermanRisError("Cliente y código Bejerman son requeridos")
+    current = q("SELECT razon_social FROM customers WHERE id = %s", [customer_id], one=True)
+    if current and is_occasional_customer_name(current.get("razon_social")):
+        # El placeholder de particulares no se mapea a un cliente de Bejerman: se emite como cliente
+        # ocasional. Pisarlo acá rompería el circuito de particulares para todos los ingresos.
+        raise BejermanRisError("El cliente Particular no se mapea a un cliente de Bejerman")
     client = BejermanSDKClient(company_key=_clean(company_key) or None, actor_user_id=user_id)
     response = client.list_clientes()
     record = find_bejerman_client_record(response, code)
@@ -2853,6 +2919,7 @@ def apply_article_fix_from_bejerman(
     article_code: str,
     article_description: str = "",
     user_id: int | None = None,
+    company_key: str = "",
 ) -> dict[str, Any]:
     if not model_id:
         raise BejermanRisError("Modelo requerido para mapear artículo Bejerman")
@@ -2863,10 +2930,11 @@ def apply_article_fix_from_bejerman(
         "model_id": model_id,
         "variante": variante or "",
     }
+    resolved_company = _clean(company_key) or "SEPID"
     try:
         candidate = validate_bejerman_article_choice(
             code,
-            client=SyncBejermanSDKClient(actor_user_id=user_id),
+            client=SyncBejermanSDKClient(company_key=resolved_company, actor_user_id=user_id),
             context=context,
         )
     except (BejermanBlockedError, BejermanConfigError, BejermanTransientError) as exc:
@@ -2879,8 +2947,9 @@ def apply_article_fix_from_bejerman(
         match_source="manual",
         source_payload={"source": "ris_preflight_fix", "candidate": candidate},
         confirmed_by=user_id,
+        company_key=resolved_company,
     )
-    reopened = reopen_jobs_for_article_mapping(int(model_id), variante or "", code)
+    reopened = reopen_jobs_for_article_mapping(int(model_id), variante or "", code, resolved_company)
     return {"mapping": mapping, "candidate": candidate, "reopened_jobs": reopened}
 
 
@@ -3167,14 +3236,20 @@ def _register_target_deposit(payload: dict[str, Any]) -> str:
     return (_clean(profile.get("deposit")) or _clean(getattr(settings, "BEJERMAN_RIS_DEPOSIT", "STR")) or "STR").upper()
 
 
-def _stock_partida_present(client: BejermanSDKClient, partida: str, deposit: str) -> bool:
+def _stock_partida_positive(client: BejermanSDKClient, partida: str, deposit: str) -> bool:
+    """True si Bejerman tiene stock >0 de la partida en el depósito. Usa
+    `_records_for_partida` (filtra cantidad<=0) y no `_records_for_partida_any_quantity`:
+    el importador de Bejerman a veces acepta el comprobante con 'OK' pero deja la
+    partida en el depósito con cantidad 0 (alta fantasma, ver `force_stock_entry_for_ingreso`).
+    Si se usara "cualquier cantidad" acá, esa partida fantasma se confundiría con stock
+    real y las verificaciones de abajo quedarían ciegas al fallo que están buscando."""
     if not _clean(partida):
         return False
     try:
         response = client.obtener_stock_partida(partida)
     except Exception:
         return False
-    return bool(_records_for_partida_any_quantity(response, partida, deposit))
+    return bool(_records_for_partida(response, partida, deposit))
 
 
 def _stock_entry_number_for_equipment(equipment: dict[str, Any], fallback: int) -> str:
@@ -3213,7 +3288,7 @@ def _verify_register_stock_entries(client: BejermanSDKClient, partidas: list[str
     delay_ms = max(0, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS", 1500) or 0))
     pending = list(dict.fromkeys(_clean(partida) for partida in partidas if _clean(partida)))
     for attempt in range(attempts):
-        pending = [partida for partida in pending if not _stock_partida_present(client, partida, deposit)]
+        pending = [partida for partida in pending if not _stock_partida_positive(client, partida, deposit)]
         if not pending:
             return
         if attempt < attempts - 1 and delay_ms:
@@ -3243,7 +3318,7 @@ def _ensure_register_stock_entries(
     used_numbers: set[str] = set()
     for index, equipment in enumerate(equipments):
         partida = _clean(resolve_equipment_partida(equipment))
-        if not partida or _stock_partida_present(client, partida, deposit):
+        if not partida or _stock_partida_positive(client, partida, deposit):
             continue
         fallback = ingreso_ids[index] if index < len(ingreso_ids) else (index + 1)
         number = _stock_entry_number_for_equipment(equipment, fallback)
@@ -3265,6 +3340,67 @@ def _ensure_register_stock_entries(
         detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
         raise BejermanRisError(f"No se envió el RIS: Bejerman rechazó el alta de stock. {detail}")
     _verify_register_stock_entries(client, pending_partidas, deposit)
+
+
+def force_stock_entry_for_ingreso(ingreso_id: int, user_id: int | None = None) -> dict[str, Any]:
+    """Repite manualmente el ENT de stock (circuito STOCK) de un ingreso cuyo RIS ya
+    fue emitido/registrado en Bejerman pero cuya partida no quedó con stock positivo en
+    el depósito destino. Es el mismo mecanismo que usa `_ensure_register_stock_entries`
+    para dar de alta partidas antes del comprobante, pero disparado a mano: el
+    importador de Bejerman a veces acepta un comprobante con 'OK' y rechaza el alta de
+    la partida en silencio (ver nota en esa función), dejando el remito emitido sin que
+    el stock se vea reflejado. Usa un número de comprobante nuevo (no reutiliza el de la
+    emisión original) para no chocar con esa aceptación fantasma."""
+    row = _row_for_ingreso(ingreso_id)
+    if not row or not _clean(row.get("remito_number")) or (row.get("status") or "") != "generated":
+        raise BejermanRisError("Este ingreso no tiene un RIS emitido en Bejerman para forzar el stock.")
+
+    payload = _json_dict(row.get("request_payload"))
+    if not payload:
+        raise BejermanRisError("No se encontró el detalle del RIS emitido para este ingreso.")
+
+    equipments = _payload_equipment_items(payload)
+    ingreso_ids = _payload_ingreso_ids(payload)
+    equipment: dict[str, Any] | None = None
+    if len(equipments) == 1:
+        equipment = equipments[0]
+    else:
+        for index, candidate_id in enumerate(ingreso_ids):
+            if candidate_id == ingreso_id and index < len(equipments):
+                equipment = equipments[index]
+                break
+    if not equipment:
+        raise BejermanRisError("No se pudo identificar el equipo dentro del RIS para forzar el stock.")
+
+    partida = _clean(resolve_equipment_partida(equipment))
+    if not partida:
+        raise BejermanRisError("El equipo no tiene número de serie ni interno para forzar el stock en Bejerman.")
+    article_code = _clean(equipment.get("articleCode"))
+    if not article_code:
+        raise BejermanRisError("El equipo no tiene artículo Bejerman mapeado; no se puede forzar el stock.")
+
+    deposit = _register_target_deposit(payload)
+    company_key = _clean(row.get("company_key")) or _clean(payload.get("companyKey")) or "SEPID"
+    client = BejermanSDKClient(company_key=company_key, actor_user_id=user_id)
+
+    if _stock_partida_positive(client, partida, deposit):
+        return {"forced": False, "reason": "already_positive", "deposit": deposit, "partida": partida}
+
+    issue_date = timezone.localdate().isoformat()
+    origin = f"NEXORA-FORCEENT-{ingreso_id}-{partida}-{timezone.now().strftime('%Y%m%d%H%M%S')}"
+    number = f"{90000000 + (zlib.crc32(origin.encode('utf-8')) % 10000000):08d}"
+    entry = _register_stock_entry_item(equipment, partida=partida, deposit=deposit, issue_date=issue_date, number=number)
+    numera_flex = _clean(getattr(settings, "BEJERMAN_STOCK_NUMERA_FLEX", "N")) or "N"
+    response = client.ingresar_lista_comprobantes_stock_json([entry], numera_flex=numera_flex)
+    if not is_ok_response(response):
+        detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
+        raise BejermanRisError(f"Bejerman rechazó el alta de stock forzada. {detail}")
+    _verify_register_stock_entries(client, [partida], deposit)
+    logger.info(
+        "bejerman_ris_force_stock_entry",
+        extra={"ingreso_id": ingreso_id, "partida": partida, "deposit": deposit, "document_number": number},
+    )
+    return {"forced": True, "deposit": deposit, "partida": partida, "documentNumber": number}
 
 
 def _is_partida_rejection_message(message: Any) -> bool:
@@ -3336,6 +3472,26 @@ def _recover_emit_partida_rejection(
     return request_payload, _service_ingress_response(request_payload, built, raw_response)
 
 
+def _resolve_or_build_customer_fields(
+    client: BejermanSDKClient, payload: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Resuelve los campos fiscales del cliente contra Bejerman, o -si el cliente local no
+    tiene código Bejerman pero el ingreso capturó nombre y documento del propietario
+    ocasional- los arma localmente con el código especial de 'cliente vario'."""
+    customer_code = _clean(payload.get("customerCode"))
+    if customer_code:
+        return payload, resolve_customer_document_fields(client, customer_code)
+    propietario_nombre = _clean(payload.get("propietarioNombre"))
+    propietario_doc = _clean(payload.get("propietarioDoc"))
+    if propietario_nombre and propietario_doc:
+        # Si el particular ya tuvo equipos y su ficha quedo deshabilitada, se rehabilita antes de
+        # emitir: asi el codigo ocasional la encuentra seguro y no crea una segunda ficha.
+        ensure_particular_customer_enabled(client, payload.get("companyKey"), propietario_doc)
+        fields = build_occasional_customer_fields(propietario_nombre, propietario_doc)
+        return {**payload, "customerCode": BEJERMAN_OCCASIONAL_CUSTOMER_CODE}, fields
+    raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_NOT_FOUND")  # inalcanzable: _build_payload ya lo garantiza
+
+
 def _register_payload_to_bejerman(
     payload: dict[str, Any],
     manual_remito_number: Any,
@@ -3367,7 +3523,7 @@ def _register_payload_to_bejerman(
             if duplicate_remote:
                 raise BejermanSdkResponseError(f"Bejerman ya registra el remito {document['remitoNumber']}")
             _ensure_equipment_remito_not_duplicated(payload, ingreso_ids, client)
-        customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
+        payload, customer_fields = _resolve_or_build_customer_fields(client, payload)
         compact_payload = {**payload, "compactServiceIngressLegends": True, "preserveRegisteredDocumentStockFlag": True}
         compact_payload["documentProfile"] = {
             **(compact_payload.get("documentProfile") if isinstance(compact_payload.get("documentProfile"), dict) else {}),
@@ -3515,7 +3671,7 @@ def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = Non
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         payload = _apply_bejerman_partida_articles(payload, client)
         _ensure_equipment_remito_not_duplicated(payload, _payload_ingreso_ids(payload), client)
-        customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
+        payload, customer_fields = _resolve_or_build_customer_fields(client, payload)
         return _send_service_ingress_comprobante(
             client,
             payload,
@@ -3583,7 +3739,7 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         payload = _apply_bejerman_partida_articles(payload, client)
         _ensure_equipment_remito_not_duplicated(payload, [ingreso_id], client)
-        customer_fields = resolve_customer_document_fields(client, payload["customerCode"])
+        payload, customer_fields = _resolve_or_build_customer_fields(client, payload)
         request_payload, response = _send_service_ingress_comprobante(
             client,
             payload,
@@ -3768,6 +3924,19 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
         raise BejermanRisPdfPendingError(
             str(exc),
             retry_after_ms=getattr(exc, "retry_after_ms", 2500),
+            payload=pdf_error_metadata(exc),
+        ) from exc
+    except BejermanPdfWorkerStalledError as exc:
+        # Antes que las genéricas: hereda de BejermanSdkResponseError y no debe caer
+        # en la rama que lo convertiría en un 202 pendiente.
+        logger.warning(
+            "bejerman_ris_pdf_worker_stalled",
+            extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
+        )
+        raise BejermanRisPdfError(
+            str(exc),
+            code=exc.code,
+            status_code=exc.status_code,
             payload=pdf_error_metadata(exc),
         ) from exc
     except BejermanPdfNotPublishedError as exc:

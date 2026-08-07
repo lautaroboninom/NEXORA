@@ -76,6 +76,18 @@ class RemitoSalidaPdfView(APIView):
         if not cur_row:
             return Response(status=404)
         estado_actual = (cur_row["estado"] or "").lower()
+        reprint_requested = str(request.query_params.get("reprint") or "").strip().lower() in {"1", "true", "yes"}
+        if reprint_requested:
+            if estado_actual not in {"liberado", "entregado", "alquilado", "baja", "vendido_entregado"}:
+                return Response(
+                    {"detail": "La orden de salida solo puede reimprimirse después de haber sido emitida."},
+                    status=409,
+                )
+            pdf_bytes, fname = render_remito_salida_pdf(ingreso_id, printed_by=getattr(request.user, "nombre", ""))
+            resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+            resp["Content-Disposition"] = f'inline; filename="{fname}"'
+            return resp
+
         es_venta_pendiente = estado_actual == "vendido_pendiente_entrega"
         resolution_by_state = {
             "reparado": "reparado",

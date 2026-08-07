@@ -262,6 +262,11 @@ class PendientesPorTecnicoAPITest(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual([row["id"] for row in resp.data], [self.ingreso_assigned_id])
+        self.assertIsNotNone(resp.data[0]["device_id"])
+        self.assertIsNotNone(resp.data[0]["customer_id"])
+        self.assertTrue(resp.data[0]["tiene_codigo_mg"])
+        self.assertTrue(resp.data[0]["es_propietario_mg"])
+        self.assertFalse(resp.data[0]["mg_inactivo_venta"])
         self.assertEqual(resp.data[0]["asignado_a"], self.tech_user.id)
         self.assertEqual(resp.data[0]["asignado_a_nombre"], self.tech_user.nombre)
         self.assertEqual(resp.data[0]["tecnico"], self.tech_user.nombre)

@@ -28,7 +28,8 @@ import {
   getIngresoRisStatus,
   getIngresoBarcodeBlob,
 } from "../lib/api";
-import { openPdfBlob } from "../lib/pdf";
+import { isPendingPdfError, openPdfBlob } from "../lib/pdf";
+import { patrimonialEmailMessage, watchPatrimonialEmail } from "../lib/patrimonialEmail";
 import {
   documentNameFromRis,
   isRisGenerated,
@@ -58,8 +59,8 @@ import {
   nsPreferInternoOf,
 } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
-import { canActAsTech, isJefe, ROLES } from "../lib/authz";
-import { can, PERMISSION_CODES } from "../lib/permissions";
+import { canActAsTech, hasAnyRole, isJefe, ROLES } from "../lib/authz";
+import { can, canAny, PERMISSION_CODES } from "../lib/permissions";
 import ArchivosTab from "./ServiceSheet/tabs/ArchivosTab";
 import HistorialTab from "./ServiceSheet/tabs/HistorialTab";
 import PresupuestoTab from "./ServiceSheet/tabs/PresupuestoTab";
@@ -409,6 +410,11 @@ export default function ServiceSheet() {
   const canRepairTransitions = can(user, PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS);
   const canReleaseOrder = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
   const canEmitIngressOrder = can(user, PERMISSION_CODES.ACTION_INGRESO_EMIT_INGRESS_ORDER);
+  const canForceBejermanFix = canAny(user, [
+    PERMISSION_CODES.ACTION_INGRESO_FIX_RIS_PREFLIGHT,
+    PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE,
+  ]);
+  const canForceBejermanStockFix = hasAnyRole(user, [ROLES.JEFE, ROLES.JEFE_VEEDOR, ROLES.SUPERVISOR]);
   const canPrintBarcode = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE);
   const canBajaAltaPermission = can(user, PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA);
   const canForceHistorical = can(user, PERMISSION_CODES.ACTION_INGRESO_FORCE_HISTORICAL);
@@ -496,6 +502,7 @@ export default function ServiceSheet() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
+  const patrimonialWatchRef = useRef(null);
   const [identifierConflict, setIdentifierConflict] = useState(null);
   const [releaseOrderRow, setReleaseOrderRow] = useState(null);
   const ingressDocumentName = useMemo(() => documentNameFromRis(data, "RIS"), [data]);
@@ -587,6 +594,9 @@ export default function ServiceSheet() {
   const actionsMenuRef = useRef(null);
   const [risBusy, setRisBusy] = useState(false);
   const [risProgressStatus, setRisProgressStatus] = useState("");
+  const [risWaitStartedAt, setRisWaitStartedAt] = useState(0);
+  const [risWaitRemito, setRisWaitRemito] = useState("");
+  const risWaitAbortRef = useRef(null);
   const [manualRisPrint, setManualRisPrint] = useState(null);
   const [risPreflight, setRisPreflight] = useState(null);
   const [risPreflightLoading, setRisPreflightLoading] = useState(false);
@@ -1002,7 +1012,14 @@ export default function ServiceSheet() {
       }
       const risDocumentName = ingressDocumentNameFor(risSource);
       const remito = risRemitoFrom(risSource) || risRemitoFrom(data);
+      // A partir de acá el comprobante ya está emitido: sólo falta el archivo, y
+      // esa espera se puede cancelar sin dejar nada a medias.
+      const controller = new AbortController();
+      risWaitAbortRef.current = controller;
+      setRisWaitStartedAt(Date.now());
+      setRisWaitRemito(remito || "");
       const blob = await waitForRisPdfBlob(id, risSource, {
+        signal: controller.signal,
         onProgress: (progress) => setRisProgressStatus(progress?.status || `Preparando PDF del ${risDocumentName}...`),
       });
       setRisProgressStatus("Abriendo impresión...");
@@ -1020,12 +1037,25 @@ export default function ServiceSheet() {
         setErr(e?.data?.detail || `La validación previa del ${ingressDocumentNameFor(e.data)} encontró problemas.`);
         return;
       }
+      if (isPendingPdfError(e)) {
+        // El remito salió bien; sólo falta el PDF. No es un error del remito.
+        setToastMsg(`${e?.message || "Bejerman todavía no devolvió el PDF."} Podés reintentar desde acá.`);
+        setTimeout(() => setToastMsg(""), 6000);
+        return;
+      }
       setErr(e?.message || `No se pudo emitir o reimprimir el ${ingressDocumentName}`);
     } finally {
+      risWaitAbortRef.current = null;
+      setRisWaitStartedAt(0);
+      setRisWaitRemito("");
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
       setRisProgressStatus("");
     }
+  }
+
+  function cancelRisWait() {
+    risWaitAbortRef.current?.abort();
   }
 
   function abrirRisManualPendiente() {
@@ -1388,6 +1418,29 @@ export default function ServiceSheet() {
     }
   }
 
+  // Muestra el aviso de la operación junto con el estado real del mail
+  // patrimonial, y lo va actualizando cuando la cola confirma el envío.
+  function anunciarPatrimonial(baseNotice, emailInfo, evento) {
+    if (patrimonialWatchRef.current) {
+      patrimonialWatchRef.current();
+      patrimonialWatchRef.current = null;
+    }
+    const compose = (emailMsg) => [baseNotice, emailMsg].filter(Boolean).join(" ");
+    setNotice(compose(patrimonialEmailMessage(emailInfo, { evento })));
+    patrimonialWatchRef.current = watchPatrimonialEmail(
+      emailInfo,
+      (emailMsg) => setNotice(compose(emailMsg)),
+      { evento },
+    );
+  }
+
+  useEffect(
+    () => () => {
+      if (patrimonialWatchRef.current) patrimonialWatchRef.current();
+    },
+    [],
+  );
+
   async function ejecutarBaja({ askConfirm = true } = {}) {
     if (savingBaja || savingAlta) return;
     if (askConfirm) {
@@ -1404,17 +1457,19 @@ export default function ServiceSheet() {
       const job = resp?.bejerman_sync_job || {};
       const jobStatus = String(job?.status || "").trim().toLowerCase();
       const jobDetail = String(job?.last_error || job?.detail || "").trim();
+      let base;
       if (jobStatus === "succeeded") {
-        setNotice("Baja registrada. La sincronización Bejerman fue completada.");
+        base = "Baja registrada. La sincronización Bejerman fue completada.";
       } else if (jobStatus === "blocked") {
-        setNotice(`Baja registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`);
+        base = `Baja registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`;
       } else if (jobStatus === "not_queued") {
-        setNotice(`Baja registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`);
+        base = `Baja registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`;
       } else if (jobStatus) {
-        setNotice("Baja registrada. La sincronización Bejerman quedó en cola.");
+        base = "Baja registrada. La sincronización Bejerman quedó en cola.";
       } else {
-        setNotice("Baja registrada.");
+        base = "Baja registrada.";
       }
+      anunciarPatrimonial(base, resp?.patrimonial_email, "baja");
     } catch (e) {
       setNotice("");
       setErr(e?.message || "No se pudo marcar la baja");
@@ -1461,17 +1516,19 @@ export default function ServiceSheet() {
       const job = resp?.bejerman_sync_job || {};
       const jobStatus = String(job?.status || "").trim().toLowerCase();
       const jobDetail = String(job?.last_error || job?.detail || "").trim();
+      let base;
       if (jobStatus === "succeeded") {
-        setNotice("Alta registrada. La sincronización Bejerman fue completada.");
+        base = "Alta registrada. La sincronización Bejerman fue completada.";
       } else if (jobStatus === "blocked") {
-        setNotice(`Alta registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`);
+        base = `Alta registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`;
       } else if (jobStatus === "not_queued") {
-        setNotice(`Alta registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`);
+        base = `Alta registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`;
       } else if (jobStatus) {
-        setNotice("Alta registrada. La sincronización Bejerman quedó en cola.");
+        base = "Alta registrada. La sincronización Bejerman quedó en cola.";
       } else {
-        setNotice("Alta registrada.");
+        base = "Alta registrada.";
       }
+      anunciarPatrimonial(base, resp?.patrimonial_email, "alta");
     } catch (e) {
       setNotice("");
       setErr(e?.message || "No se pudo marcar el alta");
@@ -1715,7 +1772,7 @@ export default function ServiceSheet() {
     }
     try {
       setMgSaving(true);
-      await postDeviceMgVenta(data.device_id, {
+      const resp = await postDeviceMgVenta(data.device_id, {
         factura_numero: factura || null,
         remito_numero: remito || null,
         fecha_venta: mgForm.fecha_venta || null,
@@ -1728,6 +1785,7 @@ export default function ServiceSheet() {
       await refreshIngreso({ strong: 1 });
       setErr("");
       setMgModalOpen(false);
+      anunciarPatrimonial("Venta del MG registrada.", resp?.patrimonial_email, "venta_mg");
     } catch (e) {
       setErr(e?.message || "No se pudo registrar la venta del MG.");
     } finally {
@@ -1772,10 +1830,15 @@ export default function ServiceSheet() {
     }
     try {
       setPropioMgSaving(true);
-      await postIngresoConvertirPropioMg(id, { numero_interno: numeroInterno });
+      const resp = await postIngresoConvertirPropioMg(id, { numero_interno: numeroInterno });
       await refreshIngreso({ strong: 1 });
       setErr("");
       setPropioMgModalOpen(false);
+      anunciarPatrimonial(
+        `Alta de MG registrada (${numeroInterno}).`,
+        resp?.patrimonial_email,
+        "alta_mg",
+      );
     } catch (e) {
       setErr(e?.message || "No se pudo dar de alta el MG.");
     } finally {
@@ -2055,6 +2118,9 @@ export default function ServiceSheet() {
         open={risBusy}
         title={risProgressStatus.toLowerCase().includes("validando") ? `Validando ${ingressDocumentName}` : `Emitiendo ${ingressDocumentName}`}
         status={risProgressStatus || `Emitiendo ${ingressDocumentName} en Bejerman...`}
+        documentLabel={risWaitRemito ? `Remito ${risWaitRemito}` : ""}
+        waitStartedAt={risWaitStartedAt}
+        onCancel={risWaitStartedAt ? cancelRisWait : undefined}
       />
       <ReleaseOrderModal
         open={Boolean(releaseOrderRow)}
@@ -2290,6 +2356,8 @@ export default function ServiceSheet() {
           setUbicacionId={setUbicacionId}
           canEditLocation={canEditLocation}
           canEditAlquiler={canEditAlquiler}
+          canForceBejermanFix={canForceBejermanFix}
+          canForceBejermanStockFix={canForceBejermanStockFix}
           canManageReleaseResolution={canResolve}
           canShowRisAction={canShowRisAction}
           ingressDocumentName={ingressDocumentName}

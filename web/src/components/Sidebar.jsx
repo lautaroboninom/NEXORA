@@ -92,7 +92,12 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
   const canCustomerCatalog = CUSTOMER_CATALOG_ROLES.has(String(user?.rol || "").trim().toLowerCase());
 
-  const showRecepcion = ((canRecepcion || canCreateIngreso || canBejermanPurchases) && canDeliveryOrders) || canRouteSheet;
+  const showRecepcion =
+    canRecepcion ||
+    canCreateIngreso ||
+    canBejermanPurchases ||
+    canDeliveryOrders ||
+    canRouteSheet;
   const showDeliveryOrdersInRecepcion = showRecepcion && canDeliveryOrders;
   const showDeliveryOrdersInAdministracion = canDeliveryOrders && !showDeliveryOrdersInRecepcion;
   const showServicioTecnico = canWorkQueues || canBudgetQueues || canLogistics || canLiberados;
@@ -162,6 +167,11 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
               {showDeliveryOrdersInRecepcion && (
                 <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
                   Órdenes de entrega
+                </LinkItem>
+              )}
+              {canBejermanPurchases && (
+                <LinkItem to="/ingresos/nuevo?tab=mercaderia" {...linkProps}>
+                  Ingreso de mercadería
                 </LinkItem>
               )}
               {canRouteSheet && (

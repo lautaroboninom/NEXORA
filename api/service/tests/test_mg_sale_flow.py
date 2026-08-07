@@ -1,8 +1,9 @@
 from unittest import skipUnless
 
+from django.core import mail
 from django.core.management import call_command
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from service.auth import issue_token
@@ -152,6 +153,7 @@ class MgSaleFlowAPITest(TestCase):
         call_command("apply_mg_sale_schema")
         call_command("apply_ticket_sale_states_schema")
         call_command("apply_historical_corrections_schema")
+        call_command("apply_notifications_schema", verbosity=0)
         super().setUpClass()
 
     @classmethod
@@ -399,6 +401,64 @@ class MgSaleFlowAPITest(TestCase):
         self.assertIsNotNone(erow)
         self.assertEqual(int(erow[0]), self.customer_cli_id)
         self.assertEqual(erow[1], "INT-COMP-123")
+
+    @override_settings(
+        BAJA_NOTIFY_RECIPIENTS=["patrimonio@example.com"],
+        PATRIMONIAL_NOTIFY_RECIPIENTS=[],
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    )
+    def test_mg_venta_envia_aviso_patrimonial(self):
+        mail.outbox = []
+        resp = self.client.post(
+            self._url_venta(self.device_id),
+            {
+                "factura_numero": "FAC-MAIL-1",
+                "remito_numero": "REM-MAIL-1",
+                "venta_customer_id": self.customer_cli_id,
+                "observaciones": "Vendido con garantía",
+                "source": "equipos",
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["patrimonio@example.com"])
+        self.assertIn("venta de equipo MG", message.subject)
+        self.assertIn("MG 9001", message.body)
+        self.assertIn("FAC-MAIL-1", message.body)
+        self.assertIn("REM-MAIL-1", message.body)
+        self.assertIn("Clinica Demo", message.body)
+        self.assertIn("Vendido con garantía", message.body)
+
+        info = resp.data.get("patrimonial_email") or {}
+        self.assertEqual(info.get("status"), "sent")
+        self.assertEqual(info.get("event"), "venta_mg")
+        self.assertEqual(info.get("recipients"), ["patrimonio@example.com"])
+
+    @override_settings(
+        BAJA_NOTIFY_RECIPIENTS=["patrimonio@example.com"],
+        PATRIMONIAL_NOTIFY_RECIPIENTS=[],
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    )
+    def test_mg_venta_desde_hoja_de_servicio_incluye_os(self):
+        mail.outbox = []
+        ingreso_id = self._create_ingreso(device_id=self.device_id, estado="ingresado")
+        resp = self.client.post(
+            self._url_venta(self.device_id),
+            {
+                "factura_numero": "FAC-MAIL-2",
+                "venta_customer_id": self.customer_cli_id,
+                "ingreso_id": ingreso_id,
+                "source": "service_sheet",
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn(f"- OS: {str(ingreso_id).zfill(5)}", mail.outbox[0].body)
 
     def test_mg_reactivacion_registra_evento(self):
         sold = self.client.post(

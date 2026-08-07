@@ -7,7 +7,7 @@ import {
   postEntregarIngreso,
   postIngresoRisEmitir,
 } from "../lib/api";
-import { openPdfBlob } from "../lib/pdf";
+import { isPendingPdfError, openPdfBlob } from "../lib/pdf";
 import {
   isRisGenerated,
   isRisRegistered,
@@ -99,6 +99,7 @@ export default function QrScanCard({
   const nav = useNavigate();
   const { user } = useAuth();
   const inputRef = useRef(null);
+  const risWaitAbortRef = useRef(null);
   const scannerRef = useRef(null);
   const scanLockRef = useRef(false);
   const startLockRef = useRef(false);
@@ -129,6 +130,7 @@ export default function QrScanCard({
   const [scanMode, setScanMode] = useState("ingreso");
   const [risBusy, setRisBusy] = useState(false);
   const [risProgressStatus, setRisProgressStatus] = useState("");
+  const [risWait, setRisWait] = useState({ startedAt: 0, remito: "" });
   const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [actionOk, setActionOk] = useState("");
   const [manualRisPrint, setManualRisPrint] = useState(null);
@@ -530,7 +532,12 @@ export default function QrScanCard({
         setActionOk(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
         return;
       }
+      // El remito ya está emitido: la espera del PDF se puede cancelar.
+      const controller = new AbortController();
+      risWaitAbortRef.current = controller;
+      setRisWait({ startedAt: Date.now(), remito: remito || "" });
       const blob = await waitForRisPdfBlob(ingreso.id, risSource, {
+        signal: controller.signal,
         onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del Remito..."),
       });
       setRisProgressStatus("Abriendo impresión...");
@@ -542,13 +549,24 @@ export default function QrScanCard({
         setErr("El PDF del Remito ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.");
       }
     } catch (e2) {
-      setErr(e2?.message || "No se pudo emitir o reimprimir el Remito.");
+      if (isPendingPdfError(e2)) {
+        // El remito salió bien; sólo falta el archivo.
+        setActionOk(`${e2?.message || "Bejerman todavía no devolvió el PDF."} El remito ya quedó registrado.`);
+      } else {
+        setErr(e2?.message || "No se pudo emitir o reimprimir el Remito.");
+      }
     } finally {
+      risWaitAbortRef.current = null;
+      setRisWait({ startedAt: 0, remito: "" });
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
       setRisProgressStatus("");
       setTimeout(() => inputRef.current?.focus(), 50);
     }
+  };
+
+  const cancelRisWait = () => {
+    risWaitAbortRef.current?.abort();
   };
 
   const abrirRisManualPendiente = () => {
@@ -587,6 +605,9 @@ export default function QrScanCard({
         open={risBusy}
         title="Emitiendo Remito"
         status={risProgressStatus || "Emitiendo Remito en Bejerman..."}
+        documentLabel={risWait.remito ? `Remito ${risWait.remito}` : ""}
+        waitStartedAt={risWait.startedAt}
+        onCancel={risWait.startedAt ? cancelRisWait : undefined}
       />
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <div>

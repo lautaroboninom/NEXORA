@@ -51,7 +51,7 @@ PERMISSION_CATALOG = [
     {"code": "action.metrics.configure", "label": "Configurar metricas", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_sync.manage", "label": "Gestionar sincronización Bejerman", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_purchase_entries.manage", "label": "Gestionar ingresos de mercadería Bejerman", "type": "action", "group": "Sistema"},
-    {"code": "action.bejerman_purchase_entries.emit", "label": "Emitir ingresos de mercadería Bejerman", "type": "action", "group": "Sistema"},
+    {"code": "action.bejerman_purchase_entries.emit", "label": "Registrar RT de compra en Bejerman", "type": "action", "group": "Sistema"},
     {"code": "action.delivery_order.create", "label": "Crear órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
     {"code": "action.delivery_order.prepare", "label": "Preparar órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
     {"code": "action.delivery_order.deliver", "label": "Entregar órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},

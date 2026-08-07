@@ -1,6 +1,7 @@
 from unittest import skipUnless
 from unittest.mock import patch
 
+from django.core import mail
 from django.core.management import call_command
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -8,6 +9,7 @@ from rest_framework.test import APIClient
 
 from service.auth import issue_token
 from service.models import User
+from service.notification_email_outbox import process_notification_email_outbox
 from service.views.mg_state import resolve_mg_flags
 
 
@@ -214,6 +216,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
             )
         call_command("apply_revision_tecnica_schema", verbosity=0)
         call_command("apply_mg_sale_schema", verbosity=0)
+        call_command("apply_notifications_schema", verbosity=0)
         super().setUpClass()
 
     @classmethod
@@ -390,25 +393,82 @@ class IngresoConvertirPropioMgAPITest(TestCase):
         self.assertTrue(flags.get("tiene_codigo_mg"))
         self.assertTrue(flags.get("es_propietario_mg"))
 
-    @override_settings(BAJA_NOTIFY_RECIPIENTS=["patrimonio@example.com"])
-    @patch("service.views.ingresos_views._send_mail_with_fallback", return_value=(True, {}))
-    def test_alta_mg_envia_mail_patrimonial(self, mock_send):
+    @override_settings(
+        BAJA_NOTIFY_RECIPIENTS=["patrimonio@example.com"],
+        PATRIMONIAL_NOTIFY_RECIPIENTS=[],
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    )
+    def test_alta_mg_envia_mail_patrimonial(self):
+        mail.outbox = []
         device_id = self._crear_equipo(numero_serie="NS-RT-100B")
         ingreso_id = self._crear_ingreso(device_id=device_id)
 
-        with self.captureOnCommitCallbacks(execute=True):
-            resp = self.client.post(
-                self._url(ingreso_id),
-                {"numero_interno": "MG 0555"},
-                format="json",
-            )
+        resp = self.client.post(
+            self._url(ingreso_id),
+            {"numero_interno": "MG 0555"},
+            format="json",
+        )
 
         self.assertEqual(resp.status_code, 200)
-        mock_send.assert_called_once()
-        subject, body, recipients = mock_send.call_args[0]
-        self.assertIn("alta de MG", subject)
-        self.assertIn("MG 0555", body)
-        self.assertEqual(recipients, ["patrimonio@example.com"])
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertIn("alta de MG", message.subject)
+        self.assertIn("MG 0555", message.body)
+        self.assertEqual(message.to, ["patrimonio@example.com"])
+
+        # La respuesta informa el resultado real del envío, no un cartel fijo.
+        info = resp.data.get("patrimonial_email") or {}
+        self.assertEqual(info.get("status"), "sent")
+        self.assertEqual(info.get("recipients"), ["patrimonio@example.com"])
+        self.assertIn("patrimonio@example.com", info.get("detail") or "")
+
+    @override_settings(
+        BAJA_NOTIFY_RECIPIENTS=["patrimonio@example.com"],
+        PATRIMONIAL_NOTIFY_RECIPIENTS=[],
+        EMAIL_BACKEND="service.email_backend.EmailBackend",
+        EMAIL_DELIVERY_ASYNC=True,
+    )
+    @patch("service.notification_email_outbox._send_delivery", side_effect=RuntimeError("smtp caído"))
+    def test_alta_mg_informa_fallo_real_de_envio(self, _send_delivery):
+        device_id = self._crear_equipo(numero_serie="NS-RT-100E")
+        ingreso_id = self._crear_ingreso(device_id=device_id)
+
+        resp = self.client.post(
+            self._url(ingreso_id),
+            {"numero_interno": "MG 0556"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        info = resp.data.get("patrimonial_email") or {}
+        # Con envío asíncrono el correo queda encolado: nunca se informa "enviado".
+        self.assertEqual(info.get("status"), "queued")
+        self.assertTrue(info.get("deliveryIds"))
+
+        process_notification_email_outbox(delivery_ids=info["deliveryIds"], limit=5)
+        estado = self.client.get(
+            "/api/notificaciones/emails/estado/",
+            {"ids": ",".join(str(value) for value in info["deliveryIds"])},
+        )
+        self.assertEqual(estado.status_code, 200)
+        self.assertEqual(estado.data.get("status"), "retry")
+        self.assertIn("smtp caído", estado.data.get("detail") or "")
+
+    @override_settings(BAJA_NOTIFY_RECIPIENTS=[], PATRIMONIAL_NOTIFY_RECIPIENTS=[])
+    def test_alta_mg_avisa_cuando_no_hay_destinatarios(self):
+        device_id = self._crear_equipo(numero_serie="NS-RT-100F")
+        ingreso_id = self._crear_ingreso(device_id=device_id)
+
+        resp = self.client.post(
+            self._url(ingreso_id),
+            {"numero_interno": "MG 0557"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        info = resp.data.get("patrimonial_email") or {}
+        self.assertEqual(info.get("status"), "sin_destinatarios")
+        self.assertEqual(info.get("recipients"), [])
 
     def test_permite_alta_mg_con_permiso_baja_alta(self):
         self._auth(self.recepcion_token)

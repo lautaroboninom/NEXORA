@@ -12,6 +12,12 @@ import {
   ResponsiveActionBar,
   fullWidthButtonClass,
 } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort";
+import {
+  DELIVERY_ORDER_SORT_COLUMNS,
+  DELIVERY_ORDER_SORT_OPTIONS,
+} from "../lib/delivery-order-sort";
 
 const STATUS_LABELS = {
   pendiente_stock: "Pendiente de stock",
@@ -50,6 +56,7 @@ export default function RecepcionDashboard() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [sort, setSort] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -87,6 +94,10 @@ export default function RecepcionDashboard() {
   }, [orders]);
   const pendingDeliveryTotal = (summary.pendiente_stock || 0) + (summary.pendiente_armado || 0) + (summary.armado_pendiente_entrega || 0);
   const remitoTotal = (summary.entregado_pendiente_facturacion || 0) + (summary.entregado_no_facturable || 0);
+  const displayOrders = useMemo(
+    () => sortRows(orders, sort, DELIVERY_ORDER_SORT_COLUMNS),
+    [orders, sort]
+  );
 
   return (
     <div className="space-y-4">
@@ -148,8 +159,16 @@ export default function RecepcionDashboard() {
           <div className="px-3 py-6 text-sm text-gray-500">Cargando...</div>
         ) : (
           <>
+            <MobileSortControl
+              sort={sort}
+              onSortChange={setSort}
+              options={DELIVERY_ORDER_SORT_OPTIONS.filter((option) =>
+                ["orden", "cliente", "articulos", "estado", "remito"].includes(option.value)
+              )}
+              className="m-3 mb-0"
+            />
             <MobileDataList className="p-3">
-              {orders.map((order) => {
+              {displayOrders.map((order) => {
                 const articles = deliveryOrderItemsSummary(order, 1);
                 return (
                   <MobileDataCard key={order.id}>
@@ -179,16 +198,16 @@ export default function RecepcionDashboard() {
               <table className="min-w-full text-sm">
                 <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
                   <tr>
-                    <th className="px-2 py-2">Orden</th>
-                    <th className="px-2 py-2">Cliente</th>
-                    <th className="px-2 py-2">Artículos</th>
-                    <th className="px-2 py-2">Estado</th>
-                    <th className="px-2 py-2">Remito</th>
+                    <SortableTh field="orden" sort={sort} onSortChange={setSort} className="px-2 py-2">Orden</SortableTh>
+                    <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="px-2 py-2">Cliente</SortableTh>
+                    <SortableTh field="articulos" sort={sort} onSortChange={setSort} className="px-2 py-2">Artículos</SortableTh>
+                    <SortableTh field="estado" sort={sort} onSortChange={setSort} className="px-2 py-2">Estado</SortableTh>
+                    <SortableTh field="remito" sort={sort} onSortChange={setSort} className="px-2 py-2">Remito</SortableTh>
                     <th className="px-2 py-2"></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.map((order) => (
+                  {displayOrders.map((order) => (
                     <OrderRow key={order.id} order={order} />
                   ))}
                   {!orders.length && (

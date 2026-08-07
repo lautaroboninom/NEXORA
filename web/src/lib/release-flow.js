@@ -9,6 +9,16 @@ const CLOSED_STATES = new Set([
   "vendido_entregado",
 ]);
 
+// Estos estados ocurren después de emitir la orden de salida. La orden debe
+// seguir disponible para verla e imprimirla otra vez si se pierde el papel.
+const REPRINTABLE_STATES = new Set([
+  "liberado",
+  "entregado",
+  "alquilado",
+  "baja",
+  "vendido_entregado",
+]);
+
 const RELEASE_READY_STATES = new Set([
   "reparado",
   "controlado_sin_defecto",
@@ -38,8 +48,9 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
   const estado = normalizeReleaseValue(row?.estado);
   const presupuesto = normalizeReleaseValue(row?.presupuesto_estado);
   const resolucion = normalizeReleaseValue(row?.resolucion);
-  const isReleased = estado === "liberado";
-  const needsResolution = !resolucion && !isReleased;
+  const isReprint = REPRINTABLE_STATES.has(estado);
+  const isSoldDelivered = estado === "vendido_entregado";
+  const needsResolution = !resolucion && !isReprint;
   const suggestedResolution = releaseResolutionSuggestion(row);
 
   let blockedReason = "";
@@ -47,7 +58,7 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
     blockedReason = "No se pudo identificar la OS.";
   } else if (estado === "vendido_pendiente_entrega") {
     blockedReason = "Es una venta pendiente de entrega. Completá la entrega de venta desde la hoja de servicio.";
-  } else if (CLOSED_STATES.has(estado)) {
+  } else if (CLOSED_STATES.has(estado) && !isReprint) {
     blockedReason = `El equipo ya está en estado ${estadoLabel(estado)}.`;
   } else if (needsResolution && !RELEASE_READY_STATES.has(estado)) {
     blockedReason = "Todavía falta cerrar la reparación o definir una resolución de salida.";
@@ -56,13 +67,19 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
   const canSubmit = Boolean(
     id &&
       !blockedReason &&
-      (isReleased || resolucion || RELEASE_READY_STATES.has(estado))
+      (isReprint || resolucion || RELEASE_READY_STATES.has(estado))
   );
 
-  const primaryLabel = isReleased ? "Reimprimir orden" : "Revisar salida";
+  const primaryLabel = isSoldDelivered
+    ? "Imprimir salida"
+    : isReprint
+      ? "Reimprimir orden"
+      : "Revisar salida";
   const statusText = blockedReason
-    || (isReleased
-      ? "La orden de salida ya fue emitida. Podés reimprimirla sin cambiar la resolución."
+    || (isSoldDelivered
+      ? "La venta ya fue entregada. Podés imprimir la orden de salida como comprobante del trabajo realizado antes de la venta, sin modificar la OS."
+      : isReprint
+      ? "La orden de salida ya fue emitida. Podés verla y reimprimirla sin cambiar la resolución."
       : needsResolution
         ? `Se va a completar la resolución como ${resolutionLabel(suggestedResolution) || "pendiente"}.`
         : `Listo para liberar con resolución ${resolutionLabel(resolucion)}.`);
@@ -73,7 +90,8 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
     presupuesto,
     resolucion,
     suggestedResolution,
-    isReleased,
+    isReprint,
+    isSoldDelivered,
     needsResolution,
     canSubmit,
     blockedReason,

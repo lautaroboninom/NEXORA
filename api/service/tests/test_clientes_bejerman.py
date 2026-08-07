@@ -4,12 +4,17 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from service.customer_bejerman_sync import (
+    bejerman_customer_details_from_record,
+    lookup_local_customer_document_fields,
+)
 from service.models import User
 
 
@@ -212,6 +217,7 @@ class ClientesBejermanAPITest(TestCase):
         call_command("apply_customer_alias_schema", verbosity=0)
 
     def setUp(self):
+        cache.clear()
         with connection.cursor() as cur:
             for table in (
                 "delivery_orders",
@@ -263,6 +269,128 @@ class ClientesBejermanAPITest(TestCase):
             device_id = cur.fetchone()[0]
             cur.execute("INSERT INTO ingresos (device_id) VALUES (%s)", [device_id])
         return sim_id, cma_id
+
+    def _insert_cached_customer(
+        self,
+        *,
+        code,
+        company_key,
+        name,
+        cuit,
+        bejerman_code=None,
+        document_type="1",
+        province="02",
+        vat_status="1",
+        iibb="",
+    ):
+        effective_bejerman_code = code if bejerman_code is None else bejerman_code
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO customers (
+                    cod_empresa,
+                    razon_social,
+                    cuit,
+                    bejerman_cod_empresa,
+                    bejerman_company_key,
+                    bejerman_tipo_documento,
+                    bejerman_provincia,
+                    bejerman_condicion_iva,
+                    bejerman_numero_iibb
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    code,
+                    name,
+                    cuit,
+                    effective_bejerman_code,
+                    company_key,
+                    document_type,
+                    province,
+                    vat_status,
+                    iibb,
+                ],
+            )
+
+    def test_lookup_local_cliente_respeta_la_empresa_bejerman(self):
+        self._insert_cached_customer(
+            code="ABC",
+            company_key="SEPID",
+            name="CLIENTE SEPID SA",
+            cuit="30700000010",
+            iibb="30700000010",
+        )
+        self._insert_cached_customer(
+            code="ABC",
+            company_key="MGBIO",
+            name="CLIENTE MGBIO SRL",
+            cuit="30700000029",
+        )
+
+        fields = lookup_local_customer_document_fields(
+            _FakeBejermanClient(company_key="MGBIO"),
+            "ABC",
+        )
+
+        self.assertEqual(fields["Cliente_RazonSocial"], "CLIENTE MGBIO SRL")
+        self.assertEqual(fields["Cliente_NroDocumento"], "30700000029")
+        self.assertNotIn("Cliente_NumeroIIBB", fields)
+
+    def test_lookup_local_cliente_no_elige_entre_duplicados_de_la_misma_empresa(self):
+        self._insert_cached_customer(
+            code="DUP",
+            company_key="SEPID",
+            name="CLIENTE DUPLICADO UNO",
+            cuit="30700000010",
+        )
+        self._insert_cached_customer(
+            code="DUP",
+            company_key="SEPID",
+            name="CLIENTE DUPLICADO DOS",
+            cuit="30700000029",
+        )
+
+        fields = lookup_local_customer_document_fields(
+            _FakeBejermanClient(company_key="SEPID"),
+            "DUP",
+        )
+
+        self.assertIsNone(fields)
+
+    def test_lookup_local_cliente_admite_codigo_legado_y_rechaza_cache_incompleta(self):
+        self._insert_cached_customer(
+            code="LEG",
+            bejerman_code="",
+            company_key="SEPID",
+            name="CLIENTE LEGADO",
+            cuit="30700000010",
+        )
+        self._insert_cached_customer(
+            code="INC",
+            company_key="SEPID",
+            name="CLIENTE INCOMPLETO",
+            cuit="30700000029",
+            province="",
+        )
+        client = _FakeBejermanClient(company_key="SEPID")
+
+        legacy_fields = lookup_local_customer_document_fields(client, "LEG")
+        incomplete_fields = lookup_local_customer_document_fields(client, "INC")
+
+        self.assertEqual(legacy_fields["Cliente_RazonSocial"], "CLIENTE LEGADO")
+        self.assertIsNone(incomplete_fields)
+
+    def test_normalizacion_cliente_admite_alias_tipo_documento_codigo(self):
+        details = bejerman_customer_details_from_record(
+            {
+                "Cliente_Codigo": "TDC",
+                "Cliente_RazonSocial": "TIPO DOCUMENTO CODIGO",
+                "TipoDocumentoCodigo": "1",
+            }
+        )
+
+        self.assertEqual(details["bejerman_tipo_documento"], "1")
 
     @patch("service.customer_bejerman_sync.BejermanSDKClient", side_effect=_fake_bejerman_factory())
     def test_customer_list_includes_bejerman_sync_and_activity_counts(self, _client_cls):

@@ -4,7 +4,7 @@ from service.bejerman_sync import run_bejerman_sync_loop
 
 
 class Command(BaseCommand):
-    help = "Ejecuta el worker continuo de sincronizacion con Bejerman"
+    help = "Ejecuta el worker continuo de sincronización con Bejerman"
 
     def add_arguments(self, parser):
         parser.add_argument("--interval", type=int, default=30)

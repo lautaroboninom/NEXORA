@@ -281,6 +281,9 @@ def _bejerman_article_mapping_sql():
             "'' AS bejerman_article_code,\n              '' AS bejerman_article_description",
             "",
         )
+    # SEPID y MG BIO tienen catálogos de artículos independientes: sin este filtro por empresa,
+    # el JOIN puede traer más de una fila (una por empresa) para el mismo modelo/variante.
+    company_expr = "UPPER(COALESCE(NULLIF(t.empresa_bejerman,''), NULLIF(t.empresa_facturar,''), 'SEPID'))"
     return (
         "COALESCE(bam.article_code,'') AS bejerman_article_code,\n"
         "              COALESCE(bam.article_description,'') AS bejerman_article_description",
@@ -288,6 +291,7 @@ def _bejerman_article_mapping_sql():
             LEFT JOIN bejerman_article_mappings bam
               ON bam.model_id = m.id
              AND bam.variante_norm = {_article_variant_norm_expr()}
+             AND UPPER(bam.company_key) = {company_expr}
         """,
     )
 

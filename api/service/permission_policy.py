@@ -89,6 +89,27 @@ VIEW_PERMISSION_MATRIX = {
             "action.presupuesto.manage",
         ]
     },
+    "IngresoAlquilerRemitoView": {
+        "GET": [
+            "page.ingresos_history",
+            "page.work_queues",
+            "page.budget_queues",
+            "page.logistics",
+            "page.liberados",
+            "page.service_sheet_principal",
+            "action.ingreso.edit_basics",
+            "action.ingreso.edit_diagnosis",
+            "action.ingreso.edit_location",
+            "action.ingreso.edit_delivery",
+            "action.ingreso.manage_derivations",
+            "action.ingreso.repair_transitions",
+            "action.ingreso.baja_alta",
+            "action.presupuesto.manage",
+        ]
+    },
+    "IngresoAlquilerRemitoAccionView": {
+        "POST": ["action.ingreso.fix_ris_preflight", "action.bejerman_sync.manage"]
+    },
     "IngresoTestView": {
         "GET": [
             "page.ingresos_history",
@@ -151,6 +172,7 @@ VIEW_PERMISSION_MATRIX = {
     },
     "BejermanArticlesView": {"GET": ["action.ingreso.fix_ris_preflight", "action.bejerman_sync.manage"]},
     "BejermanPurchaseProvidersView": {"GET": "page.bejerman_purchase_entries"},
+    "BejermanPurchaseOrdersView": {"GET": "page.bejerman_purchase_entries"},
     "BejermanPurchaseArticlesView": {"GET": "page.bejerman_purchase_entries"},
     "BejermanPurchaseEntriesView": {
         "GET": "page.bejerman_purchase_entries",
@@ -171,8 +193,15 @@ VIEW_PERMISSION_MATRIX = {
         "PATCH": "action.bejerman_purchase_entries.manage",
         "DELETE": "action.bejerman_purchase_entries.manage",
     },
-    "BejermanPurchaseEntryValidateView": {"POST": "action.bejerman_purchase_entries.manage"},
+    "BejermanPurchaseEntryValidateView": {
+        "POST": [
+            "action.bejerman_purchase_entries.manage",
+            "action.bejerman_purchase_entries.emit",
+        ]
+    },
     "BejermanPurchaseEntryEmitView": {"POST": "action.bejerman_purchase_entries.emit"},
+    "BejermanPurchaseEntryVerifyView": {"POST": "action.bejerman_purchase_entries.emit"},
+    "BejermanPurchaseEntryReopenView": {"POST": "action.bejerman_purchase_entries.emit"},
     "BejermanPurchaseHistoryView": {"GET": "page.bejerman_purchase_entries"},
     # NEXORA / órdenes de entrega y cobranzas
     "DeliveryOrdersView": {
@@ -182,8 +211,10 @@ VIEW_PERMISSION_MATRIX = {
     "DeliveryOrderDetailView": {"GET": "page.delivery_orders", "PATCH": "action.delivery_order.assign_articles"},
     "DeliveryOrderExitRemitoPdfView": {"GET": "page.delivery_orders"},
     "DeliveryOrderPreparedView": {"POST": "action.delivery_order.prepare"},
+    "DeliveryOrderRemitosView": {"POST": "action.delivery_order.prepare"},
     "DeliveryOrderDeliveredView": {"POST": "action.delivery_order.deliver"},
     "DeliveryOrderInvoicedView": {"POST": "action.delivery_order.invoice"},
+    "DeliveryOrdersBatchInvoicedView": {"POST": "action.delivery_order.invoice"},
     "DeliveryOrderNotBillableView": {"POST": "action.delivery_order.invoice"},
     "DeliveryOrderBillingPostponementView": {"POST": "action.delivery_order.invoice"},
     "DeliveryOrderBillingReactivationView": {"POST": "action.delivery_order.invoice"},
@@ -242,7 +273,16 @@ VIEW_PERMISSION_MATRIX = {
     "UsuarioActivoView": {"PATCH": "action.users.manage"},
     "UsuarioResetPassView": {"PATCH": "action.users.manage"},
     "UsuarioRolePermView": {"PATCH": "action.users.manage"},
-    "UsuarioDeleteView": {"DELETE": "action.users.manage"},
+    "UsuarioDetailView": {
+        "GET": "page.users",
+        "PATCH": "action.users.manage",
+        "DELETE": "action.users.manage",
+    },
+    "UsuarioBejermanWorkstationsView": {"GET": "action.users.manage"},
+    "UsuarioBejermanCredentialsView": {
+        "PUT": "action.users.manage",
+        "DELETE": "action.users.manage",
+    },
     "CatalogoRolesView": {"GET": "action.users.manage"},
     "CatalogoTecnicosView": {
         "GET": ["action.ingreso.change_assignment", "action.ingreso.create", "page.new_ingreso"]

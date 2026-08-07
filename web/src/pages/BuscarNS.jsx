@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { getGeneralEquipos } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import useQueryState from "../hooks/useQueryState";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 export default function BuscarNS() {
   const [sp] = useSearchParams();
@@ -11,6 +15,7 @@ export default function BuscarNS() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [sort, setSort] = useQueryState("sort", "");
   const nav = useNavigate();
 
   useEffect(() => {
@@ -61,16 +66,29 @@ export default function BuscarNS() {
   }, [ns]);
 
   const titulo = ns ? `Resultados para N/S o MG: ${ns}` : "Búsqueda por N/S o MG";
+  const displayRows = useMemo(
+    () => sortRows(rows, sort, INGRESO_LIST_SORT_COLUMNS),
+    [rows, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "marca",
+    "modelo",
+    "identificacion",
+    "tipo",
+    "fecha_ingreso",
+  ]);
 
   return (
     <div className="max-w-5xl mx-auto p-4 space-y-4">
       <h1 className="text-2xl font-bold">{titulo}</h1>
       {err && <div className="bg-red-100 text-red-700 border border-red-300 p-2 rounded">{err}</div>}
       {loading ? "Cargando..." :
-        rows.length === 0 ? <div className="text-sm text-gray-500">No se encontraron ingresos con ese N° de serie o MG.</div> :
+        displayRows.length === 0 ? <div className="text-sm text-gray-500">No se encontraron ingresos con ese N° de serie o MG.</div> :
         <div>
+          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
           <MobileDataList>
-            {rows.map((r) => {
+            {displayRows.map((r) => {
               const ingresoId = r?.id;
               return (
                 <MobileDataCard
@@ -98,16 +116,16 @@ export default function BuscarNS() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th className="p-2">OS</th>
-                <th className="p-2">Marca</th>
-                <th className="p-2">Modelo</th>
-                <th className="p-2">Identificación</th>
-                <th className="p-2">Tipo</th>
-                <th className="p-2">Fecha de ingreso</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                <SortableTh field="marca" sort={sort} onSortChange={setSort} className="p-2">Marca</SortableTh>
+                <SortableTh field="modelo" sort={sort} onSortChange={setSort} className="p-2">Modelo</SortableTh>
+                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Identificación</SortableTh>
+                <SortableTh field="tipo" sort={sort} onSortChange={setSort} className="p-2">Tipo</SortableTh>
+                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2">Fecha de ingreso</SortableTh>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {displayRows.map((r) => {
                 const ingresoId = r?.id;
                 return (
                   <tr
@@ -128,7 +146,7 @@ export default function BuscarNS() {
             </tbody>
           </table>
           </DesktopTableWrap>
-          <div className="text-xs text-gray-500 mt-2">Mostrando {rows.length} ingreso(s).</div>
+          <div className="text-xs text-gray-500 mt-2">Mostrando {displayRows.length} ingreso(s).</div>
         </div>}
     </div>
   );

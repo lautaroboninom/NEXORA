@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import re
 from decimal import Decimal
 
 from django.db import connection, transaction
@@ -833,8 +834,48 @@ def _delivery_pending_billing_sql(alias=""):
     billable_types = ", ".join("'" + tipo.replace("'", "''") + "'" for tipo in sorted(BILLABLE_REMITO_TYPES))
     if not billable_types:
         billable_types = "''"
+    remito_set_complete = ""
+    link_columns = ("id", "order_id", "remito_group_id", "batch_id", "sequence", "expected_count", "created_at")
+    if (
+        _table_exists("delivery_order_remito_links")
+        and all(_has_table_column("delivery_order_remito_links", column) for column in link_columns)
+        and _table_exists("bejerman_remito_groups")
+        and _has_table_column("bejerman_remito_groups", "status")
+    ):
+        remito_set_complete = f"""
+        AND (
+          NOT EXISTS (
+            SELECT 1
+              FROM delivery_order_remito_links any_link
+             WHERE any_link.order_id = {event_order_id}
+          )
+          OR EXISTS (
+            SELECT 1
+              FROM delivery_order_remito_links active_link
+              JOIN bejerman_remito_groups active_group
+                ON active_group.id = active_link.remito_group_id
+             WHERE active_link.order_id = {event_order_id}
+               AND active_link.batch_id = (
+                 SELECT latest_link.batch_id
+                   FROM delivery_order_remito_links latest_link
+                  WHERE latest_link.order_id = {event_order_id}
+                  ORDER BY latest_link.created_at DESC,
+                           latest_link.batch_id DESC,
+                           latest_link.sequence DESC,
+                           latest_link.id DESC
+                  LIMIT 1
+               )
+             GROUP BY active_link.batch_id
+            HAVING COUNT(DISTINCT active_link.sequence) FILTER (
+                     WHERE active_group.status IN ('generated', 'reconciled')
+                   ) >= MAX(active_link.expected_count)
+               AND BOOL_AND(active_group.status IN ('generated', 'reconciled'))
+          )
+        )
+        """
     return f"""
         NULLIF(BTRIM(COALESCE({prefix}remito_number, '')), '') IS NOT NULL
+        {remito_set_complete}
         AND NULLIF(BTRIM(COALESCE({prefix}invoice_number, '')), '') IS NULL
         AND {prefix}status NOT IN ('facturado', 'cancelado', 'entregado_no_facturable')
         AND NOT EXISTS (
@@ -919,24 +960,36 @@ def _delivery_not_imported_delivered_sql(alias=""):
 def _pending_billing_customer_count():
     if not _table_exists("delivery_orders"):
         return 0
+    # Los particulares no tienen código Bejerman y comparten la misma fila de `customers`, asi que
+    # agrupar por customer_id los contaba a todos como un unico cliente. El documento del propietario
+    # es lo que distingue a una persona de otra.
+    has_owner = (
+        _has_table_column("delivery_orders", "ingreso_id")
+        and _has_table_column("ingresos", "propietario_doc")
+        and connection.vendor == "postgresql"
+    )
+    owner_join = "LEFT JOIN ingresos i ON i.id = o.ingreso_id" if has_owner else ""
+    owner_ref = (
+        "NULLIF(regexp_replace(COALESCE(i.propietario_doc, ''), '[^0-9]', '', 'g'), ''),"
+        if has_owner
+        else ""
+    )
+    customer_ref = f"""COALESCE(
+                         NULLIF(o.bejerman_customer_code, ''),
+                         {owner_ref}
+                         CAST(o.customer_id AS TEXT),
+                         NULLIF(o.customer_name, ''),
+                         o.id
+                       )"""
     row = _safe_one(
         f"""
         SELECT COUNT(*) AS total
           FROM (
-                SELECT COALESCE(
-                         NULLIF(bejerman_customer_code, ''),
-                         CAST(customer_id AS TEXT),
-                         NULLIF(customer_name, ''),
-                         id
-                       ) AS customer_ref
-                  FROM delivery_orders
-                 WHERE {_delivery_pending_billing_sql()}
-                 GROUP BY COALESCE(
-                            NULLIF(bejerman_customer_code, ''),
-                            CAST(customer_id AS TEXT),
-                            NULLIF(customer_name, ''),
-                            id
-                          )
+                SELECT {customer_ref} AS customer_ref
+                  FROM delivery_orders o
+                  {owner_join}
+                 WHERE {_delivery_pending_billing_sql("o")}
+                 GROUP BY {customer_ref}
                ) pending_customers
         """
     )
@@ -1364,6 +1417,59 @@ class WorkObjectivesView(APIView):
         return Response(build_objectives(periodo, request=request))
 
 
+def _remito_match_sql(term: str, include_manual: bool = False) -> tuple[str, list]:
+    """WHERE fragment matching a Bejerman remito against table aliased as `r`.
+
+    Comprobante numbers are usually typed/copied with their full zero padding
+    (e.g. punto de venta "00004"), but users searching from memory often drop
+    leading zeros ("RDA r 0004"). Besides the plain/compact ILIKE checks, this
+    also compares the punto de venta and numero with leading zeros stripped so
+    that kind of shorthand still finds the right comprobante.
+    """
+    like = f"%{term}%"
+    compact_term = re.sub(r"[\s\-./]+", "", term)
+    letters = re.findall(r"[A-Za-z]+", term)
+    digits = re.findall(r"\d+", term)
+    tipo_token = max(letters, key=len) if letters else ""
+    digit_first_stripped = (digits[0].lstrip("0") or "0") if digits else ""
+    digit_last = digits[-1] if digits else ""
+    digit_last_stripped = (digit_last.lstrip("0") or "0") if digit_last else ""
+
+    clauses = ["COALESCE(r.remito_number,'') ILIKE %s"]
+    params: list = [like]
+    if include_manual:
+        clauses.append("COALESCE(r.manual_remito_number,'') ILIKE %s")
+        params.append(like)
+    if compact_term:
+        clauses.append("regexp_replace(COALESCE(r.remito_number,''), '[\\s\\-./]+', '', 'g') ILIKE %s")
+        params.append(f"%{compact_term}%")
+    if tipo_token:
+        sub_clauses = ["r.comprobante_tipo ILIKE %s"]
+        sub_params = [f"%{tipo_token}%"]
+        if digits:
+            sub_clauses.append(
+                "(ltrim(COALESCE(r.comprobante_pto_venta,''), '0') = %s"
+                " OR COALESCE(r.comprobante_numero,'') ILIKE %s"
+                " OR ltrim(COALESCE(r.comprobante_numero,''), '0') = %s)"
+            )
+            sub_params.extend([digit_first_stripped, f"%{digit_last}%", digit_last_stripped])
+        clauses.append("(" + " AND ".join(sub_clauses) + ")")
+        params.extend(sub_params)
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+def _remito_label(row: dict) -> str:
+    remito_number = (row.get("remito_number") or "").strip()
+    if remito_number:
+        return remito_number
+    parts = [row.get("comprobante_tipo") or "", row.get("comprobante_letra") or ""]
+    pto_venta = row.get("comprobante_pto_venta") or ""
+    numero = row.get("comprobante_numero") or ""
+    if pto_venta or numero:
+        parts.append(f"{pto_venta}-{numero}" if pto_venta and numero else (pto_venta or numero))
+    return " ".join(part for part in parts if part).strip()
+
+
 class GlobalSearchView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1492,10 +1598,140 @@ class GlobalSearchView(APIView):
             for row in clientes
         ]
 
+        remito_ingreso_where, remito_ingreso_params = _remito_match_sql(term, include_manual=True)
+        remitos_individuales = _safe_rows(
+            f"""
+            SELECT r.ingreso_id AS ingreso_id,
+                   t.estado::text AS estado,
+                   c.razon_social AS cliente,
+                   d.numero_serie,
+                   COALESCE(d.numero_interno,'') AS numero_interno,
+                   {mg_select_sql}
+                   COALESCE(b.nombre,'') AS marca,
+                   COALESCE(m.nombre,'') AS modelo,
+                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+                   COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
+                   r.status AS remito_status,
+                   r.comprobante_tipo, r.comprobante_letra, r.comprobante_pto_venta, r.comprobante_numero,
+                   r.remito_number
+              FROM bejerman_ingreso_remitos r
+              JOIN ingresos t ON t.id = r.ingreso_id
+              JOIN devices d ON d.id = t.device_id
+              JOIN customers c ON c.id = d.customer_id
+              LEFT JOIN marcas b ON b.id = d.marca_id
+              LEFT JOIN models m ON m.id = d.model_id
+             WHERE {remito_ingreso_where}
+             ORDER BY COALESCE(r.generated_at, r.created_at) DESC
+            LIMIT 8
+            """,
+            remito_ingreso_params,
+        )
+
+        remito_group_where, remito_group_params = _remito_match_sql(term, include_manual=False)
+        has_delivery_remito_links = _table_exists("delivery_order_remito_links") and all(
+            _has_table_column("delivery_order_remito_links", column)
+            for column in ("order_id", "remito_group_id")
+        )
+        remito_group_order_join = (
+            """
+                JOIN delivery_order_remito_links remito_link ON remito_link.remito_group_id = r.id
+                JOIN delivery_orders o ON o.id = remito_link.order_id
+            """
+            if has_delivery_remito_links
+            else "JOIN delivery_orders o ON o.bejerman_remito_group_id = r.id"
+        )
+        remito_ingreso_sources = ["SELECT o.ingreso_id AS ingreso_id"]
+        has_delivery_order_item_ingreso = _table_exists("delivery_order_items") and all(
+            _has_table_column("delivery_order_items", column)
+            for column in ("id", "order_id", "ingreso_id")
+        )
+        if has_delivery_order_item_ingreso:
+            remito_ingreso_sources.append(
+                """
+                SELECT item.ingreso_id
+                  FROM delivery_order_items item
+                 WHERE item.order_id = o.id
+                """
+            )
+        has_delivery_order_partida_ingreso = (
+            has_delivery_order_item_ingreso
+            and _table_exists("delivery_order_item_partidas")
+            and all(
+                _has_table_column("delivery_order_item_partidas", column)
+                for column in ("order_item_id", "ingreso_id")
+            )
+        )
+        if has_delivery_order_partida_ingreso:
+            remito_ingreso_sources.append(
+                """
+                SELECT partida.ingreso_id
+                  FROM delivery_order_item_partidas partida
+                  JOIN delivery_order_items item ON item.id = partida.order_item_id
+                 WHERE item.order_id = o.id
+                """
+            )
+        remito_group_ingreso_join = f"""
+                JOIN LATERAL (
+                  {' UNION '.join(remito_ingreso_sources)}
+                ) linked_ingreso ON linked_ingreso.ingreso_id IS NOT NULL
+                JOIN ingresos t ON t.id = linked_ingreso.ingreso_id
+        """
+        remitos_de_grupo = _safe_rows(
+            f"""
+            SELECT sub.* FROM (
+              SELECT DISTINCT ON (linked_ingreso.ingreso_id)
+                     linked_ingreso.ingreso_id AS ingreso_id,
+                     t.estado::text AS estado,
+                     c.razon_social AS cliente,
+                     d.numero_serie,
+                     COALESCE(d.numero_interno,'') AS numero_interno,
+                     {mg_select_sql}
+                     COALESCE(b.nombre,'') AS marca,
+                     COALESCE(m.nombre,'') AS modelo,
+                     COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+                     COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
+                     r.status AS remito_status,
+                     r.comprobante_tipo, r.comprobante_letra, r.comprobante_pto_venta, r.comprobante_numero,
+                     r.remito_number,
+                     COALESCE(r.generated_at, r.created_at) AS remito_sort_at
+                FROM bejerman_remito_groups r
+                {remito_group_order_join}
+                {remito_group_ingreso_join}
+                JOIN devices d ON d.id = t.device_id
+                JOIN customers c ON c.id = d.customer_id
+                LEFT JOIN marcas b ON b.id = d.marca_id
+                LEFT JOIN models m ON m.id = d.model_id
+               WHERE {remito_group_where}
+               ORDER BY linked_ingreso.ingreso_id, COALESCE(r.generated_at, r.created_at) DESC, r.id DESC
+            ) sub
+             ORDER BY sub.remito_sort_at DESC NULLS LAST
+            LIMIT 8
+            """,
+            remito_group_params,
+        )
+
+        remitos_by_ingreso: dict = {}
+        for row in remitos_individuales + remitos_de_grupo:
+            ingreso_id = row.get("ingreso_id")
+            if ingreso_id is None or ingreso_id in remitos_by_ingreso:
+                continue
+            remitos_by_ingreso[ingreso_id] = row
+        remitos = [
+            {
+                **row,
+                "id": row.get("ingreso_id"),
+                "os": os_label(row.get("ingreso_id")),
+                "remito_label": _remito_label(row),
+                "href": f"/ingresos/{row.get('ingreso_id')}",
+            }
+            for row in list(remitos_by_ingreso.values())[:8]
+        ]
+
         groups = [
             {"key": "ingresos", "label": "Hojas de servicio", "items": ingresos},
             {"key": "equipos", "label": "Equipos", "items": equipos},
             {"key": "clientes", "label": "Clientes", "items": clientes},
+            {"key": "remitos", "label": "Remitos", "items": remitos},
         ]
         return Response({"q": term, "groups": groups, "total": sum(len(g["items"]) for g in groups)})
 

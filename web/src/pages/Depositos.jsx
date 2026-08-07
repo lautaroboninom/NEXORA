@@ -3,6 +3,9 @@ import { getUbicaciones, getGeneralEquipos } from "../lib/api";
 import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf } from "../lib/ui-helpers";
 import { useNavigate } from "react-router-dom";
 import useQueryState from "../hooks/useQueryState";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 const numeroInternoOf = (row, fallback = "-") => {
   if (!row) return fallback;
@@ -24,6 +27,7 @@ export default function Depositos() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [sort, setSort] = useQueryState("sort", "");
   const nav = useNavigate();
 
   useEffect(() => {
@@ -60,6 +64,22 @@ export default function Depositos() {
     })();
   }, [ubicacionId, ubicacionNombre]);
 
+  const displayRows = useMemo(
+    () => sortRows(rows, sort, INGRESO_LIST_SORT_COLUMNS),
+    [rows, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "cliente",
+    "marca",
+    "modelo",
+    "tipo",
+    "numero_interno",
+    "numero_serie",
+    "estado",
+    "fecha_ingreso",
+  ]);
+
   return (
     <div className="p-4 w-full max-w-screen-2xl mx-auto">
       <h1 className="text-2xl font-bold mb-3">Depósitos/Bajas</h1>
@@ -73,24 +93,25 @@ export default function Depositos() {
       </div>
       {err && <div className="bg-red-100 text-red-700 border border-red-300 p-2 rounded mb-2">{err}</div>}
       {loading ? "Cargando..." :
-        rows.length === 0 ? <div className="text-sm text-gray-500">Sin resultados.</div> :
+        displayRows.length === 0 ? <div className="text-sm text-gray-500">Sin resultados.</div> :
         <div className="overflow-auto">
+          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
           <table className="min-w-full border">
             <thead>
               <tr className="bg-gray-50">
-                <th className="p-2 text-left">OS</th>
-                <th className="p-2 text-left">Cliente</th>
-                <th className="p-2 text-left">Marca</th>
-                <th className="p-2 text-left">Modelo</th>
-                <th className="p-2 text-left">Tipo</th>
-                <th className="p-2 text-left min-w-[180px] whitespace-nowrap">N° Interno</th>
-                <th className="p-2 text-left">N° Serie</th>
-                <th className="p-2 text-left">Estado</th>
-                <th className="p-2 text-left">Fecha ingreso</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2 text-left">OS</SortableTh>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2 text-left">Cliente</SortableTh>
+                <SortableTh field="marca" sort={sort} onSortChange={setSort} className="p-2 text-left">Marca</SortableTh>
+                <SortableTh field="modelo" sort={sort} onSortChange={setSort} className="p-2 text-left">Modelo</SortableTh>
+                <SortableTh field="tipo" sort={sort} onSortChange={setSort} className="p-2 text-left">Tipo</SortableTh>
+                <SortableTh field="numero_interno" sort={sort} onSortChange={setSort} className="p-2 text-left min-w-[180px] whitespace-nowrap">N° Interno</SortableTh>
+                <SortableTh field="numero_serie" sort={sort} onSortChange={setSort} className="p-2 text-left">N° Serie</SortableTh>
+                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="p-2 text-left">Estado</SortableTh>
+                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2 text-left">Fecha ingreso</SortableTh>
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => (
+              {displayRows.map(r => (
                 <tr key={ingresoIdOf(r)} className="hover:bg-gray-100 cursor-pointer" onClick={()=>nav(`/ingresos/${ingresoIdOf(r)}`)}>
                   <td className="p-2">{formatOS(r)}</td>
                   <td className="p-2">{r.razon_social}</td>

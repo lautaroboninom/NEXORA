@@ -133,6 +133,43 @@ def _table_exists(table_name: str) -> bool:
         return False
 
 
+def _cached_comprobante_ids(company_key: str, comprobante_ids: list[str]) -> set[str]:
+    ids = sorted({as_string(value) for value in comprobante_ids if as_string(value)})
+    if not ids or not _table_exists(SALE_ITEM_TABLE):
+        return set()
+    cached: set[str] = set()
+    for offset in range(0, len(ids), 500):
+        batch = ids[offset : offset + 500]
+        placeholders = ",".join(["%s"] * len(batch))
+        with connection.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT comprobante_id
+                  FROM {SALE_ITEM_TABLE}
+                 WHERE UPPER(company_key) = UPPER(%s)
+                   AND comprobante_id IN ({placeholders})
+                """,
+                [company_key, *batch],
+            )
+            cached.update(as_string(row[0]) for row in cur.fetchall() if as_string(row[0]))
+    return cached
+
+
+def _header_issue_date(header: dict[str, Any]) -> date | None:
+    normalized = normalize_date(
+        first_value(
+            header,
+            ("Comprobante_FechaEmision", "FechaEmision", "Fecha"),
+        )
+    )
+    if not normalized:
+        return None
+    try:
+        return date.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
 def _company_key_from_client(client: BejermanSDKClient) -> str:
     marker = as_string(getattr(client, "company_key", "")) or as_string(getattr(client, "company", ""))
     company = company_for_key(marker, default=None)
@@ -732,7 +769,16 @@ def sync_bejerman_sale_items(
             for item in as_string(_setting("BEJERMAN_SERIAL_LOOKUP_TYPES", "FC")).split(",")
             if item.strip()
         ] or ["FC"]
-    max_headers = int(max_comprobantes or _setting("BEJERMAN_SALE_ITEMS_SYNC_MAX_COMPROBANTES", 500) or 500)
+    max_headers = max(
+        1,
+        int(max_comprobantes or _setting("BEJERMAN_SALE_ITEMS_SYNC_MAX_COMPROBANTES", 500) or 500),
+    )
+    list_max_headers = max(
+        max_headers,
+        int(_setting("BEJERMAN_SALE_ITEMS_LIST_MAX_COMPROBANTES", 5000) or 5000),
+    )
+    refresh_days = max(0, int(_setting("BEJERMAN_SALE_ITEMS_REFRESH_DAYS", 2) or 0))
+    refresh_from = today - timedelta(days=max(0, refresh_days - 1)) if refresh_days else None
     company_key = _company_key_from_client(client)
 
     summary = {
@@ -742,30 +788,48 @@ def sync_bejerman_sale_items(
         "dateTo": date_to,
         "types": types,
         "headers": 0,
+        "detailAttempts": 0,
         "details": 0,
+        "skippedCached": 0,
         "items": 0,
         "upserted": 0,
         "errors": [],
+        "limitReached": False,
         "dryRun": bool(dry_run),
     }
     chunk_days = int(_setting("BEJERMAN_SALE_ITEMS_SYNC_CHUNK_DAYS", 31) or 31)
     summary["windows"] = 0
+    stop = False
     for tipo in types:
         for win_from, win_to in _date_windows(date_from, date_to, chunk_days):
             summary["windows"] += 1
             try:
                 filters = build_serial_lookup_sales_filters(tipo, win_from, win_to)
-                headers = headers_from_sales_list(client.list_comprobantes_ventas(filters), max_headers)
+                headers = headers_from_sales_list(client.list_comprobantes_ventas(filters), list_max_headers)
             except Exception as exc:
                 summary["errors"].append({"window": f"{win_from}/{win_to}", "type": tipo, "error": str(exc)})
                 if len(summary["errors"]) >= 20:
                     break
                 continue
             summary["headers"] += len(headers)
+            cached_ids = _cached_comprobante_ids(
+                company_key,
+                [comprobante_id_of(header) for header in headers],
+            )
             for header in headers:
                 detail_id = comprobante_id_of(header)
                 if not detail_id:
                     continue
+                issue_date = _header_issue_date(header)
+                should_refresh = bool(refresh_from and issue_date and issue_date >= refresh_from)
+                if detail_id in cached_ids and not should_refresh:
+                    summary["skippedCached"] += 1
+                    continue
+                if summary["detailAttempts"] >= max_headers:
+                    summary["limitReached"] = True
+                    stop = True
+                    break
+                summary["detailAttempts"] += 1
                 try:
                     detail_response = client.detalle_comprobante_ventas(detail_id)
                     summary["details"] += 1
@@ -777,8 +841,8 @@ def sync_bejerman_sale_items(
                     summary["errors"].append({"comprobanteId": detail_id, "error": str(exc)})
                     if len(summary["errors"]) >= 20:
                         break
-            if len(summary["errors"]) >= 20:
+            if stop or len(summary["errors"]) >= 20:
                 break
-        if len(summary["errors"]) >= 20:
+        if stop or len(summary["errors"]) >= 20:
             break
     return summary

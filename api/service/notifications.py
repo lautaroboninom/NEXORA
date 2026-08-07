@@ -152,6 +152,14 @@ NOTIFICATION_CATALOG = [
         "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {
+        "key": "venta_patrimonial",
+        "label": "Venta patrimonial",
+        "description": "Equipo propio MG vendido, para reflejar la baja por venta en gestión patrimonial.",
+        "group": "Patrimonio",
+        "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
+    },
+    {
         "key": "derivacion_devuelta",
         "label": "Derivación devuelta",
         "description": "Equipo devuelto desde un proveedor externo.",
@@ -206,6 +214,15 @@ NOTIFICATION_CATALOG = [
         "group": "Operación",
         "default_roles": ["jefe", "jefe_veedor", "admin"],
         "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
+    },
+    {
+        "key": "bejerman_sync_job_blocked",
+        "label": "Sincronización Bejerman bloqueada",
+        "description": "Job de sincronización Bejerman bloqueado que requiere intervención.",
+        "group": "Integración Bejerman",
+        "default_roles": ["admin", "supervisor"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
+        "channels": ("email",),
     },
     {
         "key": "remito_pdf_rt",
@@ -1140,8 +1157,12 @@ def notify_solicitud_baja(ingreso_id, solicitante_id=None, motivo="", user_ids=N
 
 
 def notify_estado_patrimonial(ingreso_id, evento, emails=None):
-    key = "baja_patrimonial" if evento == "baja" else "alta_patrimonial"
-    label = "Baja patrimonial" if evento == "baja" else "Alta patrimonial"
+    if evento == "baja":
+        key, label = "baja_patrimonial", "Baja patrimonial"
+    elif evento == "venta_mg":
+        key, label = "venta_patrimonial", "Venta patrimonial"
+    else:
+        key, label = "alta_patrimonial", "Alta patrimonial"
     row = _ingreso_context(ingreso_id)
     os_txt = os_label(ingreso_id)
     return emit_notification(
@@ -1150,7 +1171,7 @@ def notify_estado_patrimonial(ingreso_id, evento, emails=None):
         title=f"{label} - OS {os_txt}",
         body=_ingreso_body(row),
         href=f"/ingresos/{ingreso_id}?tab=principal",
-        severity="critical" if evento == "baja" else "info",
+        severity="critical" if evento in ("baja", "venta_mg") else "info",
         entity_type="ingreso",
         entity_id=ingreso_id,
         dedupe_key=f"ingreso:{ingreso_id}:{key}:{timezone.localdate().isoformat()}",

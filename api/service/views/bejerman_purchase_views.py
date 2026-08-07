@@ -17,11 +17,15 @@ from ..bejerman_purchase_entries import (
     list_purchase_articles,
     list_purchase_entries,
     list_purchase_history,
+    list_purchase_orders,
     list_purchase_providers,
+    populate_purchase_entry_lines_from_order,
+    reopen_purchase_entry,
     update_purchase_entry,
     update_purchase_line,
     update_purchase_scan,
     validate_purchase_entry,
+    verify_purchase_entry,
 )
 from ..permissions import MappedPermissionGuard
 
@@ -44,6 +48,14 @@ class BejermanPurchaseProvidersView(BejermanPurchasePermissionMixin, APIView):
     def get(self, request):
         try:
             return Response(list_purchase_providers(request.query_params, actor_user_id=_actor_id(request)))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class BejermanPurchaseOrdersView(BejermanPurchasePermissionMixin, APIView):
+    def get(self, request):
+        try:
+            return Response(list_purchase_orders(request.query_params, actor_user_id=_actor_id(request)))
         except Exception as exc:
             return _error_response(exc)
 
@@ -94,6 +106,14 @@ class BejermanPurchaseEntryLinesView(BejermanPurchasePermissionMixin, APIView):
     def post(self, request, entry_id: str):
         try:
             return Response(add_purchase_line(entry_id, request.data or {}, _actor_id(request)), status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class BejermanPurchaseEntryPopulateFromOrderView(BejermanPurchasePermissionMixin, APIView):
+    def post(self, request, entry_id: str):
+        try:
+            return Response(populate_purchase_entry_lines_from_order(entry_id, _actor_id(request)))
         except Exception as exc:
             return _error_response(exc)
 
@@ -153,7 +173,35 @@ class BejermanPurchaseEntryValidateView(BejermanPurchasePermissionMixin, APIView
 class BejermanPurchaseEntryEmitView(BejermanPurchasePermissionMixin, APIView):
     def post(self, request, entry_id: str):
         try:
-            return Response(emit_purchase_entry(entry_id, _actor_id(request)))
+            return Response(
+                emit_purchase_entry(
+                    entry_id,
+                    _actor_id(request),
+                    request.data or {},
+                )
+            )
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class BejermanPurchaseEntryVerifyView(BejermanPurchasePermissionMixin, APIView):
+    def post(self, request, entry_id: str):
+        try:
+            return Response(verify_purchase_entry(entry_id, _actor_id(request)))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class BejermanPurchaseEntryReopenView(BejermanPurchasePermissionMixin, APIView):
+    def post(self, request, entry_id: str):
+        try:
+            return Response(
+                reopen_purchase_entry(
+                    entry_id,
+                    _actor_id(request),
+                    request.data or {},
+                )
+            )
         except Exception as exc:
             return _error_response(exc)
 

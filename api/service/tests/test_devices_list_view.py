@@ -331,3 +331,21 @@ class DevicesListViewAPITest(TestCase):
         self.assertIn(self.device_id, cliente_ids)
         self.assertIn(self.device_oxi_id, cliente_ids)
         self.assertNotIn(self.device_mg_id, cliente_ids)
+
+    def test_devices_list_sort_is_stable_across_pages_and_invalid_sort_falls_back(self):
+        first = self.client.get("/api/equipos/", {"page_size": 1, "page": 1, "sort": "marca"})
+        second = self.client.get("/api/equipos/", {"page_size": 1, "page": 2, "sort": "marca"})
+        invalid = self.client.get("/api/equipos/", {"page_size": 20, "sort": "campo_inexistente"})
+
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(second.status_code, 200, second.data)
+        first_id = int(first.data["items"][0]["id"])
+        second_id = int(second.data["items"][0]["id"])
+        self.assertLess(first_id, second_id)
+        self.assertEqual(
+            [int(item["id"]) for item in invalid.data["items"]],
+            sorted(
+                [self.device_id, self.device_mg_id, self.device_oxi_id],
+                reverse=True,
+            ),
+        )

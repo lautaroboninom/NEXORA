@@ -82,11 +82,17 @@ from ..bejerman_ris import (
     BejermanRisError,
     BejermanRisPreflightError,
     emit_or_get_ris_batch,
+    force_stock_entry_for_ingreso,
     get_ris_status_for_ingreso,
     parse_ris_document_mode,
     preflight_ris_for_request_payload,
     register_ris_batch,
     RIS_DOCUMENT_MODE_REGISTER,
+)
+from ..bejerman_rental_remito import (
+    RentalRemitoError,
+    execute_rental_remito_action,
+    get_rental_remito_state,
 )
 from ..notifications import (
     notify_estado_patrimonial,
@@ -94,6 +100,7 @@ from ..notifications import (
     notify_solicitud_asignacion,
     notify_solicitud_baja,
 )
+from ..patrimonial_notifications import notify_patrimonial_email
 from ..repair_ready_notifications import notify_repair_ready_for_remito
 
 
@@ -655,7 +662,30 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
     return True
 
 
-def _merge_historico_rows(rows: list[dict], deleted_rows: list[dict]) -> list[dict]:
+def _historico_python_sort_value(row: dict, field: str):
+    accessors = {
+        "os": lambda item: int(item.get("id") or 0),
+        "cliente": lambda item: item.get("razon_social"),
+        "tipo": lambda item: item.get("tipo_equipo"),
+        "marca": lambda item: item.get("marca"),
+        "modelo": lambda item: item.get("modelo"),
+        "variante": lambda item: item.get("equipo_variante"),
+        "estado": lambda item: item.get("estado"),
+        "numero_serie": lambda item: item.get("numero_serie"),
+        "numero_interno": lambda item: item.get("numero_interno"),
+        "fecha_ingreso": lambda item: item.get("fecha_ingreso"),
+        "fecha_liberacion": lambda item: item.get("fecha_liberacion"),
+        "fecha_entrega": lambda item: item.get("fecha_entrega"),
+    }
+    value = accessors.get(field, accessors["os"])(row)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value.strip().casefold()
+    return value
+
+
+def _merge_historico_rows(rows: list[dict], deleted_rows: list[dict], sort_raw: str = "") -> list[dict]:
     if not deleted_rows:
         return rows
     seen = {int(row.get("id") or 0) for row in rows if str(row.get("id") or "").isdigit()}
@@ -668,7 +698,27 @@ def _merge_historico_rows(rows: list[dict], deleted_rows: list[dict]) -> list[di
         if row_id and row_id not in seen:
             merged.append(row)
             seen.add(row_id)
-    return sorted(merged, key=lambda item: int(item.get("id") or 0), reverse=True)
+    raw = str(sort_raw or "").strip()
+    direction_desc = raw.startswith("-")
+    field = raw[1:] if direction_desc else raw
+    valid_fields = {
+        "os", "cliente", "tipo", "marca", "modelo", "variante", "estado",
+        "numero_serie", "numero_interno", "fecha_ingreso", "fecha_liberacion", "fecha_entrega",
+    }
+    if field not in valid_fields:
+        return sorted(merged, key=lambda item: int(item.get("id") or 0), reverse=True)
+    non_empty = []
+    empty = []
+    for item in merged:
+        value = _historico_python_sort_value(item, field)
+        (empty if value in (None, "") else non_empty).append(item)
+    non_empty.sort(key=lambda item: int(item.get("id") or 0), reverse=direction_desc)
+    non_empty.sort(
+        key=lambda item: _historico_python_sort_value(item, field),
+        reverse=direction_desc,
+    )
+    empty.sort(key=lambda item: int(item.get("id") or 0), reverse=direction_desc)
+    return non_empty + empty
 
 
 def _has_historical_corrections_schema() -> bool:
@@ -924,7 +974,7 @@ def _table_exists(table_name: str) -> bool:
 def _service_release_remito_salida_for_ingreso(ingreso_id: int) -> str:
     if not (_table_exists("delivery_orders") and _table_exists("bejerman_remito_groups")):
         return ""
-    delivery_columns = {"id", "ingreso_id", "delivery_type", "bejerman_remito_group_id"}
+    delivery_columns = {"id", "ingreso_id", "delivery_type"}
     group_columns = {
         "id",
         "status",
@@ -941,26 +991,123 @@ def _service_release_remito_salida_for_ingreso(ingreso_id: int) -> str:
         return ""
     if not all(_has_table_column("bejerman_remito_groups", column) for column in group_columns):
         return ""
+
+    ingreso_match_conditions = ["o.ingreso_id = target.ingreso_id"]
+    has_item_ingreso = _table_exists("delivery_order_items") and all(
+        _has_table_column("delivery_order_items", column) for column in ("id", "order_id", "ingreso_id")
+    )
+    if has_item_ingreso:
+        ingreso_match_conditions.append(
+            """
+            EXISTS (
+              SELECT 1
+                FROM delivery_order_items item
+               WHERE item.order_id = o.id
+                 AND item.ingreso_id = target.ingreso_id
+            )
+            """
+        )
+    has_partida_ingreso = has_item_ingreso and _table_exists("delivery_order_item_partidas") and all(
+        _has_table_column("delivery_order_item_partidas", column)
+        for column in ("order_item_id", "ingreso_id")
+    )
+    if has_partida_ingreso:
+        ingreso_match_conditions.append(
+            """
+            EXISTS (
+              SELECT 1
+                FROM delivery_order_item_partidas partida
+                JOIN delivery_order_items item ON item.id = partida.order_item_id
+               WHERE item.order_id = o.id
+                 AND partida.ingreso_id = target.ingreso_id
+            )
+            """
+        )
+    ingreso_match_sql = "\nOR ".join(ingreso_match_conditions)
+
+    link_columns = {"id", "order_id", "remito_group_id", "batch_id", "sequence", "created_at"}
+    has_canonical_links = _table_exists("delivery_order_remito_links") and all(
+        _has_table_column("delivery_order_remito_links", column) for column in link_columns
+    )
+    if has_canonical_links:
+        try:
+            row = q(
+                f"""
+                WITH target AS (
+                  SELECT %s::BIGINT AS ingreso_id
+                ),
+                remitos AS (
+                  SELECT DISTINCT ON (g.id)
+                         g.id,
+                         NULLIF(BTRIM(COALESCE(
+                           NULLIF(g.remito_number, ''),
+                           NULLIF(CONCAT_WS(' ', NULLIF(g.comprobante_tipo, ''), NULLIF(g.comprobante_letra, ''), NULLIF(g.comprobante_pto_venta, ''), NULLIF(g.comprobante_numero, '')), '')
+                         )), '') AS remito_salida,
+                         l.batch_id,
+                         l.sequence,
+                         l.created_at AS linked_at,
+                         MIN(l.created_at) OVER (PARTITION BY o.id, l.batch_id) AS batch_created_at,
+                         COALESCE(g.generated_at, g.created_at, l.created_at) AS document_at
+                    FROM delivery_orders o
+                    JOIN delivery_order_remito_links l ON l.order_id = o.id
+                    JOIN bejerman_remito_groups g ON g.id = l.remito_group_id
+                    CROSS JOIN target
+                   WHERE ({ingreso_match_sql})
+                     AND o.delivery_type = 'service_release'
+                     AND g.status IN ('generated', 'reconciled')
+                     AND UPPER(COALESCE(
+                           NULLIF(g.comprobante_tipo, ''),
+                           NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
+                           NULLIF(g.response_summary ->> 'comprobanteTipo', '')
+                         )) = 'RSS'
+                   ORDER BY g.id, l.created_at, l.sequence, l.id
+                )
+                SELECT STRING_AGG(
+                         remito_salida,
+                         ' / ' ORDER BY batch_created_at, sequence, linked_at, document_at, id
+                       ) AS remito_salida
+                  FROM remitos
+                 WHERE remito_salida IS NOT NULL
+                """,
+                [ingreso_id],
+                one=True,
+            )
+            return (row or {}).get("remito_salida") or ""
+        except Exception:
+            return ""
+
+    if not _has_table_column("delivery_orders", "bejerman_remito_group_id"):
+        return ""
     try:
         row = q(
-            """
-            SELECT
-              COALESCE(
-                NULLIF(g.remito_number, ''),
-                NULLIF(CONCAT_WS(' ', NULLIF(g.comprobante_tipo, ''), NULLIF(g.comprobante_letra, ''), NULLIF(g.comprobante_pto_venta, ''), NULLIF(g.comprobante_numero, '')), '')
-              ) AS remito_salida
-              FROM delivery_orders o
-              JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id
-             WHERE o.ingreso_id = %s
-               AND o.delivery_type = 'service_release'
-               AND g.status = 'generated'
-               AND UPPER(COALESCE(
-                     NULLIF(g.comprobante_tipo, ''),
-                     NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
-                     NULLIF(g.response_summary ->> 'comprobanteTipo', '')
-                   )) = 'RSS'
-             ORDER BY COALESCE(g.generated_at, g.created_at) DESC, g.created_at DESC, g.id DESC
-             LIMIT 1
+            f"""
+            WITH target AS (
+              SELECT %s::BIGINT AS ingreso_id
+            ),
+            remitos AS (
+              SELECT DISTINCT ON (g.id)
+                     g.id,
+                     NULLIF(BTRIM(COALESCE(
+                       NULLIF(g.remito_number, ''),
+                       NULLIF(CONCAT_WS(' ', NULLIF(g.comprobante_tipo, ''), NULLIF(g.comprobante_letra, ''), NULLIF(g.comprobante_pto_venta, ''), NULLIF(g.comprobante_numero, '')), '')
+                     )), '') AS remito_salida,
+                     COALESCE(g.generated_at, g.created_at) AS document_at
+                FROM delivery_orders o
+                JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id
+                CROSS JOIN target
+               WHERE ({ingreso_match_sql})
+                 AND o.delivery_type = 'service_release'
+                 AND g.status IN ('generated', 'reconciled')
+                 AND UPPER(COALESCE(
+                       NULLIF(g.comprobante_tipo, ''),
+                       NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
+                       NULLIF(g.response_summary ->> 'comprobanteTipo', '')
+                     )) = 'RSS'
+               ORDER BY g.id, COALESCE(g.generated_at, g.created_at), g.created_at
+            )
+            SELECT STRING_AGG(remito_salida, ' / ' ORDER BY document_at, id) AS remito_salida
+              FROM remitos
+             WHERE remito_salida IS NOT NULL
             """,
             [ingreso_id],
             one=True,
@@ -1134,192 +1281,13 @@ def _historical_bejerman_reference_effect(accion: str, document_number: str = ""
 
 
 def _notify_estado_patrimonial(request, ingreso_id: int, evento: str, fecha_evento=None):
-    evento_norm = (evento or "").strip().lower()
-    if evento_norm not in ("baja", "alta", "alta_mg"):
-        return
-    try:
-        info = q(
-            """
-            SELECT c.razon_social AS cliente,
-                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
-                   COALESCE(b.nombre,'') AS marca,
-                   COALESCE(m.nombre,'') AS modelo,
-                   COALESCE(d.numero_serie,'') AS numero_serie,
-                   COALESCE(d.numero_interno,'') AS numero_interno,
-                   COALESCE(t.informe_preliminar,'') AS informe_preliminar,
-                   COALESCE(t.descripcion_problema,'') AS descripcion_problema,
-                   COALESCE(t.trabajos_realizados,'') AS trabajos_realizados,
-                   COALESCE(t.comentarios,'') AS comentarios,
-                   COALESCE(t.resolucion,'') AS resolucion,
-                   COALESCE(CAST(t.motivo AS TEXT), '') AS motivo,
-                   COALESCE(loc.nombre,'') AS ubicacion_nombre
-              FROM ingresos t
-              JOIN devices d   ON d.id = t.device_id
-              JOIN customers c ON c.id = d.customer_id
-              LEFT JOIN marcas b ON b.id = d.marca_id
-              LEFT JOIN models m ON m.id = d.model_id
-              LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-             WHERE t.id=%s
-            """,
-            [ingreso_id],
-            one=True,
-        ) or {}
-        os_txt = os_label(ingreso_id)
-        cliente = info.get("cliente") or ""
-        equipo = " | ".join(
-            [
-                p
-                for p in [
-                    info.get("tipo_equipo") or "",
-                    info.get("marca") or "",
-                    info.get("modelo") or "",
-                ]
-                if p
-            ]
-        )
-        numero_serie = info.get("numero_serie") or ""
-        numero_interno = info.get("numero_interno") or ""
-        informe_preliminar = (info.get("informe_preliminar") or "").strip()
-        descripcion_problema = (info.get("descripcion_problema") or "").strip()
-        trabajos_realizados = (info.get("trabajos_realizados") or "").strip()
-        comentarios = (info.get("comentarios") or "").strip()
-        resolucion = (info.get("resolucion") or "").strip()
-        motivo = (info.get("motivo") or "").strip()
-        ubicacion = info.get("ubicacion_nombre") or ""
-        actor_nombre = getattr(request.user, "nombre", None) or getattr(request.user, "username", "") or ""
-        actor_email = getattr(request.user, "email", "") or ""
-        if fecha_evento is None:
-            fecha_evento_txt = timezone.localtime().strftime("%Y-%m-%d %H:%M")
-        else:
-            fecha_evento_txt = timezone.localtime(fecha_evento).strftime("%Y-%m-%d %H:%M")
-        actor_line = actor_nombre or "-"
-        if actor_email:
-            actor_line = f"{actor_line} ({actor_email})" if actor_line else actor_email
-        resolucion_labels = {
-            "reparado": "Reparado",
-            "no_reparado": "No reparado",
-            "no_se_encontro_falla": "No se encontro falla",
-            "presupuesto_rechazado": "Presupuesto rechazado",
-            "cambio": "Cambio",
-        }
-        resolucion_label = resolucion_labels.get(
-            resolucion,
-            resolucion.replace("_", " ").capitalize() if resolucion else "",
-        )
-
-        notification_event = "baja" if evento_norm == "baja" else "alta"
-
-        if evento_norm == "baja":
-            subject = f"Notificación de baja de equipo - {os_txt} - {cliente or 'Sin cliente'}"
-            intro = (
-                "Se registró la baja de un equipo en NEXORA. "
-                "Por favor reflejar la baja en el sistema patrimonial."
-            )
-            fecha_label = "Fecha de baja"
-            diag_title = "Diagnóstico / motivo de baja:"
-        elif evento_norm == "alta_mg":
-            subject = f"Notificación de alta de MG - {os_txt} - {cliente or 'Sin cliente'}"
-            intro = (
-                "Se registró el alta de MG de un equipo en NEXORA. "
-                "Por favor reflejar el alta en el sistema patrimonial."
-            )
-            fecha_label = "Fecha de alta de MG"
-            diag_title = "Diagnóstico / estado actual:"
-        else:
-            subject = f"Notificación de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
-            intro = (
-                "Se registró el alta de un equipo en NEXORA. "
-                "Por favor reflejar el alta en el sistema patrimonial."
-            )
-            fecha_label = "Fecha de alta"
-            diag_title = "Diagnóstico / estado actual:"
-
-        lines = [
-            intro,
-            "",
-            "Detalle del ingreso:",
-            f"- OS: {os_txt}",
-            f"- Cliente: {cliente or '-'}",
-            f"- Equipo: {equipo or '-'}",
-            f"- Número de serie: {numero_serie or '-'}",
-            f"- Número interno: {numero_interno or '-'}",
-            f"- Ubicación actual: {ubicacion or '-'}",
-            f"- {fecha_label}: {fecha_evento_txt}",
-            f"- Registrado por: {actor_line or '-'}",
-        ]
-        diag_lines = [
-            f"- Diagnóstico / descripción del problema: {descripcion_problema or '-'}",
-            f"- Trabajos realizados: {trabajos_realizados or '-'}",
-            f"- Comentarios: {comentarios or '-'}",
-        ]
-        if informe_preliminar:
-            diag_lines.append(f"- Informe preliminar: {informe_preliminar}")
-        if resolucion_label:
-            diag_lines.append(f"- Resolución: {resolucion_label}")
-        if motivo:
-            diag_lines.append(f"- Motivo de ingreso: {motivo}")
-        lines.append("")
-        lines.append(diag_title)
-        lines.extend(diag_lines)
-        try:
-            url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
-            lines.append("")
-            lines.append(f"Hoja de servicio: {url}")
-        except Exception:
-            pass
-        body = "\n".join(lines)
-        try:
-            body = _email_append_footer_text(body)
-        except Exception:
-            pass
-        recips = getattr(settings, "BAJA_NOTIFY_RECIPIENTS", []) or []
-        if not isinstance(recips, (list, tuple)):
-            recips = [str(recips)] if recips else []
-        recips = [r for r in recips if r]
-        try:
-            notify_estado_patrimonial(ingreso_id, notification_event, emails=recips)
-        except Exception:
-            pass
-        if not recips:
-            logger.warning(
-                "%s_notify_email no recipients configured",
-                evento_norm,
-                extra={"ingreso_id": ingreso_id},
-            )
-            return
-
-        def _send():
-            try:
-                sent, _dbg = _send_mail_with_fallback(subject, body, recips)
-                logger.info(
-                    "%s_notify_email sent=%s ingreso_id=%s recipients=%s backend=%s",
-                    evento_norm,
-                    bool(sent),
-                    ingreso_id,
-                    recips,
-                    getattr(settings, "EMAIL_BACKEND", ""),
-                )
-            except Exception:
-                logger.exception(
-                    "%s_notify_email failed",
-                    evento_norm,
-                    extra={"ingreso_id": ingreso_id, "recipients": recips},
-                )
-
-        try:
-            conn = transaction.get_connection()
-            if getattr(conn, "in_atomic_block", False):
-                transaction.on_commit(_send)
-            else:
-                _send()
-        except Exception:
-            _send()
-    except Exception:
-        logger.exception(
-            "%s_notify_email prepare failed",
-            evento_norm,
-            extra={"ingreso_id": ingreso_id},
-        )
+    """Aviso patrimonial (baja / alta / alta MG) con el resultado real del envío."""
+    return notify_patrimonial_email(
+        request,
+        evento=evento,
+        ingreso_id=ingreso_id,
+        fecha_evento=fecha_evento,
+    )
 
 
 class MisPendientesView(APIView):
@@ -2015,6 +1983,57 @@ class HabilitarReparacionCotizacionView(APIView):
         )
 
 
+def resolve_ingreso_entrega_estado(ingreso_id: int) -> dict:
+    """Determina a que estado debe pasar un ingreso al entregarse.
+
+    Replica la deteccion de alquiler/MG/venta pendiente que usa
+    EntregarIngresoView, para que cualquier otro flujo que registre una
+    entrega (p.ej. la sincronizacion desde ordenes de entrega) aplique
+    exactamente las mismas reglas.
+    """
+    estado_to = "entregado"
+    set_alquilado = False
+    clear_alquilado = False
+    try:
+        info = q(
+            """
+            SELECT t.alquilado,
+                   t.estado,
+                   COALESCE(d.numero_serie,'') AS numero_serie,
+                   COALESCE(d.numero_interno,'') AS numero_interno,
+                   COALESCE(d.mg_estado,'activo') AS mg_estado,
+                   COALESCE(loc.nombre,'') AS ubicacion_nombre
+              FROM ingresos t
+              LEFT JOIN devices d ON d.id = t.device_id
+              LEFT JOIN locations loc ON loc.id = t.ubicacion_id
+             WHERE t.id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        ) or {}
+        ns = (info.get("numero_serie") or "").strip()
+        ni = (info.get("numero_interno") or "").strip()
+        import re
+        pat = re.compile(r"\bMG \d{4}\b", re.IGNORECASE)
+        is_mg = bool(pat.search(ns) or pat.search(ni)) or (
+            ns.strip().upper().startswith("MG ") or ni.strip().upper().startswith("MG ")
+        )
+        loc_norm = _norm_txt(info.get("ubicacion_nombre") or "")
+        target_loc_norm = _norm_txt("Estanteria de Alquiler")
+        estado_actual = (info.get("estado") or "").strip().lower()
+        mg_vendido = (info.get("mg_estado") or "").strip().lower() == "inactivo_venta"
+        if estado_actual == "vendido_pendiente_entrega":
+            estado_to = "vendido_entregado"
+            clear_alquilado = True
+        elif bool(info.get("alquilado")) or (is_mg and not mg_vendido) or loc_norm == target_loc_norm:
+            estado_to = "alquilado"
+            set_alquilado = True
+    except Exception:
+        # No bloquear la entrega por errores de deteccion
+        pass
+    return {"estado_to": estado_to, "set_alquilado": set_alquilado, "clear_alquilado": clear_alquilado}
+
+
 class EntregarIngresoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def post(self, request, ingreso_id: int):
@@ -2063,43 +2082,10 @@ class EntregarIngresoView(APIView):
         except Exception:
             # fallback: no bloquear la entrega por errores de verificacion
             pass
-        try:
-            info = q(
-                """
-                SELECT t.alquilado,
-                       t.estado,
-                       COALESCE(d.numero_serie,'') AS numero_serie,
-                       COALESCE(d.numero_interno,'') AS numero_interno,
-                       COALESCE(d.mg_estado,'activo') AS mg_estado,
-                       COALESCE(loc.nombre,'') AS ubicacion_nombre
-                  FROM ingresos t
-                  LEFT JOIN devices d ON d.id = t.device_id
-                  LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-                 WHERE t.id=%s
-                """,
-                [ingreso_id],
-                one=True,
-            ) or {}
-            ns = (info.get("numero_serie") or "").strip()
-            ni = (info.get("numero_interno") or "").strip()
-            import re
-            pat = re.compile(r"\bMG \d{4}\b", re.IGNORECASE)
-            is_mg = bool(pat.search(ns) or pat.search(ni)) or (
-                ns.strip().upper().startswith("MG ") or ni.strip().upper().startswith("MG ")
-            )
-            loc_norm = _norm_txt(info.get("ubicacion_nombre") or "")
-            target_loc_norm = _norm_txt("Estanteria de Alquiler")
-            estado_actual = (info.get("estado") or "").strip().lower()
-            mg_vendido = (info.get("mg_estado") or "").strip().lower() == "inactivo_venta"
-            if estado_actual == "vendido_pendiente_entrega":
-                estado_to = "vendido_entregado"
-                clear_alquilado = True
-            elif bool(info.get("alquilado")) or (is_mg and not mg_vendido) or loc_norm == target_loc_norm:
-                estado_to = "alquilado"
-                set_alquilado = True
-        except Exception:
-            # No bloquear la entrega por errores de deteccion
-            pass
+        deteccion = resolve_ingreso_entrega_estado(ingreso_id)
+        estado_to = deteccion["estado_to"]
+        set_alquilado = deteccion["set_alquilado"]
+        clear_alquilado = deteccion["clear_alquilado"]
         comentarios_update = None
         if retira_persona:
             try:
@@ -2252,9 +2238,17 @@ class DarBajaIngresoView(APIView):
                     "detail": "No se pudo encolar la sincronización Bejerman de baja.",
                     "error": str(exc),
                 }
+        patrimonial_email = None
         if marked_baja:
-            transaction.on_commit(lambda: _notify_estado_patrimonial(request, ingreso_id, "baja"))
-        return Response({"ok": True, "estado": "baja", "bejerman_sync_job": bejerman_sync_job})
+            patrimonial_email = _notify_estado_patrimonial(request, ingreso_id, "baja")
+        return Response(
+            {
+                "ok": True,
+                "estado": "baja",
+                "bejerman_sync_job": bejerman_sync_job,
+                "patrimonial_email": patrimonial_email,
+            }
+        )
 
 
 class DarAltaIngresoView(APIView):
@@ -2315,146 +2309,17 @@ class DarAltaIngresoView(APIView):
                     "detail": "No se pudo encolar la sincronización Bejerman de alta.",
                     "error": str(exc),
                 }
+        patrimonial_email = None
         if marked_alta:
-            try:
-                info = q(
-                    """
-                    SELECT c.razon_social AS cliente,
-                           COALESCE(m.tipo_equipo,'') AS tipo_equipo,
-                           COALESCE(b.nombre,'') AS marca,
-                           COALESCE(m.nombre,'') AS modelo,
-                           COALESCE(d.numero_serie,'') AS numero_serie,
-                           COALESCE(d.numero_interno,'') AS numero_interno,
-                           COALESCE(t.informe_preliminar,'') AS informe_preliminar,
-                           COALESCE(t.descripcion_problema,'') AS descripcion_problema,
-                           COALESCE(t.trabajos_realizados,'') AS trabajos_realizados,
-                           COALESCE(t.comentarios,'') AS comentarios,
-                           COALESCE(t.resolucion,'') AS resolucion,
-                           COALESCE(CAST(t.motivo AS TEXT), '') AS motivo,
-                           COALESCE(loc.nombre,'') AS ubicacion_nombre
-                      FROM ingresos t
-                      JOIN devices d   ON d.id = t.device_id
-                      JOIN customers c ON c.id = d.customer_id
-                      LEFT JOIN marcas b ON b.id = d.marca_id
-                      LEFT JOIN models m ON m.id = d.model_id
-                      LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-                     WHERE t.id=%s
-                    """,
-                    [ingreso_id],
-                    one=True,
-                ) or {}
-                os_txt = os_label(ingreso_id)
-                cliente = info.get("cliente") or ""
-                equipo = " | ".join([p for p in [info.get("tipo_equipo") or "", info.get("marca") or "", info.get("modelo") or ""] if p])
-                numero_serie = info.get("numero_serie") or ""
-                numero_interno = info.get("numero_interno") or ""
-                informe_preliminar = (info.get("informe_preliminar") or "").strip()
-                descripcion_problema = (info.get("descripcion_problema") or "").strip()
-                trabajos_realizados = (info.get("trabajos_realizados") or "").strip()
-                comentarios = (info.get("comentarios") or "").strip()
-                resolucion = (info.get("resolucion") or "").strip()
-                motivo = (info.get("motivo") or "").strip()
-                ubicacion = info.get("ubicacion_nombre") or ""
-                actor_nombre = getattr(request.user, "nombre", None) or getattr(request.user, "username", "") or ""
-                actor_email = getattr(request.user, "email", "") or ""
-                fecha_alta = timezone.localtime().strftime("%Y-%m-%d %H:%M")
-                actor_line = actor_nombre or "-"
-                if actor_email:
-                    actor_line = f"{actor_line} ({actor_email})" if actor_line else actor_email
-                resolucion_labels = {
-                    "reparado": "Reparado",
-                    "no_reparado": "No reparado",
-                    "no_se_encontro_falla": "No se encontro falla",
-                    "presupuesto_rechazado": "Presupuesto rechazado",
-                    "cambio": "Cambio",
-                }
-                resolucion_label = resolucion_labels.get(
-                    resolucion,
-                    resolucion.replace("_", " ").capitalize() if resolucion else "",
-                )
-                subject = f"Notificación de alta de equipo - {os_txt} - {cliente or 'Sin cliente'}"
-                lines = [
-                    "Se registró el alta de un equipo en NEXORA. Por favor reflejar el alta en el sistema patrimonial.",
-                    "",
-                    "Detalle del ingreso:",
-                    f"- OS: {os_txt}",
-                    f"- Cliente: {cliente or '-'}",
-                    f"- Equipo: {equipo or '-'}",
-                    f"- Número de serie: {numero_serie or '-'}",
-                    f"- Número interno: {numero_interno or '-'}",
-                    f"- Ubicación actual: {ubicacion or '-'}",
-                    f"- Fecha de alta: {fecha_alta}",
-                    f"- Registrado por: {actor_line or '-'}",
-                ]
-                diag_lines = []
-                diag_lines.append(f"- Diagnóstico / descripción del problema: {descripcion_problema or '-'}")
-                diag_lines.append(f"- Trabajos realizados: {trabajos_realizados or '-'}")
-                diag_lines.append(f"- Comentarios: {comentarios or '-'}")
-                if informe_preliminar:
-                    diag_lines.append(f"- Informe preliminar: {informe_preliminar}")
-                if resolucion_label:
-                    diag_lines.append(f"- Resolución: {resolucion_label}")
-                if motivo:
-                    diag_lines.append(f"- Motivo de ingreso: {motivo}")
-                lines.append("")
-                lines.append("Diagnóstico / estado actual:")
-                lines.extend(diag_lines)
-                try:
-                    url = _frontend_url(request, f"/ingresos/{ingreso_id}") + "?tab=principal"
-                    lines.append("")
-                    lines.append(f"Hoja de servicio: {url}")
-                except Exception:
-                    pass
-                body = "\n".join(lines)
-                try:
-                    body = _email_append_footer_text(body)
-                except Exception:
-                    pass
-                recips = getattr(settings, "BAJA_NOTIFY_RECIPIENTS", []) or []
-                if not isinstance(recips, (list, tuple)):
-                    recips = [str(recips)] if recips else []
-                recips = [r for r in recips if r]
-                try:
-                    notify_estado_patrimonial(ingreso_id, "alta", emails=recips)
-                except Exception:
-                    pass
-
-                def _send_alta_email():
-                    if not recips:
-                        logger.warning(
-                            "alta_notify_email no recipients configured",
-                            extra={"ingreso_id": ingreso_id},
-                        )
-                        return
-                    try:
-                        _sent, _dbg = _send_mail_with_fallback(subject, body, recips)
-                        logger.info(
-                            "alta_notify_email sent=%s ingreso_id=%s recipients=%s backend=%s",
-                            bool(_sent),
-                            ingreso_id,
-                            recips,
-                            getattr(settings, "EMAIL_BACKEND", ""),
-                        )
-                    except Exception:
-                        logger.exception(
-                            "alta_notify_email failed",
-                            extra={"ingreso_id": ingreso_id, "recipients": recips},
-                        )
-
-                try:
-                    conn = transaction.get_connection()
-                    if getattr(conn, "in_atomic_block", False):
-                        transaction.on_commit(_send_alta_email)
-                    else:
-                        _send_alta_email()
-                except Exception:
-                    _send_alta_email()
-            except Exception:
-                logger.exception(
-                    "alta_notify_email prepare failed",
-                    extra={"ingreso_id": ingreso_id},
-                )
-        return Response({"ok": True, "estado": "ingresado", "bejerman_sync_job": bejerman_sync_job})
+            patrimonial_email = _notify_estado_patrimonial(request, ingreso_id, "alta")
+        return Response(
+            {
+                "ok": True,
+                "estado": "ingresado",
+                "bejerman_sync_job": bejerman_sync_job,
+                "patrimonial_email": patrimonial_email,
+            }
+        )
 
 
 class IngresoConvertirPropioMgView(APIView):
@@ -2634,9 +2499,16 @@ class IngresoConvertirPropioMgView(APIView):
         ) or {}
         row.update(resolve_mg_flags(row, mg_owner_id))
         row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
-        transaction.on_commit(lambda: _notify_estado_patrimonial(request, ingreso_id, "alta_mg"))
+        patrimonial_email = _notify_estado_patrimonial(request, ingreso_id, "alta_mg")
 
-        return Response({"ok": True, "ingreso_id": ingreso_id, "device": row})
+        return Response(
+            {
+                "ok": True,
+                "ingreso_id": ingreso_id,
+                "device": row,
+                "patrimonial_email": patrimonial_email,
+            }
+        )
 
 
 class IngresoCorreccionesHistoricasView(APIView):
@@ -2937,8 +2809,9 @@ class IngresoCorreccionesHistoricasView(APIView):
                 [ingreso_id, accion, fecha_efectiva, motivo, payload_json, notificar, uid],
             )
 
+        patrimonial_email = None
         if accion in ("baja_ingreso", "alta_ingreso") and notificar:
-            _notify_estado_patrimonial(
+            patrimonial_email = _notify_estado_patrimonial(
                 request,
                 ingreso_id,
                 "baja" if accion == "baja_ingreso" else "alta",
@@ -2953,6 +2826,7 @@ class IngresoCorreccionesHistoricasView(APIView):
                 "estado": nuevo_estado,
                 "fecha_efectiva": fecha_efectiva,
                 "notificar": bool(notificar),
+                "patrimonial_email": patrimonial_email,
                 "nexora": {
                     "status": "applied",
                     "detail": "La corrección se aplicó en NEXORA y quedó registrada en el historial.",
@@ -3425,6 +3299,7 @@ class GeneralEquiposView(APIView):
         estado_q_raw = (request.GET.get("estado_q") or "").strip()
         numero_serie_raw = (request.GET.get("numero_serie") or "").strip()
         numero_interno_raw = (request.GET.get("numero_interno") or "").strip()
+        sort_raw = (request.GET.get("sort") or "").strip()
 
         # paginación opcional (se mantiene respuesta original si no se especifica page_size)
         page_raw = (request.GET.get("page") or "").strip()
@@ -3615,9 +3490,29 @@ class GeneralEquiposView(APIView):
 
             where_sql = (" WHERE " + " AND ".join(wh)) if wh else ""
 
+            sort_field = sort_raw[1:] if sort_raw.startswith("-") else sort_raw
+            sort_direction = "DESC" if sort_raw.startswith("-") else "ASC"
+            sort_map = {
+                "os": "t.id",
+                "cliente": "NULLIF(LOWER(COALESCE(c.razon_social,'')), '')",
+                "tipo": "NULLIF(LOWER(COALESCE(m.tipo_equipo,'')), '')",
+                "marca": "NULLIF(LOWER(COALESCE(b.nombre,'')), '')",
+                "modelo": "NULLIF(LOWER(COALESCE(m.nombre,'')), '')",
+                "variante": "NULLIF(LOWER(COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,''), '')), '')",
+                "estado": "NULLIF(LOWER(COALESCE(t.estado::text,'')), '')",
+                "numero_serie": "NULLIF(LOWER(COALESCE(d.numero_serie,'')), '')",
+                "numero_interno": "NULLIF(LOWER(COALESCE(d.numero_interno,'')), '')",
+                "fecha_ingreso": "t.fecha_ingreso",
+                "fecha_liberacion": "ev_lib.fecha_liberacion",
+                "fecha_entrega": "t.fecha_entrega",
+            }
+            sort_expression = sort_map.get(sort_field)
             order_sql = "ORDER BY t.id DESC"
-            if delivered:
-                order_sql = "ORDER BY t.id DESC"
+            if sort_expression:
+                order_sql = (
+                    f"ORDER BY {sort_expression} {sort_direction} NULLS LAST, "
+                    f"t.id {sort_direction}"
+                )
 
             limit_sql = ""
             limit_params = []
@@ -3666,7 +3561,7 @@ class GeneralEquiposView(APIView):
             rows = _fetchall_dicts(cur)
             deleted_rows = _historico_deleted_rows(cur, historico_filter_ctx)
             if page <= 1 or q_raw or os_raw or estado_q_raw or numero_serie_raw or numero_interno_raw:
-                rows = _merge_historico_rows(rows, deleted_rows)
+                rows = _merge_historico_rows(rows, deleted_rows, sort_raw)
         mg_owner_id = _mg_owner_customer_id()
         for row in rows:
             row.update(resolve_mg_flags(row, mg_owner_id))
@@ -4663,18 +4558,22 @@ class PendientesGeneralView(APIView):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico"])
         tecnico_raw = (request.GET.get("tecnico_id") or "").strip()
         tecnico_filter = tecnico_raw.lower()
+        mg_list_sql = _mg_list_select_sql()
 
         with connection.cursor() as cur:
             _set_audit_user(request)
 
             sql = """
                 SELECT t.id,
+                       d.id AS device_id,
+                       c.id AS customer_id,
                        t.estado,
                        t.presupuesto_estado,
                        t.motivo,
                        c.razon_social,
                        d.numero_serie,
                        COALESCE(d.numero_interno,'') AS numero_interno,
+                       {mg_list_sql}
                        COALESCE(b.nombre,'') AS marca,
                        COALESCE(m.nombre,'') AS modelo,
                        COALESCE(m.tipo_equipo,'') AS tipo_equipo,
@@ -4700,7 +4599,7 @@ class PendientesGeneralView(APIView):
                 ) ed ON ed.ingreso_id = t.id AND ed.rn = 1
                 WHERE LOWER(loc.nombre) = LOWER(%s)
                   AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
-            """
+            """.format(mg_list_sql=mg_list_sql)
             params = ["taller"]
             if tecnico_raw.isdigit():
                 sql += " AND t.asignado_a = %s"
@@ -4716,6 +4615,11 @@ class PendientesGeneralView(APIView):
             """
             cur.execute(sql, params)
             rows = _fetchall_dicts(cur)
+
+        mg_owner_id = _mg_owner_customer_id()
+        for row in rows:
+            row.update(resolve_mg_flags(row, mg_owner_id))
+            row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
 
         return Response(IngresoListItemSerializer(rows, many=True).data)
 
@@ -6226,6 +6130,7 @@ def build_ingreso_bejerman_estado(ingreso_id: int, actor_user_id: int | None) ->
         "checkedAt": checked_at,
         "items": [],
         "warning": "",
+        "action": None,
     }
     if not identifier:
         base_payload["warning"] = "El equipo no tiene número de serie ni número interno para consultar Bejerman."
@@ -6262,11 +6167,28 @@ def build_ingreso_bejerman_estado(ingreso_id: int, actor_user_id: int | None) ->
         status = "zero_stock"
         warning = f"Bejerman devolvió la partida {identifier}, pero sin stock positivo."
 
+    action = None
+    if status == "zero_stock":
+        release_remito = _service_release_remito_salida_for_ingreso(ingreso_id)
+        if release_remito:
+            warning = (
+                f"Bejerman devolvió la partida {identifier} sin stock positivo, "
+                f"pero es lo esperado: el equipo ya fue liberado (RSS {release_remito})."
+            )
+        else:
+            ris_status = get_ris_status_for_ingreso(ingreso_id)
+            if ris_status.get("status") == "generated" and as_string(ris_status.get("remito_number")):
+                action = {
+                    "type": "force_stock_entry",
+                    "label": "Forzar ingreso de stock en Bejerman",
+                }
+
     return {
         **base_payload,
         "status": status,
         "items": items,
         "warning": warning,
+        "action": action,
     }
 
 
@@ -6302,6 +6224,84 @@ class IngresoBejermanEstadoView(APIView):
             return _bejerman_estado_error_response(exc)
         status_code = int(payload.pop("_status_code", 200))
         return Response(payload, status=status_code)
+
+
+class IngresoBejermanEstadoAccionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, ingreso_id: int):
+        if not _can_read_ingreso_detail(request, ingreso_id):
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        require_roles(request, ["jefe", "jefe_veedor", "supervisor"])
+        _set_audit_user(request)
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        body = request.data if isinstance(request.data, dict) else {}
+        action = str(body.get("action") or "").strip()
+        if action != "force_stock_entry":
+            return Response({"detail": "Acción de Bejerman inválida."}, status=400)
+        try:
+            result = force_stock_entry_for_ingreso(ingreso_id, user_id=actor_user_id)
+            state = build_ingreso_bejerman_estado(ingreso_id, actor_user_id)
+        except BejermanRisError as exc:
+            return Response({"detail": str(exc)}, status=409)
+        except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
+            return _bejerman_estado_error_response(exc)
+        except Exception as exc:
+            logger.warning("ingreso_bejerman_forzar_stock_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
+            return _bejerman_estado_error_response(exc)
+        state.pop("_status_code", None)
+        return Response({"ok": True, "result": result, "state": state})
+
+
+class IngresoAlquilerRemitoView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, ingreso_id: int):
+        if not _can_read_ingreso_detail(request, ingreso_id):
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        remito_number = request.GET.get("remito") or None
+        try:
+            state = get_rental_remito_state(ingreso_id, remito_number, actor_user_id=actor_user_id)
+        except RentalRemitoError as exc:
+            return Response({"detail": exc.detail, "code": exc.code}, status=exc.status_code)
+        except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
+            return _bejerman_estado_error_response(exc)
+        except Exception as exc:
+            logger.warning("ingreso_alquiler_remito_estado_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
+            return _bejerman_estado_error_response(exc)
+        return Response(state)
+
+
+class IngresoAlquilerRemitoAccionView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, ingreso_id: int):
+        require_roles(request, ["jefe", "jefe_veedor", "admin", "recepcion"])
+        require_any_permission(request, ["action.ingreso.fix_ris_preflight", "action.bejerman_sync.manage"])
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        body = request.data if isinstance(request.data, dict) else {}
+        action = str(body.get("action") or "").strip()
+        remito_number = body.get("remitoNumber") or body.get("remito_number") or None
+        try:
+            result = execute_rental_remito_action(
+                ingreso_id,
+                action,
+                remito_number=remito_number,
+                actor_user_id=actor_user_id,
+            )
+        except RentalRemitoError as exc:
+            return Response({"detail": exc.detail, "code": exc.code}, status=exc.status_code)
+        except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
+            return _bejerman_estado_error_response(exc)
+        except Exception as exc:
+            logger.warning(
+                "ingreso_alquiler_remito_accion_failed",
+                exc_info=True,
+                extra={"ingreso_id": ingreso_id, "action": action},
+            )
+            return _bejerman_estado_error_response(exc)
+        return Response(result)
 
 
 class IngresoDetalleView(APIView):
@@ -7449,6 +7449,7 @@ __all__ = [
     'DarAltaIngresoView',
     'IngresoCorreccionesHistoricasView',
     'IngresoBejermanEstadoView',
+    'IngresoBejermanEstadoAccionView',
     'IngresoAsignarTecnicoView',
     'IngresoSolicitarAsignacionView',
     'IngresoSolicitarBajaView',

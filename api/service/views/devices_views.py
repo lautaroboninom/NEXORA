@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..permissions import MappedPermissionGuard
+from ..patrimonial_notifications import notify_patrimonial_email
 from .helpers import q, exec_void, exec_returning, require_roles, _fetchall_dicts, _set_audit_user
 from .mg_state import normalize_mg, resolve_mg_flags
 from .tipo_equipo_utils import sentence_case_tipo_equipo
@@ -627,29 +628,39 @@ class DevicesListView(APIView):
 
             where_sql = (" WHERE " + " AND ".join(wh)) if wh else ""
 
+            mg_status_sql = "COALESCE(d.mg_estado, 'activo')" if has_mg_schema else "'activo'"
+            mg_owner_sql = "FALSE"
+            if mg_owner_id is not None:
+                mg_owner_sql = f"d.customer_id = {int(mg_owner_id)}"
+            mg_code_sql = """
+                (
+                  COALESCE(d.numero_interno, '') ~* '^(MG|NM|NV|CE)[[:space:]]*[0-9]{1,4}$'
+                  OR COALESCE(d.numero_serie, '') ~* '^(MG|NM|NV|CE)[[:space:]]*[0-9]{1,4}$'
+                )
+            """
+            property_sort_sql = f"""
+                CASE
+                  WHEN ({mg_owner_sql}) OR (({mg_code_sql}) AND {mg_status_sql} <> 'inactivo_venta') THEN 0
+                  WHEN ({mg_code_sql}) THEN 2
+                  ELSE 1
+                END
+            """
             sort_map = {
                 "id": "d.id",
-                "-id": "d.id DESC",
-                "ns": "d.numero_serie",
-                "-ns": "d.numero_serie DESC",
-                "mg": "d.numero_interno",
-                "-mg": "d.numero_interno DESC",
-                "marca": "b.nombre",
-                "-marca": "b.nombre DESC",
-                "modelo": "m.nombre",
-                "-modelo": "m.nombre DESC",
-                "cliente": "c.razon_social",
-                "-cliente": "c.razon_social DESC",
-                "ubicacion": "loc.nombre",
-                "-ubicacion": "loc.nombre DESC",
+                "ns": "NULLIF(LOWER(BTRIM(COALESCE(d.numero_serie, d.numero_interno, ''))), '')",
+                "mg": "NULLIF(LOWER(BTRIM(COALESCE(d.numero_interno, ''))), '')",
+                "marca": "NULLIF(LOWER(BTRIM(COALESCE(b.nombre, ''))), '')",
+                "modelo": "NULLIF(LOWER(BTRIM(COALESCE(m.nombre, ''))), '')",
+                "cliente": "NULLIF(LOWER(BTRIM(COALESCE(c.razon_social, ''))), '')",
+                "ubicacion": "NULLIF(LOWER(BTRIM(COALESCE(loc.nombre, ''))), '')",
+                "propiedad": property_sort_sql,
+                "alquiler": "COALESCE(d.alquilado, FALSE)",
             }
             if has_preventivos:
                 sort_map.update(
                     {
                         "preventivo_ultima": "pp.ultima_revision_fecha",
-                        "-preventivo_ultima": "pp.ultima_revision_fecha DESC",
                         "preventivo_proxima": "pp.proxima_revision_fecha",
-                        "-preventivo_proxima": "pp.proxima_revision_fecha DESC",
                         "preventivo_estado": (
                             "CASE "
                             "WHEN pp.id IS NULL THEN 0 "
@@ -657,27 +668,24 @@ class DevicesListView(APIView):
                             "WHEN pp.proxima_revision_fecha IS NOT NULL AND (CURRENT_DATE + (COALESCE(pp.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= pp.proxima_revision_fecha THEN 2 "
                             "ELSE 3 END"
                         ),
-                        "-preventivo_estado": (
-                            "CASE "
-                            "WHEN pp.id IS NULL THEN 0 "
-                            "WHEN pp.proxima_revision_fecha IS NOT NULL AND CURRENT_DATE > pp.proxima_revision_fecha THEN 1 "
-                            "WHEN pp.proxima_revision_fecha IS NOT NULL AND (CURRENT_DATE + (COALESCE(pp.aviso_anticipacion_dias,30) * INTERVAL '1 day'))::date >= pp.proxima_revision_fecha THEN 2 "
-                            "ELSE 3 END DESC"
-                        ),
                     }
                 )
             else:
                 sort_map.update(
                     {
                         "preventivo_ultima": "d.id",
-                        "-preventivo_ultima": "d.id DESC",
                         "preventivo_proxima": "d.id",
-                        "-preventivo_proxima": "d.id DESC",
                         "preventivo_estado": "0",
-                        "-preventivo_estado": "0 DESC",
                     }
                 )
-            order_sql = sort_map.get(sort_raw or "", "d.id DESC")
+            descending = sort_raw.startswith("-")
+            sort_field = sort_raw[1:] if descending else sort_raw
+            sort_expression = sort_map.get(sort_field)
+            if sort_expression:
+                direction = "DESC" if descending else "ASC"
+                order_sql = f"{sort_expression} {direction} NULLS LAST, d.id {direction}"
+            else:
+                order_sql = "d.id DESC"
 
             limit_sql = ""
             limit_params = []
@@ -1475,7 +1483,22 @@ class DeviceMgVentaView(APIView):
             one=True,
         ) or {}
         row.update(resolve_mg_flags(row, mg_owner_id))
-        return Response({"ok": True, "device": row})
+
+        patrimonial_email = notify_patrimonial_email(
+            request,
+            evento="venta_mg",
+            device_id=device_id,
+            ingreso_id=ingreso_id,
+            fecha_evento=fecha_venta,
+            venta={
+                "comprador": row.get("mg_venta_customer_nombre") or "",
+                "factura_numero": factura_numero,
+                "remito_numero": remito_numero,
+                "numero_alternativo": venta_numero_alternativo,
+                "observaciones": observaciones,
+            },
+        )
+        return Response({"ok": True, "device": row, "patrimonial_email": patrimonial_email})
 
 
 class DeviceMgReactivarView(APIView):

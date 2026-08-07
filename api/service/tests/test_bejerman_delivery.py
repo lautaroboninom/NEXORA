@@ -29,8 +29,17 @@ from service.bejerman_delivery import (
     _bridge_order,
     _collapse_recovery_candidate_rows,
     _delivery_article_sales_vat_map,
+    _diagnose_bejerman_error,
+    _ensure_blocking_stock_sync_jobs_resolved,
+    _find_blocking_stock_sync_jobs,
+    _mark_group_failed,
+    _mark_group_review_required,
+    _mark_group_sent_unknown,
+    _order_print_line_count,
+    _partition_remito_orders_for_printing,
     _profile_for_order,
     _recovery_record_matches_delivery_request,
+    _recover_delivery_partida_rejection,
     _remito_requires_billing,
     _remito_print_item_chunks,
     _validate_remito_orders,
@@ -38,6 +47,7 @@ from service.bejerman_delivery import (
     get_delivery_order_remito_pdf,
     get_facturacion_pdf,
     get_remito_group_pdf,
+    generate_bejerman_remito,
     list_bejerman_article_stock,
     list_bejerman_articles,
     list_bejerman_depositos,
@@ -56,14 +66,17 @@ from service.bejerman_pdf_settings import (
     resolve_pdf_output_path,
     validate_pdf_output_dir,
 )
-from service.bejerman_pdf_requests import BejermanPdfRequestPending
+from service.bejerman_pdf_requests import BejermanPdfRequestPending, BejermanPdfWorkerStalledError
 from service.delivery_orders import (
     DeliveryOrderError,
     _service_release_equipment_detail,
+    get_delivery_order,
     insert_item_partidas,
+    list_delivery_orders,
     remito_profile_for_type,
     serialize_order,
 )
+from service.bejerman_particular_customers import has_other_open_ingresos
 from service.models import User
 from service.views.delivery_orders_views import CobranzasRemitoPdfView, CobranzasRemitoPrintView, _remito_print_wait_page
 from service.bejerman_ris import _apply_registered_document, _build_payload
@@ -77,6 +90,7 @@ from service.bejerman_sdk import (
     build_article_stock_lots,
     build_delivery_remito_comprobante,
     build_document_id,
+    build_facturacion_result,
     build_remitos_result,
     build_partida_rows,
     build_sales_filters,
@@ -277,48 +291,203 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         self.assertEqual([len(chunk) for chunk in chunks], [7, 7, 7, 7, 7, 7, 6])
         self.assertTrue(all(len(chunk) <= 7 for chunk in chunks))
 
-    @override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21)
-    def test_venta_print_split_cuenta_una_linea_por_partida_mas_encabezado(self):
-        # Caso OE-00116: 6 artículos con 26 partidas en total. El RT imprime
-        # 1 línea por partida más 2 líneas de encabezado por orden.
-        partida_counts = [1, 2, 2, 10, 10, 1]
+    @override_settings(BEJERMAN_SALE_MAX_ARTICLE_LINES=10, BEJERMAN_SALE_MAX_PRINT_LINES=22)
+    def test_venta_print_split_respeta_diez_lineas_de_articulo(self):
+        for item_count, expected_chunk_sizes in (
+            (10, [10]),
+            (11, [10, 1]),
+            (25, [10, 10, 5]),
+        ):
+            with self.subTest(item_count=item_count):
+                order = {
+                    "deliveryType": "sale",
+                    "items": [
+                        {
+                            "id": f"item-{index}",
+                            "quantity": 1,
+                            "partidas": [{"partida": f"P-{index:03d}", "quantity": 1}],
+                        }
+                        for index in range(item_count)
+                    ],
+                }
+
+                chunks = _remito_print_item_chunks(order)
+
+                self.assertEqual([len(chunk) for chunk in chunks], expected_chunk_sizes)
+                self.assertEqual(
+                    [sum(len(item["partidas"]) for item in chunk) for chunk in chunks],
+                    expected_chunk_sizes,
+                )
+
+    @override_settings(BEJERMAN_SALE_MAX_ARTICLE_LINES=10, BEJERMAN_SALE_MAX_PRINT_LINES=22)
+    def test_venta_print_split_fragmenta_un_item_con_trece_partidas(self):
+        item = {
+            "id": "item-partidas",
+            "articleCode": "ART-LOTE",
+            "quantity": 13,
+            "unitPrice": "123.45",
+            "discountPercent": "7.5",
+            "priceCurrency": "USD",
+            "partidas": [
+                {
+                    "partida": f"LOTE-{index:03d}",
+                    "assignedQuantity": 1,
+                    "stockDepositCode": "VAL",
+                }
+                for index in range(13)
+            ],
+        }
+        order = {
+            "deliveryType": "sale",
+            "items": [item],
+        }
+
+        chunks = _remito_print_item_chunks(order)
+
+        fragments = [fragment for chunk in chunks for fragment in chunk]
+        self.assertEqual(
+            [sum(len(item["partidas"]) for item in chunk) for chunk in chunks],
+            [10, 3],
+        )
+        self.assertEqual([fragment["quantity"] for fragment in fragments], [10, 3])
+        self.assertEqual(sum(fragment["quantity"] for fragment in fragments), 13)
+        self.assertEqual(
+            [partida["partida"] for fragment in fragments for partida in fragment["partidas"]],
+            [f"LOTE-{index:03d}" for index in range(13)],
+        )
+        for fragment in fragments:
+            self.assertEqual(fragment["articleCode"], "ART-LOTE")
+            self.assertEqual(fragment["unitPrice"], "123.45")
+            self.assertEqual(fragment["discountPercent"], "7.5")
+            self.assertEqual(fragment["priceCurrency"], "USD")
+            self.assertTrue(all(partida["stockDepositCode"] == "VAL" for partida in fragment["partidas"]))
+        self.assertEqual(item["quantity"], 13)
+        self.assertEqual(len(item["partidas"]), 13)
+
+    @override_settings(BEJERMAN_SALE_MAX_ARTICLE_LINES=10, BEJERMAN_SALE_MAX_PRINT_LINES=22)
+    def test_venta_print_split_fragmenta_veintiseis_partidas_sin_perder_cantidades(self):
         order = {
             "deliveryType": "sale",
             "items": [
                 {
-                    "id": f"item-{index}",
-                    "quantity": count,
-                    "partidas": [{"partida": f"D25-{index}{serial:02d}", "quantity": 1} for serial in range(count)],
+                    "id": "item-26-partidas",
+                    "quantity": 26,
+                    "partidas": [
+                        {"partida": f"P-{index:03d}", "quantity": 1}
+                        for index in range(26)
+                    ],
                 }
-                for index, count in enumerate(partida_counts)
             ],
         }
 
         chunks = _remito_print_item_chunks(order)
 
-        # Capacidad por remito: 21 - 2 de encabezado = 19 líneas de artículos.
-        self.assertEqual(len(chunks), 2)
-        self.assertEqual([len(chunk) for chunk in chunks], [4, 2])
         self.assertEqual(
             [sum(len(item["partidas"]) for item in chunk) for chunk in chunks],
-            [15, 11],
+            [10, 10, 6],
+        )
+        self.assertEqual(
+            sum(item["quantity"] for chunk in chunks for item in chunk),
+            26,
         )
 
-    def test_venta_print_split_no_divide_si_entra_en_una_hoja(self):
+    @override_settings(BEJERMAN_SALE_MAX_ARTICLE_LINES=10, BEJERMAN_SALE_MAX_PRINT_LINES=22)
+    def test_venta_print_split_admite_diez_articulos_con_descuento_en_veintidos_renglones(self):
         order = {
             "deliveryType": "sale",
             "items": [
-                {"id": f"item-{index}", "quantity": 1, "partidas": [{"partida": f"P-{index}", "quantity": 1}]}
+                {
+                    "id": f"item-{index}",
+                    "quantity": 1,
+                    "discountPercent": 10,
+                    "partidas": [{"partida": f"P-{index:03d}", "quantity": 1}],
+                }
                 for index in range(10)
             ],
         }
 
         chunks = _remito_print_item_chunks(order)
 
-        self.assertEqual(len(chunks), 1)
+        self.assertEqual([len(chunk) for chunk in chunks], [10])
+        self.assertEqual(_order_print_line_count(order), 22)
 
-    @override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21)
-    def test_alquiler_y_demo_print_split_usan_el_limite_general(self):
+    @override_settings(BEJERMAN_SALE_MAX_ARTICLE_LINES=10, BEJERMAN_SALE_MAX_PRINT_LINES=22)
+    def test_venta_print_split_agrupa_ordenes_por_limite_de_articulos(self):
+        def build_order(order_index, item_count, discount_percent=0):
+            return {
+                "id": f"order-{order_index}",
+                "deliveryType": "sale",
+                "items": [
+                    {
+                        "id": f"item-{order_index}-{item_index}",
+                        "quantity": 1,
+                        "discountPercent": discount_percent,
+                        "partidas": [{"partida": f"P-{order_index}-{item_index}", "quantity": 1}],
+                    }
+                    for item_index in range(item_count)
+                ],
+            }
+
+        orders_5_plus_5 = [build_order(1, 5), build_order(2, 5)]
+        orders_6_plus_6 = [build_order(1, 6), build_order(2, 6)]
+        orders_5_plus_5_with_discount = [build_order(1, 5, 10), build_order(2, 5, 10)]
+
+        self.assertEqual(
+            [[order["id"] for order in batch] for batch in _partition_remito_orders_for_printing(orders_5_plus_5)],
+            [["order-1", "order-2"]],
+        )
+        self.assertEqual(
+            [[order["id"] for order in batch] for batch in _partition_remito_orders_for_printing(orders_6_plus_6)],
+            [["order-1"], ["order-2"]],
+        )
+        self.assertEqual(
+            [
+                [order["id"] for order in batch]
+                for batch in _partition_remito_orders_for_printing(orders_5_plus_5_with_discount)
+            ],
+            [["order-1"], ["order-2"]],
+        )
+
+    @override_settings(BEJERMAN_SALE_MAX_ARTICLE_LINES=10, BEJERMAN_SALE_MAX_PRINT_LINES=22)
+    def test_reintento_por_partida_bloquea_rt_con_once_articulos_sin_llamar_al_sdk(self):
+        client = Mock()
+        comprobante = {
+            "Comprobante_Items": [
+                {
+                    "Item_Tipo": "A",
+                    "Item_CodigoArticulo": f"ART-{index:03d}",
+                    "Item_Partida": f"P-{index:03d}",
+                    "Item_Deposito": "VAL",
+                    "Item_CantidadUM1": -1,
+                    "Item_CantidadUM2": -1,
+                }
+                for index in range(11)
+            ],
+        }
+
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            _recover_delivery_partida_rejection(
+                client,
+                comprobante,
+                delivery_type="sale",
+                numera_flex="N",
+                emite_reg="E",
+                circuito="VENTAS",
+                operacion="RT",
+            )
+
+        self.assertEqual(ctx.exception.code, "BEJERMAN_RT_PRINT_LIMIT_EXCEEDED")
+        client.obtener_stock_partida.assert_not_called()
+        client.ingresar_lista_comprobantes_stock_json.assert_not_called()
+        client.ingresar_comprobante_ventas_json.assert_not_called()
+        self.assertEqual(client.mock_calls, [])
+
+    @override_settings(
+        BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+        BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        BEJERMAN_REMITO_MAX_PRINT_LINES=21,
+    )
+    def test_rta_y_rtn_print_split_conservan_el_limite_general(self):
         # Alquileres (RTA) y demos imprimen igual que las ventas: 1 línea por
         # NS/partida más 2 líneas de encabezado por orden.
         for delivery_type in ("rental", "demo"):
@@ -588,6 +757,49 @@ def _non_pdf_response():
 
 
 class BejermanPdfHelperTests(SimpleTestCase):
+    def test_candidatos_cubren_la_convencion_de_nombre_del_erp(self):
+        """El ERP rellena el código de cliente a 6 con espacios a la IZQUIERDA.
+
+        NEXORA sanea y quita los espacios, así que buscando sólo su propio nombre
+        daba por ausente un PDF que estaba en la carpeta (caso real:
+        `RISR00004-00004252-   NOV.pdf`).
+        """
+
+        from service.bejerman_sdk import _comprobante_pdf_filename_candidates
+
+        candidatos = _comprobante_pdf_filename_candidates(
+            BejermanPdfReference(
+                type="RIS", number="00004252", letter="R", point_of_sale="00004",
+                issue_date="2026-05-01", customer_code="NOV",
+            )
+        )
+
+        self.assertIn("RISR00004-00004252-   NOV.pdf", candidatos)  # ERP
+        self.assertIn("RISR00004-00004252-NOV.pdf", candidatos)     # NEXORA
+        self.assertIn("RISR00004-00004252.pdf", candidatos)         # sin cliente
+        # Convención del SDK, documentada en "10. Generación y Consulta de
+        # comprobantes emitidos": V-{TIPO:3}-{L}-{PTO:5}-{NRO:8}-{DDMMAAAA}-{CLI:6}
+        self.assertIn("V-RIS-R-00004-00004252-01052026-NOV   .pdf", candidatos)
+
+    def test_consultar_y_generar_pdf_filtran_con_la_misma_fecha(self):
+        """Mandaban formatos distintos para el mismo comprobante."""
+
+        client = BejermanSDKClient.__new__(BejermanSDKClient)
+        client.token = "token"
+        client.execute = Mock(return_value={})
+        client._execute_once = Mock(return_value={})
+        reference = BejermanPdfReference(
+            type="RIS", number="00004344", letter="R", point_of_sale="00004", issue_date="2026-08-06",
+        )
+
+        client.consultar_comprobante_ventas_pdf(reference)
+        client.generar_comprobante_ventas_pdf(reference)
+
+        fecha_consulta = client.execute.call_args.kwargs["params_json"][4]
+        fecha_generacion = client._execute_once.call_args.kwargs["params_json"][4]
+        self.assertEqual(fecha_consulta, "06/08/2026")
+        self.assertEqual(fecha_consulta, fecha_generacion)
+
     def test_extract_pdf_bytes_normaliza_prefijo_bom_o_espacios(self):
         pdf_bytes = extract_pdf_bytes(_pdf_response(b"\xef\xbb\xbf\r\n  %PDF-1.4\nRSS test"))
 
@@ -598,7 +810,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
     def test_extract_pdf_bytes_ignora_base64_que_no_es_pdf(self):
         self.assertIsNone(extract_pdf_bytes(_non_pdf_response()))
 
-    def test_fetch_comprobante_pdf_genera_y_reintenta_hasta_encontrar_pdf(self):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    def test_fetch_comprobante_pdf_genera_y_reintenta_hasta_encontrar_pdf(self, _read_remote_candidates):
         client = FakePdfClient([{"DatosJSON": "{}"}, {"DatosJSON": "{}"}, _pdf_response()])
 
         pdf_bytes, content_type = fetch_comprobante_pdf(
@@ -749,11 +962,19 @@ class BejermanPdfHelperTests(SimpleTestCase):
 
         self.assertEqual(content_type, "application/pdf")
         self.assertEqual(pdf_bytes, b"%PDF-1.4\nremote")
-        read_remote_pdf_candidates.assert_called_once_with(
-            r"samtronic:C:\2. SEPID\PDF\REMITOS",
-            ["RTR00004-00004707-RES.pdf", "RTR00004-00004707.pdf"],
-            ["RTR00004-00004707"],
-        )
+        # Se buscan todas las convenciones que conviven en la carpeta. Con sólo la
+        # propia, un PDF escrito por el ERP o por el SDK quedaba invisible.
+        # Aserción por pertenencia y no por igualdad: agregar un candidato nuevo no
+        # tiene por qué romper este test.
+        read_remote_pdf_candidates.assert_called_once()
+        args, kwargs = read_remote_pdf_candidates.call_args
+        self.assertEqual(args[0], r"samtronic:C:\2. SEPID\PDF\REMITOS")
+        self.assertIn("RTR00004-00004707-RES.pdf", args[1])           # NEXORA
+        self.assertIn("RTR00004-00004707-   RES.pdf", args[1])        # ERP (rjust 6)
+        self.assertIn("V-RT -R-00004-00004707-26062026-RES   .pdf", args[1])  # SDK
+        self.assertIn("RTR00004-00004707", args[2])
+        self.assertIn("V-RT -R-00004-00004707-", args[2])
+        self.assertTrue(kwargs["use_cache"])
         write_remote_pdf.assert_not_called()
         self.assertEqual(client.consult_calls, 0)
         self.assertEqual(client.generate_calls, 0)
@@ -802,12 +1023,19 @@ class BejermanPdfHelperTests(SimpleTestCase):
             with self.assertRaises(BejermanPdfOutputSettingsError):
                 validate_pdf_output_dir(r"Z:\MG BIO\Remitos BEJERMAN")
 
-    @patch(
-        "service.bejerman_sdk.remove_remote_pdf_candidates_if_same",
-        return_value=[r"C:\2. SEPID\PDF\FACTURAS\V-RT -R-00004-00004707-26062026-RES   .pdf"],
-    )
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    @patch("service.bejerman_sdk.remove_remote_pdf_candidates_if_same")
     @patch("service.bejerman_sdk.write_remote_pdf")
-    def test_fetch_comprobante_pdf_copia_remito_a_samtronic_y_limpia_facturas(self, write_remote_pdf, remove_remote_candidates):
+    def test_fetch_comprobante_pdf_copia_remito_a_samtronic_y_limpia_facturas(
+        self, write_remote_pdf, remove_remote_candidates, _read_remote_candidates
+    ):
+        # La limpieza prueba primero el nombre exacto de Crystal (barato); si no
+        # encuentra nada ahí (primera llamada -> []), recién entonces cae al barrido
+        # completo por prefijos (segunda llamada), que es la que sí encuentra el archivo.
+        remove_remote_candidates.side_effect = [
+            [],
+            [r"C:\2. SEPID\PDF\FACTURAS\V-RT -R-00004-00004707-26062026-RES   .pdf"],
+        ]
         write_remote_pdf.return_value = Mock(path=r"C:\2. SEPID\PDF\REMITOS\RTR00004-00004707-RES.pdf")
         client = FakePdfClient([_pdf_response()])
         client.company_key = "SEPID"
@@ -836,7 +1064,14 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(write_remote_pdf.call_args.args[0], r"samtronic:C:\2. SEPID\PDF\REMITOS")
         self.assertEqual(write_remote_pdf.call_args.args[1], "RTR00004-00004707-RES.pdf")
         self.assertEqual(write_remote_pdf.call_args.args[2], pdf_bytes)
-        remove_remote_candidates.assert_called_once_with(
+        self.assertEqual(remove_remote_candidates.call_count, 2)
+        remove_remote_candidates.assert_any_call(
+            r"samtronic:C:\2. SEPID\PDF\FACTURAS",
+            ["V-RT -R-00004-00004707-26062026-RES   .pdf"],
+            [],
+            pdf_bytes,
+        )
+        remove_remote_candidates.assert_any_call(
             r"samtronic:C:\2. SEPID\PDF\FACTURAS",
             [
                 "V-RT -R-00004-00004707-26062026-RES   .pdf",
@@ -847,7 +1082,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
             pdf_bytes,
         )
 
-    def test_fetch_comprobante_pdf_no_devuelve_200_con_bytes_no_pdf(self):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    def test_fetch_comprobante_pdf_no_devuelve_200_con_bytes_no_pdf(self, _read_remote_candidates):
         client = FakePdfClient([_non_pdf_response(), _non_pdf_response()])
 
         with self.assertRaises(BejermanPdfPendingError):
@@ -861,7 +1097,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(client.generate_calls, 1)
         self.assertEqual(client.consult_calls, 2)
 
-    def test_fetch_comprobante_pdf_pendiente_no_es_error_generico(self):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    def test_fetch_comprobante_pdf_pendiente_no_es_error_generico(self, _read_remote_candidates):
         client = FakePdfClient([{"DatosJSON": "{}"}, {"DatosJSON": "{}"}, {"DatosJSON": "{}"}])
 
         with self.assertRaises(BejermanPdfPendingError) as ctx:
@@ -876,7 +1113,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(client.generate_calls, 1)
         self.assertEqual(client.consult_calls, 3)
 
-    def test_fetch_comprobante_pdf_consulta_error_persistente_queda_pendiente(self):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    def test_fetch_comprobante_pdf_consulta_error_persistente_queda_pendiente(self, _read_remote_candidates):
         client = FakePdfClient(
             [
                 BejermanSdkResponseError("HTTP 406 Bejerman: PDF no disponible"),
@@ -902,7 +1140,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
         BEJERMAN_PDF_INTERACTIVE_RETRY_DELAY_MS=0,
         BEJERMAN_PDF_INTERACTIVE_RETRY_AFTER_MS=2500,
     )
-    def test_fetch_comprobante_pdf_interactivo_usa_timeout_y_reintentos_cortos(self):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    def test_fetch_comprobante_pdf_interactivo_usa_timeout_y_reintentos_cortos(self, _read_remote_candidates):
         client = FakePdfClient([{"DatosJSON": "{}"}, {"DatosJSON": "{}"}])
 
         with self.assertRaises(BejermanPdfPendingError) as ctx:
@@ -919,7 +1158,8 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertTrue(client.timeout_values)
         self.assertTrue(all(value == 4 for value in client.timeout_values))
 
-    def test_fetch_comprobante_pdf_interactivo_timeout_generando_queda_pendiente_rapido(self):
+    @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
+    def test_fetch_comprobante_pdf_interactivo_timeout_generando_queda_pendiente_rapido(self, _read_remote_candidates):
         client = FakePdfGenerateTimeoutClient([{"DatosJSON": "{}"}])
 
         with self.assertRaises(BejermanPdfPendingError) as ctx:
@@ -1512,6 +1752,69 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         self.assertEqual(result["items"][0]["pdfUrl"], "/api/ordenes-entrega/remito-bejerman/brg-rss-local/pdf/")
         self.assertEqual(result["items"][0]["source"], "nexora")
 
+    def test_documentos_ordenan_numeros_naturalmente_antes_de_paginar(self):
+        records = [
+            {
+                "Comprobante_Tipo": "FC",
+                "Comprobante_Letra": "A",
+                "Comprobante_PtoVenta": "00002",
+                "Comprobante_Numero": "00000010",
+                "Comprobante_FechaEmision": "2026-06-10",
+                "Cliente_Codigo": "DOS",
+                "Cliente_RazonSocial": "Cliente 10",
+                "Comprobante_ImporteTotal": "100",
+            },
+            {
+                "Comprobante_Tipo": "FC",
+                "Comprobante_Letra": "A",
+                "Comprobante_PtoVenta": "00002",
+                "Comprobante_Numero": "00000002",
+                "Comprobante_FechaEmision": "2026-06-02",
+                "Cliente_Codigo": "UNO",
+                "Cliente_RazonSocial": "Cliente 2",
+                "Comprobante_ImporteTotal": "200",
+            },
+        ]
+
+        result = build_facturacion_result(
+            {"DatosJSON": records},
+            "",
+            {"sort": "numero", "page": "1", "pageSize": "1"},
+        )
+
+        self.assertEqual(result["pagination"]["total"], 2)
+        self.assertEqual(result["items"][0]["number"], "00000002")
+
+    def test_documentos_mantienen_vacios_al_final_en_orden_descendente(self):
+        records = [
+            {
+                "Comprobante_Tipo": "RSS",
+                "Comprobante_Letra": "R",
+                "Comprobante_PtoVenta": "00004",
+                "Comprobante_Numero": "00000001",
+                "Comprobante_FechaEmision": "2026-06-01",
+                "Cliente_Codigo": "VAC",
+                "Cliente_RazonSocial": "",
+            },
+            {
+                "Comprobante_Tipo": "RSS",
+                "Comprobante_Letra": "R",
+                "Comprobante_PtoVenta": "00004",
+                "Comprobante_Numero": "00000002",
+                "Comprobante_FechaEmision": "2026-06-02",
+                "Cliente_Codigo": "DOS",
+                "Cliente_RazonSocial": "Beta",
+            },
+        ]
+
+        result = build_remitos_result(
+            {"DatosJSON": records},
+            "",
+            {"sort": "-cliente", "pageSize": "25"},
+        )
+
+        self.assertEqual([item["customerName"] for item in result["items"]], ["Beta", ""])
+
     def test_remitos_rechaza_tipo_o_operacion_invalidos(self):
         with self.assertRaises(BillingError) as remito_ctx:
             list_remitos_from_bejerman("", {"remitoType": "FC"})
@@ -1556,6 +1859,36 @@ class BejermanDeliveryBillingTests(SimpleTestCase):
         self.assertEqual(ctx.exception.retry_after_ms, 2500)
         self.assertEqual(ctx.exception.payload, {"pdf_state": "queued", "generation_requested": False})
         self.assertEqual(coordinator.call_args.kwargs, {"actor_user_id": None, "remito_group_id": None})
+
+    def test_facturacion_pdf_worker_detenido_devuelve_503_y_no_202(self):
+        """Candado de regresión del 202 eterno.
+
+        Si BejermanPdfWorkerStalledError heredara de BejermanSdkUnavailable, el
+        `except` interactivo de get_facturacion_pdf lo convertiría en un 202 y el
+        navegador volvería a girar para siempre.
+        """
+
+        document_id = build_document_id(
+            {"t": "RSS", "n": "00000012", "l": "R", "p": "0004", "f": "2026-06-12", "c": "ACU"}
+        )
+
+        stalled = BejermanPdfWorkerStalledError(
+            "El servicio que prepara los PDF de Bejerman no está respondiendo.",
+            pdf_state="queued",
+            generation_requested=False,
+            details={"worker_alive": False, "stage_label": "En cola para solicitar la generación"},
+        )
+        with patch(
+            "service.bejerman_delivery.fetch_or_enqueue_comprobante_pdf",
+            side_effect=stalled,
+        ):
+            with self.assertRaises(BillingError) as ctx:
+                get_facturacion_pdf("ACU", document_id, interactive=True)
+
+        self.assertEqual(ctx.exception.code, "BEJERMAN_PDF_WORKER_STALLED")
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertNotEqual(ctx.exception.status_code, 202)
+        self.assertIs(ctx.exception.payload["worker_alive"], False)
 
     def test_facturacion_pdf_exp_cuotas_devuelve_error_legible(self):
         document_id = build_document_id(
@@ -2445,6 +2778,386 @@ class BejermanDeliveryRemitosFallbackTests(TestCase):
         self.assertTrue(item["printUrl"].endswith("/print/?customerCode=RES&companyKey=SEPID"))
         self.assertNotIn("/ordenes-entrega/remito-bejerman/", item["printUrl"])
 
+    def test_mark_group_failed_categoriza_error_y_guarda_diagnostico(self):
+        self._insert_remito_group("brg-failed-diagnostico")
+
+        _mark_group_failed(
+            "brg-failed-diagnostico", [], None, BejermanSdkResponseError("BEJERMAN_CUSTOMER_NOT_FOUND")
+        )
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT status, last_error, response_summary FROM bejerman_remito_groups WHERE id = %s",
+                ["brg-failed-diagnostico"],
+            )
+            status, last_error, response_summary = cur.fetchone()
+
+        self.assertEqual(status, "failed")
+        self.assertTrue(last_error)
+        summary = response_summary if isinstance(response_summary, dict) else json.loads(response_summary)
+        self.assertEqual(summary["errorCategory"], "BEJERMAN_CUSTOMER_RESOLUTION_FAILED")
+
+    def test_mark_group_failed_usa_mensaje_generico_si_la_excepcion_no_trae_texto(self):
+        self._insert_remito_group("brg-failed-sin-texto")
+
+        class _ExcepcionSinTexto(Exception):
+            def __str__(self):
+                return ""
+
+        _mark_group_failed("brg-failed-sin-texto", [], None, _ExcepcionSinTexto())
+
+        with connection.cursor() as cur:
+            cur.execute("SELECT last_error FROM bejerman_remito_groups WHERE id = %s", ["brg-failed-sin-texto"])
+            (last_error,) = cur.fetchone()
+
+        self.assertTrue(last_error)
+
+    def test_mark_group_review_required_categoriza_partida_inexistente(self):
+        self._insert_remito_group("brg-review-partida")
+
+        exc = BejermanSdkResponseError(
+            "El comprobante no se importó debido a que el ítem 1103001 tiene asignada una "
+            "Partida inexistente y/o no informada."
+        )
+        _mark_group_review_required("brg-review-partida", [], None, exc)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT status, response_summary FROM bejerman_remito_groups WHERE id = %s",
+                ["brg-review-partida"],
+            )
+            status, response_summary = cur.fetchone()
+
+        self.assertEqual(status, "failed_review")
+        summary = response_summary if isinstance(response_summary, dict) else json.loads(response_summary)
+        self.assertEqual(summary["errorCategory"], "BEJERMAN_PARTIDA_INEXISTENTE")
+
+    def test_mark_group_sent_unknown_categoriza_bloqueo_transitorio_de_tabla(self):
+        self._insert_remito_group("brg-sent-unknown-tabla")
+
+        exc = BejermanSdkResponseError("El comprobante no se importó. No ha sido posible actualizar los datos en la tabla.")
+        _mark_group_sent_unknown("brg-sent-unknown-tabla", [], None, exc)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT status, response_summary FROM bejerman_remito_groups WHERE id = %s",
+                ["brg-sent-unknown-tabla"],
+            )
+            status, response_summary = cur.fetchone()
+
+        self.assertEqual(status, "sent_unknown")
+        summary = response_summary if isinstance(response_summary, dict) else json.loads(response_summary)
+        self.assertEqual(summary["errorCategory"], "BEJERMAN_TABLE_UPDATE_TRANSIENT")
+
+
+class BejermanBlockingStockSyncJobLookupTests(TestCase):
+    def setUp(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "INSERT INTO customers(cod_empresa, razon_social, telefono, email) VALUES (%s,%s,%s,%s) RETURNING id",
+                ["CLI-SYNC", "Cliente Sync", "123", "sync@bejerman.test"],
+            )
+            self.customer_id = int(cur.fetchone()[0])
+            cur.execute("INSERT INTO locations(nombre) VALUES (%s) RETURNING id", ["Taller Sync"])
+            self.taller_id = int(cur.fetchone()[0])
+            cur.execute("INSERT INTO marcas(nombre) VALUES (%s) RETURNING id", ["ResMed Sync"])
+            self.marca_id = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO models(marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s) RETURNING id",
+                [self.marca_id, "AirSense Sync", "CPAP", ""],
+            )
+            self.model_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, alquilado, mg_estado)
+                VALUES (%s,%s,%s,%s,FALSE,'activo')
+                RETURNING id
+                """,
+                [self.customer_id, self.marca_id, self.model_id, "SN-SYNC-001"],
+            )
+            self.device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO ingresos(device_id, estado, motivo, fecha_creacion, ubicacion_id, empresa_bejerman, empresa_facturar)
+                VALUES (%s,'liberado','reparación',CURRENT_TIMESTAMP,%s,'SEPID','SEPID')
+                RETURNING id
+                """,
+                [self.device_id, self.taller_id],
+            )
+            self.ingreso_id = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO delivery_orders(id, order_number, delivery_type) VALUES (%s,%s,'service_release')",
+                ["do-sync-lookup-test", "OS-SYNC-TEST"],
+            )
+            cur.execute(
+                "INSERT INTO delivery_order_items(id, order_id, ingreso_id) VALUES (%s,%s,%s)",
+                ["doi-sync-lookup-test", "do-sync-lookup-test", self.ingreso_id],
+            )
+
+    def _insert_sync_job(
+        self,
+        *,
+        status: str,
+        sync_type: str = "stock_str_to_stc",
+        target_deposit: str = "STC",
+        ingreso_id: int | None = None,
+        device_id: int | None = None,
+        serial: str = "SN-SYNC-001",
+    ):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bejerman_sync_jobs(sync_type, ingreso_id, device_id, numero_serie, source_deposit, target_deposit, status, last_error)
+                VALUES (%s,%s,%s,%s,'STR',%s,%s,%s)
+                RETURNING id
+                """,
+                [
+                    sync_type,
+                    ingreso_id or self.ingreso_id,
+                    device_id or self.device_id,
+                    serial,
+                    target_deposit,
+                    status,
+                    "El comprobante no se importó. No ha sido posible actualizar los datos en la tabla.",
+                ],
+            )
+            return int(cur.fetchone()[0])
+
+    def _insert_linked_ingreso(self, index: int) -> tuple[int, int, str]:
+        serial = f"SN-SYNC-EXTRA-{index:02d}"
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, alquilado, mg_estado)
+                VALUES (%s,%s,%s,%s,FALSE,'activo')
+                RETURNING id
+                """,
+                [self.customer_id, self.marca_id, self.model_id, serial],
+            )
+            device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO ingresos(device_id, estado, motivo, fecha_creacion, ubicacion_id, empresa_bejerman, empresa_facturar)
+                VALUES (%s,'liberado','reparación',CURRENT_TIMESTAMP,%s,'SEPID','SEPID')
+                RETURNING id
+                """,
+                [device_id, self.taller_id],
+            )
+            ingreso_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO delivery_order_items(id, order_id, ingreso_id)
+                VALUES (%s,%s,%s)
+                """,
+                [
+                    f"doi-sync-lookup-extra-{index}",
+                    "do-sync-lookup-test",
+                    ingreso_id,
+                ],
+            )
+        return ingreso_id, device_id, serial
+
+    def test_encuentra_job_bloqueado_para_la_orden(self):
+        job_id = self._insert_sync_job(status="blocked")
+
+        result = _find_blocking_stock_sync_jobs(["do-sync-lookup-test"])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["jobId"], job_id)
+        self.assertEqual(result[0]["status"], "blocked")
+        self.assertEqual(result[0]["targetDeposit"], "STC")
+
+    def test_no_devuelve_jobs_exitosos(self):
+        self._insert_sync_job(status="succeeded")
+
+        result = _find_blocking_stock_sync_jobs(["do-sync-lookup-test"])
+
+        self.assertEqual(result, [])
+
+    def test_orden_sin_ingreso_vinculado_no_rompe(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "INSERT INTO delivery_orders(id, order_number, delivery_type) VALUES (%s,%s,'sale')",
+                ["do-sync-lookup-sin-ingreso", "OS-SYNC-SIN-INGRESO"],
+            )
+
+        result = _find_blocking_stock_sync_jobs(["do-sync-lookup-sin-ingreso"])
+
+        self.assertEqual(result, [])
+
+    def test_lista_vacia_de_ordenes_no_consulta_nada(self):
+        self.assertEqual(_find_blocking_stock_sync_jobs([]), [])
+
+    @staticmethod
+    def _order_for_preflight() -> dict:
+        return {
+            "id": "do-sync-lookup-test",
+            "deliveryType": "service_release",
+            "companyKey": "SEPID",
+        }
+
+    def test_generate_reabre_job_bloqueado_y_continua_si_se_resuelve(self):
+        job_id = self._insert_sync_job(status="blocked")
+        order = self._order_for_preflight()
+
+        def mark_succeeded(**_kwargs):
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE bejerman_sync_jobs
+                       SET status='succeeded',
+                           last_error=NULL,
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE id=%s
+                    """,
+                    [job_id],
+                )
+            return {"processed": 1, "succeeded": 1, "failed": 0, "blocked": 0}
+
+        with (
+            patch("service.bejerman_delivery.get_delivery_order", return_value=order),
+            patch("service.bejerman_delivery._refresh_service_release_orders_for_remito", return_value=[order]),
+            patch("service.bejerman_delivery.refresh_delivery_order_article_partida_flags", return_value=order),
+            patch("service.bejerman_delivery._same_uncertain_remito_group_for_orders", return_value=None),
+            patch("service.bejerman_delivery.process_bejerman_jobs", side_effect=mark_succeeded) as process_mock,
+            patch(
+                "service.bejerman_delivery._validate_remito_orders",
+                side_effect=RuntimeError("continuó con la generación"),
+            ),
+            patch("service.bejerman_delivery.BejermanSDKClient") as remito_sdk_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "continuó con la generación"):
+                generate_bejerman_remito(
+                    ["do-sync-lookup-test"],
+                    actor_user_id=1152,
+                    _skip_print_split=True,
+                )
+
+        process_mock.assert_called_once_with(
+            limit=1,
+            job_id=job_id,
+            actor_user_id=1152,
+            reopen_blocked=True,
+        )
+        remito_sdk_mock.assert_not_called()
+
+    def test_generate_bloquea_antes_del_sdk_si_el_job_sigue_pendiente(self):
+        job_id = self._insert_sync_job(status="blocked")
+        order = self._order_for_preflight()
+
+        with (
+            patch(
+                "service.bejerman_delivery.get_delivery_order",
+                return_value=order,
+            ) as get_order_mock,
+            patch("service.bejerman_delivery._refresh_service_release_orders_for_remito", return_value=[order]),
+            patch("service.bejerman_delivery.refresh_delivery_order_article_partida_flags", return_value=order),
+            patch("service.bejerman_delivery._same_uncertain_remito_group_for_orders", return_value=None),
+            patch(
+                "service.bejerman_delivery.process_bejerman_jobs",
+                return_value={"processed": 1, "succeeded": 0, "failed": 1, "blocked": 0},
+            ),
+            patch("service.bejerman_delivery._validate_remito_orders") as validate_mock,
+            patch("service.bejerman_delivery.BejermanSDKClient") as remito_sdk_mock,
+        ):
+            with self.assertRaises(BillingError) as ctx:
+                generate_bejerman_remito(
+                    ["do-sync-lookup-test"],
+                    actor_user_id=1152,
+                    _skip_print_split=True,
+                )
+
+        self.assertEqual(ctx.exception.code, "BEJERMAN_REMITO_BLOCKED_BY_SYNC")
+        self.assertEqual(ctx.exception.payload["blockingSyncJobs"][0]["jobId"], job_id)
+        self.assertIn("Reintentá en unos minutos", str(ctx.exception))
+        get_order_mock.assert_not_called()
+        validate_mock.assert_not_called()
+        remito_sdk_mock.assert_not_called()
+
+    def test_preflight_sin_jobs_no_hace_nada(self):
+        with patch("service.bejerman_delivery.process_bejerman_jobs") as process_mock:
+            _ensure_blocking_stock_sync_jobs_resolved(
+                ["do-sync-lookup-test"],
+                actor_user_id=1152,
+            )
+
+        process_mock.assert_not_called()
+
+    def test_preflight_ignora_jobs_legacy_bloqueados_intencionalmente(self):
+        self._insert_sync_job(
+            status="blocked",
+            sync_type="stock_exit_rts",
+            target_deposit="SALIDA",
+        )
+
+        with patch("service.bejerman_delivery.process_bejerman_jobs") as process_mock:
+            _ensure_blocking_stock_sync_jobs_resolved(
+                ["do-sync-lookup-test"],
+                actor_user_id=1152,
+            )
+
+        process_mock.assert_not_called()
+
+    def test_preflight_intenta_todos_los_jobs_sin_limite_de_cinco(self):
+        job_ids = [self._insert_sync_job(status="blocked")]
+        for index in range(1, 6):
+            ingreso_id, device_id, serial = self._insert_linked_ingreso(index)
+            job_ids.append(
+                self._insert_sync_job(
+                    status="blocked",
+                    ingreso_id=ingreso_id,
+                    device_id=device_id,
+                    serial=serial,
+                )
+            )
+
+        def mark_succeeded(**kwargs):
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE bejerman_sync_jobs
+                       SET status='succeeded',
+                           last_error=NULL,
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE id=%s
+                    """,
+                    [kwargs["job_id"]],
+                )
+            return {"processed": 1, "succeeded": 1, "failed": 0, "blocked": 0}
+
+        with patch(
+            "service.bejerman_delivery.process_bejerman_jobs",
+            side_effect=mark_succeeded,
+        ) as process_mock:
+            _ensure_blocking_stock_sync_jobs_resolved(
+                ["do-sync-lookup-test"],
+                actor_user_id=1152,
+            )
+
+        self.assertEqual(process_mock.call_count, 6)
+        self.assertEqual(
+            {item.kwargs["job_id"] for item in process_mock.call_args_list},
+            set(job_ids),
+        )
+
+    def test_preflight_falla_cerrado_si_no_puede_consultar_la_cola(self):
+        with (
+            patch(
+                "service.bejerman_delivery._find_blocking_stock_sync_jobs",
+                side_effect=RuntimeError("base no disponible"),
+            ),
+            self.assertRaises(BillingError) as ctx,
+        ):
+            _ensure_blocking_stock_sync_jobs_resolved(
+                ["do-sync-lookup-test"],
+                actor_user_id=1152,
+            )
+
+        self.assertEqual(
+            ctx.exception.code,
+            "BEJERMAN_REMITO_SYNC_PREFLIGHT_UNAVAILABLE",
+        )
+
 
 class BejermanDeliveryArticleTests(SimpleTestCase):
     def test_sdk_article_catalog_fetches_full_catalog_without_search_parametros(self):
@@ -2600,6 +3313,62 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
         self.assertEqual(result["depositCode"], "STL")
         self.assertEqual([item["partida"] for item in result["items"]], ["L-STL-1"])
         self.assertEqual(result["items"][0]["stockDepositCode"], "STL")
+
+    def test_article_stock_falls_back_to_raw_total_when_article_has_no_partida(self):
+        # Como OE-00232: article_requires_partida=false, así que las filas de stock no
+        # traen Art_Partida y build_article_stock_lots las descarta. Sin este fallback
+        # el frontend no tiene forma de mostrar "hay/no hay stock" para ese artículo.
+        class FakeNoPartidaClient:
+            def __init__(self):
+                self.deposit_calls = []
+
+            def obtener_stock_deposito(self, deposit_code):
+                self.deposit_calls.append(deposit_code)
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "1203012",
+                            "Art_CodDeposito": "VAL",
+                            "Art_Partida": "",
+                            "Art_DispUM1": 3,
+                            "Art_RealUM1": 3,
+                        },
+                        {
+                            "Articulo_Codigo": "1203012",
+                            "Art_CodDeposito": "VAL",
+                            "Art_Partida": "",
+                            "Art_DispUM1": 4,
+                            "Art_RealUM1": 4,
+                        },
+                    ]
+                }
+
+            def obtener_partidas(self):
+                return {"DatosJSON": []}
+
+        client = FakeNoPartidaClient()
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=client):
+            result = list_bejerman_article_stock("1203012", 100, company_key="MGBIO")
+
+        self.assertEqual(result["totalAvailableQuantity"], 7)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["stockAvailableQuantity"], 7)
+        self.assertEqual(result["items"][0]["partida"], "")
+        self.assertIsNone(result["warning"])
+
+    def test_article_stock_warns_when_no_partida_and_no_stock(self):
+        class FakeEmptyStockClient:
+            def obtener_stock_deposito(self, deposit_code):
+                return {"DatosJSON": []}
+
+            def obtener_partidas(self):
+                return {"DatosJSON": []}
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=FakeEmptyStockClient()):
+            result = list_bejerman_article_stock("1203012", 100, company_key="MGBIO")
+
+        self.assertEqual(result["items"], [])
+        self.assertIn("Sin stock positivo", result["warning"])
 
     def test_bejerman_depositos_returns_sdk_deposits_for_company(self):
         client = FakeArticleStockClient()
@@ -2769,7 +3538,10 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(payload["equipment"]["articleCode"], "")
         self.assertTrue(payload["equipment"]["mappingRequired"])
         self.assertEqual(payload["equipment"]["articleName"], "BPAP BMC GI 25")
-        self.assertEqual(payload["equipment"]["mappedArticleName"], "Equipo recibido para servicio técnico")
+        # mappedArticleName ahora es exclusivamente la descripción que Bejerman tiene
+        # registrada para el código (vacía si todavía no hay mapeo confirmado); el texto
+        # armado localmente (equipmentLabel) ya no se mezcla acá, solo en articleName.
+        self.assertEqual(payload["equipment"]["mappedArticleName"], "")
 
     @override_settings(BEJERMAN_RIS_UPDATE_STOCK="0")
     def test_ris_comprobante_uses_bejerman_customer_fiscal_fields_and_no_stock(self):
@@ -3396,6 +4168,58 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(_validate_remito_orders([order("do-2", "MG BIO")])["companyKey"], "MGBIO")
         with self.assertRaisesRegex(Exception, "empresas Bejerman distintas"):
             _validate_remito_orders([order("do-1", "SEPID"), order("do-2", "MG BIO")])
+
+    def test_delivery_remito_cliente_particular_usa_datos_del_propietario(self):
+        def order(order_id, propietario_doc):
+            return {
+                "id": order_id,
+                "bejermanCustomerCode": "",
+                "customerName": "Particular",
+                "propietarioNombre": "Juan Perez",
+                "propietarioDoc": propietario_doc,
+                "deliveryType": "sale",
+                "status": "armado_pendiente_entrega",
+                "operationCompanyLabel": "SEPID",
+                "items": [{"articleCode": "110706", "quantity": 1, "partida": "P1"}],
+            }
+
+        compatibility = _validate_remito_orders([order("do-part-1", "30710698"), order("do-part-2", "30710698")])
+
+        self.assertEqual(compatibility["customerCode"], "")
+        self.assertEqual(compatibility["propietarioNombre"], "Juan Perez")
+        self.assertEqual(compatibility["propietarioDoc"], "30710698")
+        self.assertEqual(compatibility["customerName"], "Juan Perez")
+
+    def test_delivery_remito_lote_no_permite_particulares_con_documentos_distintos(self):
+        def order(order_id, propietario_doc):
+            return {
+                "id": order_id,
+                "bejermanCustomerCode": "",
+                "customerName": "Particular",
+                "propietarioNombre": "Juan Perez",
+                "propietarioDoc": propietario_doc,
+                "deliveryType": "sale",
+                "status": "armado_pendiente_entrega",
+                "operationCompanyLabel": "SEPID",
+                "items": [{"articleCode": "110706", "quantity": 1, "partida": "P1"}],
+            }
+
+        with self.assertRaisesRegex(Exception, "mismo código Bejerman"):
+            _validate_remito_orders([order("do-part-1", "30710698"), order("do-part-2", "27263312258")])
+
+    def test_delivery_remito_particular_sin_propietario_sigue_bloqueado(self):
+        order = {
+            "id": "do-part-sin-doc",
+            "bejermanCustomerCode": "",
+            "customerName": "Particular",
+            "deliveryType": "sale",
+            "status": "armado_pendiente_entrega",
+            "operationCompanyLabel": "SEPID",
+            "items": [{"articleCode": "110706", "quantity": 1, "partida": "P1"}],
+        }
+
+        with self.assertRaisesRegex(Exception, "mismo código Bejerman"):
+            _validate_remito_orders([order])
 
     def test_delivery_remito_lote_no_permite_mezclar_monedas(self):
         def order(order_id, price_currency):
@@ -4317,3 +5141,133 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertNotIn("Intento ", html)
         self.assertNotIn("Esperando PDF (", html)
         self.assertNotIn(chr(0x00C3), html)
+
+
+class DeliveryOrderPropietarioOcasionalTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # get_delivery_order lee el codigo Bejerman vivo del cliente (multi-empresa SEPID/MGBIO).
+        call_command("apply_customer_bejerman_schema", verbosity=0)
+        super().setUpClass()
+
+    def setUp(self):
+        with connection.cursor() as cur:
+            # 'PTL' a proposito: en produccion la fila Particular quedo con un codigo cargado que no
+            # existe en Bejerman. Con NULL aca el test pasaba en verde mientras el circuito real
+            # fallaba, porque el camino de cliente ocasional esta detras de guardas
+            # `if not customer_code`.
+            cur.execute(
+                "INSERT INTO customers(cod_empresa, razon_social) VALUES (%s,%s) RETURNING id",
+                ["PTL", "Particular"],
+            )
+            self.particular_customer_id = int(cur.fetchone()[0])
+            cur.execute("INSERT INTO locations(nombre) VALUES (%s) RETURNING id", ["Taller Propietario"])
+            self.taller_id = int(cur.fetchone()[0])
+            cur.execute("INSERT INTO marcas(nombre) VALUES (%s) RETURNING id", ["ResMed Propietario"])
+            self.marca_id = int(cur.fetchone()[0])
+            cur.execute(
+                "INSERT INTO models(marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s) RETURNING id",
+                [self.marca_id, "AirSense Propietario", "CPAP", ""],
+            )
+            self.model_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, alquilado, mg_estado)
+                VALUES (%s,%s,%s,%s,FALSE,'activo')
+                RETURNING id
+                """,
+                [self.particular_customer_id, self.marca_id, self.model_id, "SN-PROPIETARIO-001"],
+            )
+            self.device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    device_id, estado, motivo, fecha_creacion, ubicacion_id,
+                    empresa_bejerman, empresa_facturar, propietario_nombre, propietario_doc
+                )
+                VALUES (%s,'liberado','reparación',CURRENT_TIMESTAMP,%s,'SEPID','SEPID',%s,%s)
+                RETURNING id
+                """,
+                [self.device_id, self.taller_id, "Juan Perez", "30710698"],
+            )
+            self.ingreso_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO delivery_orders(id, order_number, delivery_type, ingreso_id, customer_id, bejerman_customer_code, customer_name)
+                VALUES (%s,%s,'service_release',%s,%s,NULL,%s)
+                """,
+                ["do-propietario-test", "OS-PROPIETARIO-TEST", self.ingreso_id, self.particular_customer_id, "Particular"],
+            )
+
+    def _insert_ingreso_particular(self, *, estado, propietario_doc="30710698", serial="SN-EXTRA"):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, alquilado, mg_estado)
+                VALUES (%s,%s,%s,%s,FALSE,'activo') RETURNING id
+                """,
+                [self.particular_customer_id, self.marca_id, self.model_id, serial],
+            )
+            device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    device_id, estado, motivo, fecha_creacion, ubicacion_id,
+                    empresa_bejerman, empresa_facturar, propietario_nombre, propietario_doc
+                )
+                VALUES (%s,%s,'reparación',CURRENT_TIMESTAMP,%s,'SEPID','SEPID',%s,%s)
+                RETURNING id
+                """,
+                [device_id, estado, self.taller_id, "Juan Perez", propietario_doc],
+            )
+            return int(cur.fetchone()[0])
+
+    def test_un_segundo_equipo_del_mismo_particular_mantiene_la_ficha_ocupada(self):
+        # El caso que motivo la salvaguarda: trae dos equipos y se entrega uno solo.
+        self._insert_ingreso_particular(estado="reparado", serial="SN-PROPIETARIO-002")
+
+        self.assertTrue(has_other_open_ingresos("30710698", exclude_ingreso_id=self.ingreso_id))
+        # El documento local puede venir con puntos; el maestro lo guarda sin nada.
+        self.assertTrue(has_other_open_ingresos("30.710.698", exclude_ingreso_id=self.ingreso_id))
+
+    def test_el_ingreso_que_se_esta_entregando_no_cuenta_como_abierto(self):
+        self.assertFalse(has_other_open_ingresos("30710698", exclude_ingreso_id=self.ingreso_id))
+
+    def test_los_estados_terminales_no_cuentan_como_abiertos(self):
+        for estado in ("entregado", "vendido_entregado", "baja"):
+            with self.subTest(estado=estado):
+                self._insert_ingreso_particular(estado=estado, serial=f"SN-TERM-{estado}")
+        self.assertFalse(has_other_open_ingresos("30710698", exclude_ingreso_id=self.ingreso_id))
+
+    def test_liberado_y_pendiente_de_entrega_siguen_contando_como_abiertos(self):
+        # El equipo esta listo pero todavia en la casa: si se deshabilita la ficha ahi, la salida
+        # de ese equipo se queda sin cliente habilitado.
+        for estado in ("liberado", "vendido_pendiente_entrega"):
+            with self.subTest(estado=estado):
+                otro = self._insert_ingreso_particular(estado=estado, serial=f"SN-ABIERTO-{estado}")
+                self.assertTrue(has_other_open_ingresos("30710698", exclude_ingreso_id=self.ingreso_id))
+                with connection.cursor() as cur:
+                    cur.execute("UPDATE ingresos SET estado='entregado' WHERE id=%s", [otro])
+
+    def test_otro_documento_no_bloquea(self):
+        self._insert_ingreso_particular(
+            estado="reparado", propietario_doc="27263312258", serial="SN-OTRO-DOC"
+        )
+
+        self.assertFalse(has_other_open_ingresos("30710698", exclude_ingreso_id=self.ingreso_id))
+
+    def test_get_delivery_order_expone_datos_del_propietario_ocasional(self):
+        order = get_delivery_order("do-propietario-test")
+
+        self.assertEqual(order["propietarioNombre"], "Juan Perez")
+        self.assertEqual(order["propietarioDoc"], "30710698")
+        self.assertEqual(order["bejermanCustomerCode"], "")
+
+    def test_list_delivery_orders_expone_datos_del_propietario_ocasional(self):
+        # La respuesta de emision reusa el listado: si ahi faltan los datos del propietario,
+        # el panel no puede distinguir un particular de un cliente sin mapear.
+        items = list_delivery_orders({"limit": 200})["items"]
+        order = next(item for item in items if item["id"] == "do-propietario-test")
+
+        self.assertEqual(order["propietarioNombre"], "Juan Perez")
+        self.assertEqual(order["propietarioDoc"], "30710698")

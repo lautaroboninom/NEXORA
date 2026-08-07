@@ -308,6 +308,51 @@ export function deliveryOrderSourceLabel(order) {
   return [sourceLocation, clean(order?.sourceReference), clean(order?.sourceSystem)].filter(Boolean).join(" - ");
 }
 
+// Espejo de service/bejerman_sdk.py: OCCASIONAL_CUSTOMER_NAMES / is_occasional_customer_name.
+const OCCASIONAL_CUSTOMER_NAMES = new Set(["particular", "particulares", "consumidorfinal", "clientevario"]);
+
+function normalizedCustomerName(value) {
+  // NFD separa los acentos en marcas combinantes y el filtro alfanumérico las descarta,
+  // igual que el lado Python: "Pärticular" y "Particular" normalizan al mismo texto.
+  return String(value ?? "")
+    .normalize("NFD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+export function isOccasionalCustomerName(value) {
+  return OCCASIONAL_CUSTOMER_NAMES.has(normalizedCustomerName(value));
+}
+
+/** Las órdenes de un particular no llevan código Bejerman: se emiten como cliente ocasional
+ * (`@@@#@@`) con el nombre y documento del propietario que capturó el ingreso. */
+export function deliveryOrderIsOccasionalCustomer(order) {
+  return !clean(order?.bejermanCustomerCode) && isOccasionalCustomerName(order?.customerName);
+}
+
+export function deliveryOrderOccasionalCustomerReady(order) {
+  return Boolean(clean(order?.propietarioNombre) && clean(order?.propietarioDoc));
+}
+
+/** Identidad de un particular: el documento del propietario, normalizado a dígitos como lo
+ * guarda el maestro. Es lo único que distingue a una persona de otra, porque todos comparten
+ * la misma fila `customers` y ninguno tiene código Bejerman. */
+export function deliveryOrderOccasionalCustomerDocument(order) {
+  if (!deliveryOrderIsOccasionalCustomer(order)) return "";
+  return clean(order?.propietarioDoc).replace(/\D/g, "");
+}
+
+export function deliveryOrderBejermanCustomerLabel(order) {
+  const code = clean(order?.bejermanCustomerCode);
+  if (code) return code;
+  if (deliveryOrderIsOccasionalCustomer(order)) {
+    const owner = clean(order?.propietarioNombre);
+    const doc = clean(order?.propietarioDoc);
+    return ["Cliente ocasional", owner, doc ? `Doc. ${doc}` : ""].filter(Boolean).join(" - ");
+  }
+  return "";
+}
+
 export function deliveryOrderCommercialLabel(order) {
   return [
     clean(order?.sellerName),

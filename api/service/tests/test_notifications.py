@@ -14,8 +14,10 @@ from rest_framework.test import APIClient
 
 from service.auth import issue_token
 from service.bejerman_delivery import (
+    _current_multi_remito_result,
     generate_bejerman_remito,
     list_rental_available_equipment,
+    register_delivery_order_remitos,
     reissue_corrected_bejerman_remito_review,
     verify_bejerman_remito_review,
 )
@@ -358,6 +360,8 @@ class NotificationsAPITest(TestCase):
         status: str = "entregado_pendiente_facturacion",
         remito_number: str = "RT R 00004-00012345",
         invoice_number: str | None = None,
+        attach_bejerman_group: bool = True,
+        billing_required: bool = True,
     ) -> dict:
         order = create_delivery_order(
             {
@@ -386,7 +390,7 @@ class NotificationsAPITest(TestCase):
             },
             self.jefe.id,
         )
-        if remito_number:
+        if remito_number and attach_bejerman_group:
             with connection.cursor() as cur:
                 cur.execute(
                     """
@@ -414,7 +418,7 @@ class NotificationsAPITest(TestCase):
                         "VAL",
                         "generated",
                         json.dumps([order_id]),
-                        json.dumps({"billingRequired": True}),
+                        json.dumps({"billingRequired": billing_required}),
                     ],
                 )
                 cur.execute(
@@ -717,6 +721,102 @@ class NotificationsAPITest(TestCase):
         self.assertEqual({row[1] for row in rows}, {"entregado"})
         self.assertEqual({row[2] for row in rows}, {"RSS R 00004-00001234"})
         self.assertTrue(all(row[3] is not None for row in rows))
+
+    def test_rss_partida_rechazada_cae_a_ent_mas_documento_n(self):
+        self._ensure_rental_article_mapping("1111003")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET estado = 'liberado',
+                       resolucion = 'reparado',
+                       remito_salida = NULL,
+                       fecha_entrega = NULL,
+                       factura_numero = NULL
+                 WHERE id = %s
+                """,
+                [self.ingreso_id],
+            )
+        order = ensure_service_release_order_for_ingreso(self.ingreso_id, self.jefe.id)
+
+        sent_comprobantes = []
+        stock_comprobantes = []
+        present_partidas = set()
+
+        class PartidaRejectedRssClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clinica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
+                            "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def obtener_stock_partida(self, requested_partida):
+                if requested_partida not in present_partidas:
+                    return {"DatosJSON": []}
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "1111003",
+                            "Art_CodDeposito": "STC",
+                            "Art_Partida": requested_partida,
+                            "Art_RealUM1": 1,
+                            "Art_DispUM1": 1,
+                        }
+                    ]
+                }
+
+            def ingresar_lista_comprobantes_stock_json(self, comprobantes, *, numera_flex="N"):
+                stock_comprobantes.append(list(comprobantes or []))
+                for item in comprobantes or []:
+                    present_partidas.add(item.get("Comprobante_ArtPartida"))
+                return {"Resultado": "OK", "DatosJSON": json.dumps(comprobantes or [])}
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                sent_comprobantes.append(comprobante)
+                if comprobante.get("Comprobante_ActualizaStock") == "S":
+                    raise BejermanSdkResponseError("El comprobante no se importó. Partida inexistente.")
+                return {
+                    "Resultado": "OK",
+                    "DatosJSON": json.dumps(
+                        {
+                            "Comprobante_Tipo": "RSS",
+                            "Comprobante_Letra": "R",
+                            "Comprobante_PtoVenta": "00004",
+                            "Comprobante_Numero": "00001234",
+                        }
+                    ),
+                }
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", PartidaRejectedRssClient):
+            result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertEqual(result["remitoNumber"], "RSS R 00004-00001234")
+        self.assertEqual(len(sent_comprobantes), 2)
+        self.assertEqual(sent_comprobantes[0]["Comprobante_ActualizaStock"], "S")
+        self.assertEqual(sent_comprobantes[1]["Comprobante_ActualizaStock"], "N")
+        self.assertEqual(len(stock_comprobantes), 1)
+        rejected_article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        recovered_article_lines = [item for item in sent_comprobantes[1]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        partida = rejected_article_lines[0]["Item_Partida"]
+        self.assertTrue(partida)
+        self.assertEqual(stock_comprobantes[0][0]["Comprobante_ArtPartida"], partida)
+        self.assertEqual(stock_comprobantes[0][0]["Comprobante_ArtDeposito"], "STC")
+        self.assertEqual(recovered_article_lines[0]["Item_Partida"], partida)
+        self.assertGreater(recovered_article_lines[0]["Item_CantidadUM1"], 0)
+        with connection.cursor() as cur:
+            cur.execute("SELECT status FROM bejerman_remito_groups WHERE id = %s", [result["groupId"]])
+            self.assertEqual(cur.fetchone()[0], "generated")
 
     def test_rss_corrige_articulo_por_stock_de_partida_antes_de_emitir(self):
         self._ensure_rental_article_mapping("1103004")
@@ -1440,6 +1540,205 @@ class NotificationsAPITest(TestCase):
 
         return patch("service.delivery_orders._delivery_partida_stock_lots", side_effect=fake_lots)
 
+    def _create_rt_split_order(
+        self,
+        order_id: str,
+        item_count: int,
+        *,
+        partida_prefix: str,
+        article_code: str = "ART-SPLIT",
+        discount_percent: str = "0",
+    ) -> dict:
+        lots = [
+            {
+                "articleCode": article_code,
+                "depositCode": "VAL",
+                "partida": f"{partida_prefix}-{index:03d}",
+                "availableQuantity": 1,
+            }
+            for index in range(item_count)
+        ]
+        with self._delivery_partida_stock_patch(lots):
+            return create_delivery_order(
+                {
+                    "id": order_id,
+                    "orderNumber": f"OE-{order_id.upper()}",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": "SEPID",
+                    "sellerName": "Ventas",
+                    "sellerCode": "MAX",
+                    "status": "armado_pendiente_entrega",
+                    "items": [
+                        {
+                            "articleCode": article_code,
+                            "articleName": "Artículo divisible",
+                            "articleRequiresPartida": True,
+                            "description": "Artículo divisible",
+                            "quantity": 1,
+                            "unitPrice": "10",
+                            "discountPercent": discount_percent,
+                            "partida": f"{partida_prefix}-{index:03d}",
+                        }
+                        for index in range(item_count)
+                    ],
+                },
+                self.jefe.id,
+            )
+
+    def _create_rt_multipartida_split_order(
+        self,
+        order_id: str,
+        partida_count: int,
+        *,
+        partida_prefix: str,
+        article_code: str = "ART-MULTIPARTIDA",
+    ) -> dict:
+        lots = [
+            {
+                "articleCode": article_code,
+                "depositCode": "VAL",
+                "partida": f"{partida_prefix}-{index:03d}",
+                "availableQuantity": 1,
+            }
+            for index in range(partida_count)
+        ]
+        with self._delivery_partida_stock_patch(lots):
+            return create_delivery_order(
+                {
+                    "id": order_id,
+                    "orderNumber": f"OE-{order_id.upper()}",
+                    "customerId": self.customer_id,
+                    "deliveryType": "sale",
+                    "companyKey": "SEPID",
+                    "sellerName": "Ventas",
+                    "sellerCode": "MAX",
+                    "status": "armado_pendiente_entrega",
+                    "priceCurrency": "ARS",
+                    "items": [
+                        {
+                            "articleCode": article_code,
+                            "articleName": "Artículo multipartida",
+                            "articleRequiresPartida": True,
+                            "description": "Artículo multipartida",
+                            "quantity": partida_count,
+                            "unitPrice": "10",
+                            "priceCurrency": "ARS",
+                            "discountPercent": "0",
+                            "partidas": [
+                                {
+                                    "partida": f"{partida_prefix}-{index:03d}",
+                                    "assignedQuantity": 1,
+                                    "stockDepositCode": "VAL",
+                                }
+                                for index in range(partida_count)
+                            ],
+                        }
+                    ],
+                },
+                self.jefe.id,
+            )
+
+    def _fake_rt_split_client(self, sent_comprobantes, article_codes=None, first_number=3234):
+        known_article_codes = list(article_codes or ["ART-SPLIT"])
+
+        class SplitSaleClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_clientes(self):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Cliente_Codigo": "CLI-NOTIF",
+                            "Cliente_RazonSocial": "Clinica Notificaciones",
+                            "Cliente_NroDocumento": "30700000000",
+                            "Cliente_Provincia": "02",
+                            "Cliente_TipoDocumento": "1",
+                            "Cliente_SitIVA": "1",
+                        }
+                    ]
+                }
+
+            def list_articulos(self, filters=None, limit=20):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": article_code,
+                            "Articulo_Descripcion": "Artículo divisible",
+                            "Art_TipoTasaVentas": "1",
+                            "Art_CodTasaIVAVentas": "01",
+                        }
+                        for article_code in known_article_codes
+                    ]
+                }
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                sent_comprobantes.append(comprobante)
+                number = first_number + len(sent_comprobantes) - 1
+                return {
+                    "Resultado": "OK",
+                    "DatosJSON": json.dumps(
+                        {
+                            "Comprobante_Tipo": "RT",
+                            "Comprobante_Letra": "R",
+                            "Comprobante_PtoVenta": "00004",
+                            "Comprobante_Numero": f"{number:08d}",
+                        }
+                    ),
+                }
+
+        return SplitSaleClient
+
+    @staticmethod
+    def _rt_article_counts(sent_comprobantes):
+        return [
+            len([item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"])
+            for comprobante in sent_comprobantes
+        ]
+
+    def _attach_failed_rt_review_group(self, order_id: str, group_id: str, *, issue_date: str) -> None:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bejerman_remito_groups(
+                    id, company_key, comprobante_tipo, comprobante_letra, comprobante_pto_venta,
+                    customer_code, customer_name, seller_code, payment_term_code,
+                    operation_code, deposit_code, status, order_ids, response_summary, last_error
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                """,
+                [
+                    group_id,
+                    "SEPID",
+                    "RT",
+                    "R",
+                    "00004",
+                    "CLI-NOTIF",
+                    "Clinica Notificaciones",
+                    "MAX",
+                    "30",
+                    "MC",
+                    "VAL",
+                    "failed_review",
+                    json.dumps([order_id]),
+                    json.dumps(
+                        {
+                            "reviewRequired": True,
+                            "reconciliationRequired": True,
+                            "reviewState": "requires_verification",
+                            "failureCertainty": "confirmed_not_imported",
+                            "bridgeRequest": {"issueDate": issue_date},
+                        }
+                    ),
+                    "El comprobante no se importó en Bejerman.",
+                ],
+            )
+            cur.execute(
+                "UPDATE delivery_orders SET bejerman_remito_group_id = %s WHERE id = %s",
+                [group_id, order_id],
+            )
+
     def _create_sale_order_ready_for_manual_remito(self, order_id: str, company_key: str = "SEPID") -> dict:
         partida = f"P-{order_id}"
         with self._delivery_partida_stock_patch(
@@ -1653,6 +1952,239 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(summary["manualRemitoNumber"], "RT R 00001-00022345")
         self.assertTrue(summary["stockMovementGenerated"])
         self.assertEqual(summary["stockMovementSource"], "nexora_manual_pv1")
+
+    def test_una_orden_asocia_dos_remitos_existentes_sin_dividirse(self):
+        order = self._create_rt_split_order(
+            "do-multi-remito-existente",
+            11,
+            partida_prefix="P-MULTI-EXISTENTE",
+        )
+
+        with patch("service.bejerman_delivery.BejermanSDKClient") as sdk_cls:
+            result = register_delivery_order_remitos(
+                order["id"],
+                self.recepcion.id,
+                {
+                    "remitos": [
+                        {"remitoNumber": "RT R 00004-00088001"},
+                        {"remitoNumber": "RT R 00004-00088002"},
+                    ]
+                },
+            )
+
+        sdk_cls.assert_not_called()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["remitoSetStatus"], "complete")
+        self.assertEqual(result["remitoNumbers"], ["RT R 00004-00088001", "RT R 00004-00088002"])
+        with connection.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM delivery_orders WHERE id = %s", [order["id"]])
+            self.assertEqual(int(cur.fetchone()[0]), 1)
+            cur.execute(
+                """
+                SELECT l.sequence, l.expected_count, l.allocation_status, COUNT(a.id)
+                  FROM delivery_order_remito_links l
+                  LEFT JOIN delivery_order_remito_item_allocations a ON a.link_id = l.id
+                 WHERE l.order_id = %s
+                 GROUP BY l.id, l.sequence, l.expected_count, l.allocation_status
+                 ORDER BY l.sequence
+                """,
+                [order["id"]],
+            )
+            links = cur.fetchall()
+        self.assertEqual(links, [(1, 2, "external_unknown", 0), (2, 2, "external_unknown", 0)])
+
+    def test_reintento_manual_salta_el_remito_00001_ya_exitoso(self):
+        order = self._create_rt_split_order(
+            "do-multi-remito-registrado",
+            2,
+            partida_prefix="P-MULTI-REGISTRADO",
+        )
+        item_ids = [item["id"] for item in order["items"]]
+        payload = {
+            "remitos": [
+                {
+                    "remitoNumber": "RT R 00001-00088101",
+                    "allocations": [{"itemId": item_ids[0], "quantity": 1}],
+                },
+                {
+                    "remitoNumber": "RT R 00001-00088102",
+                    "allocations": [{"itemId": item_ids[1], "quantity": 1}],
+                },
+            ]
+        }
+        first_sent = []
+        BaseClient = self._fake_rt_split_client(first_sent, first_number=88101)
+
+        class FailSecondClient(BaseClient):
+            attempts = 0
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                type(self).attempts += 1
+                if type(self).attempts == 2:
+                    raise BejermanSdkResponseError("Falla controlada del segundo remito")
+                return super().ingresar_comprobante_ventas_json(comprobante, **kwargs)
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", FailSecondClient):
+            partial = register_delivery_order_remitos(order["id"], self.recepcion.id, payload)
+
+        self.assertFalse(partial["success"])
+        self.assertTrue(partial["partial"])
+        self.assertEqual(partial["remitoSetStatus"], "partial")
+        self.assertEqual(partial["remitoNumbers"], ["RT R 00001-00088101"])
+
+        changed_payload = {
+            "remitos": [
+                {
+                    "remitoNumber": "RT R 00001-00088101",
+                    "allocations": [{"itemId": item_ids[1], "quantity": 1}],
+                },
+                {
+                    "remitoNumber": "RT R 00001-00088102",
+                    "allocations": [{"itemId": item_ids[0], "quantity": 1}],
+                },
+            ]
+        }
+        with patch("service.bejerman_delivery.BejermanSDKClient") as retry_sdk_cls:
+            with self.assertRaises(DeliveryOrderError) as mismatch:
+                register_delivery_order_remitos(order["id"], self.recepcion.id, changed_payload)
+        self.assertEqual(mismatch.exception.code, "DELIVERY_REMITO_ALLOCATION_RETRY_MISMATCH")
+        retry_sdk_cls.assert_not_called()
+
+        retry_sent = []
+        with patch(
+            "service.bejerman_delivery.BejermanSDKClient",
+            self._fake_rt_split_client(retry_sent, first_number=88102),
+        ):
+            completed = register_delivery_order_remitos(order["id"], self.recepcion.id, payload)
+
+        self.assertTrue(completed["success"])
+        self.assertEqual(completed["remitoSetStatus"], "complete")
+        self.assertEqual(len(first_sent), 1)
+        self.assertEqual(len(retry_sent), 1)
+        self.assertEqual(
+            completed["remitoNumbers"],
+            ["RT R 00001-00088101", "RT R 00001-00088102"],
+        )
+
+    def test_varios_remitos_00001_rechazan_distribuciones_invalidas_y_modos_mezclados(self):
+        order = self._create_rt_split_order(
+            "do-multi-remito-validaciones",
+            2,
+            partida_prefix="P-MULTI-VALIDACIONES",
+        )
+        first_item_id, second_item_id = [item["id"] for item in order["items"]]
+        cases = [
+            (
+                "faltante",
+                {
+                    "remitos": [
+                        {
+                            "remitoNumber": "RT R 00001-00088301",
+                            "allocations": [{"itemId": first_item_id, "quantity": 0.5}],
+                        },
+                        {
+                            "remitoNumber": "RT R 00001-00088302",
+                            "allocations": [{"itemId": second_item_id, "quantity": 1}],
+                        },
+                    ]
+                },
+                "DELIVERY_REMITO_ALLOCATIONS_INCOMPLETE",
+            ),
+            (
+                "exceso",
+                {
+                    "remitos": [
+                        {
+                            "remitoNumber": "RT R 00001-00088303",
+                            "allocations": [{"itemId": first_item_id, "quantity": 2}],
+                        },
+                        {
+                            "remitoNumber": "RT R 00001-00088304",
+                            "allocations": [{"itemId": second_item_id, "quantity": 1}],
+                        },
+                    ]
+                },
+                "DELIVERY_REMITO_ALLOCATIONS_INCOMPLETE",
+            ),
+            (
+                "solapamiento",
+                {
+                    "remitos": [
+                        {
+                            "remitoNumber": "RT R 00001-00088305",
+                            "allocations": [{"itemId": first_item_id, "quantity": 0.5}],
+                        },
+                        {
+                            "remitoNumber": "RT R 00001-00088306",
+                            "allocations": [
+                                {"itemId": first_item_id, "quantity": 0.5},
+                                {"itemId": second_item_id, "quantity": 1},
+                            ],
+                        },
+                    ]
+                },
+                "DELIVERY_REMITO_ALLOCATION_OVERLAP",
+            ),
+            (
+                "número duplicado",
+                {
+                    "remitos": [
+                        {"remitoNumber": "RT R 00001-00088307"},
+                        {"remitoNumber": "RT R 00001-00088307"},
+                    ]
+                },
+                "DELIVERY_REMITO_DUPLICATED",
+            ),
+            (
+                "modos mezclados",
+                {
+                    "remitos": [
+                        {"remitoNumber": "RT R 00001-00088308"},
+                        {"remitoNumber": "RT R 00004-00088309"},
+                    ]
+                },
+                "DELIVERY_REMITO_MIXED_MODES",
+            ),
+            (
+                "empresas mezcladas",
+                {
+                    "remitos": [
+                        {"remitoNumber": "RT R 00004-00088310"},
+                        {"remitoNumber": "RT R 00007-00088311"},
+                    ]
+                },
+                "DELIVERY_REMITO_MIXED_COMPANIES",
+            ),
+        ]
+
+        with patch("service.bejerman_delivery.BejermanSDKClient") as sdk_cls:
+            for label, payload, expected_code in cases:
+                with self.subTest(label=label):
+                    with self.assertRaises(DeliveryOrderError) as raised:
+                        register_delivery_order_remitos(order["id"], self.recepcion.id, payload)
+                    self.assertEqual(raised.exception.code, expected_code)
+        sdk_cls.assert_not_called()
+
+    def test_remito_existente_reconcilia_grupo_incierto_sin_nuevo_movimiento(self):
+        order = self._create_sale_order_ready_for_manual_remito("do-reconcile-existing")
+        group_id = "brg-reconcile-existing"
+        self._attach_failed_rt_review_group(order["id"], group_id, issue_date="2026-08-04")
+
+        with patch("service.bejerman_delivery.BejermanSDKClient") as sdk_cls:
+            result = register_delivery_order_remitos(
+                order["id"],
+                self.recepcion.id,
+                {"remitoNumber": "RT R 00004-00088201"},
+            )
+
+        sdk_cls.assert_not_called()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["remitoSetStatus"], "complete")
+        self.assertEqual(result["remitos"][0]["groupId"], group_id)
+        self.assertEqual(result["remitos"][0]["allocationStatus"], "external_unknown")
+        with connection.cursor() as cur:
+            cur.execute("SELECT status, remito_number FROM bejerman_remito_groups WHERE id = %s", [group_id])
+            self.assertEqual(cur.fetchone(), ("reconciled", "RT R 00004-00088201"))
 
     def test_ingreso_liberado_respeta_preferencia_y_no_duplica(self):
         self._enable_liberado_for_tecnico()
@@ -3439,118 +3971,620 @@ class NotificationsAPITest(TestCase):
     def test_venta_grande_se_divide_en_varios_remitos_por_limite_de_lineas(self):
         # Caso OE-00116: una venta con más partidas de las que entran en la
         # hoja del RT debe emitirse como varios remitos automáticamente.
-        lots = [
-            {"articleCode": "ART-SPLIT", "depositCode": "VAL", "partida": f"P-{index:03d}", "availableQuantity": 1}
-            for index in range(25)
-        ]
-        with self._delivery_partida_stock_patch(lots):
-            order = create_delivery_order(
-                {
-                    "id": "do-remito-venta-split",
-                    "orderNumber": "OE-VENTA-SPLIT",
-                    "customerId": self.customer_id,
-                    "deliveryType": "sale",
-                    "companyKey": "SEPID",
-                    "sellerName": "Ventas",
-                    "sellerCode": "MAX",
-                    "status": "armado_pendiente_entrega",
-                    "items": [
-                        {
-                            "articleCode": "ART-SPLIT",
-                            "articleName": "Artículo divisible",
-                            "articleRequiresPartida": True,
-                            "description": "Artículo divisible",
-                            "quantity": 1,
-                            "unitPrice": "10",
-                            "partida": f"P-{index:03d}",
-                        }
-                        for index in range(25)
-                    ],
-                },
-                self.jefe.id,
-            )
+        order = self._create_rt_split_order(
+            "do-remito-venta-split",
+            25,
+            partida_prefix="P-VENTA-SPLIT",
+        )
         sent_comprobantes = []
 
-        class SplitSaleClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def list_clientes(self):
-                return {
-                    "DatosJSON": [
-                        {
-                            "Cliente_Codigo": "CLI-NOTIF",
-                            "Cliente_RazonSocial": "Clinica Notificaciones",
-                            "Cliente_NroDocumento": "30700000000",
-                            "Cliente_Provincia": "02",
-                            "Cliente_TipoDocumento": "1",
-                            "Cliente_SitIVA": "1",
-                        }
-                    ]
-                }
-
-            def list_articulos(self, filters=None, limit=20):
-                return {
-                    "DatosJSON": [
-                        {
-                            "Articulo_Codigo": "ART-SPLIT",
-                            "Articulo_Descripcion": "Artículo divisible",
-                            "Art_TipoTasaVentas": "1",
-                            "Art_CodTasaIVAVentas": "01",
-                        }
-                    ]
-                }
-
-            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
-                sent_comprobantes.append(comprobante)
-                number = 3234 + len(sent_comprobantes) - 1
-                return {
-                    "Resultado": "OK",
-                    "DatosJSON": json.dumps(
-                        {
-                            "Comprobante_Tipo": "RT",
-                            "Comprobante_Letra": "R",
-                            "Comprobante_PtoVenta": "00004",
-                            "Comprobante_Numero": f"{number:08d}",
-                        }
-                    ),
-                }
-
-        with override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21):
-            with patch("service.bejerman_delivery.BejermanSDKClient", SplitSaleClient):
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_comprobantes),
+            ):
                 result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
 
         self.assertTrue(result["multiple"])
-        self.assertEqual(result["remitoNumbers"], ["RT R 00004-00003234", "RT R 00004-00003235"])
-        self.assertEqual(len(sent_comprobantes), 2)
-        article_counts = [
-            len([item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"])
-            for comprobante in sent_comprobantes
-        ]
+        self.assertEqual(
+            result["remitoNumbers"],
+            ["RT R 00004-00003234", "RT R 00004-00003235", "RT R 00004-00003236"],
+        )
+        self.assertEqual(len(sent_comprobantes), 3)
         line_counts = [len(comprobante["Comprobante_Items"]) for comprobante in sent_comprobantes]
-        # Capacidad: 21 líneas por hoja, 2 de encabezado por orden → 19 artículos.
-        self.assertEqual(article_counts, [19, 6])
-        self.assertTrue(all(count <= 21 for count in line_counts))
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 10, 5])
+        self.assertTrue(all(count <= 22 for count in line_counts))
         with connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT order_number, source_system, remito_number,
+                SELECT order_number, remito_number,
                        (SELECT COUNT(*) FROM delivery_order_items i WHERE i.order_id = d.id) AS item_count
                   FROM delivery_orders d
-                 WHERE id = %s OR source_external_id LIKE %s
-                 ORDER BY order_number
+                 WHERE id = %s
                 """,
-                [order["id"], f"{order['id']}:rss-split:%"],
+                [order["id"]],
             )
-            rows = cur.fetchall()
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0][0], "OE-VENTA-SPLIT")
-        self.assertEqual(rows[0][2], "RT R 00004-00003234")
-        self.assertEqual(rows[0][3], 19)
-        self.assertTrue(rows[1][0].startswith("OE-VENTA-SPLIT-P2-"))
-        self.assertEqual(rows[1][1], "nexora-rss-split")
-        self.assertEqual(rows[1][2], "RT R 00004-00003235")
-        self.assertEqual(rows[1][3], 6)
+            row = cur.fetchone()
+            cur.execute(
+                """
+                SELECT l.sequence, l.expected_count, COUNT(a.id)
+                  FROM delivery_order_remito_links l
+                  JOIN delivery_order_remito_item_allocations a ON a.link_id = l.id
+                 WHERE l.order_id = %s
+                 GROUP BY l.id, l.sequence, l.expected_count
+                 ORDER BY l.sequence
+                """,
+                [order["id"]],
+            )
+            link_rows = cur.fetchall()
+            cur.execute(
+                "SELECT COUNT(*) FROM delivery_orders WHERE source_external_id LIKE %s",
+                [f"{order['id']}:%"],
+            )
+            fragment_count = int(cur.fetchone()[0])
+        self.assertEqual(row, ("OE-DO-REMITO-VENTA-SPLIT", " / ".join(result["remitoNumbers"]), 25))
+        self.assertEqual(link_rows, [(1, 3, 10), (2, 3, 10), (3, 3, 5)])
+        self.assertEqual(fragment_count, 0)
+
+    def test_rt_respeta_los_limites_de_diez_y_once_articulos(self):
+        order_10 = self._create_rt_split_order(
+            "do-remito-venta-diez",
+            10,
+            partida_prefix="P-DIEZ",
+        )
+        order_11 = self._create_rt_split_order(
+            "do-remito-venta-once",
+            11,
+            partida_prefix="P-ONCE",
+        )
+        sent_10 = []
+        sent_11 = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_10, first_number=3300),
+            ):
+                result_10 = generate_bejerman_remito([order_10["id"]], self.jefe.id, {})
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_11, first_number=3310),
+            ):
+                result_11 = generate_bejerman_remito([order_11["id"]], self.jefe.id, {})
+
+        self.assertFalse(result_10.get("multiple", False))
+        self.assertEqual(self._rt_article_counts(sent_10), [10])
+        self.assertTrue(result_11["multiple"])
+        self.assertEqual(result_11["remitoNumbers"], ["RT R 00004-00003310", "RT R 00004-00003311"])
+        self.assertEqual(self._rt_article_counts(sent_11), [10, 1])
+        self.assertTrue(all(len(comprobante["Comprobante_Items"]) <= 22 for comprobante in sent_10 + sent_11))
+
+    def test_rt_reserva_el_conjunto_y_reintenta_solo_el_remito_faltante(self):
+        order = self._create_rt_split_order(
+            "do-remito-parcial-retry",
+            11,
+            partida_prefix="P-PARCIAL-RETRY",
+        )
+        first_sent = []
+        reservation_snapshots = []
+        BaseClient = self._fake_rt_split_client(first_sent, first_number=3330)
+
+        class FailSecondClient(BaseClient):
+            attempts = 0
+
+            def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+                type(self).attempts += 1
+                if type(self).attempts == 1:
+                    with connection.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT g.status
+                              FROM delivery_order_remito_links l
+                              JOIN bejerman_remito_groups g ON g.id = l.remito_group_id
+                             WHERE l.order_id = %s
+                             ORDER BY l.sequence
+                            """,
+                            [order["id"]],
+                        )
+                        reservation_snapshots.append([row[0] for row in cur.fetchall()])
+                if type(self).attempts == 2:
+                    raise BejermanSdkResponseError("El comprobante no se importó. Rechazo controlado.")
+                return super().ingresar_comprobante_ventas_json(comprobante, **kwargs)
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", FailSecondClient):
+            partial = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertFalse(partial["success"])
+        self.assertTrue(partial["partial"])
+        self.assertEqual(partial["remitoSetStatus"], "partial")
+        self.assertEqual(reservation_snapshots, [["sending", "reserved"]])
+        self.assertEqual(len(first_sent), 1)
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT sequence, expected_count FROM delivery_order_remito_links WHERE order_id = %s",
+                [order["id"]],
+            )
+            self.assertEqual(cur.fetchall(), [(1, 2)])
+
+        retry_sent = []
+        with patch(
+            "service.bejerman_delivery.BejermanSDKClient",
+            self._fake_rt_split_client(retry_sent, first_number=3331),
+        ):
+            completed = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertTrue(completed["success"])
+        self.assertEqual(completed["remitoSetStatus"], "complete")
+        self.assertEqual(len(retry_sent), 1)
+        self.assertEqual(completed["remitoNumbers"], ["RT R 00004-00003330", "RT R 00004-00003331"])
+
+    def test_rt_agrupa_ordenes_sin_superar_diez_articulos(self):
+        orders_5 = [
+            self._create_rt_split_order(
+                f"do-remito-cinco-{index}",
+                5,
+                partida_prefix=f"P-CINCO-{index}",
+            )
+            for index in range(2)
+        ]
+        orders_6 = [
+            self._create_rt_split_order(
+                f"do-remito-seis-{index}",
+                6,
+                partida_prefix=f"P-SEIS-{index}",
+            )
+            for index in range(2)
+        ]
+        sent_5 = []
+        sent_6 = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_5, first_number=3320),
+            ):
+                result_5 = generate_bejerman_remito(
+                    [order["id"] for order in orders_5],
+                    self.jefe.id,
+                    {},
+                )
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_6, first_number=3330),
+            ):
+                result_6 = generate_bejerman_remito(
+                    [order["id"] for order in orders_6],
+                    self.jefe.id,
+                    {},
+                )
+
+        self.assertFalse(result_5.get("multiple", False))
+        self.assertEqual(self._rt_article_counts(sent_5), [10])
+        grouped_result = _current_multi_remito_result([order["id"] for order in orders_5])
+        self.assertEqual(len(grouped_result["remitos"]), 1)
+        self.assertEqual(len(grouped_result["groupIds"]), 1)
+        self.assertEqual(len(grouped_result["orders"]), 2)
+        self.assertTrue(result_6["multiple"])
+        self.assertEqual(result_6["remitoNumbers"], ["RT R 00004-00003330", "RT R 00004-00003331"])
+        self.assertEqual(self._rt_article_counts(sent_6), [6, 6])
+        self.assertTrue(all(len(comprobante["Comprobante_Items"]) <= 22 for comprobante in sent_5 + sent_6))
+
+    def test_rt_diez_articulos_con_descuento_caben_en_veintidos_renglones(self):
+        order = self._create_rt_split_order(
+            "do-remito-diez-descuento",
+            10,
+            partida_prefix="P-DESCUENTO",
+            discount_percent="5",
+        )
+        sent_comprobantes = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_comprobantes, first_number=3340),
+            ):
+                result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertFalse(result.get("multiple", False))
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10])
+        self.assertEqual(len(sent_comprobantes[0]["Comprobante_Items"]), 22)
+
+    def test_rt_divide_un_item_con_trece_partidas_sin_perder_datos(self):
+        order = self._create_rt_multipartida_split_order(
+            "do-remito-multipartida-trece",
+            13,
+            partida_prefix="P-MULTI",
+        )
+        sent_comprobantes = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(
+                    sent_comprobantes,
+                    article_codes=["ART-MULTIPARTIDA"],
+                    first_number=3350,
+                ),
+            ):
+                result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertTrue(result["multiple"])
+        self.assertEqual(result["remitoNumbers"], ["RT R 00004-00003350", "RT R 00004-00003351"])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 3])
+        article_lines = [
+            item
+            for comprobante in sent_comprobantes
+            for item in comprobante["Comprobante_Items"]
+            if item["Item_Tipo"] == "A"
+        ]
+        expected_partidas = [f"P-MULTI-{index:03d}" for index in range(13)]
+        self.assertEqual([item["Item_Partida"] for item in article_lines], expected_partidas)
+        self.assertEqual(
+            sum(abs(Decimal(str(item["Item_CantidadUM1"]))) for item in article_lines),
+            Decimal("13"),
+        )
+        self.assertEqual(
+            sum(Decimal(str(comprobante["Comprobante_ImporteTotal"])) for comprobante in sent_comprobantes),
+            Decimal("157.3"),
+        )
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.order_number, i.quantity, i.unit_price, i.price_currency, i.discount_percent,
+                       COUNT(p.id), COALESCE(SUM(p.assigned_quantity), 0)
+                  FROM delivery_orders d
+                  JOIN delivery_order_items i ON i.order_id = d.id
+                  LEFT JOIN delivery_order_item_partidas p ON p.order_item_id = i.id
+                 WHERE d.id = %s OR d.source_external_id LIKE %s
+                 GROUP BY d.order_number, i.id, i.quantity, i.unit_price, i.price_currency, i.discount_percent
+                 ORDER BY d.order_number
+                """,
+                [order["id"], f"{order['id']}:%"],
+            )
+            item_rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT l.sequence, COUNT(a.id), COALESCE(SUM(a.assigned_quantity), 0)
+                  FROM delivery_order_remito_links l
+                  JOIN delivery_order_remito_item_allocations a ON a.link_id = l.id
+                 WHERE l.order_id = %s
+                 GROUP BY l.id, l.sequence
+                 ORDER BY l.sequence
+                """,
+                [order["id"]],
+            )
+            allocation_rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT p.partida, p.stock_deposit_code, p.stock_available_quantity
+                  FROM delivery_order_item_partidas p
+                  JOIN delivery_order_items i ON i.id = p.order_item_id
+                  JOIN delivery_orders d ON d.id = i.order_id
+                 WHERE d.id = %s OR d.source_external_id LIKE %s
+                 ORDER BY p.partida
+                """,
+                [order["id"], f"{order['id']}:%"],
+            )
+            partida_rows = cur.fetchall()
+
+        self.assertEqual(len(item_rows), 1)
+        self.assertEqual([int(row[1]) for row in item_rows], [13])
+        self.assertTrue(all(Decimal(row[2]) == Decimal("10") for row in item_rows))
+        self.assertEqual({row[3] for row in item_rows}, {"ARS"})
+        self.assertTrue(all(Decimal(row[4]) == Decimal("0") for row in item_rows))
+        self.assertEqual([int(row[5]) for row in item_rows], [13])
+        self.assertEqual([int(row[6]) for row in item_rows], [13])
+        self.assertEqual([(row[0], int(row[1]), int(row[2])) for row in allocation_rows], [(1, 10, 10), (2, 3, 3)])
+        self.assertEqual([row[0] for row in partida_rows], expected_partidas)
+        self.assertEqual({row[1] for row in partida_rows}, {"VAL"})
+        self.assertTrue(all(Decimal(row[2]) == Decimal("1") for row in partida_rows))
+
+    def test_rt_divide_un_item_con_veintiseis_partidas_sin_duplicarlas(self):
+        order = self._create_rt_multipartida_split_order(
+            "do-remito-multipartida-veintiseis",
+            26,
+            partida_prefix="P-MULTI-26",
+        )
+        sent_comprobantes = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(
+                    sent_comprobantes,
+                    article_codes=["ART-MULTIPARTIDA"],
+                    first_number=3380,
+                ),
+            ):
+                result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertTrue(result["multiple"])
+        self.assertEqual(
+            result["remitoNumbers"],
+            ["RT R 00004-00003380", "RT R 00004-00003381", "RT R 00004-00003382"],
+        )
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 10, 6])
+        article_lines = [
+            item
+            for comprobante in sent_comprobantes
+            for item in comprobante["Comprobante_Items"]
+            if item["Item_Tipo"] == "A"
+        ]
+        expected_partidas = [f"P-MULTI-26-{index:03d}" for index in range(26)]
+        self.assertEqual([item["Item_Partida"] for item in article_lines], expected_partidas)
+        self.assertEqual(
+            sum(abs(Decimal(str(item["Item_CantidadUM1"]))) for item in article_lines),
+            Decimal("26"),
+        )
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.order_number, i.quantity, COUNT(p.id), COALESCE(SUM(p.assigned_quantity), 0)
+                  FROM delivery_orders d
+                  JOIN delivery_order_items i ON i.order_id = d.id
+                  LEFT JOIN delivery_order_item_partidas p ON p.order_item_id = i.id
+                 WHERE d.id = %s OR d.source_external_id LIKE %s
+                 GROUP BY d.order_number, i.id, i.quantity
+                 ORDER BY d.order_number
+                """,
+                [order["id"], f"{order['id']}:%"],
+            )
+            item_rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT l.sequence, COUNT(a.id), COALESCE(SUM(a.assigned_quantity), 0)
+                  FROM delivery_order_remito_links l
+                  JOIN delivery_order_remito_item_allocations a ON a.link_id = l.id
+                 WHERE l.order_id = %s
+                 GROUP BY l.id, l.sequence
+                 ORDER BY l.sequence
+                """,
+                [order["id"]],
+            )
+            allocation_rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT p.partida, p.assigned_quantity
+                  FROM delivery_order_item_partidas p
+                  JOIN delivery_order_items i ON i.id = p.order_item_id
+                  JOIN delivery_orders d ON d.id = i.order_id
+                 WHERE d.id = %s OR d.source_external_id LIKE %s
+                 ORDER BY p.partida
+                """,
+                [order["id"], f"{order['id']}:%"],
+            )
+            partida_rows = cur.fetchall()
+
+        self.assertEqual(len(item_rows), 1)
+        self.assertEqual([int(row[1]) for row in item_rows], [26])
+        self.assertEqual([int(row[2]) for row in item_rows], [26])
+        self.assertEqual([int(row[3]) for row in item_rows], [26])
+        self.assertEqual(
+            [(row[0], int(row[1]), int(row[2])) for row in allocation_rows],
+            [(1, 10, 10), (2, 10, 10), (3, 6, 6)],
+        )
+        self.assertEqual([row[0] for row in partida_rows], expected_partidas)
+        self.assertEqual(len({row[0] for row in partida_rows}), 26)
+        self.assertTrue(all(Decimal(row[1]) == Decimal("1") for row in partida_rows))
+
+    def test_rt_ignora_skip_print_split_recibido_en_el_payload(self):
+        order = self._create_rt_split_order(
+            "do-remito-skip-publico",
+            11,
+            partida_prefix="P-SKIP-PUBLICO",
+        )
+        sent_comprobantes = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch(
+                "service.bejerman_delivery.BejermanSDKClient",
+                self._fake_rt_split_client(sent_comprobantes, first_number=3360),
+            ):
+                result = generate_bejerman_remito(
+                    [order["id"]],
+                    self.jefe.id,
+                    {"_skipPrintSplit": True},
+                )
+
+        self.assertTrue(result["multiple"])
+        self.assertEqual(result["remitoNumbers"], ["RT R 00004-00003360", "RT R 00004-00003361"])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 1])
+
+    def test_rt_defensa_final_bloquea_exceso_antes_de_enviar_al_sdk(self):
+        order = self._create_rt_split_order(
+            "do-remito-guard-final",
+            11,
+            partida_prefix="P-GUARD-FINAL",
+        )
+        sent_comprobantes = []
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with (
+                patch(
+                    "service.bejerman_delivery._split_remito_orders_for_printing",
+                    side_effect=lambda orders, *args, **kwargs: orders,
+                ),
+                patch(
+                    "service.bejerman_delivery._partition_remito_orders_for_printing",
+                    side_effect=lambda orders, *args, **kwargs: [orders],
+                ),
+                patch(
+                    "service.bejerman_delivery.BejermanSDKClient",
+                    self._fake_rt_split_client(sent_comprobantes, first_number=3370),
+                ),
+                self.assertRaises(DeliveryOrderError) as ctx,
+            ):
+                generate_bejerman_remito([order["id"]], self.jefe.id, {})
+
+        self.assertEqual(ctx.exception.code, "BEJERMAN_RT_PRINT_LIMIT_EXCEEDED")
+        self.assertEqual(sent_comprobantes, [])
+        self.assertFalse(get_delivery_order(order["id"], include_events=False)["bejermanRemitoGroupId"])
+
+    def test_revision_rt_grande_confirmado_no_importado_reemite_diez_mas_uno(self):
+        order = self._create_rt_split_order(
+            "do-rt-review-split-once",
+            11,
+            partida_prefix="P-RT-REVIEW",
+        )
+        old_group_id = "brg-rt-review-split-once"
+        self._attach_failed_rt_review_group(order["id"], old_group_id, issue_date="2026-07-21")
+        sent_comprobantes = []
+        lookup_calls = []
+        BaseReviewClient = self._fake_rt_split_client(sent_comprobantes, first_number=3400)
+
+        class ReviewSplitRtClient(BaseReviewClient):
+            def list_comprobantes_ventas(self, filters):
+                lookup_calls.append(filters)
+                return {"DatosJSON": []}
+
+        with override_settings(
+            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
+            BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        ):
+            with patch("service.bejerman_delivery.BejermanSDKClient", ReviewSplitRtClient):
+                verify_result = verify_bejerman_remito_review(old_group_id, self.jefe.id)
+                self.assertEqual(verify_result["reviewState"], "ready_for_correction")
+                self.assertEqual(verify_result["failureCertainty"], "confirmed_not_imported")
+                self.assertFalse(get_delivery_order(order["id"], include_events=False)["bejermanRemitoGroupId"])
+
+                result = reissue_corrected_bejerman_remito_review(
+                    old_group_id,
+                    self.jefe.id,
+                    {"confirm": True, "issueDate": "2026-07-21"},
+                )
+
+        self.assertEqual(len(lookup_calls), 2)
+        self.assertTrue(result["multiple"])
+        self.assertEqual(result["previousGroupId"], old_group_id)
+        self.assertEqual(
+            result["remitoNumbers"],
+            ["RT R 00004-00003400", "RT R 00004-00003401"],
+        )
+        self.assertEqual(len(result["groupIds"]), 2)
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 1])
+        self.assertTrue(all(len(item["Comprobante_Items"]) <= 22 for item in sent_comprobantes))
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status,
+                       response_summary ->> 'reviewState',
+                       response_summary ->> 'replacementGroupId',
+                       response_summary ->> 'replacementGroupIds',
+                       response_summary ->> 'replacementRemitoNumbers',
+                       response_summary ->> 'reissueInProgress'
+                  FROM bejerman_remito_groups
+                 WHERE id = %s
+                """,
+                [old_group_id],
+            )
+            old_group = cur.fetchone()
+        self.assertEqual(old_group[0], "failed_review")
+        self.assertEqual(old_group[1], "superseded")
+        self.assertEqual(old_group[2], result["groupIds"][0])
+        self.assertEqual(json.loads(old_group[3]), result["groupIds"])
+        self.assertEqual(json.loads(old_group[4]), result["remitoNumbers"])
+        self.assertEqual(old_group[5], "false")
+
+    def test_revision_rt_grande_bloquea_lookup_fallido_o_ambiguo_sin_emitir(self):
+        for index, (lookup_status, expected_code) in enumerate(
+            (
+                ("lookup_failed", "BEJERMAN_REMITO_LOOKUP_UNAVAILABLE"),
+                ("ambiguous", "BEJERMAN_REMITO_LOOKUP_AMBIGUOUS"),
+            ),
+            start=1,
+        ):
+            with self.subTest(lookup_status=lookup_status):
+                order = self._create_rt_split_order(
+                    f"do-rt-review-{lookup_status}",
+                    11,
+                    partida_prefix=f"P-RT-REVIEW-{index}",
+                )
+                old_group_id = f"brg-rt-review-{lookup_status}"
+                self._attach_failed_rt_review_group(order["id"], old_group_id, issue_date="2026-07-21")
+                sent_comprobantes = []
+
+                def unresolved_lookup(*args, lookup_outcome=None, **kwargs):
+                    if lookup_outcome is not None:
+                        lookup_outcome.update({"status": lookup_status})
+                        if lookup_status == "ambiguous":
+                            lookup_outcome.update({"candidateCount": 2, "matchCount": 2})
+                    return None
+
+                with (
+                    patch(
+                        "service.bejerman_delivery.BejermanSDKClient",
+                        self._fake_rt_split_client(sent_comprobantes, first_number=3410 + index),
+                    ),
+                    patch(
+                        "service.bejerman_delivery._recover_delivery_remito_after_emit_error",
+                        side_effect=unresolved_lookup,
+                    ),
+                    self.assertRaises(DeliveryOrderError) as ctx,
+                ):
+                    verify_bejerman_remito_review(old_group_id, self.jefe.id)
+
+                self.assertEqual(ctx.exception.code, expected_code)
+                self.assertEqual(sent_comprobantes, [])
+                with connection.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT o.remito_number,
+                               o.bejerman_remito_group_id,
+                               g.status,
+                               g.response_summary ->> 'reviewState',
+                               g.response_summary ->> 'failureCertainty',
+                               g.response_summary ->> 'diagnosticCode',
+                               g.response_summary ->> 'candidateCount',
+                               g.response_summary ->> 'matchCount'
+                          FROM delivery_orders o
+                          JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id
+                         WHERE o.id = %s
+                        """,
+                        [order["id"]],
+                    )
+                    state = cur.fetchone()
+                    cur.execute(
+                        """
+                        SELECT COUNT(*)
+                          FROM bejerman_integration_attempts
+                         WHERE group_id = %s
+                           AND phase IN ('sending', 'review_reissue')
+                        """,
+                        [old_group_id],
+                    )
+                    emission_attempts = int(cur.fetchone()[0])
+                self.assertEqual(state[:6], (None, old_group_id, "failed_review", "blocked", "unknown", expected_code))
+                if lookup_status == "ambiguous":
+                    self.assertEqual(state[6:], ("2", "2"))
+                else:
+                    self.assertEqual(state[6:], (None, None))
+                self.assertEqual(emission_attempts, 0)
 
     def test_remito_bejerman_recupera_rt_creado_tras_error_falso_de_stock(self):
         with self._delivery_partida_stock_patch(
@@ -4655,12 +5689,31 @@ class NotificationsAPITest(TestCase):
         mark_delivered(order["id"], self.jefe.id, "RT 0002-00012345")
         self.assertEqual(len(mail.outbox), 1)
 
+    def test_entrega_con_numero_sin_prefijo_respeta_facturacion_del_grupo_bejerman(self):
+        order = self._create_commercial_correction_order(
+            order_id="do-remito-grupo-facturable",
+            status="armado_pendiente_entrega",
+            remito_number="0001-00012345",
+            billing_required=True,
+        )
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE delivery_orders SET status = 'armado_pendiente_entrega' WHERE id = %s",
+                [order["id"]],
+            )
+
+        delivered = mark_delivered(order["id"], self.jefe.id, "0001-00012345")
+
+        self.assertEqual(delivered["status"], "entregado_pendiente_facturacion")
+        pending = list_delivery_orders({"pendingBilling": True, "limit": 10})
+        self.assertIn(order["id"], [item["id"] for item in pending["items"]])
+
     @override_settings(
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
         PUBLIC_WEB_URL="https://nexora.test",
         DEFAULT_FROM_EMAIL="noreply@nexora.test",
     )
-    def test_supervisor_corrige_precio_plazo_post_remito_y_notifica_cobranzas(self):
+    def test_supervisor_corrige_precio_plazo_solo_en_nexora_y_notifica_cobranzas(self):
         order = self._create_commercial_correction_order()
         mail.outbox = []
         item = order["items"][0]
@@ -4668,8 +5721,9 @@ class NotificationsAPITest(TestCase):
 
         with patch(
             "service.delivery_orders.perform_bejerman_remito_price_fix",
-            return_value={"backupName": "NEXORA_BKP_TEST", "lineCount": 1, "rows": [{"estado": "APLICADO"}]},
-        ) as price_fix:
+            create=True,
+            side_effect=AssertionError("La corrección local no debe consultar ni modificar Bejerman"),
+        ) as bejerman_price_fix:
             resp = self.client.patch(
                 f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
                 {
@@ -4687,7 +5741,7 @@ class NotificationsAPITest(TestCase):
             )
 
         self.assertEqual(resp.status_code, 200, resp.data)
-        price_fix.assert_called_once()
+        bejerman_price_fix.assert_not_called()
         self.assertEqual(resp.data["commercialDeadline"], "30 días")
         self.assertEqual(Decimal(str(resp.data["items"][0]["unitPrice"])), Decimal("1500.00"))
         self.assertEqual(Decimal(str(resp.data["items"][0]["discountPercent"])), Decimal("10.00"))
@@ -4715,14 +5769,14 @@ class NotificationsAPITest(TestCase):
             self.assertEqual(currency, "ARS")
             cur.execute(
                 """
-                SELECT metadata
+                SELECT actor_user_id, metadata
                   FROM delivery_order_events
                  WHERE order_id = %s
                    AND event_type = 'delivery_order_commercial_correction'
                 """,
                 [order["id"]],
             )
-            metadata = cur.fetchone()[0]
+            event_actor_user_id, metadata = cur.fetchone()
             if isinstance(metadata, str):
                 metadata = json.loads(metadata)
             cur.execute(
@@ -4735,7 +5789,14 @@ class NotificationsAPITest(TestCase):
             notification_rows = cur.fetchall()
         self.assertEqual(metadata["previousDeadline"], "15 días")
         self.assertEqual(metadata["newDeadline"], "30 días")
-        self.assertEqual(metadata["bejerman"]["backupName"], "NEXORA_BKP_TEST")
+        self.assertEqual(event_actor_user_id, self.supervisor.id)
+        self.assertEqual(metadata["remitoNumber"], order["remitoNumber"])
+        self.assertEqual(metadata["correctionScope"], "nexora_only")
+        self.assertFalse(metadata["bejermanRemitoModified"])
+        self.assertEqual(Decimal(metadata["items"][0]["previousUnitPrice"]), Decimal("1000.00"))
+        self.assertEqual(Decimal(metadata["items"][0]["newUnitPrice"]), Decimal("1500.00"))
+        self.assertEqual(Decimal(metadata["items"][0]["previousDiscountPercent"]), Decimal("0"))
+        self.assertEqual(Decimal(metadata["items"][0]["newDiscountPercent"]), Decimal("10"))
         self.assertEqual(
             notification_rows,
             [(self.cobranzas.id, f"Corrección comercial en {order['orderNumber']}", f"/cobranzas/facturacion?orderId={order['id']}")],
@@ -4745,7 +5806,74 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(message.to, ["cobranzas@notif.test"])
         self.assertIn(order["remitoNumber"], message.body)
         self.assertIn("30 días", message.body)
+        self.assertIn("el RT emitido en Bejerman no fue modificado", message.body)
         self.assertIn("https://nexora.test/cobranzas/facturacion?orderId=do-commercial-correction", message.body)
+
+    def test_correccion_comercial_local_permite_remito_pendiente_sin_grupo_bejerman(self):
+        order = self._create_commercial_correction_order(
+            order_id="do-commercial-without-bejerman-group",
+            status="armado_pendiente_entrega",
+            attach_bejerman_group=False,
+        )
+        item = order["items"][0]
+        self.assertFalse(order["bejermanRemitoGroupId"])
+        self.client.force_authenticate(user=self.supervisor)
+
+        with patch(
+            "service.delivery_orders.perform_bejerman_remito_price_fix",
+            create=True,
+            side_effect=AssertionError("La corrección local no debe consultar ni modificar Bejerman"),
+        ) as bejerman_price_fix:
+            resp = self.client.patch(
+                f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                {
+                    "commercialDeadline": "45 días",
+                    "items": [
+                        {
+                            "id": item["id"],
+                            "unitPrice": "1750.00",
+                            "priceCurrency": "ARS",
+                            "discountPercent": "0",
+                        }
+                    ],
+                },
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        bejerman_price_fix.assert_not_called()
+        self.assertEqual(resp.data["commercialDeadline"], "45 días")
+        self.assertEqual(Decimal(str(resp.data["items"][0]["unitPrice"])), Decimal("1750.00"))
+
+    def test_correccion_comercial_local_permite_rt_con_billing_required_false(self):
+        order = self._create_commercial_correction_order(
+            order_id="do-commercial-rt-billing-false",
+            status="armado_pendiente_entrega",
+            billing_required=False,
+        )
+        item = order["items"][0]
+        self.assertFalse(order["bejermanRemitoGroup"]["responseSummary"]["billingRequired"])
+        self.client.force_authenticate(user=self.supervisor)
+
+        resp = self.client.patch(
+            f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+            {
+                "commercialDeadline": "30 días",
+                "items": [
+                    {
+                        "id": item["id"],
+                        "unitPrice": "1495.50",
+                        "priceCurrency": "ARS",
+                        "discountPercent": "0",
+                    }
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["commercialDeadline"], "30 días")
+        self.assertEqual(Decimal(str(resp.data["items"][0]["unitPrice"])), Decimal("1495.50"))
 
     def test_correccion_comercial_rechaza_roles_no_supervisor(self):
         roles = [self.admin, self.jefe, self.ventas, self.recepcion, self.cobranzas]
@@ -4754,24 +5882,22 @@ class NotificationsAPITest(TestCase):
                 order = self._create_commercial_correction_order(order_id=f"do-commercial-role-{user.rol}")
                 item = order["items"][0]
                 self.client.force_authenticate(user=user)
-                with patch("service.delivery_orders.perform_bejerman_remito_price_fix") as price_fix:
-                    resp = self.client.patch(
-                        f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
-                        {
-                            "commercialDeadline": "30 días",
-                            "items": [
-                                {
-                                    "id": item["id"],
-                                    "unitPrice": "1500.00",
-                                    "priceCurrency": "ARS",
-                                    "discountPercent": "0",
-                                }
-                            ],
-                        },
-                        format="json",
-                    )
+                resp = self.client.patch(
+                    f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                    {
+                        "commercialDeadline": "30 días",
+                        "items": [
+                            {
+                                "id": item["id"],
+                                "unitPrice": "1500.00",
+                                "priceCurrency": "ARS",
+                                "discountPercent": "0",
+                            }
+                        ],
+                    },
+                    format="json",
+                )
                 self.assertEqual(resp.status_code, 403, resp.data)
-                price_fix.assert_not_called()
 
     def test_correccion_comercial_rechaza_orden_facturada_o_sin_remito(self):
         cases = [
@@ -4789,48 +5915,44 @@ class NotificationsAPITest(TestCase):
                     invoice_number=invoice_number,
                 )
                 item = order["items"][0]
-                with patch("service.delivery_orders.perform_bejerman_remito_price_fix") as price_fix:
-                    resp = self.client.patch(
-                        f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
-                        {
-                            "commercialDeadline": "30 días",
-                            "items": [
-                                {
-                                    "id": item["id"],
-                                    "unitPrice": "1500.00",
-                                    "priceCurrency": "ARS",
-                                    "discountPercent": "0",
-                                }
-                            ],
-                        },
-                        format="json",
-                    )
+                resp = self.client.patch(
+                    f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+                    {
+                        "commercialDeadline": "30 días",
+                        "items": [
+                            {
+                                "id": item["id"],
+                                "unitPrice": "1500.00",
+                                "priceCurrency": "ARS",
+                                "discountPercent": "0",
+                            }
+                        ],
+                    },
+                    format="json",
+                )
                 self.assertEqual(resp.status_code, 409, resp.data)
-                price_fix.assert_not_called()
 
     def test_correccion_comercial_rechaza_cambios_fuera_de_precio_plazo(self):
         order = self._create_commercial_correction_order()
         item = order["items"][0]
         self.client.force_authenticate(user=self.supervisor)
-        with patch("service.delivery_orders.perform_bejerman_remito_price_fix") as price_fix:
-            resp = self.client.patch(
-                f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
-                {
-                    "commercialDeadline": "30 días",
-                    "items": [
-                        {
-                            "id": item["id"],
-                            "unitPrice": "1500.00",
-                            "priceCurrency": "ARS",
-                            "discountPercent": "0",
-                            "quantity": "99",
-                        }
-                    ],
-                },
-                format="json",
-            )
+        resp = self.client.patch(
+            f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+            {
+                "commercialDeadline": "30 días",
+                "items": [
+                    {
+                        "id": item["id"],
+                        "unitPrice": "1500.00",
+                        "priceCurrency": "ARS",
+                        "discountPercent": "0",
+                        "quantity": "99",
+                    }
+                ],
+            },
+            format="json",
+        )
         self.assertEqual(resp.status_code, 409, resp.data)
-        price_fix.assert_not_called()
 
     @override_settings(
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
@@ -5414,11 +6536,43 @@ class NotificationsAPITest(TestCase):
         )
 
         self.assertIs(order["items"][0]["articleRequiresPartida"], False)
-        prepared = mark_prepared(order["id"], self.recepcion.id)
+        with patch("service.delivery_orders._delivery_article_available_quantity", return_value=100):
+            prepared = mark_prepared(order["id"], self.recepcion.id)
 
         self.assertEqual(prepared["status"], "armado_pendiente_entrega")
         self.assertEqual(prepared["items"][0]["partidas"], [])
         self.assertIs(prepared["items"][0]["articleRequiresPartida"], False)
+
+    def test_orden_entrega_preparada_bloquea_articulo_sin_partida_con_stock_insuficiente(self):
+        order = create_delivery_order(
+            {
+                "id": "do-prepare-no-partida-sin-stock",
+                "orderNumber": "OE-PREP-NO-PARTIDA-STOCK",
+                "customerId": self.customer_id,
+                "deliveryType": "sale",
+                "sellerName": "Ventas",
+                "items": [
+                    {
+                        "id": "doi-no-partida-sin-stock",
+                        "articleCode": "1208010",
+                        "articleName": "Filtro de aire",
+                        "articleRequiresPartida": False,
+                        "description": "Filtro de aire",
+                        "quantity": 10,
+                    }
+                ],
+            },
+            self.jefe.id,
+        )
+
+        with patch("service.delivery_orders._delivery_article_available_quantity", return_value=3):
+            with self.assertRaises(DeliveryOrderError) as ctx:
+                mark_prepared(order["id"], self.recepcion.id)
+
+        self.assertEqual(ctx.exception.code, "DELIVERY_ORDER_ARTICLE_STOCK_INSUFFICIENT")
+        with connection.cursor() as cur:
+            cur.execute("SELECT status FROM delivery_orders WHERE id = %s", [order["id"]])
+            self.assertEqual(cur.fetchone()[0], "pendiente_armado")
 
     def test_orden_entrega_preparada_bloquea_articulo_seriado_sin_partida(self):
         order = create_delivery_order(

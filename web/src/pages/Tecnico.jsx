@@ -17,6 +17,7 @@ export default function Tecnico() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
+  const [sort, setSort] = useQueryState("sort", "");
   const navigate = useNavigate();
 
   const sortPendientes = (arr) => {
@@ -104,6 +105,8 @@ export default function Tecnico() {
         emptyText={q ? "No se encontraron pendientes para el filtro aplicado." : "No tiene pendientes por ahora."}
         onOpen={go}
         showTechnician={false}
+        sort={sort}
+        onSortChange={setSort}
       />
     </div>
   );

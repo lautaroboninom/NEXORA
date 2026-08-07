@@ -19,16 +19,19 @@ class IngresoAlquilerUncheckAPITest(TestCase):
             auto_inc = "INTEGER PRIMARY KEY AUTOINCREMENT"
             bool_type = "INTEGER"
             bool_default = "1"
+            bool_false = "0"
             datetime_type = "DATETIME"
         elif vendor == "postgresql":
             auto_inc = "BIGSERIAL PRIMARY KEY"
             bool_type = "BOOLEAN"
             bool_default = "TRUE"
+            bool_false = "FALSE"
             datetime_type = "TIMESTAMPTZ"
         else:
             auto_inc = "INT AUTO_INCREMENT PRIMARY KEY"
             bool_type = "BOOLEAN"
             bool_default = "1"
+            bool_false = "0"
             datetime_type = "DATETIME"
         engine_suffix = " ENGINE=InnoDB" if vendor == "mysql" else ""
 
@@ -125,15 +128,15 @@ class IngresoAlquilerUncheckAPITest(TestCase):
                     resolucion TEXT,
                     fecha_ingreso {datetime_type} DEFAULT CURRENT_TIMESTAMP,
                     fecha_servicio {datetime_type} NULL,
-                    garantia_reparacion {bool_type} DEFAULT 0,
-                    garantia_fabrica {bool_type} DEFAULT 0,
+                    garantia_reparacion {bool_type} DEFAULT {bool_false},
+                    garantia_fabrica {bool_type} DEFAULT {bool_false},
                     etiq_garantia_ok {bool_type} DEFAULT {bool_default},
                     faja_garantia TEXT,
                     remito_ingreso TEXT,
                     remito_salida TEXT,
                     factura_numero TEXT,
                     fecha_entrega {datetime_type} NULL,
-                    alquilado {bool_type} DEFAULT 0,
+                    alquilado {bool_type} DEFAULT {bool_false},
                     alquiler_a TEXT,
                     alquiler_remito TEXT,
                     alquiler_fecha DATE NULL,

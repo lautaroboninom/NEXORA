@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  getDeliveryOrder,
   getDeliveryOrderBejermanArticleStock,
   getDeliveryOrderBejermanArticles,
   patchDeliveryOrderItemArticle,
@@ -7,9 +8,12 @@ import {
   postDeliveryOrderBejermanRemito,
 } from "../lib/api";
 import {
+  deliveryOrderBejermanCustomerLabel,
   deliveryOrderEquipmentContext,
   deliveryOrderCompanyKey,
   deliveryOrderCompanyLabel,
+  deliveryOrderIsOccasionalCustomer,
+  deliveryOrderOccasionalCustomerReady,
   deliveryOrderItemCanOmitPartida,
   deliveryOrderItemEffectivePartida,
   deliveryOrderItemLabel,
@@ -156,6 +160,7 @@ function remitoGroupDetail(group) {
 }
 
 function remitoGroupIssue(order) {
+  if (clean(order?.remitoSetStatus).toLowerCase() === "partial") return "";
   if (!clean(order?.bejermanRemitoGroupId)) return "";
   const group = order?.bejermanRemitoGroup && typeof order.bejermanRemitoGroup === "object" ? order.bejermanRemitoGroup : {};
   const status = clean(group.status).toLowerCase();
@@ -176,21 +181,44 @@ function remitoGroupIssue(order) {
   return `${label}: ya tiene una emisión Bejerman asociada${detail ? `: ${detail}` : "."}`;
 }
 
+// Espejo de bejerman_delivery._validate_remito_orders: sin código Bejerman la emisión sigue
+// el camino de cliente ocasional, que exige el mismo nombre y documento de propietario en todas
+// las órdenes (es lo que se manda como Cliente_* con el código especial @@@#@@).
+function occasionalCustomerIssue(orders) {
+  if (!orders.every((order) => deliveryOrderIsOccasionalCustomer(order))) {
+    return "Todas las órdenes deben tener el mismo cliente con código Bejerman.";
+  }
+  if (!orders.every((order) => deliveryOrderOccasionalCustomerReady(order))) {
+    return "El particular se emite como cliente ocasional: cargue nombre y documento del propietario en el ingreso.";
+  }
+  const names = new Set(orders.map((order) => clean(order.propietarioNombre)));
+  const docs = new Set(orders.map((order) => clean(order.propietarioDoc)));
+  if (names.size !== 1 || docs.size !== 1) {
+    return "Las órdenes de particulares deben corresponder al mismo propietario (mismo nombre y documento).";
+  }
+  return "";
+}
+
 function compatibilityIssues(orders) {
   if (!orders.length) return ["Seleccione al menos una orden."];
   const customerCodes = new Set(orders.map((order) => clean(order.bejermanCustomerCode)));
   const types = new Set(orders.map((order) => clean(order.deliveryType)));
   const companyKeys = new Set(orders.map((order) => deliveryOrderCompanyKey(order)));
   const issues = [];
-  if (customerCodes.size !== 1 || !Array.from(customerCodes)[0]) {
+  if (customerCodes.size !== 1) {
     issues.push("Todas las órdenes deben tener el mismo cliente con código Bejerman.");
+  } else if (!Array.from(customerCodes)[0]) {
+    const occasionalIssue = occasionalCustomerIssue(orders);
+    if (occasionalIssue) issues.push(occasionalIssue);
   }
   if (types.size !== 1) issues.push("Todas las órdenes deben tener el mismo tipo de remito.");
   if (companyKeys.size !== 1) issues.push("Todas las órdenes deben pertenecer a la misma empresa Bejerman.");
   if (orders.some((order) => order.status === "pendiente_stock")) {
     issues.push("Las órdenes pendientes de stock deben pasar a pendiente de armado antes de emitir remito.");
   }
-  if (orders.some((order) => order.remitoNumber || order.status === "facturado" || order.status === "cancelado")) {
+  if (orders.some((order) => (
+    order.remitoNumber && clean(order.remitoSetStatus).toLowerCase() !== "partial"
+  ) || order.status === "facturado" || order.status === "cancelado")) {
     issues.push("No se pueden emitir órdenes cerradas, canceladas o con remito.");
   }
   orders.map(remitoGroupIssue).filter(Boolean).forEach((issue) => issues.push(issue));
@@ -457,6 +485,52 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
   );
 }
 
+function ArticleStockBadge({ order, item }) {
+  const [stock, setStock] = useState(null);
+  const articleCode = clean(item.articleCode);
+  const requestedQuantity = numberOf(item.quantity, 1);
+
+  useEffect(() => {
+    if (!articleCode) {
+      setStock(null);
+      return undefined;
+    }
+    let active = true;
+    setStock({ loading: true });
+    getDeliveryOrderBejermanArticleStock({
+      articleCode,
+      limit: 1,
+      companyKey: deliveryOrderCompanyKey(order),
+      deliveryType: order.deliveryType,
+      depositCode: itemStockDeposit(order, item),
+    })
+      .then((data) => {
+        if (!active) return;
+        const available = numberOf(data?.totalAvailableQuantity ?? data?.items?.[0]?.stockAvailableQuantity, 0);
+        setStock({ loading: false, available, warning: clean(data?.warning) });
+      })
+      .catch((err) => {
+        if (!active) return;
+        setStock({ loading: false, available: null, warning: err?.message || "No se pudo verificar stock Bejerman." });
+      });
+    return () => {
+      active = false;
+    };
+  }, [articleCode, item.stockDepositCode, order.deliveryType, order.companyKey, order.operationCompanyLabel, order.sourceCompanyId]);
+
+  if (!articleCode || !stock || stock.loading) return null;
+  if (stock.available == null) {
+    return <div className="text-xs text-amber-800">{stock.warning || "No se pudo verificar stock Bejerman."}</div>;
+  }
+  const insufficient = requestedQuantity - stock.available > 0.0001;
+  return (
+    <div className={`text-xs ${insufficient ? "text-red-700" : "text-gray-500"}`}>
+      Stock Bejerman disponible: {formatQuantity(stock.available)}
+      {insufficient && ` — pediste ${formatQuantity(requestedQuantity)}, no alcanza`}
+    </div>
+  );
+}
+
 function PartidasEditor({ order, item, onUpdated, disabled }) {
   const initial = Array.isArray(item.partidas) && item.partidas.length
     ? item.partidas.map((partida) => ({
@@ -704,6 +778,9 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
   const [progressStatus, setProgressStatus] = useState("Emitiendo remito en Bejerman");
   const [progressDetail, setProgressDetail] = useState("NEXORA está trabajando. El PDF se abrirá cuando esté listo.");
   const [manualRemitoPrints, setManualRemitoPrints] = useState([]);
+  const [pdfWait, setPdfWait] = useState({ startedAt: 0, remito: "" });
+  const pdfWaitAbortRef = useRef(null);
+  const orderSelectionKey = (orders || []).map((order) => order?.id).filter(Boolean).join("|");
 
   useEffect(() => {
     if (!open) return;
@@ -713,7 +790,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
     setProgressOpen(false);
     setProgressTitle("Emitiendo remito");
     setManualRemitoPrints([]);
-  }, [open, orders]);
+  }, [open, orderSelectionKey]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -751,10 +828,38 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         orderIds: localOrders.map((order) => order.id),
         notes,
       });
+      let refreshedOrders = Array.isArray(result?.orders)
+        ? result.orders.filter((order) => order?.id)
+        : result?.order?.id
+          ? [result.order]
+          : [];
+      if (result?.success === false && !refreshedOrders.length) {
+        try {
+          refreshedOrders = await Promise.all(localOrders.map((order) => getDeliveryOrder(order.id)));
+          result = { ...result, orders: refreshedOrders };
+        } catch (_) {
+          // El error de emisión original sigue siendo el dato prioritario para el operador.
+        }
+      }
+      if (refreshedOrders.length) {
+        const refreshedById = new Map(refreshedOrders.map((order) => [order.id, order]));
+        setLocalOrders((current) => current.map((order) => refreshedById.get(order.id) || order));
+      }
+      const partialFailureMessage = result?.success === false
+        ? clean(typeof result?.error === "string" ? result.error : result?.error?.message) ||
+          "Algunos remitos no se pudieron emitir. Reintente solamente los pendientes."
+        : "";
       setProgressStatus(`${documentLabel} emitido`);
       setProgressDetail("Esperando el PDF publicado por Bejerman.");
       // La emisión puede dividirse en varios remitos si no entran en una hoja.
-      const subResults = Array.isArray(result?.remitos) && result.remitos.length > 1 ? result.remitos : [result];
+      // En un reintento, el resumen conserva todo el conjunto, pero sólo deben
+      // abrirse los documentos que se emitieron en esta llamada.
+      const hasNewRemitos = Array.isArray(result?.newRemitos);
+      const subResults = hasNewRemitos
+        ? result.newRemitos
+        : Array.isArray(result?.remitos) && result.remitos.length
+          ? result.remitos
+          : [result];
       const printJobs = [];
       const missingPdfs = [];
       for (let index = 0; index < subResults.length; index += 1) {
@@ -766,8 +871,14 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           continue;
         }
         try {
+          // El remito ya está emitido: sólo falta el archivo, y esta espera se
+          // puede cancelar sin dejar nada a medias.
+          const controller = new AbortController();
+          pdfWaitAbortRef.current = controller;
+          setPdfWait({ startedAt: Date.now(), remito: clean(subResult?.remitoNumber) });
           const blob = await waitForPdfBlob(pdfUrl, {
             label: subLabel,
+            signal: controller.signal,
             onProgress: (progress) => {
               setProgressStatus(progress?.status || `Preparando PDF del ${subLabel}...`);
               setProgressDetail(progress?.detail || "Esperando el archivo de Bejerman.");
@@ -776,12 +887,21 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           printJobs.push({ blob, result: subResult, documentLabel: subLabel });
         } catch (pdfError) {
           missingPdfs.push(clean(subResult?.remitoNumber) || subLabel);
+        } finally {
+          pdfWaitAbortRef.current = null;
+          setPdfWait({ startedAt: 0, remito: "" });
         }
+      }
+      if (!subResults.length) {
+        setError(partialFailureMessage || "No se emitieron remitos nuevos en este intento.");
+        onGenerated(result, { keepOpen: true });
+        return;
       }
       if (!printJobs.length) {
         setError(
-          `Remito ${result?.remitoNumber || ""} emitido, pero Bejerman no pudo devolver el PDF. ` +
-            "Reintente imprimirlo desde el historial de pedidos."
+          partialFailureMessage ||
+            (`Remito ${result?.remitoNumber || ""} emitido, pero Bejerman no pudo devolver el PDF. ` +
+              "Reintente imprimirlo desde el historial de pedidos.")
         );
         onGenerated(result, { keepOpen: true });
         return;
@@ -796,6 +916,16 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
       const [firstJob, ...restJobs] = printJobs;
       const opened = openRemitoPrintablePdf(firstJob.blob, firstJob.result, firstJob.documentLabel).opened;
       const pendingJobs = opened ? restJobs : printJobs;
+      if (partialFailureMessage) {
+        setManualRemitoPrints(pendingJobs);
+        const parts = [partialFailureMessage];
+        if (!opened) parts.push("El navegador bloqueó el PDF del remito emitido. Use Abrir e imprimir.");
+        if (opened && pendingJobs.length) parts.push(`Quedan ${pendingJobs.length} remito(s) emitidos por imprimir.`);
+        if (missingPdfs.length) parts.push(`No se pudo obtener el PDF de: ${missingPdfs.join(" / ")}.`);
+        setError(parts.join(" "));
+        onGenerated(result, { keepOpen: true });
+        return;
+      }
       if (!pendingJobs.length && !missingPdfs.length) {
         onGenerated(result);
       } else {
@@ -853,6 +983,9 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         title={progressTitle}
         status={progressStatus}
         detail={progressDetail}
+        documentLabel={pdfWait.remito ? `Remito ${pdfWait.remito}` : ""}
+        waitStartedAt={pdfWait.startedAt}
+        onCancel={pdfWait.startedAt ? () => pdfWaitAbortRef.current?.abort() : undefined}
       />
       <ResponsiveModalOverlay role="dialog" aria-modal="true" onClick={onClose}>
         <ResponsiveModalPanel className="max-w-6xl overflow-hidden" onClick={(event) => event.stopPropagation()}>
@@ -899,7 +1032,14 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
                     <div>
                       <div className="font-medium text-gray-900">{order.orderNumber}</div>
                       <div className="text-xs text-gray-600">
-                        {[order.customerName, order.bejermanCustomerCode || "sin código", deliveryOrderCompanyLabel(order), deliveryOrderSourceLabel(order)].filter(Boolean).join(" - ")}
+                        {[
+                          order.customerName,
+                          deliveryOrderBejermanCustomerLabel(order) || "sin código",
+                          deliveryOrderCompanyLabel(order),
+                          deliveryOrderSourceLabel(order),
+                        ]
+                          .filter(Boolean)
+                          .join(" - ")}
                       </div>
                       {deliveryOrderEquipmentContext(order) && (
                         <div className="mt-0.5 text-xs text-gray-500">{deliveryOrderEquipmentContext(order)}</div>
@@ -933,6 +1073,9 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
                         )}
                         {clean(item.articleCode) && canAssignArticles && !deliveryOrderItemCanOmitPartida(order, item) && (itemNeedsPartidas(order, item) || !deliveryOrderItemPartidaLabel(item, order)) && (
                           <PartidasEditor order={order} item={item} onUpdated={updateOrder} disabled={saving} />
+                        )}
+                        {clean(item.articleCode) && deliveryOrderItemCanOmitPartida(order, item) && (
+                          <ArticleStockBadge order={order} item={item} />
                         )}
                       </div>
                     ))}

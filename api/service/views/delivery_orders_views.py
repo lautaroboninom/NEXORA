@@ -29,6 +29,7 @@ from ..bejerman_delivery import (
     list_remitos_from_bejerman,
     list_rental_available_equipment,
     registered_remito_no_pdf_error,
+    register_delivery_order_remitos,
     resolve_registered_ingreso_remito_for_document_id,
     resolve_remito_group_for_document_id,
 )
@@ -42,6 +43,7 @@ from ..delivery_orders import (
     list_remito_history,
     mark_delivered,
     mark_invoiced,
+    mark_invoiced_batch,
     mark_not_billable,
     mark_prepared,
     postpone_delivery_order_billing,
@@ -183,6 +185,15 @@ class DeliveryOrderPreparedView(DeliveryOrderPermissionMixin, APIView):
             return _error_response(exc)
 
 
+class DeliveryOrderRemitosView(DeliveryOrderPermissionMixin, APIView):
+
+    def post(self, request, order_id):
+        try:
+            return Response(register_delivery_order_remitos(order_id, _actor_id(request), request.data or {}))
+        except Exception as exc:
+            return _error_response(exc)
+
+
 class DeliveryOrderDeliveredView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
@@ -197,6 +208,22 @@ class DeliveryOrderInvoicedView(DeliveryOrderPermissionMixin, APIView):
     def post(self, request, order_id):
         try:
             return Response(mark_invoiced(order_id, _actor_id(request), (request.data or {}).get("invoiceNumber")))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class DeliveryOrdersBatchInvoicedView(DeliveryOrderPermissionMixin, APIView):
+
+    def post(self, request):
+        try:
+            payload = request.data or {}
+            return Response(
+                mark_invoiced_batch(
+                    payload.get("orderIds"),
+                    _actor_id(request),
+                    payload.get("invoiceNumber"),
+                )
+            )
         except Exception as exc:
             return _error_response(exc)
 

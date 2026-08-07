@@ -30,8 +30,11 @@ import { remitoDocumentLabel, remitoPdfUnavailableReason, remitoPrintableLabel }
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import { formatDateTime, formatOS } from "../lib/ui-helpers";
+import BejermanPdfQueuePanel from "../components/BejermanPdfQueuePanel.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort.js";
 
 const STATUS_LABELS = {
   pending: "En cola",
@@ -77,6 +80,13 @@ const PROCESS_KIND_LABELS = {
   remito: "Remito",
   stock: "Stock",
 };
+
+const PROCESS_SORT_OPTIONS = [
+  { value: "estado_tipo", label: "Estado / Tipo" },
+  { value: "documento", label: "Documento / OS" },
+  { value: "referencia", label: "Referencia" },
+  { value: "seguimiento", label: "Último intento" },
+];
 
 const PROCESS_STATUSES = ["failed_review", "failed", "blocked", "running", "pending", "generated", "succeeded"];
 
@@ -209,6 +219,7 @@ function stockApiFilters(filters) {
     q: filters.q,
     cliente: filters.cliente,
     articulo: filters.articulo,
+    history: filters.history ? "1" : "",
   };
 }
 
@@ -219,6 +230,7 @@ function remitoApiFilters(filters) {
     company_key: filters.company_key,
     q: filters.q,
     cliente: filters.cliente,
+    history: filters.history ? "1" : "",
   };
 }
 
@@ -652,9 +664,13 @@ function ArticleSummary({ row, className = "" }) {
   );
 }
 
-function JobActions({ row, canManage, onEdit, onRetry, className = "" }) {
+function JobActions({ row, canManage, onEdit, onRetry, retryingJobId, className = "" }) {
   const canEdit = canManage && row?.device_id;
-  const canRetry = canManage && (row?.status === "failed" || row?.status === "blocked");
+  // "En cola" también se puede forzar: si el worker de sincronización no está corriendo, el job
+  // queda ahí sin intentos y sin errores, y no hay otra forma de empujarlo.
+  const isPending = row?.status === "pending";
+  const canRetry = canManage && (isPending || row?.status === "failed" || row?.status === "blocked");
+  const retrying = retryingJobId === row?.id;
 
   if (!canEdit && !canRetry) return null;
 
@@ -674,11 +690,13 @@ function JobActions({ row, canManage, onEdit, onRetry, className = "" }) {
       {canRetry && (
         <button
           type="button"
-          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
           onClick={() => onRetry(row.id)}
+          disabled={retrying}
+          title={isPending ? "Ejecutar ahora sin esperar al worker" : "Reintentar la operación"}
         >
-          <RotateCcw className="h-3.5 w-3.5" />
-          Reintentar
+          <RotateCcw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} />
+          {retrying ? "Procesando..." : isPending ? "Procesar ahora" : "Reintentar"}
         </button>
       )}
     </div>
@@ -1174,6 +1192,7 @@ export default function BejermanSync() {
     q: "",
     cliente: "",
     articulo: "",
+    history: false,
   });
   const [rows, setRows] = useState([]);
   const [counters, setCounters] = useState({});
@@ -1186,9 +1205,11 @@ export default function BejermanSync() {
   const [err, setErr] = useState("");
   const [remitoErr, setRemitoErr] = useState("");
   const [remitoActionState, setRemitoActionState] = useState({});
+  const [retryingJobId, setRetryingJobId] = useState(null);
   const [msg, setMsg] = useState("");
   const [expanded, setExpanded] = useState({});
   const [remitoExpanded, setRemitoExpanded] = useState({});
+  const [processSort, setProcessSort] = useState("");
   const [mappingForms, setMappingForms] = useState({});
   const [articleSearchForms, setArticleSearchForms] = useState({});
   const [articleSearchState, setArticleSearchState] = useState({});
@@ -1442,6 +1463,25 @@ export default function BejermanSync() {
       return String(b.key).localeCompare(String(a.key));
     });
   }, [filters, rows, remitoRows]);
+  const displayProcessRows = useMemo(
+    () => sortRows(processRows, processSort, {
+      estado_tipo: {
+        getValue: (item) => `${item.row?.status || ""} ${PROCESS_KIND_LABELS[item.kind] || ""} ${companyLabel(item.row)}`,
+      },
+      documento: {
+        getValue: (item) => item.kind === "remito"
+          ? remitoDocumentLabel(item.row)
+          : `${item.row?.ingreso_id || ""} ${equipmentLabel(item.row)}`,
+      },
+      referencia: {
+        getValue: (item) => item.kind === "remito"
+          ? `${item.row?.source_reference || ""} ${item.row?.customer_name || item.row?.cliente || ""}`
+          : `${item.row?.numero_serie || ""} ${item.row?.numero_interno || ""} ${item.row?.article_code || ""}`,
+      },
+      seguimiento: { getValue: (item) => processAttemptedAt(item.row), type: "date" },
+    }),
+    [processRows, processSort],
+  );
   const processLoading = (
     (processTypeValue(filters) !== "remito" && loading) ||
     (processTypeValue(filters) !== "stock" && remitoLoading)
@@ -1511,11 +1551,19 @@ export default function BejermanSync() {
   const retry = async (jobId) => {
     setErr("");
     setMsg("");
+    // El backend procesa el job dentro del request, así que esto puede tardar unos segundos.
+    setRetryingJobId(jobId);
     try {
-      await postBejermanJobRetry(jobId);
+      const updated = await postBejermanJobRetry(jobId);
+      const status = String(updated?.status || "").trim();
+      if (status === "succeeded") setMsg("La operación se sincronizó con Bejerman.");
+      else if (updated?.last_error) setErr(updated.last_error);
+      else if (status === "pending") setMsg("La operación quedó encolada para reintentar.");
       await load();
     } catch (e) {
       setErr(e?.message || "No se pudo reintentar la operación.");
+    } finally {
+      setRetryingJobId(null);
     }
   };
 
@@ -1976,7 +2024,13 @@ export default function BejermanSync() {
             actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
           />
         ) : (
-          <JobActions row={row} canManage={canManage} onEdit={openEditModal} onRetry={retry} />
+          <JobActions
+            row={row}
+            canManage={canManage}
+            onEdit={openEditModal}
+            onRetry={retry}
+            retryingJobId={retryingJobId}
+          />
         )}
 
         {isOpen && (
@@ -2077,7 +2131,14 @@ export default function BejermanSync() {
                 className="justify-end"
               />
             ) : (
-              <JobActions row={row} canManage={canManage} onEdit={openEditModal} onRetry={retry} className="justify-end" />
+              <JobActions
+                row={row}
+                canManage={canManage}
+                onEdit={openEditModal}
+                onRetry={retry}
+                retryingJobId={retryingJobId}
+                className="justify-end"
+              />
             )}
           </td>
         </tr>
@@ -2112,6 +2173,8 @@ export default function BejermanSync() {
           Actualizar
         </button>
       </div>
+
+      <BejermanPdfQueuePanel canManage={canManage} />
 
       <PdfOutputSettingsPanel
         settings={pdfSettings}
@@ -2258,6 +2321,14 @@ export default function BejermanSync() {
               Filtrar
             </button>
           </div>
+          <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={filters.history}
+              onChange={(e) => updateFilter("history", e.target.checked)}
+            />
+            Ver histórico (incluir procesos exitosos de más de 7 días y fallidos de órdenes ya cerradas)
+          </label>
         </div>
 
         {filters.process_type !== "remito" && err && <div className="mt-3 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{err}</div>}
@@ -2270,6 +2341,12 @@ export default function BejermanSync() {
           onFocusCapture={pauseAutoRefresh}
           onBlurCapture={handleQueueBlur}
         >
+          <MobileSortControl
+            sort={processSort}
+            onSortChange={setProcessSort}
+            options={PROCESS_SORT_OPTIONS}
+            className="mt-4"
+          />
           <MobileDataList className="mt-4">
             {processLoading && processRows.length === 0 && (
               <MobileDataCard className="text-center text-gray-500">Cargando procesos...</MobileDataCard>
@@ -2277,7 +2354,7 @@ export default function BejermanSync() {
             {!processLoading && processRows.length === 0 && (
               <MobileDataCard className="text-center text-gray-500">Sin procesos.</MobileDataCard>
             )}
-            {processRows.map(renderProcessMobileCard)}
+            {displayProcessRows.map(renderProcessMobileCard)}
           </MobileDataList>
 
           <DesktopTableWrap className="mt-4 rounded border border-gray-200 bg-white">
@@ -2285,10 +2362,10 @@ export default function BejermanSync() {
               <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
                 <tr>
                   <th className="w-10 px-2 py-2"></th>
-                  <th className="w-[170px] px-3 py-2">Estado / Tipo</th>
-                  <th className="w-[24%] px-3 py-2">Documento / OS</th>
-                  <th className="w-[26%] px-3 py-2">Referencia</th>
-                  <th className="px-3 py-2">Seguimiento</th>
+                  <SortableTh field="estado_tipo" sort={processSort} onSortChange={setProcessSort} className="w-[170px] px-3 py-2">Estado / Tipo</SortableTh>
+                  <SortableTh field="documento" sort={processSort} onSortChange={setProcessSort} className="w-[24%] px-3 py-2">Documento / OS</SortableTh>
+                  <SortableTh field="referencia" sort={processSort} onSortChange={setProcessSort} className="w-[26%] px-3 py-2">Referencia</SortableTh>
+                  <SortableTh field="seguimiento" sort={processSort} onSortChange={setProcessSort} className="px-3 py-2">Seguimiento</SortableTh>
                   <th className="w-[130px] px-3 py-2 text-right">Acciones</th>
                 </tr>
               </thead>
@@ -2303,7 +2380,7 @@ export default function BejermanSync() {
                     <td colSpan={6} className="p-4 text-center text-gray-500">Sin procesos.</td>
                   </tr>
                 )}
-                {processRows.map(renderProcessDesktopRow)}
+                {displayProcessRows.map(renderProcessDesktopRow)}
               </tbody>
             </table>
           </DesktopTableWrap>

@@ -1,6 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, Clock3, FileText, Loader2, Pencil, Search, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  FileText,
+  Loader2,
+  Pencil,
+  Search,
+  X,
+} from "lucide-react";
 import {
   billingRemitoPdfUrl,
   getBillingCustomers,
@@ -13,14 +24,18 @@ import {
   postDeliveryOrderBillingReactivation,
   postDeliveryOrderInvoiced,
   postDeliveryOrderNotBillable,
+  postDeliveryOrdersInvoicedBatch,
 } from "../lib/api";
 import { openPrintablePdf, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
 import { useAuth } from "../context/AuthContext";
+import { can, PERMISSION_CODES } from "../lib/permissions";
 import DeliveryOrderCommercialCorrectionModal from "../components/DeliveryOrderCommercialCorrectionModal.jsx";
 import { remitoDocumentNumber } from "../lib/remitos";
 import {
+  deliveryOrderBejermanCustomerLabel,
   deliveryOrderCommercialLabel,
-  deliveryOrderCompanyLabel,
+  deliveryOrderIsOccasionalCustomer,
+  deliveryOrderOccasionalCustomerDocument,
   deliveryOrderItemAmounts,
   deliveryOrderItemDiscountPercent,
   deliveryOrderItemLabel,
@@ -42,9 +57,32 @@ import {
   ResponsiveModalOverlay,
   ResponsiveModalPanel,
 } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import useQueryState from "../hooks/useQueryState";
 
 const BILLABLE_REMITO_TYPES = new Set(["RT"]);
 const BILLING_PAGE_SIZE = 25;
+const BILLING_SORT_OPTIONS = [
+  { value: "fecha", label: "Fecha" },
+  { value: "cliente", label: "Cliente" },
+  { value: "comprobante", label: "Comprobante" },
+  { value: "numero", label: "Número" },
+  { value: "total", label: "Total" },
+];
+const REMITO_SORT_OPTIONS = [
+  { value: "fecha", label: "Fecha" },
+  { value: "cliente", label: "Cliente" },
+  { value: "codigo", label: "Código" },
+  { value: "tipo", label: "Tipo" },
+  { value: "operacion", label: "Operación" },
+  { value: "numero", label: "Número" },
+  { value: "total", label: "Total" },
+];
+const PENDING_BILLING_PAGE_SIZE = 200;
+const BILLING_COMPANY_BY_POINT_OF_SALE = {
+  "00004": "SEPID",
+  "00007": "MGBIO",
+};
 const EMPTY_PAGINATION = {
   page: 1,
   pageSize: BILLING_PAGE_SIZE,
@@ -95,17 +133,17 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
-function initialOrderIdFromUrl() {
+function orderIdFromSearch(search) {
   try {
-    return clean(new URLSearchParams(window.location.search).get("orderId"));
+    return clean(new URLSearchParams(search || "").get("orderId"));
   } catch {
     return "";
   }
 }
 
-function initialServiceOrderIdFromUrl() {
+function serviceOrderIdFromSearch(search) {
   try {
-    return clean(new URLSearchParams(window.location.search).get("serviceOrderId"));
+    return clean(new URLSearchParams(search || "").get("serviceOrderId"));
   } catch {
     return "";
   }
@@ -149,13 +187,6 @@ function tomorrowDateInputValue() {
   return `${year}-${month}-${day}`;
 }
 
-function isBillingPostponed(order) {
-  const value = clean(order?.billingPostponedUntil);
-  if (!value) return false;
-  const dueAt = new Date(value);
-  return !Number.isNaN(dueAt.getTime()) && dueAt.getTime() > Date.now();
-}
-
 function pendingRemitoEmissionRaw(order) {
   return (
     clean(order?.bejermanRemitoGroup?.generatedAt) ||
@@ -174,7 +205,15 @@ function pendingRemitoEmissionTime(order) {
 }
 
 function normalizePendingBillingOrders(items) {
-  return [...items]
+  const uniqueItems = [];
+  const seenIds = new Set();
+  for (const order of items) {
+    const orderId = clean(order?.id);
+    if (orderId && seenIds.has(orderId)) continue;
+    if (orderId) seenIds.add(orderId);
+    uniqueItems.push(order);
+  }
+  return uniqueItems
     .filter((order) => !clean(order?.invoiceNumber))
     .sort((a, b) => {
       const byDate = pendingRemitoEmissionTime(a) - pendingRemitoEmissionTime(b);
@@ -183,6 +222,307 @@ function normalizePendingBillingOrders(items) {
       if (byOrder) return byOrder;
       return clean(a?.id).localeCompare(clean(b?.id), "es-AR", { numeric: true });
     });
+}
+
+function pendingBillingUnitKey(order) {
+  const remitoGroupId = clean(order?.bejermanRemitoGroupId);
+  return remitoGroupId ? `remito:${remitoGroupId}` : `orden:${clean(order?.id)}`;
+}
+
+function pendingBillingCustomerCode(order) {
+  return clean(order?.bejermanRemitoGroup?.customerCode) || clean(order?.bejermanCustomerCode);
+}
+
+function normalizeBillingCompanyKey(value) {
+  const companyKey = clean(value).replace(/[\s_-]/g, "").toUpperCase();
+  if (companyKey === "SEPID" || companyKey === "SEP" || companyKey === "SEPISA") return "SEPID";
+  if (["MG", "MGB", "MGBI", "MGBIO", "MGBIOSA", "PORMG"].includes(companyKey)) return "MGBIO";
+  return "";
+}
+
+function normalizeBillingPointOfSale(value) {
+  const raw = clean(value);
+  if (!raw) return "";
+  if (/^\d{1,5}$/.test(raw)) return raw.padStart(5, "0");
+  return raw;
+}
+
+function billingPointOfSaleFromRemitoNumber(value) {
+  const match = clean(value).match(/(?:^|\s)(\d{1,5})\s*-\s*\d{1,8}(?:\b|$)/);
+  return match ? normalizeBillingPointOfSale(match[1]) : "";
+}
+
+function pendingBillingPointOfSale(order) {
+  const remitoGroup = order?.bejermanRemitoGroup || {};
+  const responseSummary = remitoGroup?.responseSummary || {};
+  return (
+    normalizeBillingPointOfSale(order?.billingPointOfSale) ||
+    normalizeBillingPointOfSale(remitoGroup?.comprobantePtoVenta) ||
+    normalizeBillingPointOfSale(responseSummary?.comprobantePtoVenta) ||
+    normalizeBillingPointOfSale(responseSummary?.comprobante_pto_venta) ||
+    normalizeBillingPointOfSale(responseSummary?.pointOfSale) ||
+    billingPointOfSaleFromRemitoNumber(remitoGroup?.remitoNumber || order?.remitoNumber)
+  );
+}
+
+function pendingBillingCompanyKey(order) {
+  const pointCompanyKey = BILLING_COMPANY_BY_POINT_OF_SALE[pendingBillingPointOfSale(order)];
+  if (pointCompanyKey) return pointCompanyKey;
+
+  const resolvedCompanyKey = normalizeBillingCompanyKey(order?.billingCompanyKey);
+  if (resolvedCompanyKey) return resolvedCompanyKey;
+
+  const remitoCompanyKey = normalizeBillingCompanyKey(order?.bejermanRemitoGroup?.companyKey);
+  if (remitoCompanyKey) return remitoCompanyKey;
+
+  const orderCompanyKey = normalizeBillingCompanyKey(order?.companyKey);
+  if (orderCompanyKey) return orderCompanyKey;
+
+  return normalizeBillingCompanyKey(order?.operationCompanyLabel || order?.sourceCompanyId);
+}
+
+function billingCompanyLabel(companyKey) {
+  if (companyKey === "MGBIO") return "MG BIO";
+  if (companyKey === "SEPID") return "SEPID";
+  return "Empresa sin determinar";
+}
+
+function pendingBillingCompanyLabel(order) {
+  return billingCompanyLabel(pendingBillingCompanyKey(order));
+}
+
+// Un particular no tiene código Bejerman y comparte la fila `customers` con todos los demás:
+// agrupar por customerId los mezclaría. El documento del propietario es la identidad real, y es
+// además lo que el backend exige para dejar facturar en grupo.
+function pendingBillingOccasionalDocument(order) {
+  return deliveryOrderOccasionalCustomerDocument(order);
+}
+
+function pendingBillingCustomerGroupKey(order) {
+  const customerCode = pendingBillingCustomerCode(order);
+  if (!customerCode) {
+    const occasionalDocument = pendingBillingOccasionalDocument(order);
+    return occasionalDocument ? `particular-doc:${occasionalDocument}` : `individual:${clean(order?.id)}`;
+  }
+  const customerId = clean(order?.customerId);
+  return customerId ? `cliente-id:${customerId}` : `cliente-codigo:${customerCode.toUpperCase()}`;
+}
+
+function pendingBillingCompanyGroupKey(order, customerGroupKey = pendingBillingCustomerGroupKey(order)) {
+  const customerCode = pendingBillingCustomerCode(order).toUpperCase();
+  const occasionalDocument = pendingBillingOccasionalDocument(order);
+  const companyKey = pendingBillingCompanyKey(order) || "SIN_EMPRESA";
+  const individualSuffix = customerCode || occasionalDocument ? "" : `:${clean(order?.id)}`;
+  const codeLabel = customerCode || (occasionalDocument ? `OCASIONAL-${occasionalDocument}` : "SIN_CODIGO");
+  return `${customerGroupKey}:empresa:${companyKey}:codigo:${codeLabel}${individualSuffix}`;
+}
+
+function aggregateDeliveryOrderTotals(orders) {
+  const totalsByCurrency = {};
+  let grossTotal = 0;
+  let discountTotal = 0;
+  let total = 0;
+  let itemCount = 0;
+  let pricedItems = 0;
+  let missingPriceItems = 0;
+
+  for (const order of orders) {
+    const orderTotals = deliveryOrderItemsTotals(order);
+    itemCount += orderTotals.itemCount;
+    pricedItems += orderTotals.pricedItems;
+    missingPriceItems += orderTotals.missingPriceItems;
+    grossTotal += orderTotals.grossTotal;
+    discountTotal += orderTotals.discountTotal;
+    total += orderTotals.total;
+    for (const currency of orderTotals.currencies || []) {
+      const source = orderTotals.totalsByCurrency?.[currency];
+      if (!source) continue;
+      const bucket = totalsByCurrency[currency] || {
+        currency,
+        grossTotal: 0,
+        discountTotal: 0,
+        total: 0,
+        pricedItems: 0,
+        missingPriceItems: 0,
+      };
+      bucket.grossTotal += source.grossTotal;
+      bucket.discountTotal += source.discountTotal;
+      bucket.total += source.total;
+      bucket.pricedItems += source.pricedItems;
+      bucket.missingPriceItems += source.missingPriceItems;
+      totalsByCurrency[currency] = bucket;
+    }
+  }
+
+  const currencies = ["ARS", "USD"].filter((currency) => totalsByCurrency[currency]);
+  return {
+    itemCount,
+    pricedItems,
+    missingPriceItems,
+    hasMissingPrices: missingPriceItems > 0,
+    currency: currencies.length > 1 ? "MIXED" : currencies[0] || "ARS",
+    currencies: currencies.length ? currencies : ["ARS"],
+    mixedCurrency: currencies.length > 1,
+    totalsByCurrency,
+    grossTotal,
+    discountTotal,
+    total,
+  };
+}
+
+function pendingBillingUnits(orders) {
+  const byKey = new Map();
+  for (const order of orders) {
+    const key = pendingBillingUnitKey(order);
+    const unit = byKey.get(key) || { key, orders: [] };
+    unit.orders.push(order);
+    byKey.set(key, unit);
+  }
+  return [...byKey.values()].map((unit) => ({
+    ...unit,
+    remitoNumber: unit.orders.find((order) => clean(order?.remitoNumber))?.remitoNumber || "",
+    totals: aggregateDeliveryOrderTotals(unit.orders),
+  }));
+}
+
+function groupPendingBillingOrders(orders) {
+  const customerGroupsByKey = new Map();
+  for (const order of orders) {
+    const key = pendingBillingCustomerGroupKey(order);
+    const customerGroup = customerGroupsByKey.get(key) || {
+      key,
+      customerId: clean(order?.customerId),
+      customerName: clean(order?.customerName) || "Cliente sin nombre",
+      orders: [],
+    };
+    customerGroup.orders.push(order);
+    customerGroupsByKey.set(key, customerGroup);
+  }
+
+  return [...customerGroupsByKey.values()]
+    .map((customerGroup) => {
+      const companyGroupsByKey = new Map();
+      for (const order of customerGroup.orders) {
+        const key = pendingBillingCompanyGroupKey(order, customerGroup.key);
+        const companyKey = pendingBillingCompanyKey(order);
+        const companyGroup = companyGroupsByKey.get(key) || {
+          key,
+          customerName: customerGroup.customerName,
+          customerCode: pendingBillingCustomerCode(order),
+          occasionalDocument: pendingBillingOccasionalDocument(order),
+          occasionalLabel: deliveryOrderIsOccasionalCustomer(order) ? deliveryOrderBejermanCustomerLabel(order) : "",
+          companyKey,
+          companyLabel: billingCompanyLabel(companyKey),
+          orders: [],
+        };
+        companyGroup.orders.push(order);
+        companyGroupsByKey.set(key, companyGroup);
+      }
+
+      const companyGroups = [...companyGroupsByKey.values()]
+        .map((companyGroup) => {
+          const pointOfSales = [
+            ...new Set(companyGroup.orders.map(pendingBillingPointOfSale).filter(Boolean)),
+          ].sort((a, b) => a.localeCompare(b, "es-AR", { numeric: true }));
+          return {
+            ...companyGroup,
+            pointOfSales,
+            batchEligible: Boolean(
+              (companyGroup.customerCode || companyGroup.occasionalDocument) && companyGroup.companyKey
+            ),
+            oldestPendingTime: Math.min(...companyGroup.orders.map(pendingRemitoEmissionTime)),
+            units: pendingBillingUnits(companyGroup.orders),
+            totals: aggregateDeliveryOrderTotals(companyGroup.orders),
+          };
+        })
+        .sort((a, b) => {
+          const byDate = a.oldestPendingTime - b.oldestPendingTime;
+          if (byDate) return byDate;
+          const byCompany = a.companyLabel.localeCompare(b.companyLabel, "es-AR", { sensitivity: "base" });
+          if (byCompany) return byCompany;
+          return a.key.localeCompare(b.key, "es-AR", { numeric: true });
+        });
+      const customerCodes = [
+        ...new Set(customerGroup.orders.map(pendingBillingCustomerCode).filter(Boolean)),
+      ];
+      const occasionalLabel = customerCodes.length
+        ? ""
+        : deliveryOrderBejermanCustomerLabel(customerGroup.orders[0]);
+      return {
+        ...customerGroup,
+        customerCodes,
+        occasionalLabel,
+        companyGroups,
+        oldestPendingTime: Math.min(...customerGroup.orders.map(pendingRemitoEmissionTime)),
+        units: pendingBillingUnits(customerGroup.orders),
+        totals: aggregateDeliveryOrderTotals(customerGroup.orders),
+      };
+    })
+    .sort((a, b) => {
+      const byDate = a.oldestPendingTime - b.oldestPendingTime;
+      if (byDate) return byDate;
+      const byCustomer = a.customerName.localeCompare(b.customerName, "es-AR", { sensitivity: "base" });
+      if (byCustomer) return byCustomer;
+      return a.key.localeCompare(b.key, "es-AR", { numeric: true });
+    });
+}
+
+function findPendingBillingContext(groups, orderId) {
+  const requestedId = clean(orderId);
+  if (!requestedId) return null;
+  for (const customerGroup of groups) {
+    for (const companyGroup of customerGroup.companyGroups || []) {
+      if (companyGroup.orders.some((order) => clean(order?.id) === requestedId)) {
+        return { customerGroup, companyGroup };
+      }
+    }
+  }
+  return null;
+}
+
+async function getAllPendingBillingOrders() {
+  const items = [];
+  let offset = 0;
+  let pageCount = 0;
+  let expectedTotal = 0;
+
+  while (true) {
+    const data = await getDeliveryOrders({
+      pendingBilling: true,
+      limit: PENDING_BILLING_PAGE_SIZE,
+      offset,
+    });
+    if (!Array.isArray(data?.items)) {
+      throw new Error("No se pudo confirmar la lista completa de remitos pendientes.");
+    }
+    const pageItems = data.items;
+    const reportedTotal = Number.parseInt(data?.total, 10);
+    const hasReportedTotal = Number.isFinite(reportedTotal) && reportedTotal >= 0;
+    if (!hasReportedTotal) {
+      throw new Error("No se pudo confirmar la cantidad total de remitos pendientes.");
+    }
+    expectedTotal = reportedTotal;
+    items.push(...pageItems);
+    offset += pageItems.length;
+    pageCount += 1;
+
+    if (offset >= reportedTotal) break;
+    if (!pageItems.length) {
+      throw new Error("La carga de remitos pendientes quedó incompleta.");
+    }
+    if (pageCount >= 1000) throw new Error("La carga de remitos pendientes excedió el límite seguro.");
+  }
+
+  const uniqueItems = new Map();
+  for (const order of items) {
+    const orderId = clean(order?.id);
+    if (orderId) uniqueItems.set(orderId, order);
+  }
+  const normalizedItems = normalizePendingBillingOrders([...uniqueItems.values()]);
+  if (normalizedItems.length !== expectedTotal) {
+    throw new Error("La carga de remitos pendientes quedó incompleta.");
+  }
+  return normalizedItems;
 }
 
 function orderMatchesServiceOrderId(order, serviceOrderId) {
@@ -194,17 +534,10 @@ function orderMatchesServiceOrderId(order, serviceOrderId) {
     .some((value) => value === requested || value === numeric || value === `OS-${numeric.padStart(5, "0")}`);
 }
 
-function serviceOrderSearchQuery(serviceOrderId) {
-  const requested = clean(serviceOrderId);
-  if (!requested) return "";
-  if (/^\d+$/.test(requested)) return `OS-${String(Number(requested)).padStart(5, "0")}`;
-  return requested;
-}
-
 function orderSubtitle(order) {
   return [
     clean(order?.orderNumber),
-    clean(order?.bejermanCustomerCode) || "sin código Bejerman",
+    pendingBillingCustomerCode(order) || deliveryOrderBejermanCustomerLabel(order) || "sin código Bejerman",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -262,20 +595,16 @@ function hasPendingBilling(order) {
   if (!clean(order?.remitoNumber) || clean(order?.invoiceNumber)) return false;
   if (["facturado", "cancelado", "entregado_no_facturable"].includes(clean(order?.status))) return false;
   const billingRequired = order?.bejermanRemitoGroup?.responseSummary?.billingRequired;
-  if (typeof billingRequired === "boolean") return billingRequired;
-  if (typeof billingRequired === "string" && ["true", "false"].includes(billingRequired.trim().toLowerCase())) {
-    return billingRequired.trim().toLowerCase() === "true";
-  }
-  return BILLABLE_REMITO_TYPES.has(remitoTypeFromOrder(order));
+  const billingRequiredText = clean(billingRequired).toLowerCase();
+  return (
+    billingRequired === true ||
+    billingRequiredText === "true" ||
+    BILLABLE_REMITO_TYPES.has(remitoTypeFromOrder(order))
+  );
 }
 
 function canCorrectCommercialTerms(user, order) {
-  return (
-    clean(user?.rol).toLowerCase() === "supervisor" &&
-    order?.status === "entregado_pendiente_facturacion" &&
-    Boolean(clean(order?.remitoNumber)) &&
-    !clean(order?.invoiceNumber)
-  );
+  return can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_CORRECT_COMMERCIAL_TERMS) && hasPendingBilling(order);
 }
 
 function remitoOperationLabel(item) {
@@ -458,8 +787,11 @@ function DeliveryOrderBillingDetails({ order, showItems = true }) {
         <DetailItem label="Remito" value={order.remitoNumber || "-"} />
         <DetailItem label="Orden" value={order.orderNumber} />
         <DetailItem label="Cliente" value={order.customerName} />
-        <DetailItem label="Código Bejerman" value={order.bejermanCustomerCode || "sin código"} />
-        <DetailItem label="Empresa" value={deliveryOrderCompanyLabel(order)} />
+        <DetailItem
+          label="Código Bejerman"
+          value={pendingBillingCustomerCode(order) || deliveryOrderBejermanCustomerLabel(order) || "sin código"}
+        />
+        <DetailItem label="Empresa" value={pendingBillingCompanyLabel(order)} />
         <DetailItem label="Fecha de entrega" value={formatDateTime(order.deliveredAt)} />
         <DetailItem label="Ubicación del remito" value={remitoLocationLabel(order.remitoLocation)} />
         <DetailItem label="Total estimado" value={formatOrderTotalsAmount(totals, "total")} />
@@ -495,13 +827,124 @@ function DeliveryOrderBillingDetails({ order, showItems = true }) {
   );
 }
 
+function BillingTotalsByCurrency({ totals, label = "Total estimado" }) {
+  const currencies = ["ARS", "USD"].filter((currency) => totals?.totalsByCurrency?.[currency]);
+  if (!currencies.length) return <span>{label}: -</span>;
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-1">
+      {currencies.map((currency) => (
+        <span key={currency}>
+          {label} {currency}: {formatOrderMoney(totals.totalsByCurrency[currency].total, currency)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function PendingBillingOrderRow({
+  order,
+  user,
+  selectedOrderId,
+  savingInvoice,
+  savingPostponement,
+  postponementOrder,
+  savingNotBillableId,
+  onSelect,
+  onCorrectCommercial,
+  onInvoice,
+  onPostpone,
+  onNotBillable,
+}) {
+  const totals = deliveryOrderItemsTotals(order);
+  const selected = clean(selectedOrderId) === clean(order?.id);
+  return (
+    <div
+      id={`pending-order-${order.id}`}
+      className={`px-3 py-3 text-sm ${selected ? "bg-emerald-50" : "bg-white"}`}
+    >
+      <button type="button" onClick={() => onSelect(order)} className="block w-full text-left">
+        <div className="font-medium text-gray-950">{order.remitoNumber || order.orderNumber}</div>
+        <div className="mt-0.5 text-xs text-gray-500">{orderSubtitle(order)}</div>
+        <div className="mt-1 text-xs font-medium text-gray-800">
+          Total estimado: {formatOrderTotalsAmount(totals, "total")}
+        </div>
+      </button>
+      {totals.hasMissingPrices && (
+        <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-800">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          Ítems sin precio
+        </div>
+      )}
+      {!pendingBillingCustomerCode(order) && !deliveryOrderIsOccasionalCustomer(order) && (
+        <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-800">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          Sin código Bejerman
+        </div>
+      )}
+      {!pendingBillingCompanyKey(order) && (
+        <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-800">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          Empresa sin determinar
+        </div>
+      )}
+      <div className="mt-2 flex flex-wrap gap-2">
+        {canCorrectCommercialTerms(user, order) && (
+          <button
+            type="button"
+            onClick={() => onCorrectCommercial(order)}
+            className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+          >
+            <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+            Corregir precio/plazo
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onInvoice(order)}
+          disabled={savingInvoice}
+          className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Registrar factura
+        </button>
+        <button
+          type="button"
+          onClick={() => onPostpone(order)}
+          disabled={savingPostponement}
+          className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+        >
+          {savingPostponement && postponementOrder?.id === order.id ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          ) : (
+            <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+          Posponer
+        </button>
+        <button
+          type="button"
+          onClick={() => onNotBillable(order)}
+          disabled={savingNotBillableId === order.id}
+          className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+        >
+          {savingNotBillableId === order.id ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          ) : (
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+          No se factura
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Billing() {
   const location = useLocation();
   const { user } = useAuth();
   const isRemitosRoute = location.pathname.endsWith("/remitos");
   const shouldRedirectToFacturacion = isRemitosRoute && /\b(?:orderId|serviceOrderId)=/.test(location.search || "");
-  const requestedOrderId = useMemo(initialOrderIdFromUrl, []);
-  const requestedServiceOrderId = useMemo(initialServiceOrderIdFromUrl, []);
+  const requestedOrderId = useMemo(() => orderIdFromSearch(location.search), [location.search]);
+  const requestedServiceOrderId = useMemo(() => serviceOrderIdFromSearch(location.search), [location.search]);
   const [customers, setCustomers] = useState([]);
   const [selectedCode, setSelectedCode] = useState("");
   const [customerQuery, setCustomerQuery] = useState("");
@@ -511,6 +954,7 @@ export default function Billing() {
   const [documents, setDocuments] = useState([]);
   const [pagination, setPagination] = useState(EMPTY_PAGINATION);
   const [page, setPage] = useState(1);
+  const [documentSort, setDocumentSort] = useQueryState("sort_facturacion", "");
   const [selectedRemitoCode, setSelectedRemitoCode] = useState("");
   const [remitoFilters, setRemitoFilters] = useState({
     companyKey: "SEPID",
@@ -523,8 +967,12 @@ export default function Billing() {
   const [remitos, setRemitos] = useState([]);
   const [remitosPagination, setRemitosPagination] = useState(EMPTY_PAGINATION);
   const [remitoPage, setRemitoPage] = useState(1);
+  const [remitoSort, setRemitoSort] = useQueryState("sort_remitos", "");
   const [pendingOrders, setPendingOrders] = useState([]);
   const [postponedOrders, setPostponedOrders] = useState([]);
+  const [pendingListComplete, setPendingListComplete] = useState(false);
+  const [expandedPendingCustomerKeys, setExpandedPendingCustomerKeys] = useState([]);
+  const [expandedPendingCompanyGroupKeys, setExpandedPendingCompanyGroupKeys] = useState([]);
   const [selectedPendingOrderId, setSelectedPendingOrderId] = useState("");
   const [pendingDetailOrder, setPendingDetailOrder] = useState(null);
   const [documentsLoading, setDocumentsLoading] = useState(false);
@@ -536,6 +984,11 @@ export default function Billing() {
   const [commercialCorrectionOrder, setCommercialCorrectionOrder] = useState(null);
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [invoiceError, setInvoiceError] = useState("");
+  const [batchInvoiceGroupKey, setBatchInvoiceGroupKey] = useState("");
+  const [batchInvoiceUnitKeys, setBatchInvoiceUnitKeys] = useState([]);
+  const [batchInvoiceNumber, setBatchInvoiceNumber] = useState("");
+  const [batchInvoiceError, setBatchInvoiceError] = useState("");
+  const [savingBatchInvoice, setSavingBatchInvoice] = useState(false);
   const [error, setError] = useState("");
   const [documentsWarning, setDocumentsWarning] = useState("");
   const [remitoError, setRemitoError] = useState("");
@@ -544,6 +997,7 @@ export default function Billing() {
   const [loadingDocumentPdfId, setLoadingDocumentPdfId] = useState("");
   const [loadingRemitoPdfId, setLoadingRemitoPdfId] = useState("");
   const [pendingError, setPendingError] = useState("");
+  const [pendingSuccess, setPendingSuccess] = useState("");
   const [savingNotBillableId, setSavingNotBillableId] = useState("");
   const [postponementOrder, setPostponementOrder] = useState(null);
   const [postponementDate, setPostponementDate] = useState("");
@@ -553,8 +1007,29 @@ export default function Billing() {
   const [postponedOpen, setPostponedOpen] = useState(false);
 
   const selectedPendingOrder = useMemo(
-    () => pendingOrders.find((order) => order.id === selectedPendingOrderId) || null,
+    () => pendingOrders.find((order) => clean(order?.id) === clean(selectedPendingOrderId)) || null,
     [pendingOrders, selectedPendingOrderId]
+  );
+
+  const pendingGroups = useMemo(() => groupPendingBillingOrders(pendingOrders), [pendingOrders]);
+  const batchInvoiceGroup = useMemo(
+    () =>
+      pendingGroups
+        .flatMap((customerGroup) => customerGroup.companyGroups || [])
+        .find((companyGroup) => companyGroup.key === batchInvoiceGroupKey) || null,
+    [batchInvoiceGroupKey, pendingGroups]
+  );
+  const selectedBatchInvoiceUnitKeys = useMemo(() => new Set(batchInvoiceUnitKeys), [batchInvoiceUnitKeys]);
+  const selectedBatchInvoiceOrders = useMemo(
+    () =>
+      (batchInvoiceGroup?.units || [])
+        .filter((unit) => selectedBatchInvoiceUnitKeys.has(unit.key))
+        .flatMap((unit) => unit.orders),
+    [batchInvoiceGroup, selectedBatchInvoiceUnitKeys]
+  );
+  const selectedBatchInvoiceTotals = useMemo(
+    () => aggregateDeliveryOrderTotals(selectedBatchInvoiceOrders),
+    [selectedBatchInvoiceOrders]
   );
 
   const customerSuggestions = useMemo(() => {
@@ -589,7 +1064,11 @@ export default function Billing() {
     setCustomerActiveIndex((current) => Math.min(current, Math.max(customerSuggestions.length - 1, 0)));
   }, [customerSuggestions.length]);
 
-  const loadDocuments = async (customerCode = selectedCode, pageNumber = page) => {
+  const loadDocuments = async (
+    customerCode = selectedCode,
+    pageNumber = page,
+    sortValue = documentSort
+  ) => {
     const code = clean(customerCode);
     setDocumentsLoading(true);
     try {
@@ -597,6 +1076,7 @@ export default function Billing() {
         ...filters,
         page: pageNumber,
         pageSize: BILLING_PAGE_SIZE,
+        sort: sortValue || undefined,
       };
       if (code) params.customerCode = code;
       const data = await getBillingDocuments(params);
@@ -615,7 +1095,11 @@ export default function Billing() {
     }
   };
 
-  const loadRemitos = async (customerCode = selectedRemitoCode, pageNumber = remitoPage) => {
+  const loadRemitos = async (
+    customerCode = selectedRemitoCode,
+    pageNumber = remitoPage,
+    sortValue = remitoSort
+  ) => {
     const code = clean(customerCode);
     setRemitosLoading(true);
     try {
@@ -623,6 +1107,7 @@ export default function Billing() {
         ...remitoFilters,
         page: pageNumber,
         pageSize: BILLING_PAGE_SIZE,
+        sort: sortValue || undefined,
       };
       if (code) params.customerCode = code;
       const data = await getBillingRemitos(params);
@@ -643,53 +1128,28 @@ export default function Billing() {
 
   const loadPendingOrders = async ({ preferredSelectedId = selectedPendingOrderId, allowRequestedSelection = true } = {}) => {
     setPendingLoading(true);
+    setPendingListComplete(false);
     try {
-      const data = await getDeliveryOrders({ pendingBilling: true, limit: 200 });
-      let items = Array.isArray(data?.items) ? data.items : [];
-      if (allowRequestedSelection && requestedOrderId && !items.some((order) => order.id === requestedOrderId)) {
-        try {
-          const requestedOrder = await getDeliveryOrder(requestedOrderId);
-          if (hasPendingBilling(requestedOrder) && !isBillingPostponed(requestedOrder)) {
-            items = [requestedOrder, ...items];
-          }
-        } catch {
-          // Si el vínculo ya no corresponde a un pendiente, la lista general sigue disponible.
-        }
-      }
-      if (
-        allowRequestedSelection &&
-        requestedServiceOrderId &&
-        !items.some((order) => orderMatchesServiceOrderId(order, requestedServiceOrderId))
-      ) {
-        try {
-          const serviceData = await getDeliveryOrders({
-            pendingBilling: true,
-            q: serviceOrderSearchQuery(requestedServiceOrderId),
-            limit: 20,
-          });
-          const serviceItems = Array.isArray(serviceData?.items) ? serviceData.items : [];
-          items = [
-            ...serviceItems.filter((order) => orderMatchesServiceOrderId(order, requestedServiceOrderId)),
-            ...items,
-          ];
-        } catch {
-          // Si el vínculo de OS no encuentra un remito pendiente, la lista general sigue disponible.
-        }
-      }
-
+      let items = await getAllPendingBillingOrders();
       items = normalizePendingBillingOrders(items);
       setPendingOrders(items);
-      const preferredExists = preferredSelectedId && items.some((order) => order.id === preferredSelectedId);
-      const requestedExists = allowRequestedSelection && requestedOrderId && items.some((order) => order.id === requestedOrderId);
+      const preferredExists =
+        preferredSelectedId && items.some((order) => clean(order?.id) === clean(preferredSelectedId));
+      const requestedExists =
+        allowRequestedSelection &&
+        requestedOrderId &&
+        items.some((order) => clean(order?.id) === clean(requestedOrderId));
       const requestedServiceOrder = allowRequestedSelection && requestedServiceOrderId
         ? items.find((order) => orderMatchesServiceOrderId(order, requestedServiceOrderId))
         : null;
       const nextSelectedId = preferredExists ? preferredSelectedId : requestedExists ? requestedOrderId : requestedServiceOrder?.id || "";
       setSelectedPendingOrderId(nextSelectedId);
       setPendingError("");
-    } catch {
+      setPendingListComplete(true);
+    } catch (err) {
       setPendingOrders([]);
-      setPendingError("No se pudieron cargar los remitos pendientes.");
+      setPendingError(err?.message || "No se pudieron cargar todos los remitos pendientes.");
+      setPendingListComplete(false);
     } finally {
       setPendingLoading(false);
     }
@@ -722,11 +1182,148 @@ export default function Billing() {
     loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: true });
     loadPostponedOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRemitosRoute, requestedOrderId, requestedServiceOrderId]);
+
+  useEffect(() => {
+    if (!isRemitosRoute) return;
+    loadRemitos("", 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRemitosRoute]);
+
+  const remitoSearchSkipNextRef = useRef(true);
+  useEffect(() => {
+    if (!isRemitosRoute) return;
+    if (remitoSearchSkipNextRef.current) {
+      remitoSearchSkipNextRef.current = false;
+      return;
+    }
+    const timeoutId = setTimeout(() => {
+      setRemitoPage(1);
+      loadRemitos(selectedRemitoCode, 1);
+    }, 400);
+    return () => clearTimeout(timeoutId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remitoFilters.search]);
+
+  useEffect(() => {
+    const selectedId = clean(selectedPendingOrderId);
+    if (!selectedId) return;
+    const selectedContext = findPendingBillingContext(pendingGroups, selectedId);
+    if (!selectedContext) return;
+    setExpandedPendingCustomerKeys((current) =>
+      current.includes(selectedContext.customerGroup.key) ? current : [...current, selectedContext.customerGroup.key]
+    );
+    setExpandedPendingCompanyGroupKeys((current) =>
+      current.includes(selectedContext.companyGroup.key) ? current : [...current, selectedContext.companyGroup.key]
+    );
+  }, [pendingGroups, selectedPendingOrderId]);
+
+  useEffect(() => {
+    if (pendingLoading || (!requestedOrderId && !requestedServiceOrderId)) return undefined;
+    const selectedId = clean(selectedPendingOrderId);
+    if (!selectedId) return undefined;
+    const selectedContext = findPendingBillingContext(pendingGroups, selectedId);
+    if (
+      !selectedContext ||
+      !expandedPendingCustomerKeys.includes(selectedContext.customerGroup.key) ||
+      !expandedPendingCompanyGroupKeys.includes(selectedContext.companyGroup.key)
+    ) return undefined;
+    const timer = window.setTimeout(() => {
+      document.getElementById(`pending-order-${selectedId}`)?.scrollIntoView({ block: "nearest" });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    expandedPendingCompanyGroupKeys,
+    expandedPendingCustomerKeys,
+    pendingGroups,
+    pendingLoading,
+    requestedOrderId,
+    requestedServiceOrderId,
+    selectedPendingOrderId,
+  ]);
 
   const selectPendingOrder = (order) => {
     setSelectedPendingOrderId(order.id);
     setPendingDetailOrder(order);
+  };
+
+  const togglePendingCustomerGroup = (groupKey) => {
+    setExpandedPendingCustomerKeys((current) =>
+      current.includes(groupKey) ? current.filter((key) => key !== groupKey) : [...current, groupKey]
+    );
+  };
+
+  const togglePendingCompanyGroup = (groupKey) => {
+    setExpandedPendingCompanyGroupKeys((current) =>
+      current.includes(groupKey) ? current.filter((key) => key !== groupKey) : [...current, groupKey]
+    );
+  };
+
+  const openBatchInvoiceModal = (group) => {
+    if (!pendingListComplete || !group?.batchEligible) return;
+    setBatchInvoiceGroupKey(group.key);
+    setBatchInvoiceUnitKeys(group.units.map((unit) => unit.key));
+    setBatchInvoiceNumber("");
+    setBatchInvoiceError("");
+    setPendingSuccess("");
+  };
+
+  const closeBatchInvoiceModal = () => {
+    if (savingBatchInvoice) return;
+    setBatchInvoiceGroupKey("");
+    setBatchInvoiceUnitKeys([]);
+    setBatchInvoiceNumber("");
+    setBatchInvoiceError("");
+  };
+
+  const toggleBatchInvoiceUnit = (unitKey) => {
+    setBatchInvoiceUnitKeys((current) =>
+      current.includes(unitKey) ? current.filter((key) => key !== unitKey) : [...current, unitKey]
+    );
+    setBatchInvoiceError("");
+  };
+
+  const toggleAllBatchInvoiceUnits = () => {
+    if (!batchInvoiceGroup) return;
+    const allSelected = batchInvoiceUnitKeys.length === batchInvoiceGroup.units.length;
+    setBatchInvoiceUnitKeys(allSelected ? [] : batchInvoiceGroup.units.map((unit) => unit.key));
+    setBatchInvoiceError("");
+  };
+
+  const submitBatchInvoice = async (event) => {
+    event.preventDefault();
+    const invoice = batchInvoiceNumber.trim();
+    if (!invoice) {
+      setBatchInvoiceError("Ingrese el número de factura.");
+      return;
+    }
+    if (!selectedBatchInvoiceOrders.length) {
+      setBatchInvoiceError("Seleccione al menos un remito para facturar.");
+      return;
+    }
+
+    const orderIds = selectedBatchInvoiceOrders.map((order) => order.id);
+    const selectedRemitoCount = batchInvoiceUnitKeys.length;
+    setSavingBatchInvoice(true);
+    setBatchInvoiceError("");
+    try {
+      const result = await postDeliveryOrdersInvoicedBatch({ orderIds, invoiceNumber: invoice });
+      const updatedCount = Number.parseInt(result?.count, 10);
+      const orderCount = Number.isFinite(updatedCount) ? updatedCount : orderIds.length;
+      setBatchInvoiceGroupKey("");
+      setBatchInvoiceUnitKeys([]);
+      setBatchInvoiceNumber("");
+      setPendingDetailOrder(null);
+      setSelectedPendingOrderId("");
+      setPendingSuccess(
+        `Factura ${invoice} registrada para ${selectedRemitoCount} remito${selectedRemitoCount === 1 ? "" : "s"} y ${orderCount} OE.`
+      );
+      await loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: false });
+    } catch (err) {
+      setBatchInvoiceError(err?.message || "No se pudo registrar la factura agrupada.");
+    } finally {
+      setSavingBatchInvoice(false);
+    }
   };
 
   const openInvoiceModal = (order) => {
@@ -736,6 +1333,7 @@ export default function Billing() {
     setInvoiceNumber("");
     setInvoiceError("");
     setError("");
+    setPendingSuccess("");
   };
 
   const closePendingDetailModal = () => {
@@ -854,6 +1452,7 @@ export default function Billing() {
       setInvoiceNumber("");
       setPendingDetailOrder(null);
       setSelectedPendingOrderId("");
+      setPendingSuccess(`Factura ${invoice} registrada para ${invoiceOrder.remitoNumber || invoiceOrder.orderNumber}.`);
       await loadPendingOrders({ preferredSelectedId: "", allowRequestedSelection: false });
     } catch (err) {
       setInvoiceError(err?.message || "No se pudo registrar la factura.");
@@ -1031,6 +1630,12 @@ export default function Billing() {
     loadDocuments(resolveCustomerCodeInput(), safePage);
   };
 
+  const updateDocumentSort = (value) => {
+    setDocumentSort(value);
+    setPage(1);
+    loadDocuments(resolveCustomerCodeInput(), 1, value);
+  };
+
   const handleBillingCustomerKeyDown = (event) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -1066,6 +1671,12 @@ export default function Billing() {
     loadRemitos(selectedRemitoCode, safePage);
   };
 
+  const updateRemitoSort = (value) => {
+    setRemitoSort(value);
+    setRemitoPage(1);
+    loadRemitos(selectedRemitoCode, 1, value);
+  };
+
   if (shouldRedirectToFacturacion) {
     return <Navigate to={`/cobranzas/facturacion${location.search || ""}`} replace />;
   }
@@ -1081,7 +1692,7 @@ export default function Billing() {
         </div>
       </div>
 
-      <div className={isRemitosRoute ? "contents" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]"}>
+      <div className={isRemitosRoute ? "contents" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_440px]"}>
         {!isRemitosRoute && (
         <section className="border">
           <div className="border-b px-3 py-2 text-sm font-semibold">Consulta de facturación</div>
@@ -1196,6 +1807,12 @@ export default function Billing() {
           {error && <div className="border-t px-3 py-2 text-sm text-red-700">{error}</div>}
           {documentsWarning && <div className="border-t px-3 py-2 text-sm text-amber-800">{documentsWarning}</div>}
 
+          <MobileSortControl
+            sort={documentSort}
+            onSortChange={updateDocumentSort}
+            options={BILLING_SORT_OPTIONS}
+            className="px-3 pt-3"
+          />
           <MobileDataList className="p-3">
             {documentsLoading && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
             {!documentsLoading &&
@@ -1240,11 +1857,11 @@ export default function Billing() {
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
                 <tr>
-                  <th className="px-2 py-2">Fecha</th>
-                  <th className="px-2 py-2">Cliente</th>
-                  <th className="px-2 py-2">Comprobante</th>
-                  <th className="px-2 py-2">Número</th>
-                  <th className="px-2 py-2 text-right">Total</th>
+                  <SortableTh field="fecha" sort={documentSort} onSortChange={updateDocumentSort} className="px-2 py-2">Fecha</SortableTh>
+                  <SortableTh field="cliente" sort={documentSort} onSortChange={updateDocumentSort} className="px-2 py-2">Cliente</SortableTh>
+                  <SortableTh field="comprobante" sort={documentSort} onSortChange={updateDocumentSort} className="px-2 py-2">Comprobante</SortableTh>
+                  <SortableTh field="numero" sort={documentSort} onSortChange={updateDocumentSort} className="px-2 py-2">Número</SortableTh>
+                  <SortableTh field="total" sort={documentSort} onSortChange={updateDocumentSort} className="px-2 py-2 text-right">Total</SortableTh>
                   <th className="px-2 py-2"></th>
                 </tr>
               </thead>
@@ -1327,102 +1944,181 @@ export default function Billing() {
         {!isRemitosRoute && (
           <aside className="flex min-w-0 flex-col gap-4">
             <section className="border">
-          <div className="flex items-center justify-between border-b px-3 py-2 text-sm font-semibold">
-            <span>Remitos pendientes</span>
-            <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-normal text-gray-700">
-              {pendingOrders.length}
-            </span>
-          </div>
-          {pendingError && <div className="border-b px-3 py-2 text-sm text-red-700">{pendingError}</div>}
-          <div className="max-h-[560px] overflow-y-auto">
-            {pendingLoading ? (
-              <div className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-gray-500">
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                Cargando...
+              <div className="flex items-center justify-between border-b px-3 py-2 text-sm font-semibold">
+                <span>Remitos pendientes por cliente</span>
+                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-normal text-gray-700">
+                  {pendingOrders.length} OE
+                </span>
               </div>
-            ) : (
-              pendingOrders.map((order) => {
-                const totals = deliveryOrderItemsTotals(order);
-                return (
-                  <div
-                    key={order.id}
-                    className={`border-b px-3 py-2 text-sm ${
-                      selectedPendingOrderId === order.id ? "bg-emerald-50" : ""
-                    }`}
-                  >
-                    <button type="button" onClick={() => selectPendingOrder(order)} className="block w-full text-left">
-                      <div className="font-medium text-gray-950">{order.remitoNumber || order.orderNumber}</div>
-                      <div className="text-gray-600">{order.customerName}</div>
-                      <div className="text-xs text-gray-500">{orderSubtitle(order)}</div>
-                      <div className="mt-1 text-xs font-medium text-gray-800">
-                        Total estimado: {formatOrderTotalsAmount(totals, "total")}
-                      </div>
-                    </button>
-                    {totals.hasMissingPrices && (
-                      <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-800">
-                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        Ítems sin precio
-                      </div>
-                    )}
-                    {!order.bejermanCustomerCode && (
-                      <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-800">
-                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        Sin código Bejerman
-                      </div>
-                    )}
-                    {canCorrectCommercialTerms(user, order) && (
-                      <button
-                        type="button"
-                        onClick={() => openCommercialCorrection(order)}
-                        className="mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50"
-                      >
-                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                        Corregir precio/plazo
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => openInvoiceModal(order)}
-                      disabled={savingInvoice}
-                      className={`${canCorrectCommercialTerms(user, order) ? "ml-2" : ""} mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50`}
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      Registrar factura
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openPostponementModal(order)}
-                      disabled={savingPostponement}
-                      className="ml-2 mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      {savingPostponement && postponementOrder?.id === order.id ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                      ) : (
-                        <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
-                      )}
-                      Posponer
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => markOrderNotBillable(order)}
-                      disabled={savingNotBillableId === order.id}
-                      className="ml-2 mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      {savingNotBillableId === order.id ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                      ) : (
-                        <X className="h-3.5 w-3.5" aria-hidden="true" />
-                      )}
-                      No se factura
-                    </button>
+              {pendingError && <div className="border-b bg-red-50 px-3 py-2 text-sm text-red-700">{pendingError}</div>}
+              {pendingSuccess && (
+                <div className="border-b bg-emerald-50 px-3 py-2 text-sm text-emerald-800">{pendingSuccess}</div>
+              )}
+              <div className="max-h-[720px] overflow-y-auto bg-gray-50/50 p-2">
+                {pendingLoading ? (
+                  <div className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-gray-500">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    Cargando todos los pendientes...
                   </div>
-                );
-              })
-            )}
-            {!pendingLoading && !pendingOrders.length && (
-              <div className="px-3 py-8 text-center text-sm text-gray-500">Sin remitos pendientes.</div>
-            )}
-          </div>
+                ) : (
+                  <div className="space-y-2">
+                    {pendingGroups.map((customerGroup) => {
+                      const expanded = expandedPendingCustomerKeys.includes(customerGroup.key);
+                      const containsSelectedOrder = customerGroup.orders.some(
+                        (order) => clean(order?.id) === clean(selectedPendingOrderId)
+                      );
+                      const customerCodeLabel = !customerGroup.customerCodes.length
+                        ? customerGroup.occasionalLabel || "Sin código Bejerman"
+                        : customerGroup.customerCodes.length === 1
+                          ? `Código Bejerman ${customerGroup.customerCodes[0]}`
+                          : `${customerGroup.customerCodes.length} códigos Bejerman`;
+                      return (
+                        <article
+                          key={customerGroup.key}
+                          className={`overflow-hidden rounded border bg-white ${
+                            containsSelectedOrder ? "border-emerald-300 ring-1 ring-emerald-200" : ""
+                          }`}
+                        >
+                          <div className={containsSelectedOrder ? "bg-emerald-50" : ""}>
+                            <button
+                              type="button"
+                              onClick={() => togglePendingCustomerGroup(customerGroup.key)}
+                              className="flex w-full items-start gap-2 px-3 py-3 text-left hover:bg-gray-50/80"
+                              aria-expanded={expanded}
+                            >
+                              {expanded ? (
+                                <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+                              ) : (
+                                <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+                              )}
+                              <span className="min-w-0 flex-1">
+                                <span className="block font-semibold text-gray-950">{customerGroup.customerName}</span>
+                                <span className="mt-0.5 block text-xs text-gray-600">
+                                  {customerCodeLabel}
+                                </span>
+                                <span className="mt-1 block text-xs text-gray-500">
+                                  {customerGroup.companyGroups.length} empresa{customerGroup.companyGroups.length === 1 ? "" : "s"} ·{" "}
+                                  {customerGroup.units.length} remito{customerGroup.units.length === 1 ? "" : "s"} ·{" "}
+                                  {customerGroup.orders.length} OE
+                                </span>
+                                <span className="mt-1 block text-xs font-medium text-gray-800">
+                                  <BillingTotalsByCurrency totals={customerGroup.totals} />
+                                </span>
+                              </span>
+                            </button>
+                          </div>
+
+                          {expanded && (
+                            <div className="space-y-2 border-t bg-gray-50 p-2">
+                              {customerGroup.companyGroups.map((companyGroup) => {
+                                const companyExpanded = expandedPendingCompanyGroupKeys.includes(companyGroup.key);
+                                const companyContainsSelectedOrder = companyGroup.orders.some(
+                                  (order) => clean(order?.id) === clean(selectedPendingOrderId)
+                                );
+                                const pointOfSaleLabel = companyGroup.pointOfSales.length
+                                  ? `PV ${companyGroup.pointOfSales.join(", ")}`
+                                  : "PV sin informar";
+                                return (
+                                  <section
+                                    key={companyGroup.key}
+                                    className={`overflow-hidden rounded border bg-white ${
+                                      companyContainsSelectedOrder ? "border-emerald-300 ring-1 ring-emerald-100" : ""
+                                    }`}
+                                  >
+                                    <div className={companyContainsSelectedOrder ? "bg-emerald-50" : ""}>
+                                      <button
+                                        type="button"
+                                        onClick={() => togglePendingCompanyGroup(companyGroup.key)}
+                                        className="flex w-full items-start gap-2 px-3 py-3 text-left hover:bg-gray-50/80"
+                                        aria-expanded={companyExpanded}
+                                      >
+                                        {companyExpanded ? (
+                                          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+                                        ) : (
+                                          <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+                                        )}
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block font-semibold text-gray-950">{companyGroup.companyLabel}</span>
+                                          <span className="mt-0.5 block text-xs text-gray-600">
+                                            {companyGroup.customerCode ||
+                                              companyGroup.occasionalLabel ||
+                                              "Sin código Bejerman"}{" "}
+                                            · {pointOfSaleLabel}
+                                          </span>
+                                          <span className="mt-1 block text-xs text-gray-500">
+                                            {companyGroup.units.length} remito{companyGroup.units.length === 1 ? "" : "s"} ·{" "}
+                                            {companyGroup.orders.length} OE
+                                          </span>
+                                          <span className="mt-1 block text-xs font-medium text-gray-800">
+                                            <BillingTotalsByCurrency totals={companyGroup.totals} />
+                                          </span>
+                                        </span>
+                                      </button>
+                                      <div className="flex flex-wrap items-center gap-2 px-3 pb-3 pl-9">
+                                        {companyGroup.totals.hasMissingPrices && (
+                                          <span className="inline-flex items-center gap-1 text-xs text-amber-800">
+                                            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                            {companyGroup.totals.missingPriceItems} ítem
+                                            {companyGroup.totals.missingPriceItems === 1 ? "" : "s"} sin precio
+                                          </span>
+                                        )}
+                                        {!companyGroup.batchEligible && (
+                                          <span className="inline-flex items-center gap-1 text-xs text-amber-800">
+                                            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                            {!companyGroup.customerCode && !companyGroup.occasionalDocument
+                                              ? "Sin código Bejerman: sólo facturación individual"
+                                              : "Empresa sin determinar: sólo facturación individual"}
+                                          </span>
+                                        )}
+                                        {companyGroup.batchEligible && (
+                                          <button
+                                            type="button"
+                                            onClick={() => openBatchInvoiceModal(companyGroup)}
+                                            disabled={!pendingListComplete || pendingLoading || savingBatchInvoice}
+                                            className="ml-auto inline-flex items-center gap-1.5 rounded bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                                          >
+                                            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                            Facturar selección
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {companyExpanded && (
+                                      <div className="divide-y border-t">
+                                        {companyGroup.orders.map((order) => (
+                                          <PendingBillingOrderRow
+                                            key={order.id}
+                                            order={order}
+                                            user={user}
+                                            selectedOrderId={selectedPendingOrderId}
+                                            savingInvoice={savingInvoice}
+                                            savingPostponement={savingPostponement}
+                                            postponementOrder={postponementOrder}
+                                            savingNotBillableId={savingNotBillableId}
+                                            onSelect={selectPendingOrder}
+                                            onCorrectCommercial={openCommercialCorrection}
+                                            onInvoice={openInvoiceModal}
+                                            onPostpone={openPostponementModal}
+                                            onNotBillable={markOrderNotBillable}
+                                          />
+                                        ))}
+                                      </div>
+                                    )}
+                                  </section>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+                {!pendingLoading && !pendingGroups.length && (
+                  <div className="px-3 py-8 text-center text-sm text-gray-500">Sin remitos pendientes.</div>
+                )}
+              </div>
             </section>
             <section className="border">
             <button
@@ -1513,6 +2209,9 @@ export default function Billing() {
                 setRemitoPage(1);
                 setSelectedRemitoCode(event.target.value);
               }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") runRemitoSearch();
+              }}
               list="billing-remito-customers"
               className="h-9 w-full rounded border px-2"
               placeholder="Código Bejerman"
@@ -1597,7 +2296,13 @@ export default function Billing() {
             <span className="mb-1 block text-xs uppercase text-gray-500">Buscar</span>
             <input
               value={remitoFilters.search}
-              onChange={(event) => setRemitoFilters((prev) => ({ ...prev, search: event.target.value }))}
+              onChange={(event) => {
+                setRemitoPage(1);
+                setRemitoFilters((prev) => ({ ...prev, search: event.target.value }));
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") runRemitoSearch();
+              }}
               className="h-9 w-full rounded border px-2"
               placeholder="Número, cliente, código u operación"
             />
@@ -1607,6 +2312,12 @@ export default function Billing() {
         {remitoWarning && <div className="border-t px-3 py-2 text-sm text-amber-800">{remitoWarning}</div>}
         {remitoError && <div className="border-t px-3 py-2 text-sm text-red-700">{remitoError}</div>}
 
+        <MobileSortControl
+          sort={remitoSort}
+          onSortChange={updateRemitoSort}
+          options={REMITO_SORT_OPTIONS}
+          className="px-3 pt-3"
+        />
         <MobileDataList className="p-3">
           {remitosLoading && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
           {!remitosLoading &&
@@ -1655,13 +2366,13 @@ export default function Billing() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-2 py-2">Fecha</th>
-                <th className="px-2 py-2">Cliente</th>
-                <th className="px-2 py-2">Código</th>
-                <th className="px-2 py-2">Tipo</th>
-                <th className="px-2 py-2">Operación</th>
-                <th className="px-2 py-2">Número</th>
-                <th className="px-2 py-2 text-right">Total</th>
+                <SortableTh field="fecha" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2">Fecha</SortableTh>
+                <SortableTh field="cliente" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2">Cliente</SortableTh>
+                <SortableTh field="codigo" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2">Código</SortableTh>
+                <SortableTh field="tipo" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2">Tipo</SortableTh>
+                <SortableTh field="operacion" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2">Operación</SortableTh>
+                <SortableTh field="numero" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2">Número</SortableTh>
+                <SortableTh field="total" sort={remitoSort} onSortChange={updateRemitoSort} className="px-2 py-2 text-right">Total</SortableTh>
                 <th className="px-2 py-2"></th>
               </tr>
             </thead>
@@ -1892,6 +2603,152 @@ export default function Billing() {
         onClose={closeCommercialCorrection}
         onSaved={handleCommercialCorrectionSaved}
       />
+
+      {batchInvoiceGroup && (
+        <ResponsiveModalOverlay className="bg-black/35">
+          <ResponsiveModalPanel className="max-w-6xl" role="dialog" aria-modal="true">
+            <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold">Registrar factura agrupada</h2>
+                <p className="mt-0.5 text-sm text-gray-600">
+                  {batchInvoiceGroup.customerName} · {batchInvoiceGroup.customerCode} · {batchInvoiceGroup.companyLabel}
+                </p>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  {batchInvoiceGroup.pointOfSales.length
+                    ? `Punto${batchInvoiceGroup.pointOfSales.length === 1 ? "" : "s"} de venta: ${batchInvoiceGroup.pointOfSales.join(", ")}`
+                    : "Punto de venta sin informar"}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Una sola factura se asignará a todos los remitos seleccionados.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeBatchInvoiceModal}
+                disabled={savingBatchInvoice}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                aria-label="Cerrar"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <form onSubmit={submitBatchInvoice} className="max-h-[calc(100vh-8rem)] overflow-y-auto">
+              <div className="sticky top-0 z-10 space-y-3 border-b bg-white p-4 shadow-sm">
+                <div className="grid gap-3 md:grid-cols-[minmax(240px,1fr)_auto] md:items-end">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs uppercase text-gray-500">Número de factura</span>
+                    <input
+                      autoFocus
+                      value={batchInvoiceNumber}
+                      onChange={(event) => {
+                        setBatchInvoiceNumber(event.target.value);
+                        setBatchInvoiceError("");
+                      }}
+                      className="h-9 w-full rounded border px-2"
+                      placeholder="FC A 0001-00000000"
+                    />
+                  </label>
+                  <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded border px-3 text-sm hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={
+                        batchInvoiceGroup.units.length > 0 &&
+                        batchInvoiceUnitKeys.length === batchInvoiceGroup.units.length
+                      }
+                      onChange={toggleAllBatchInvoiceUnits}
+                      className="h-4 w-4 rounded border-gray-300"
+                    />
+                    Seleccionar todos
+                  </label>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span className="text-gray-600">
+                    {batchInvoiceUnitKeys.length} de {batchInvoiceGroup.units.length} remitos · {selectedBatchInvoiceOrders.length} OE
+                  </span>
+                  <span className="font-medium text-gray-900">
+                    <BillingTotalsByCurrency totals={selectedBatchInvoiceTotals} label="Seleccionado" />
+                  </span>
+                </div>
+                <MissingPriceNotice totals={selectedBatchInvoiceTotals} />
+                {batchInvoiceError && (
+                  <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {batchInvoiceError}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3 bg-gray-50 p-3 sm:p-4">
+                {batchInvoiceGroup.units.map((unit) => {
+                  const selected = selectedBatchInvoiceUnitKeys.has(unit.key);
+                  return (
+                    <section
+                      key={unit.key}
+                      className={`overflow-hidden rounded border bg-white ${
+                        selected ? "border-emerald-300 ring-1 ring-emerald-100" : "opacity-70"
+                      }`}
+                    >
+                      <label className="flex cursor-pointer items-start gap-3 border-b bg-gray-50 px-3 py-3 sm:px-4">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleBatchInvoiceUnit(unit.key)}
+                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-semibold text-gray-950">
+                            {unit.remitoNumber || unit.orders[0]?.orderNumber || "Remito sin número"}
+                          </span>
+                          <span className="mt-0.5 block text-xs text-gray-600">
+                            {unit.orders.length} OE · {formatOrderTotalsAmount(unit.totals, "total")}
+                          </span>
+                          {unit.orders.length > 1 && (
+                            <span className="mt-1 block text-xs text-blue-700">
+                              Estas OE pertenecen al mismo remito y se seleccionan juntas.
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                      <div className="divide-y">
+                        {unit.orders.map((order) => (
+                          <div key={order.id} className="space-y-3 p-3 sm:p-4">
+                            {unit.orders.length > 1 && (
+                              <div className="text-sm font-semibold text-gray-900">{order.orderNumber || `OE ${order.id}`}</div>
+                            )}
+                            <DeliveryOrderBillingDetails order={order} />
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  );
+                })}
+              </div>
+
+              <div className="sticky bottom-0 flex flex-col-reverse gap-2 border-t bg-white px-4 py-3 shadow-[0_-2px_8px_rgba(0,0,0,0.06)] sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={closeBatchInvoiceModal}
+                  disabled={savingBatchInvoice}
+                  className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingBatchInvoice}
+                  className="inline-flex items-center justify-center gap-2 rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {savingBatchInvoice ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  Registrar factura en {batchInvoiceUnitKeys.length} remito{batchInvoiceUnitKeys.length === 1 ? "" : "s"}
+                </button>
+              </div>
+            </form>
+          </ResponsiveModalPanel>
+        </ResponsiveModalOverlay>
+      )}
 
       {invoiceOrder && (
         <ResponsiveModalOverlay className="bg-black/35">

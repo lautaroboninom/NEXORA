@@ -4,9 +4,12 @@ import { getHistoricoIngresos, downloadAuth } from "../lib/api";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, resolveFechaIngreso } from "../lib/ui-helpers";
 import useQueryState from "../hooks/useQueryState";
+import useDebouncedValue from "../hooks/useDebouncedValue";
 import StatusChip from "../components/StatusChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 export default function HistoricoIngresos() {
   const [rows, setRows] = useState([]);
@@ -17,6 +20,7 @@ export default function HistoricoIngresos() {
   const [err, setErr] = useState("");
   const [exporting, setExporting] = useState(false);
   const [q, setQ] = useQueryState("q", "");
+  const [sort, setSort] = useQueryState("sort", "");
   const [qDebounced, setQDebounced] = useState(q);
   const [osFilter, setOsFilter] = useQueryState("os", "");
   const [clienteFilter, setClienteFilter] = useQueryState("cliente", "");
@@ -39,7 +43,17 @@ export default function HistoricoIngresos() {
   const [fechaLiberacionToDraft, setFechaLiberacionToDraft] = useState(fechaLiberacionTo);
   const [fechaEntregaFromDraft, setFechaEntregaFromDraft] = useState(fechaEntregaFrom);
   const [fechaEntregaToDraft, setFechaEntregaToDraft] = useState(fechaEntregaTo);
+  const osFilterDebounced = useDebouncedValue(osFilter, 300);
+  const clienteFilterDebounced = useDebouncedValue(clienteFilter, 300);
+  const tipoFilterDebounced = useDebouncedValue(tipoFilter, 300);
+  const marcaFilterDebounced = useDebouncedValue(marcaFilter, 300);
+  const modeloFilterDebounced = useDebouncedValue(modeloFilter, 300);
+  const varianteFilterDebounced = useDebouncedValue(varianteFilter, 300);
+  const estadoFilterDebounced = useDebouncedValue(estadoFilter, 300);
+  const serieFilterDebounced = useDebouncedValue(serieFilter, 300);
+  const mgFilterDebounced = useDebouncedValue(mgFilter, 300);
   const navigate = useNavigate();
+  const hasLoadedOnceRef = useRef(false);
   const [search, setSearch] = useSearchParams();
   const pageSize = 200;
   const delivered = search.get("delivered") || "";
@@ -111,15 +125,15 @@ export default function HistoricoIngresos() {
   const buildFilterParams = ({ includePaging = false, pageValue = 1 } = {}) => {
     const params = new URLSearchParams();
     if (delivered === "1") params.set("delivered", "1");
-    if (osFilter) params.set("os", osFilter);
-    if (clienteFilter) params.set("cliente", clienteFilter);
-    if (tipoFilter) params.set("tipo_equipo", tipoFilter);
-    if (marcaFilter) params.set("marca", marcaFilter);
-    if (modeloFilter) params.set("modelo", modeloFilter);
-    if (varianteFilter) params.set("variante", varianteFilter);
-    if (estadoFilter) params.set("estado_q", estadoFilter);
-    if (serieFilter) params.set("numero_serie", serieFilter);
-    if (mgFilter) params.set("numero_interno", mgFilter);
+    if (osFilterDebounced) params.set("os", osFilterDebounced);
+    if (clienteFilterDebounced) params.set("cliente", clienteFilterDebounced);
+    if (tipoFilterDebounced) params.set("tipo_equipo", tipoFilterDebounced);
+    if (marcaFilterDebounced) params.set("marca", marcaFilterDebounced);
+    if (modeloFilterDebounced) params.set("modelo", modeloFilterDebounced);
+    if (varianteFilterDebounced) params.set("variante", varianteFilterDebounced);
+    if (estadoFilterDebounced) params.set("estado_q", estadoFilterDebounced);
+    if (serieFilterDebounced) params.set("numero_serie", serieFilterDebounced);
+    if (mgFilterDebounced) params.set("numero_interno", mgFilterDebounced);
     if (fechaIngresoFrom) params.set("fecha_ingreso_from", fechaIngresoFrom);
     if (fechaIngresoTo) params.set("fecha_ingreso_to", fechaIngresoTo);
     if (fechaLiberacionFrom) params.set("fecha_liberacion_from", fechaLiberacionFrom);
@@ -127,6 +141,7 @@ export default function HistoricoIngresos() {
     if (fechaEntregaFromEffective) params.set("fecha_entrega_from", fechaEntregaFromEffective);
     if (fechaEntregaToEffective) params.set("fecha_entrega_to", fechaEntregaToEffective);
     if (qEffective) params.set("q", qEffective);
+    if (sort) params.set("sort", sort);
     if (includePaging) {
       params.set("page", String(pageValue));
       params.set("page_size", String(pageSize));
@@ -160,6 +175,7 @@ export default function HistoricoIngresos() {
     } finally {
       setLoading(false);
       setLoadingMore(false);
+      hasLoadedOnceRef.current = true;
     }
   }
 
@@ -186,21 +202,22 @@ export default function HistoricoIngresos() {
   }, [
     delivered,
     qEffective,
-    osFilter,
-    clienteFilter,
-    tipoFilter,
-    marcaFilter,
-    modeloFilter,
-    varianteFilter,
-    estadoFilter,
-    serieFilter,
-    mgFilter,
+    osFilterDebounced,
+    clienteFilterDebounced,
+    tipoFilterDebounced,
+    marcaFilterDebounced,
+    modeloFilterDebounced,
+    varianteFilterDebounced,
+    estadoFilterDebounced,
+    serieFilterDebounced,
+    mgFilterDebounced,
     fechaIngresoFrom,
     fechaIngresoTo,
     fechaLiberacionFrom,
     fechaLiberacionTo,
     fechaEntregaFromEffective,
     fechaEntregaToEffective,
+    sort,
   ]);
 
   const filtered = rows;
@@ -278,14 +295,36 @@ export default function HistoricoIngresos() {
         </button>
       </div>
 
-      {loading ? (
+      {loading && !hasLoadedOnceRef.current ? (
         "Cargando..."
       ) : (
         <div>
+          {loading && (
+            <div className="text-xs text-gray-500 mb-2">Actualizando…</div>
+          )}
+          <MobileSortControl
+            sort={sort}
+            onSortChange={setSort}
+            options={ingresoSortOptions([
+              "os",
+              "cliente",
+              "tipo",
+              "marca",
+              "modelo",
+              "variante",
+              "estado",
+              "numero_serie",
+              "numero_interno",
+              "fecha_ingreso",
+              "fecha_liberacion",
+              "fecha_entrega",
+            ])}
+            className="mb-3"
+          />
           <MobileDataList>
             {filtered.length === 0 ? (
               <MobileDataCard className="text-gray-500">
-                No hay resultados que coincidan con el filtro.
+                {loading ? "Cargando…" : "No hay resultados que coincidan con el filtro."}
               </MobileDataCard>
             ) : (
               filtered.map((row) => {
@@ -331,17 +370,18 @@ export default function HistoricoIngresos() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th scope="col" className="p-2">OS</th>
-                <th scope="col" className="p-2">Cliente</th>
-                <th scope="col" className="p-2">Tipo de equipo</th>
-                <th scope="col" className="p-2">Marca</th>
-                <th scope="col" className="p-2">Modelo</th>
-                <th scope="col" className="p-2">Variante</th>
-                <th scope="col" className="p-2">Estado</th>
-                <th scope="col" className="p-2" colSpan={2}>Identificación</th>
-                <th scope="col" className="p-2">Fecha ingreso</th>
-                <th scope="col" className="p-2">Fecha liberación</th>
-                <th scope="col" className="p-2">Fecha entrega</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
+                <SortableTh field="tipo" sort={sort} onSortChange={setSort} className="p-2">Tipo de equipo</SortableTh>
+                <SortableTh field="marca" sort={sort} onSortChange={setSort} className="p-2">Marca</SortableTh>
+                <SortableTh field="modelo" sort={sort} onSortChange={setSort} className="p-2">Modelo</SortableTh>
+                <SortableTh field="variante" sort={sort} onSortChange={setSort} className="p-2">Variante</SortableTh>
+                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="p-2">Estado</SortableTh>
+                <SortableTh field="numero_serie" sort={sort} onSortChange={setSort} className="p-2">N/S</SortableTh>
+                <SortableTh field="numero_interno" sort={sort} onSortChange={setSort} className="p-2">MG</SortableTh>
+                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2">Fecha ingreso</SortableTh>
+                <SortableTh field="fecha_liberacion" sort={sort} onSortChange={setSort} className="p-2">Fecha liberación</SortableTh>
+                <SortableTh field="fecha_entrega" sort={sort} onSortChange={setSort} className="p-2">Fecha entrega</SortableTh>
               </tr>
               <tr className="text-left">
                 <th className="p-2">
@@ -524,7 +564,7 @@ export default function HistoricoIngresos() {
               {filtered.length === 0 ? (
                 <tr>
                   <td colSpan={12} className="p-2 text-sm text-gray-500">
-                    No hay resultados que coincidan con el filtro.
+                    {loading ? "Cargando…" : "No hay resultados que coincidan con el filtro."}
                   </td>
                 </tr>
               ) : (

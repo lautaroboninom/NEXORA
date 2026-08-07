@@ -25,6 +25,8 @@ import {
   postClienteMerge,
   postRouteLocation,
 } from "../lib/api";
+import { SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort.js";
 
 const BLANK_CUSTOMER = {
   razon_social: "",
@@ -426,6 +428,7 @@ export default function CatalogoClientes() {
   const [editCandidates, setEditCandidates] = useState({ items: [] });
   const [routeAddressForm, setRouteAddressForm] = useState({ name: "", address: "" });
   const [savingRouteAddress, setSavingRouteAddress] = useState(false);
+  const [sort, setSort] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -487,6 +490,20 @@ export default function CatalogoClientes() {
       return haystack.includes(q);
     });
   }, [filters, rows]);
+  const displayRows = useMemo(
+    () => sortRows(filteredRows, sort, {
+      cliente: { getValue: (row) => row.razon_social },
+      codigo: { getValue: (row) => row.cod_empresa },
+      bejerman: { getValue: (row) => row?.bejerman_sync?.status },
+      direcciones: { getValue: (row) => (row.route_locations || []).length, type: "number" },
+      contacto: { getValue: (row) => row.contacto || row.telefono || row.email },
+      actividad: {
+        getValue: (row) => Number(row.equipos_count || 0) + Number(row.ingresos_count || 0),
+        type: "number",
+      },
+    }),
+    [filteredRows, sort],
+  );
 
   const runCandidateSearch = async (target) => {
     const isEdit = target === "edit";
@@ -806,12 +823,12 @@ export default function CatalogoClientes() {
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-3 py-2">Cliente</th>
-                <th className="px-3 py-2">Código</th>
-                <th className="px-3 py-2">Bejerman</th>
-                <th className="px-3 py-2">Direcciones</th>
-                <th className="px-3 py-2">Contacto</th>
-                <th className="px-3 py-2 text-right">Actividad</th>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="px-3 py-2">Cliente</SortableTh>
+                <SortableTh field="codigo" sort={sort} onSortChange={setSort} className="px-3 py-2">Código</SortableTh>
+                <SortableTh field="bejerman" sort={sort} onSortChange={setSort} className="px-3 py-2">Bejerman</SortableTh>
+                <SortableTh field="direcciones" sort={sort} onSortChange={setSort} className="px-3 py-2">Direcciones</SortableTh>
+                <SortableTh field="contacto" sort={sort} onSortChange={setSort} className="px-3 py-2">Contacto</SortableTh>
+                <SortableTh field="actividad" sort={sort} onSortChange={setSort} className="px-3 py-2 text-right">Actividad</SortableTh>
                 <th className="px-3 py-2 text-right">Acciones</th>
               </tr>
             </thead>
@@ -823,7 +840,7 @@ export default function CatalogoClientes() {
                   </td>
                 </tr>
               ) : (
-                filteredRows.map((c) => {
+                displayRows.map((c) => {
                   const sync = c.bejerman_sync || { status: "unchecked", candidates: [] };
                   const candidates = Array.isArray(sync.candidates) ? sync.candidates : [];
                   const details = bejermanDetails(c);

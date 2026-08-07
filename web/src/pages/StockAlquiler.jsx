@@ -8,6 +8,9 @@ import { useAuth } from "../context/AuthContext";
 import useQueryState from "../hooks/useQueryState";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 // Catálogo (DB):
 const ESTADOS_EXCLUIR = new Set(["entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado"]);
@@ -37,6 +40,7 @@ export default function StockAlquiler() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
+  const [sort, setSort] = useQueryState("sort", "");
   const nav = useNavigate();
 
   const { user, loading: authLoading } = useAuth();
@@ -102,6 +106,18 @@ export default function StockAlquiler() {
     }
     return "-";
   };
+  const displayRows = useMemo(
+    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
+    [filtered, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "tipo",
+    "marca",
+    "modelo",
+    "variante",
+    "identificacion",
+  ]);
 
   return (
     <div className="card">
@@ -118,12 +134,13 @@ export default function StockAlquiler() {
       </div>
 
       {loading ? "Cargando..." :
-        filtered.length === 0 ? (
+        displayRows.length === 0 ? (
           <div className="text-sm text-gray-500">No hay equipos disponibles en Estantería de Alquiler con stock STL.</div>
         ) : (
           <div>
+            <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
             <MobileDataList>
-              {filtered.map((row) => (
+              {displayRows.map((row) => (
                 <MobileDataCard
                   key={ingresoIdOf(row)}
                   as="button"
@@ -148,16 +165,16 @@ export default function StockAlquiler() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left">
-                  <th className="p-2">OS</th>
-                  <th className="p-2">Tipo de equipo</th>
-                  <th className="p-2">Marca</th>
-                  <th className="p-2">Modelo</th>
-                  <th className="p-2">Variante</th>
-                  <th className="p-2">Serie</th>
+                  <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                  <SortableTh field="tipo" sort={sort} onSortChange={setSort} className="p-2">Tipo de equipo</SortableTh>
+                  <SortableTh field="marca" sort={sort} onSortChange={setSort} className="p-2">Marca</SortableTh>
+                  <SortableTh field="modelo" sort={sort} onSortChange={setSort} className="p-2">Modelo</SortableTh>
+                  <SortableTh field="variante" sort={sort} onSortChange={setSort} className="p-2">Variante</SortableTh>
+                  <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((row) => (
+                {displayRows.map((row) => (
                   <tr
                     key={ingresoIdOf(row)}
                     className="border-t hover:bg-gray-50 cursor-pointer"
@@ -174,7 +191,7 @@ export default function StockAlquiler() {
               </tbody>
             </table>
             </DesktopTableWrap>
-            <div className="text-xs text-gray-500 mt-2">Mostrando {filtered.length} equipos.</div>
+            <div className="text-xs text-gray-500 mt-2">Mostrando {displayRows.length} equipos.</div>
           </div>
         )}
     </div>

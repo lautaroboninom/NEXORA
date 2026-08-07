@@ -55,6 +55,8 @@ class IngresoListItemSerializer(serializers.Serializer):
     Matchea las columnas que ya entrega el back y que espera el front.
     """
     id = serializers.IntegerField()
+    device_id = serializers.IntegerField(required=False, allow_null=True)
+    customer_id = serializers.IntegerField(required=False, allow_null=True)
     estado = serializers.CharField()
     presupuesto_estado = serializers.CharField(allow_null=True, required=False)
     resolucion = serializers.CharField(allow_null=True, allow_blank=True, required=False)
@@ -94,6 +96,9 @@ class IngresoListItemSerializer(serializers.Serializer):
     derivado_devuelto = serializers.BooleanField(required=False)
     mg_estado = serializers.CharField(allow_blank=True, required=False)
     mg_inactivo_venta = serializers.BooleanField(required=False)
+    es_propietario_mg = serializers.BooleanField(required=False)
+    es_cliente_mg_owner = serializers.BooleanField(required=False)
+    tiene_codigo_mg = serializers.BooleanField(required=False)
 
 
 class IngresoDetailSerializer(serializers.Serializer):

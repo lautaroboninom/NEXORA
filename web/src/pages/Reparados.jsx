@@ -7,6 +7,9 @@ import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import StatusChip from "../components/StatusChip.jsx";
 import useQueryState from "../hooks/useQueryState";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 // Ajustar si el backend usa otra ruta.
 
@@ -19,6 +22,7 @@ export default function Reparados() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
+  const [sort, setSort] = useQueryState("sort", "");
   const navigate = useNavigate();
 
   async function load() {
@@ -56,6 +60,20 @@ export default function Reparados() {
       return campos.some((c) => norm(c).includes(needle));
     });
   }, [rows, q]);
+
+  const displayRows = useMemo(
+    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
+    [filtered, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "estado",
+    "cliente",
+    "equipo",
+    "identificacion",
+    "fecha_ingreso",
+    "fecha_reparado",
+  ]);
 
   const go = (row) => {
     const id = ingresoIdOf(row);
@@ -102,12 +120,13 @@ export default function Reparados() {
 
       {loading ? (
         "Cargando..."
-      ) : filtered.length === 0 ? (
+      ) : displayRows.length === 0 ? (
         <div className="text-sm text-gray-500">No hay reparados que coincidan con el filtro.</div>
       ) : (
         <div>
+          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
           <MobileDataList>
-            {filtered.map((row) => (
+            {displayRows.map((row) => (
               <MobileDataCard
                 key={ingresoIdOf(row)}
                 as="button"
@@ -144,17 +163,17 @@ export default function Reparados() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th scope="col" className="p-2">OS</th>
-                <th scope="col" className="p-2">Estado</th>
-                <th scope="col" className="p-2">Cliente</th>
-                <th scope="col" className="p-2">Equipo</th>
-                <th scope="col" className="p-2">Serie</th>
-                <th scope="col" className="p-2">Fecha ingreso</th>
-                <th scope="col" className="p-2">Fecha reparación</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="p-2">Estado</SortableTh>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
+                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
+                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
+                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2">Fecha ingreso</SortableTh>
+                <SortableTh field="fecha_reparado" sort={sort} onSortChange={setSort} className="p-2">Fecha reparación</SortableTh>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row) => (
+              {displayRows.map((row) => (
                 <tr
                   key={ingresoIdOf(row)}
                   onClick={() => go(row)}
@@ -186,7 +205,7 @@ export default function Reparados() {
           </table>
           </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
-            Mostrando {filtered.length} de {rows.length}.
+            Mostrando {displayRows.length} de {rows.length}.
           </div>
         </div>
       )}

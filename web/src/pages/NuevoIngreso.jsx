@@ -21,12 +21,14 @@ import {
   postRisPreflightCustomerFix,
   postRisPreflightArticleFix,
   postIngresoRisEmitir,
+  postBejermanPdfQueueRetry,
   getSerialBarcodeBlob,
 } from "@/lib/api";
-import { openPdfBlob } from "@/lib/pdf";
+import { isPendingPdfError, openPdfBlob } from "@/lib/pdf";
 import { MOTIVO } from "@/lib/constants";
 import {
   openRisPrintablePdf,
+  risPrintUrlFor,
   risRemitoFrom,
   waitForRisPdfBlob,
 } from "@/lib/ris-print";
@@ -56,7 +58,7 @@ const TextArea = ({ className = "", ...p }) => (
   <textarea {...p} className={`${FIELD_BASE_CLASS} ${className}`} />
 );
 
-const CollapsibleSection = ({ title, open, onToggle, children }) => (
+const CollapsibleSection = ({ title, open, onToggle, incomplete = false, children }) => (
   <fieldset className="border rounded p-0">
     <legend className="ml-2 px-0">
       <button
@@ -72,6 +74,11 @@ const CollapsibleSection = ({ title, open, onToggle, children }) => (
           {open ? "-" : "+"}
         </span>
         <span>{title}</span>
+        {!open && incomplete && (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+            Falta completar
+          </span>
+        )}
       </button>
     </legend>
     {open && <div className="p-3 pt-1">{children}</div>}
@@ -293,6 +300,11 @@ export default function NuevoIngreso() {
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
   const [manualRisPrint, setManualRisPrint] = useState(null);
+  // Espera del PDF: se puede cancelar y tiene tope. Antes giraba sin límite.
+  const [pdfWait, setPdfWait] = useState({ startedAt: 0, remito: "" });
+  const [pendingPdfRetry, setPendingPdfRetry] = useState(null);
+  const [pdfRetryBusy, setPdfRetryBusy] = useState(false);
+  const pdfWaitAbortRef = useRef(null);
   const [risMode, setRisMode] = useState("emit");
   const [manualRemitoNumber, setManualRemitoNumber] = useState("");
   const [risPreflight, setRisPreflight] = useState(null);
@@ -324,6 +336,10 @@ export default function NuevoIngreso() {
   });
   const collapseDataSections = () =>
     setExpandedSections({ cliente: false, equipo: false, ingreso: false });
+  // Tras un autocompletado (N/S, MG, escaneo o venta Bejerman) se abren los tres
+  // bloques: el operador tiene que revisar lo que se cargó y completar lo que falta.
+  const expandAllSections = () =>
+    setExpandedSections({ cliente: true, equipo: true, ingreso: true });
   const expandSection = (section) => {
     setExpandedSections((prev) => (prev[section] ? prev : { ...prev, [section]: true }));
   };
@@ -665,9 +681,7 @@ export default function NuevoIngreso() {
     }
     const variantePrefill = prefill.variante || prefill.equipo_variante || "";
     if (variantePrefill) setVarianteTxt(variantePrefill);
-    if (prefill.marca_id || prefill.model_id || prefill.tipo_equipo || variantePrefill) {
-      expandSection("equipo");
-    }
+    expandAllSections();
     const prefillRentalCustomer = rentalReturnCustomerFromPayload(prefill);
     const prefillAlquilerA = prefill.alquilado ? cleanText(prefill.alquiler_a) : "";
     const prefillClienteNombre = prefillRentalCustomer?.name || prefillAlquilerA || prefill.customer_nombre || "";
@@ -684,7 +698,6 @@ export default function NuevoIngreso() {
     if (prefillClienteNombre) {
       setClienteRsInput(prefillClienteNombre);
       setClienteCodInput(prefillClienteCod);
-      expandSection("cliente");
     }
     if (prefillEsParticular && prefillTienePropietario) {
       setPropietario({
@@ -692,7 +705,6 @@ export default function NuevoIngreso() {
         contacto: prefill.propietario_contacto || "",
         doc: prefill.propietario_doc || "",
       });
-      expandSection("cliente");
     } else {
       setPropietario(PROPIETARIO_VACIO);
     }
@@ -961,11 +973,8 @@ export default function NuevoIngreso() {
           (autofillEsParticular && propietarioDoc) ||
           mgInactiveBySale
         );
-        if (shouldAutofillCliente || autofillEsParticular) {
-          expandSection("cliente");
-        }
-        if (marcaIdFromDevice || modelIdFromDevice || tipoFromDevice || varianteFromDevice || tecnicoAutoId) {
-          expandSection("equipo");
+        if (hasAutofillData) {
+          expandAllSections();
         }
         setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Puede editarlos.` : "");
         setNsAutofillClienteWarning(clienteWarning);
@@ -1400,12 +1409,7 @@ export default function NuevoIngreso() {
       nsAutoDesiredModelRef.current = modelInCurrentList?.id ? null : suggestedModeloId;
     }
     const customerApplied = applyBejermanCustomerPayload(s);
-    if (!auto || highConfidence) {
-      expandSection("equipo");
-    }
-    if (customerApplied || s?.customer?.name) {
-      expandSection("cliente");
-    }
+    expandAllSections();
     const resolutionStatus = s?.customer?.resolution?.status || "";
     if (auto) {
       setNsAutofillInfo(
@@ -1508,7 +1512,7 @@ export default function NuevoIngreso() {
     if (isParticularIngreso && (!propietarioPayload.nombre || !propietarioPayload.doc)) {
       return {
         ok: false,
-        error: "Para un ingreso particular es obligatorio completar nombre y CUIT del propietario.",
+        error: "Para un ingreso particular es obligatorio completar nombre y DNI/CUIT del propietario.",
       };
     }
     return { ok: true, c, propietarioPayload };
@@ -1727,11 +1731,15 @@ export default function NuevoIngreso() {
     const equipmentError = validateCurrentEquipmentForSubmit();
     if (equipmentError) {
       setErr(equipmentError);
+      // Abrir el bloque donde está el dato que falta: si está plegado, el error
+      // solo se ve arriba y no queda claro qué campo hay que completar.
+      expandSection(!form.equipo.marca_id || !form.equipo.modelo_id ? "equipo" : "ingreso");
       return { ok: false, error: equipmentError, items: batchItems, preflight: null };
     }
     const shared = validateSharedForSubmit();
     if (!shared.ok) {
       setErr(shared.error);
+      expandSection("cliente");
       return { ok: false, error: shared.error, items: batchItems, preflight: null };
     }
     const payload = buildIngresoPayload(shared.c, shared.propietarioPayload, { includeShared: false });
@@ -1852,6 +1860,74 @@ export default function NuevoIngreso() {
     setNotice("");
   };
 
+  // La espera del PDF es lo único cancelable del flujo: para cuando arranca, el
+  // remito ya está emitido en Bejerman y sólo falta el archivo para imprimir.
+  const beginPdfWait = (remito) => {
+    const controller = new AbortController();
+    pdfWaitAbortRef.current = controller;
+    setPdfWait({ startedAt: Date.now(), remito: remito || "" });
+    return controller;
+  };
+
+  const endPdfWait = () => {
+    pdfWaitAbortRef.current = null;
+    setPdfWait({ startedAt: 0, remito: "" });
+  };
+
+  const cancelPdfWait = () => {
+    pdfWaitAbortRef.current?.abort();
+  };
+
+  const retryPendingPdf = async () => {
+    if (!pendingPdfRetry || pdfRetryBusy) return;
+    const { documentKey, ingresoId, source, remito } = pendingPdfRetry;
+    setPdfRetryBusy(true);
+    setErr("");
+    try {
+      if (documentKey) await postBejermanPdfQueueRetry(documentKey);
+      const controller = beginPdfWait(remito);
+      setLoading(true);
+      setSubmitStage("Reintentando el PDF del remito...");
+      const blob = await waitForRisPdfBlob(ingresoId, source || {}, {
+        signal: controller.signal,
+        onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
+      });
+      const opened = openRisPrintablePdf(blob, source || {}).opened;
+      if (opened) {
+        setPendingPdfRetry(null);
+        setNotice(remito ? `Remito ${remito} listo para imprimir.` : "Remito listo para imprimir.");
+      } else {
+        setManualRisPrint({ blob, source: source || {}, remito });
+        setPendingPdfRetry(null);
+        setNotice("El PDF está listo, pero el navegador bloqueó la ventana. Use Abrir e imprimir.");
+      }
+    } catch (error) {
+      setNotice(
+        isPendingPdfError(error)
+          ? `${error?.message || "Bejerman todavía no devolvió el PDF."} El remito sigue emitido y se puede reimprimir más tarde.`
+          : `No se pudo obtener el PDF: ${error?.message || "error desconocido"}.`,
+      );
+    } finally {
+      endPdfWait();
+      setLoading(false);
+      setSubmitStage("");
+      setPdfRetryBusy(false);
+    }
+  };
+
+  const pdfWaitNotice = (error, ingresoId, source) => {
+    if (!isPendingPdfError(error)) {
+      return `No se pudo abrir el PDF del remito: ${error?.message || "error desconocido"}. Se puede reimprimir desde la hoja de servicio.`;
+    }
+    setPendingPdfRetry({
+      documentKey: error?.documentKey || "",
+      ingresoId: ingresoId || null,
+      source: source || null,
+      remito: risRemitoFrom(source || {}),
+    });
+    return `${error?.message || "Bejerman todavía no devolvió el PDF."} El remito ya quedó registrado.`;
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     scrollPageTop();
@@ -1905,7 +1981,7 @@ export default function NuevoIngreso() {
       : { ...PROPIETARIO_VACIO };
     if (isParticularIngreso && (!propietarioPayload.nombre || !propietarioPayload.doc)) {
       setLoading(false);
-      setErr("Para un ingreso particular es obligatorio completar nombre y CUIT del propietario.");
+      setErr("Para un ingreso particular es obligatorio completar nombre y DNI/CUIT del propietario.");
       return;
     }
 
@@ -1974,8 +2050,10 @@ export default function NuevoIngreso() {
                 : r?.detail || `Ingresos creados para ${count} ${count === 1 ? "equipo" : "equipos"}. Remito pendiente de reintento.`
             );
         if (!isRegisteredResponse && remito && firstIngresoId) {
+          const controller = beginPdfWait(remito);
           try {
             const blob = await waitForRisPdfBlob(firstIngresoId, r, {
+              signal: controller.signal,
               onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
             });
             setSubmitStage("Abriendo impresión...");
@@ -1987,7 +2065,9 @@ export default function NuevoIngreso() {
               risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
             }
           } catch (pdfError) {
-            risNotice += ` No se pudo abrir el PDF del remito: ${pdfError?.message || "error desconocido"}. Reintente desde una hoja de servicio.`;
+            risNotice += ` ${pdfWaitNotice(pdfError, firstIngresoId, r)}`;
+          } finally {
+            endPdfWait();
           }
         }
         await waitForRisProgressMinimum(risProgressStartedAt);
@@ -2046,16 +2126,19 @@ export default function NuevoIngreso() {
       let risNotice = "Ingreso creado.";
       if (r?.ingreso_id) {
         const risProgressStartedAt = Date.now();
+        let risResult = null;
         try {
           setSubmitStage("Emitiendo remito en Bejerman...");
           await waitForRisProgressPaint();
-          const risResult = await postIngresoRisEmitir(r.ingreso_id);
+          risResult = await postIngresoRisEmitir(r.ingreso_id);
           setSubmitStage("Preparando PDF...");
           const remito = risRemitoFrom(risResult);
           risNotice = remito
             ? `Ingreso creado y remito ${remito} emitido.`
             : "Ingreso creado y remito emitido.";
+          const controller = beginPdfWait(remito);
           const blob = await waitForRisPdfBlob(r.ingreso_id, risResult, {
+            signal: controller.signal,
             onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
           });
           setSubmitStage("Abriendo impresión...");
@@ -2067,8 +2150,11 @@ export default function NuevoIngreso() {
             risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
           }
         } catch (risError) {
-          risNotice = `Ingreso creado. No se pudo emitir o abrir el remito: ${risError?.message || "error desconocido"}. Reintente desde la hoja de servicio.`;
+          risNotice = isPendingPdfError(risError)
+            ? `${risNotice} ${pdfWaitNotice(risError, r.ingreso_id, risResult)}`
+            : `Ingreso creado. No se pudo emitir o abrir el remito: ${risError?.message || "error desconocido"}. Reintente desde la hoja de servicio.`;
         } finally {
+          endPdfWait();
           await waitForRisProgressMinimum(risProgressStartedAt);
         }
       }
@@ -2147,6 +2233,20 @@ export default function NuevoIngreso() {
   const canEmitRisBatch = batchItems.length > 0 && risPreflight?.can_emit === true;
   const canSubmitWithDraft = currentEquipmentDraft && !editingBatchItem;
   const canSubmitRemito = canEmitRisBatch || canSubmitWithDraft;
+  // Aviso en el encabezado de los bloques plegados que todavía tienen datos
+  // obligatorios sin cargar. Sólo cuando el ingreso ya arrancó, para no marcar
+  // en rojo un formulario recién abierto.
+  const ingresoIniciado = !!(
+    (form.equipo.numero_serie || "").trim() ||
+    (form.equipo.numero_interno || "").trim() ||
+    currentEquipmentDraft ||
+    editingBatchItem ||
+    batchItems.length > 0
+  );
+  const clienteIncompleto = ingresoIniciado && !canSubmitCliente;
+  const equipoIncompleto =
+    ingresoIniciado && (!form.equipo.marca_id || !form.equipo.modelo_id);
+  const ingresoIncompleto = ingresoIniciado && !form.motivo;
   const submitDisabled =
     loading ||
     risPreflightLoading ||
@@ -2188,7 +2288,49 @@ export default function NuevoIngreso() {
         open={risProgressOpen}
         title={risProgressTitle}
         status={risProgressStatus}
+        documentLabel={pdfWait.remito ? `Remito ${pdfWait.remito}` : ""}
+        waitStartedAt={pdfWait.startedAt}
+        onCancel={pdfWait.startedAt ? cancelPdfWait : undefined}
       />
+      {pendingPdfRetry && (
+        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <p className="font-medium">
+            {pendingPdfRetry.remito ? `Remito ${pendingPdfRetry.remito} emitido` : "Remito emitido"}, pero
+            Bejerman todavía no devolvió el PDF.
+          </p>
+          <p className="mt-1">
+            El remito ya está registrado. Podés pedir el PDF de nuevo, o reimprimirlo más tarde desde la
+            hoja de servicio o desde Remitos.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={pdfRetryBusy}
+              onClick={retryPendingPdf}
+              className="rounded bg-amber-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-800 disabled:opacity-60"
+            >
+              {pdfRetryBusy ? "Reintentando..." : "Reintentar PDF"}
+            </button>
+            {pendingPdfRetry.ingresoId && (
+              <a
+                href={risPrintUrlFor(pendingPdfRetry.ingresoId, pendingPdfRetry.source || {})}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded border border-amber-400 px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100"
+              >
+                Abrir PDF en otra pestaña
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={() => setPendingPdfRetry(null)}
+              className="rounded px-3 py-1.5 text-sm font-medium text-amber-800 hover:bg-amber-100"
+            >
+              Descartar
+            </button>
+          </div>
+        </div>
+      )}
       <h1 className="text-2xl font-bold">Nuevo ingreso</h1>
 
       {(canCreateEquipmentIngreso || canMercaderiaIngreso) && (
@@ -2474,6 +2616,7 @@ export default function NuevoIngreso() {
           title="Cliente"
           open={expandedSections.cliente}
           onToggle={() => toggleSection("cliente")}
+          incomplete={clienteIncompleto}
         >
           {!clientesPerm && (
             <div className="text-xs text-gray-600 mb-2">No tiene permisos para listar clientes</div>
@@ -2537,11 +2680,14 @@ export default function NuevoIngreso() {
             </div>
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Código empresa</label>
+              {/* Un particular no tiene código de cliente en Bejerman: se emite como cliente
+                  ocasional con los datos del propietario. Mostrar el código del placeholder local
+                  hacía creer que el equipo entraba a nombre de un cliente real. */}
               <Input
-                value={clienteCodInput}
+                value={isParticularIngreso ? "" : clienteCodInput}
                 readOnly
                 tabIndex={-1}
-                placeholder="Se completa al elegir cliente"
+                placeholder={isParticularIngreso ? "No aplica (cliente ocasional)" : "Se completa al elegir cliente"}
               />
             </div>
             <div className="md:col-span-3">
@@ -2576,11 +2722,11 @@ export default function NuevoIngreso() {
                   />
                 </div>
                 <div className="md:col-span-4">
-                  <label className={FIELD_LABEL_CLASS}>CUIT</label>
+                  <label className={FIELD_LABEL_CLASS}>DNI o CUIT</label>
                   <Input
                     value={propietario.doc}
                     onChange={(e) => setPropietario((p) => ({ ...p, doc: e.target.value }))}
-                    placeholder="CUIT"
+                    placeholder="DNI o CUIT"
                     required
                   />
                 </div>
@@ -2610,6 +2756,7 @@ export default function NuevoIngreso() {
           title="Equipo"
           open={expandedSections.equipo}
           onToggle={() => toggleSection("equipo")}
+          incomplete={equipoIncompleto}
         >
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             {/* Tipo de equipo */}
@@ -2683,6 +2830,7 @@ export default function NuevoIngreso() {
           title="Ingreso"
           open={expandedSections.ingreso}
           onToggle={() => toggleSection("ingreso")}
+          incomplete={ingresoIncompleto}
         >
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-3">
@@ -2943,7 +3091,7 @@ export default function NuevoIngreso() {
       </form>
         </>
       ) : (
-        <BejermanPurchaseEntries embedded />
+        <BejermanPurchaseEntries embedded companyKey={empresaBejerman} />
       )}
     </div>
   );

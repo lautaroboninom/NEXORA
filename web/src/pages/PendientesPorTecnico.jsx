@@ -21,6 +21,7 @@ export default function PendientesPorTecnico() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
+  const [sort, setSort] = useQueryState("sort", "");
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -111,6 +112,8 @@ export default function PendientesPorTecnico() {
           emptyText="Sin pendientes."
           onOpen={go}
           showTechnician={tecnicoId === UNASSIGNED_TECHNICIAN_FILTER}
+          sort={sort}
+          onSortChange={setSort}
         />
       )}
     </div>

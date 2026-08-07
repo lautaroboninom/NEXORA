@@ -8,6 +8,9 @@ import BusquedaAccRefCard from "../components/BusquedaAccRefCard.jsx";
 import QrScanCard from "../components/QrScanCard.jsx";
 import DeliveryOrderCreateForm from "../components/DeliveryOrderCreateForm.jsx";
 import WorkQueueTable from "../components/WorkQueueTable.jsx";
+import { SortableTh } from "../components/TableSortControls.jsx";
+import { DELIVERY_ORDER_SORT_COLUMNS } from "../lib/delivery-order-sort.js";
+import { sortRows } from "../lib/table-sort.js";
 import {
   catalogEquipmentLabel,
   deviceIdentifierPartsOf,
@@ -104,7 +107,9 @@ function SearchResult({ item, groupKey, onOpen }) {
   const subtitle =
     groupKey === "clientes"
       ? [item?.cod_empresa, item?.telefono, item?.email].filter(Boolean).join(" - ")
-      : [item?.cliente, catalogEquipmentLabel(item), identifierText].filter(Boolean).join(" - ");
+      : groupKey === "remitos"
+        ? [item?.remito_label, item?.cliente].filter(Boolean).join(" - ")
+        : [item?.cliente, catalogEquipmentLabel(item), identifierText].filter(Boolean).join(" - ");
 
   return (
     <button
@@ -165,11 +170,11 @@ function SearchSection({ search, setSearch, searchData, searching, onOpen }) {
       <div className="mb-3 flex flex-col justify-between gap-3 md:flex-row md:items-center">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Búsqueda global</h2>
-          <div className="text-sm text-gray-500">OS, N/S, MG, cliente o equipo.</div>
+          <div className="text-sm text-gray-500">OS, N/S, MG, remito, cliente o equipo.</div>
         </div>
         <input
           className="w-full rounded border p-2 md:max-w-lg"
-          placeholder="Buscar OS, serie, MG, cliente o equipo"
+          placeholder="Buscar OS, serie, MG, remito, cliente o equipo"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           aria-label="Búsqueda global"
@@ -180,7 +185,7 @@ function SearchSection({ search, setSearch, searchData, searching, onOpen }) {
           {searching ? (
             <div className="p-3 text-sm text-gray-500">Buscando...</div>
           ) : (searchData?.groups || []).some((group) => group.items?.length) ? (
-            <div className="grid grid-cols-1 divide-y lg:grid-cols-3 lg:divide-x lg:divide-y-0">
+            <div className="grid grid-cols-1 divide-y lg:grid-cols-4 lg:divide-x lg:divide-y-0">
               {(searchData?.groups || []).map((group) => (
                 <div key={group.key}>
                   <div className="bg-gray-50 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -221,6 +226,7 @@ function PrioritiesSection({
   showTechnician = true,
 }) {
   const navigate = useNavigate();
+  const [sort, setSort] = useState("");
   return (
     <section className="rounded border bg-white p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -240,6 +246,8 @@ function PrioritiesSection({
         emptyText={emptyText}
         onOpen={onOpen}
         showTechnician={showTechnician}
+        sort={sort}
+        onSortChange={setSort}
       />
     </section>
   );
@@ -325,6 +333,11 @@ function DeliveryOrdersSection({
 }) {
   const navigate = useNavigate();
   const rows = Array.isArray(summary?.delivery_orders?.items) ? summary.delivery_orders.items : [];
+  const [sort, setSort] = useState("");
+  const displayRows = useMemo(
+    () => sortRows(rows, sort, DELIVERY_ORDER_SORT_COLUMNS),
+    [rows, sort],
+  );
   return (
     <section className="rounded border bg-white p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -344,16 +357,16 @@ function DeliveryOrdersSection({
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-2 py-2">Pedido</th>
-                <th className="px-2 py-2">Cliente</th>
-                <th className="px-2 py-2">Estado</th>
-                <th className="px-2 py-2">Artículos</th>
-                <th className="px-2 py-2">Comercial</th>
-                <th className="px-2 py-2">Remito</th>
+                <SortableTh field="orden" sort={sort} onSortChange={setSort} className="px-2 py-2">Pedido</SortableTh>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="px-2 py-2">Cliente</SortableTh>
+                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="px-2 py-2">Estado</SortableTh>
+                <SortableTh field="articulos" sort={sort} onSortChange={setSort} className="px-2 py-2">Artículos</SortableTh>
+                <SortableTh field="comercial" sort={sort} onSortChange={setSort} className="px-2 py-2">Comercial</SortableTh>
+                <SortableTh field="remito" sort={sort} onSortChange={setSort} className="px-2 py-2">Remito</SortableTh>
               </tr>
             </thead>
             <tbody>
-              {rows.map((order) => (
+              {displayRows.map((order) => (
                 <tr key={order.id || order.orderNumber} className="border-t align-top">
                   <td className="px-2 py-2 font-medium">{order.orderNumber || "-"}</td>
                   <td className="px-2 py-2">{order.customerName || "-"}</td>

@@ -1,6 +1,8 @@
 import json
+from datetime import timedelta
 
 from django.db import connection
+from django.utils import timezone
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -31,6 +33,7 @@ from ..bejerman_sync import (
     article_resolution_for_job_row,
     article_context_for_ingreso,
     article_context_for_model,
+    process_bejerman_jobs,
     search_bejerman_articles_for_job,
     search_bejerman_articles_for_context,
     reopen_jobs_for_article_mapping,
@@ -38,6 +41,7 @@ from ..bejerman_sync import (
     validate_bejerman_article_choice,
 )
 from ..bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, company_for_key, list_ingress_companies
+from ..bejerman_pdf_requests import pdf_queue_status, requeue_pdf_request
 from ..bejerman_pdf_settings import (
     BejermanPdfOutputSettingsError,
     serialize_pdf_output_settings,
@@ -59,6 +63,10 @@ def _as_int(value):
         return None
 
 
+def _wants_bejerman_history(params):
+    return str(params.get("history") or "").strip() in {"1", "true", "True"}
+
+
 def _build_job_filters(params, *, include_status=True):
     where = []
     sql_params = []
@@ -67,6 +75,22 @@ def _build_job_filters(params, *, include_status=True):
         placeholders = ",".join(["%s"] * len(LEGACY_BLOCKED_SYNC_TYPES))
         where.append(f"j.sync_type NOT IN ({placeholders})")
         sql_params.extend(LEGACY_BLOCKED_SYNC_TYPES)
+
+    if not _wants_bejerman_history(params):
+        where.append(
+            """
+            NOT (
+              (j.status = 'succeeded' AND j.updated_at < NOW() - INTERVAL '7 days')
+              OR (
+                j.status IN ('failed', 'blocked')
+                AND (
+                  t.estado IN ('vendido_entregado', 'baja')
+                  OR t.remito_salida IS NOT NULL
+                )
+              )
+            )
+            """
+        )
 
     if include_status:
         status = (params.get("status") or "").strip()
@@ -190,6 +214,31 @@ def _matches_text(row, search):
     )
 
 
+REMITO_PROCESS_TERMINAL_ORDER_STATUSES = {"cancelado", "facturado", "entregado_no_facturable"}
+REMITO_PROCESS_TERMINAL_INGRESO_STATUSES = {"vendido_entregado", "baja"}
+REMITO_PROCESS_SUCCESS_RETENTION_DAYS = 7
+
+
+def _remito_process_is_archivable(row):
+    status = str(row.get("status") or "").lower()
+    if status in {"generated", "reconciled"}:
+        reference = row.get("generated_at") or row.get("updated_at") or row.get("created_at")
+        if not reference:
+            return False
+        cutoff = timezone.now() - timedelta(days=REMITO_PROCESS_SUCCESS_RETENTION_DAYS)
+        return reference < cutoff
+    if status in {"failed", "failed_review"}:
+        if row.get("source") == "ingreso":
+            return str(row.get("ingreso_estado") or "").lower() in REMITO_PROCESS_TERMINAL_INGRESO_STATUSES
+        orders = row.get("orders") or []
+        return any(
+            str(order.get("status") or "").lower() in REMITO_PROCESS_TERMINAL_ORDER_STATUSES
+            for order in orders
+            if isinstance(order, dict)
+        )
+    return False
+
+
 def _filter_remito_processes(rows, params, *, include_status=True):
     source = _clean_filter(params.get("source") or params.get("origen")).lower()
     status = _clean_filter(params.get("status")).lower()
@@ -197,9 +246,12 @@ def _filter_remito_processes(rows, params, *, include_status=True):
     os_value = _as_int(params.get("os") or params.get("ingreso_id"))
     cliente = _clean_filter(params.get("cliente")).lower()
     search = _clean_filter(params.get("q")).lower()
+    show_history = _wants_bejerman_history(params)
 
     filtered = []
     for row in rows:
+        if not show_history and _remito_process_is_archivable(row):
+            continue
         if include_status and status and str(row.get("status") or "").lower() != status:
             continue
         if source and str(row.get("source") or "").lower() != source:
@@ -276,6 +328,7 @@ def _ingreso_remito_processes():
         """
         SELECT r.id,
                r.ingreso_id,
+               i.estado AS ingreso_estado,
                COALESCE(NULLIF(r.company_key, ''), NULLIF(i.empresa_bejerman, ''), %s) AS company_key,
                COALESCE(r.company_label, '') AS company_label,
                COALESCE(r.bejerman_company, '') AS bejerman_company,
@@ -684,6 +737,61 @@ class BejermanPdfOutputSettingsView(APIView):
         return Response(payload)
 
 
+class BejermanPdfQueueStatusView(APIView):
+    """Diagnóstico de la cola de PDF sin tener que entrar al servidor."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        require_permission(request, "page.bejerman_sync")
+        try:
+            limit = int(request.query_params.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        stuck_only = str(request.query_params.get("stuckOnly") or "").strip().lower() in {"1", "true", "si", "sí"}
+        return Response(pdf_queue_status(limit=max(1, min(limit, 200)), stuck_only=stuck_only))
+
+
+class BejermanPdfQueueRetryView(APIView):
+    """Abre un ciclo de generación nuevo para un PDF que no llegó."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, document_key: str):
+        require_permission(request, "action.bejerman_sync.manage")
+        force = bool((request.data or {}).get("force")) if isinstance(request.data, dict) else False
+        try:
+            result = requeue_pdf_request(
+                document_key,
+                reason="manual_retry",
+                actor_user_id=_actor_id(request),
+                force=force,
+            )
+        except (BejermanConfigError, BejermanPdfOutputSettingsError) as exc:
+            return Response({"detail": str(exc)}, status=503)
+        outcome = result.get("outcome")
+        if outcome == "missing":
+            return Response({"detail": "No hay una solicitud de PDF para ese comprobante."}, status=404)
+        if outcome == "exhausted":
+            return Response(
+                {
+                    "detail": (
+                        "Ya se agotaron los reintentos automáticos de generación para este comprobante. "
+                        "Se puede forzar uno nuevo, pero conviene revisar antes por qué Bejerman no publica el archivo."
+                    ),
+                    "code": "BEJERMAN_PDF_REGENERATION_EXHAUSTED",
+                    **result,
+                },
+                status=409,
+            )
+        detail = (
+            "El PDF ya estaba publicado en la carpeta de Bejerman y quedó disponible."
+            if outcome == "ready"
+            else "Se pidió una generación nueva del PDF a Bejerman."
+        )
+        return Response({"detail": detail, **result})
+
+
 class BejermanJobRetryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -699,8 +807,13 @@ class BejermanJobRetryView(APIView):
             if sync_type in LEGACY_BLOCKED_SYNC_TYPES:
                 detail = NEXORA_STOCK_ENTRY_MESSAGE if sync_type == SYNC_TYPE_STOCK_ENTRY_STR else PORTAL_STOCK_EXIT_MESSAGE
                 return Response({"detail": detail}, status=409)
-            if status not in ("failed", "blocked"):
-                return Response({"detail": "Solo se pueden reintentar operaciones fallidas o bloqueadas"}, status=409)
+            # 'pending' entra a proposito: si el worker de sincronizacion no esta corriendo, el job
+            # queda encolado para siempre y este es el unico modo de forzarlo desde el panel.
+            if status not in ("failed", "blocked", "pending"):
+                return Response(
+                    {"detail": "Solo se pueden reintentar operaciones pendientes, fallidas o bloqueadas"},
+                    status=409,
+                )
             cur.execute(
                 """
                 UPDATE bejerman_sync_jobs
@@ -715,6 +828,19 @@ class BejermanJobRetryView(APIView):
                 """,
                 [_actor_id(request), job_id],
             )
+            cols = [col[0] for col in cur.description]
+            updated = dict(zip(cols, cur.fetchone()))
+
+        # Se corre en el request en vez de dejarlo para el worker: el operador necesita saber ahora
+        # si el movimiento entro o no. Si falla, process_bejerman_jobs lo vuelve a dejar encolado.
+        stats = process_bejerman_jobs(job_id=job_id, actor_user_id=_actor_id(request))
+        if stats.get("disabled"):
+            return Response(
+                {"detail": "La sincronización con Bejerman está desactivada (BEJERMAN_SYNC_ENABLED)."},
+                status=409,
+            )
+        with connection.cursor() as cur:
+            cur.execute("SELECT id, status, attempts, last_error FROM bejerman_sync_jobs WHERE id=%s", [job_id])
             cols = [col[0] for col in cur.description]
             updated = dict(zip(cols, cur.fetchone()))
         return Response(updated)
@@ -838,10 +964,10 @@ class BejermanArticleMappingsView(APIView):
         rows = q(
             """
             SELECT id, model_id, variante, variante_norm, article_code, article_description,
-                   match_source, confirmed_at, updated_at
+                   match_source, company_key, confirmed_at, updated_at
               FROM bejerman_article_mappings
              WHERE model_id = %s
-             ORDER BY variante_norm, updated_at DESC
+             ORDER BY variante_norm, company_key, updated_at DESC
             """,
             [model_id],
         ) or []
@@ -858,8 +984,9 @@ class BejermanArticleMappingsView(APIView):
         model_id = _as_int(data.get("model_id"))
         variante = (data.get("variante") or "").strip()
         job_id = _as_int(data.get("job_id"))
+        requested_company_key = (data.get("company_key") or data.get("companyKey") or "").strip()
         context = None
-        company_key = DEFAULT_INGRESS_COMPANY_KEY
+        company_key = requested_company_key or DEFAULT_INGRESS_COMPANY_KEY
         if job_id:
             row = q(
                 "SELECT ingreso_id, COALESCE(NULLIF(company_key, ''), %s) AS company_key FROM bejerman_sync_jobs WHERE id=%s",
@@ -868,7 +995,7 @@ class BejermanArticleMappingsView(APIView):
             )
             if not row:
                 return Response({"detail": "Operación Bejerman no encontrada"}, status=404)
-            company_key = row.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY
+            company_key = requested_company_key or row.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY
             context = article_context_for_ingreso(int(row["ingreso_id"]))
             model_id = int(context["model_id"])
             variante = context.get("variante") or ""
@@ -885,7 +1012,7 @@ class BejermanArticleMappingsView(APIView):
         try:
             candidate = validate_bejerman_article_choice(
                 article_code,
-                client=BejermanSDKClient(company_key=company_key if job_id else None, actor_user_id=user_id),
+                client=BejermanSDKClient(company_key=company_key if (job_id or requested_company_key) else None, actor_user_id=user_id),
                 context=context or {},
             )
         except BejermanBlockedError as exc:
@@ -901,8 +1028,9 @@ class BejermanArticleMappingsView(APIView):
             match_source="manual",
             source_payload={"source": "manual_resolution", "candidate": candidate},
             confirmed_by=user_id,
+            company_key=company_key,
         )
-        reopened = reopen_jobs_for_article_mapping(model_id, variante, article_code)
+        reopened = reopen_jobs_for_article_mapping(model_id, variante, article_code, company_key)
         try:
             updated_job = apply_article_mapping_to_job(job_id, article_code) if job_id else False
         except BejermanBlockedError as exc:
@@ -949,13 +1077,15 @@ class BejermanArticlesView(APIView):
                     limit=min(max(limit, 1), 50),
                 )
             else:
-                client = BejermanSDKClient(actor_user_id=_actor_id(request))
+                company_key = (request.GET.get("company_key") or request.GET.get("companyKey") or "").strip()
+                client = BejermanSDKClient(company_key=company_key or None, actor_user_id=_actor_id(request))
                 context = article_context_for_model(int(model_id), variante)
                 payload = search_bejerman_articles_for_context(
                     context=context,
                     query=query,
                     client=client,
                     limit=min(max(limit, 1), 50),
+                    company_key=company_key or None,
                 )
         except BejermanBlockedError as exc:
             return Response({"detail": str(exc)}, status=404)

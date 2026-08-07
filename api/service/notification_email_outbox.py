@@ -8,7 +8,7 @@ from email.utils import parseaddr
 from typing import Any
 
 from django.conf import settings
-from django.core.mail import EmailMessage, get_connection
+from django.core.mail import EmailMultiAlternatives as EmailMessage, get_connection
 from django.db import connection, transaction
 from django.utils import timezone
 
@@ -51,6 +51,7 @@ def queue_notification_email(
     recipients: list[str] | tuple[str, ...],
     subject: str,
     body: str,
+    html_body: str = "",
     attachment_kind: str = "",
     attachment_reference: str = "",
     attachment_context: dict[str, Any] | None = None,
@@ -74,7 +75,10 @@ def queue_notification_email(
     reactivated = 0
     duplicates = 0
     delivery_ids: list[int] = []
-    context_text = json.dumps(attachment_context or {}, ensure_ascii=False, default=str)
+    context_payload = dict(attachment_context or {})
+    if html_body:
+        context_payload["html_body"] = str(html_body)
+    context_text = json.dumps(context_payload, ensure_ascii=False, default=str)
     attempts = max(1, min(50, int(max_attempts or 12)))
 
     with transaction.atomic():
@@ -162,6 +166,107 @@ def queue_notification_email(
     }
 
 
+def describe_email_deliveries(delivery_ids: list[int] | tuple[int, ...]) -> list[dict[str, Any]]:
+    """Estado real de cada correo encolado, tal como está guardado en la cola."""
+    clean_ids = sorted({int(value) for value in delivery_ids or [] if value is not None})
+    if not clean_ids:
+        return []
+    with connection.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT id, notification_key, recipient, subject, status,
+                   attempt_count, max_attempts, last_error, sent_at, next_attempt_at
+              FROM {OUTBOX_TABLE}
+             WHERE id = ANY(%s)
+             ORDER BY id
+            """,
+            [clean_ids],
+        )
+        columns = [column[0] for column in cur.description]
+        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    return [
+        {
+            "id": int(row["id"]),
+            "notificationKey": _clean(row.get("notification_key")),
+            "recipient": _clean(row.get("recipient")),
+            "subject": _clean(row.get("subject")),
+            "status": _clean(row.get("status")) or "pending",
+            "attempts": int(row.get("attempt_count") or 0),
+            "maxAttempts": int(row.get("max_attempts") or 0),
+            "lastError": _clean(row.get("last_error")),
+            "sentAt": row.get("sent_at"),
+            "nextAttemptAt": row.get("next_attempt_at"),
+        }
+        for row in rows
+    ]
+
+
+def summarize_email_deliveries(delivery_ids: list[int] | tuple[int, ...]) -> dict[str, Any]:
+    """Resume el estado real de un grupo de correos encolados.
+
+    `status` es siempre el estado guardado en la cola: `sent` solo cuando el
+    servidor de correo confirmó la entrega, nunca por haber encolado el mensaje.
+    """
+    try:
+        deliveries = describe_email_deliveries(delivery_ids)
+    except Exception:
+        logger.exception("No se pudo leer el estado de la cola de correos")
+        return {
+            "status": "desconocido",
+            "detail": "No se pudo consultar el estado de la cola de correos.",
+            "deliveries": [],
+        }
+    if not deliveries:
+        return {
+            "status": "sin_envios",
+            "detail": "No se registraron correos para esta operación.",
+            "deliveries": [],
+        }
+
+    by_status: dict[str, list[dict[str, Any]]] = {}
+    for delivery in deliveries:
+        by_status.setdefault(delivery["status"], []).append(delivery)
+    sent = by_status.get("sent", [])
+    failed = by_status.get("failed", [])
+    retry = by_status.get("retry", [])
+    pending = by_status.get("pending", []) + by_status.get("sending", [])
+    all_recipients = [delivery["recipient"] for delivery in deliveries]
+
+    if len(sent) == len(deliveries):
+        sent_at = max((d["sentAt"] for d in sent if d["sentAt"]), default=None)
+        hora = timezone.localtime(sent_at).strftime("%H:%M") if sent_at else ""
+        detail = f"Correo enviado a {', '.join(all_recipients)}"
+        detail = f"{detail} a las {hora}." if hora else f"{detail}."
+        status = "sent"
+    elif failed and not retry and not pending:
+        error = failed[0]["lastError"] or "el servidor de correo rechazó el envío"
+        detail = (
+            f"No se pudo enviar el correo a {', '.join(d['recipient'] for d in failed)} "
+            f"después de {failed[0]['attempts']} intentos: {error}"
+        )
+        status = "failed"
+    elif failed or retry:
+        problem = (failed or retry)[0]
+        error = problem["lastError"] or "error de conexión con el servidor de correo"
+        detail = (
+            f"El correo a {problem['recipient']} falló ({error}) y se está reintentando "
+            f"automáticamente (intento {problem['attempts']} de {problem['maxAttempts']})."
+        )
+        status = "retry"
+    else:
+        detail = f"Correo encolado para {', '.join(all_recipients)}; se envía en los próximos segundos."
+        status = "queued"
+
+    return {
+        "status": status,
+        "detail": detail,
+        "deliveries": deliveries,
+        "sentCount": len(sent),
+        "pendingCount": len(pending) + len(retry),
+        "failedCount": len(failed),
+    }
+
+
 def _claim_deliveries(*, limit: int, delivery_ids: list[int] | None = None) -> list[dict[str, Any]]:
     clean_ids = sorted({int(value) for value in delivery_ids or [] if value is not None})
     id_filter = "AND id = ANY(%s)" if clean_ids else ""
@@ -217,20 +322,23 @@ def _claim_deliveries(*, limit: int, delivery_ids: list[int] | None = None) -> l
     return [rows_by_id[delivery_id] for delivery_id in claimed_ids if delivery_id in rows_by_id]
 
 
-def _attachment_for_delivery(delivery: dict[str, Any]) -> tuple[bytes, str, str] | None:
-    kind = _clean(delivery.get("attachment_kind"))
-    reference = _clean(delivery.get("attachment_reference"))
+def _delivery_context(delivery: dict[str, Any]) -> dict[str, Any]:
     raw_context = delivery.get("attachment_context")
     if isinstance(raw_context, dict):
-        context = raw_context
+        return raw_context
     elif isinstance(raw_context, str):
         try:
             parsed_context = json.loads(raw_context)
         except Exception:
             parsed_context = {}
-        context = parsed_context if isinstance(parsed_context, dict) else {}
-    else:
-        context = {}
+        return parsed_context if isinstance(parsed_context, dict) else {}
+    return {}
+
+
+def _attachment_for_delivery(delivery: dict[str, Any]) -> tuple[bytes, str, str] | None:
+    kind = _clean(delivery.get("attachment_kind"))
+    reference = _clean(delivery.get("attachment_reference"))
+    context = _delivery_context(delivery)
     if not kind:
         return None
     try:
@@ -259,6 +367,9 @@ def _attachment_for_delivery(delivery: dict[str, Any]) -> tuple[bytes, str, str]
 
 
 def _send_delivery(delivery: dict[str, Any], attachment: tuple[bytes, str, str] | None) -> None:
+    context = _delivery_context(delivery)
+    html_body = str(context.get("html_body") or "").strip()
+
     def _message(connection_obj=None) -> EmailMessage:
         message = EmailMessage(
             delivery.get("subject") or "",
@@ -267,6 +378,8 @@ def _send_delivery(delivery: dict[str, Any], attachment: tuple[bytes, str, str] 
             [delivery.get("recipient")],
             connection=connection_obj,
         )
+        if html_body:
+            message.attach_alternative(html_body, "text/html")
         if attachment:
             pdf_bytes, content_type, filename = attachment
             message.attach(filename or "adjunto.pdf", pdf_bytes, content_type or "application/octet-stream")

@@ -10,6 +10,7 @@ from service.bejerman_user_credentials import (
     bejerman_workstation_for_role,
     decrypt_bejerman_password,
     encrypt_bejerman_password,
+    resolve_user_bejerman_workstation,
 )
 from service.models import User
 
@@ -182,6 +183,7 @@ class BejermanUserCredentialsApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["bejermanCredentialsRequired"])
         self.assertTrue(response.data["user"]["bejermanCredentials"]["required"])
+        self.assertFalse(response.data["user"]["bejermanCredentials"]["promptDismissed"])
 
     @override_settings(BEJERMAN_CREDENTIALS_SECRET="api-test-secret")
     def test_save_credentials_validates_and_persists_encrypted_password(self):
@@ -232,6 +234,152 @@ class BejermanUserCredentialsApiTests(TestCase):
 
         session = self.client.get("/api/auth/session/")
         self.assertFalse(session.data["bejermanCredentialsRequired"])
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="api-test-secret")
+    def test_requested_workstation_is_validated_and_persisted(self):
+        with patch("service.views.auth_views.BejermanSDKClient") as sdk_cls:
+            sdk_cls.return_value.register.return_value = {"Resultado": "OK", "Token": "token"}
+            response = self.client.post(
+                "/api/auth/bejerman-credentials/",
+                {
+                    "username": "oper1",
+                    "password": "clave-personal",
+                    "workstation": "vtas",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["workstation"], "VTAS")
+        self.assertTrue(response.data["workstationConfigured"])
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT bejerman_workstation FROM users WHERE id = %s",
+                [self.user.id],
+            )
+            self.assertEqual(cur.fetchone()[0], "VTAS")
+        self.assertEqual(
+            sdk_cls.call_args_list,
+            [
+                call(
+                    company_key="SEPID",
+                    bejerman_username="OPER1",
+                    bejerman_password="clave-personal",
+                    bejerman_workstation="VTAS",
+                ),
+                call(
+                    company_key="MGBIO",
+                    bejerman_username="OPER1",
+                    bejerman_password="clave-personal",
+                    bejerman_workstation="VTAS",
+                ),
+            ],
+        )
+
+    def test_workstation_lookup_returns_common_recommended_option(self):
+        def remote_lookup(_sql, *, company_key=None, outcome=None, **_kwargs):
+            outcome.update({"status": "success"})
+            if company_key == "SEPID":
+                return [
+                    {"code": "DEPO", "label": "DEPÓSITO"},
+                    {"code": "VTAS", "label": "VENTAS"},
+                ]
+            return [
+                {"code": "GER", "label": "GERENCIA"},
+                {"code": "VTAS", "label": "VENTAS"},
+            ]
+
+        with patch(
+            "service.bejerman_delivery._remote_bejerman_sql_csv",
+            side_effect=remote_lookup,
+        ):
+            response = self.client.get(
+                "/api/auth/bejerman-workstations/?username=spvta"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["automatic"])
+        self.assertEqual(response.data["recommended"], "VTAS")
+        self.assertEqual(
+            response.data["options"],
+            [{"code": "VTAS", "label": "VENTAS"}],
+        )
+
+    def test_user_can_persistently_dismiss_automatic_credentials_prompt(self):
+        response = self.client.patch(
+            "/api/auth/bejerman-credentials/",
+            {"dismissPrompt": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["required"])
+        self.assertTrue(response.data["promptDismissed"])
+
+        session = self.client.get("/api/auth/session/")
+        self.assertTrue(
+            session.data["user"]["bejermanCredentials"]["promptDismissed"]
+        )
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="api-test-secret")
+    def test_saving_credentials_reenables_future_automatic_prompt(self):
+        self.client.patch(
+            "/api/auth/bejerman-credentials/",
+            {"dismissPrompt": True},
+            format="json",
+        )
+        with patch("service.views.auth_views.BejermanSDKClient") as sdk_cls:
+            sdk_cls.return_value.register.return_value = {"Resultado": "OK", "Token": "token"}
+            response = self.client.post(
+                "/api/auth/bejerman-credentials/",
+                {
+                    "username": "oper1",
+                    "password": "clave-personal",
+                    "workstation": "STEC",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["promptDismissed"])
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="api-test-secret")
+    def test_personal_workstation_overrides_role_during_validation(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET bejerman_workstation = %s WHERE id = %s",
+                ["VTAS", self.user.id],
+            )
+
+        self.assertEqual(resolve_user_bejerman_workstation(self.user.id), "VTAS")
+
+        with patch("service.views.auth_views.BejermanSDKClient") as sdk_cls:
+            sdk_cls.return_value.register.return_value = {"Resultado": "OK", "Token": "token"}
+            response = self.client.post(
+                "/api/auth/bejerman-credentials/",
+                {"username": "spvta", "password": "clave-personal"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["workstation"], "VTAS")
+        self.assertEqual(
+            sdk_cls.call_args_list,
+            [
+                call(
+                    company_key="SEPID",
+                    bejerman_username="SPVTA",
+                    bejerman_password="clave-personal",
+                    bejerman_workstation="VTAS",
+                ),
+                call(
+                    company_key="MGBIO",
+                    bejerman_username="SPVTA",
+                    bejerman_password="clave-personal",
+                    bejerman_workstation="VTAS",
+                ),
+            ],
+        )
 
     @override_settings(BEJERMAN_CREDENTIALS_SECRET="api-test-secret")
     def test_save_credentials_rejects_user_valid_in_only_one_company(self):

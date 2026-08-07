@@ -1,5 +1,7 @@
+import hashlib
 from difflib import SequenceMatcher
 
+from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from rest_framework import permissions
 from rest_framework.exceptions import ValidationError
@@ -10,6 +12,7 @@ from ..bejerman_sdk import BejermanSDKClient, as_string, first_value, normalize_
 from ..customer_bejerman_sync import (
     BEJERMAN_COMPANY_CONTEXT_KEY,
     BEJERMAN_CUSTOMER_COLUMNS,
+    BEJERMAN_CUSTOMERS_CACHE_SECONDS,
     bejerman_customer_detail_payload_from_record,
     bejerman_customer_details_from_record,
     customer_bejerman_detail_payload,
@@ -291,9 +294,9 @@ def _candidate_payload(record, local=None, query=""):
     }
 
 
-def _load_bejerman_records(user_id: int | None = None):
+def _load_bejerman_records(user_id: int | None = None, force_refresh: bool = False):
     """Carga clientes de todas las empresas Bejerman configuradas (SEPID, MGBIO)."""
-    return load_bejerman_customer_records_for_companies(user_id=user_id)
+    return load_bejerman_customer_records_for_companies(user_id=user_id, force_refresh=force_refresh)
 
 
 def _record_company_key(record):
@@ -366,6 +369,30 @@ def _bejerman_sync_payload(local, records, by_code):
     }
 
 
+def _bejerman_records_fingerprint(records):
+    """Huella barata del catálogo remoto para invalidar el cache de matching si cambia."""
+    codes = sorted(
+        f"{_record_company_key(record)}:{_clean_upper(_bejerman_customer_code(record))}"
+        for record in records
+    )
+    return hashlib.md5("|".join(codes).encode("utf-8")).hexdigest()
+
+
+def _bejerman_sync_cache_key(row, records_fingerprint):
+    fields = "|".join(
+        [
+            str(row.get("id") or ""),
+            _clean_upper(row.get("cod_empresa")),
+            _clean(row.get("razon_social")),
+            _digits_only(row.get("cuit")),
+            _clean_upper(row.get("bejerman_company_key")),
+            records_fingerprint,
+        ]
+    )
+    digest = hashlib.md5(fields.encode("utf-8")).hexdigest()
+    return f"bejerman_customer_sync:{digest}"
+
+
 def _attach_bejerman_sync(rows, user_id: int | None = None):
     try:
         records, company_errors = _load_bejerman_records(user_id=user_id)
@@ -387,6 +414,11 @@ def _attach_bejerman_sync(rows, user_id: int | None = None):
             continue
         by_code.setdefault((_record_company_key(record), code), record)
         by_code.setdefault(code, record)
+
+    # El matching difuso contra todo el catálogo remoto (cuando no hay código exacto)
+    # es O(clientes locales x clientes Bejerman); se cachea por cliente para no
+    # recalcularlo en cada carga de la página mientras el catálogo no cambie.
+    records_fingerprint = _bejerman_records_fingerprint(records)
     for row in rows:
         row_company = _clean_upper(row.get("bejerman_company_key"))
         if row_company and row_company in failed_companies:
@@ -397,7 +429,12 @@ def _attach_bejerman_sync(rows, user_id: int | None = None):
                 "candidates": [],
             }
             continue
-        row["bejerman_sync"] = _bejerman_sync_payload(row, records, by_code)
+        cache_key = _bejerman_sync_cache_key(row, records_fingerprint)
+        sync = cache.get(cache_key)
+        if sync is None:
+            sync = _bejerman_sync_payload(row, records, by_code)
+            cache.set(cache_key, sync, BEJERMAN_CUSTOMERS_CACHE_SECONDS)
+        row["bejerman_sync"] = sync
     return rows
 
 
@@ -565,7 +602,7 @@ class ClientesBejermanSyncView(APIView):
         dry_run = _bool_param((request.data or {}).get("dry_run"))
         try:
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-            records, company_errors = _load_bejerman_records(user_id=user_id)
+            records, company_errors = _load_bejerman_records(user_id=user_id, force_refresh=True)
             summary = sync_customers_from_bejerman_records(records, dry_run=dry_run)
         except Exception as exc:
             return Response({"detail": str(exc) or "No se pudo sincronizar Bejerman."}, status=503)

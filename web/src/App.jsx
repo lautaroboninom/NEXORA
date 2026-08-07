@@ -7,6 +7,7 @@ import BejermanCredentialsModal from "./components/BejermanCredentialsModal.jsx"
 import BejermanSellerCodeModal from "./components/BejermanSellerCodeModal.jsx";
 import useRouteUiState from "./hooks/useRouteUiState";
 import { useAuth } from "./context/AuthContext";
+import { patchBejermanCredentialsPrompt } from "./lib/api";
 import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
 
 export default function App() {
@@ -15,9 +16,12 @@ export default function App() {
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [dismissedBejermanCredentialsUserId, setDismissedBejermanCredentialsUserId] = useState(null);
+  const [manualBejermanCredentialsOpen, setManualBejermanCredentialsOpen] = useState(false);
   const rol = user?.rol;
   const bejermanCredentialsPromptUserId = user?.id ?? "__current__";
-  const bejermanCredentialsRequired = !!user?.bejermanCredentials?.required;
+  const bejermanCredentials = user?.bejermanCredentials || {};
+  const bejermanCredentialsRequired = !!bejermanCredentials.required;
+  const bejermanCredentialsPromptDismissed = !!bejermanCredentials.promptDismissed;
   const bejermanSellerCode = user?.bejermanSellerCode || {};
 
   const canSeeGeneralCliente = canAny(user, [
@@ -39,10 +43,13 @@ export default function App() {
     PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE,
     PERMISSION_CODES.ACTION_BILLING_VIEW,
   ]);
-  const showBejermanCredentialsModal =
+  const showAutomaticBejermanCredentialsModal =
     bejermanCredentialsRequired &&
     shouldPromptBejermanCredentials &&
+    !bejermanCredentialsPromptDismissed &&
     dismissedBejermanCredentialsUserId !== bejermanCredentialsPromptUserId;
+  const showBejermanCredentialsModal =
+    manualBejermanCredentialsOpen || showAutomaticBejermanCredentialsModal;
   const showBejermanSellerCodeModal =
     !!bejermanSellerCode?.required && !showBejermanCredentialsModal;
 
@@ -53,10 +60,15 @@ export default function App() {
   }, [location.pathname]);
 
   useEffect(() => {
-    if (!user?.id || !bejermanCredentialsRequired) {
+    setDismissedBejermanCredentialsUserId(null);
+    setManualBejermanCredentialsOpen(false);
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!bejermanCredentialsRequired) {
       setDismissedBejermanCredentialsUserId(null);
     }
-  }, [user?.id, bejermanCredentialsRequired]);
+  }, [bejermanCredentialsRequired]);
 
   useEffect(() => {
     if (!mobileMenuOpen) return undefined;
@@ -144,6 +156,24 @@ export default function App() {
               </Link>
             )}
             {user && <NotificationBell />}
+            {user && shouldPromptBejermanCredentials && (
+              <button
+                type="button"
+                onClick={() => setManualBejermanCredentialsOpen(true)}
+                className={`rounded border px-2.5 py-1.5 text-xs hover:bg-gray-50 md:text-sm ${
+                  bejermanCredentialsRequired
+                    ? "border-amber-300 bg-amber-50 text-amber-800"
+                    : "border-gray-200 text-gray-700"
+                }`}
+                title={
+                  bejermanCredentialsRequired
+                    ? "Configurar credenciales Bejerman pendientes"
+                    : "Actualizar credenciales Bejerman"
+                }
+              >
+                Bejerman{bejermanCredentialsRequired ? " pendiente" : ""}
+              </button>
+            )}
             {user && (
               <span className="hidden md:inline text-sm text-gray-500">
                 {user?.nombre} {rol}
@@ -175,8 +205,25 @@ export default function App() {
       <Footer />
       <BejermanCredentialsModal
         open={showBejermanCredentialsModal}
-        onSaved={refreshSession}
-        onExit={() => setDismissedBejermanCredentialsUserId(bejermanCredentialsPromptUserId)}
+        initialWorkstation={
+          bejermanCredentials.workstationConfigured
+            ? bejermanCredentials.workstation
+            : ""
+        }
+        allowPersistentDismissal={bejermanCredentialsRequired}
+        onSaved={async () => {
+          setManualBejermanCredentialsOpen(false);
+          setDismissedBejermanCredentialsUserId(null);
+          await refreshSession();
+        }}
+        onExit={async ({ neverShowAgain } = {}) => {
+          if (neverShowAgain) {
+            await patchBejermanCredentialsPrompt(true);
+            await refreshSession();
+          }
+          setDismissedBejermanCredentialsUserId(bejermanCredentialsPromptUserId);
+          setManualBejermanCredentialsOpen(false);
+        }}
       />
       <BejermanSellerCodeModal
         open={showBejermanSellerCodeModal}

@@ -8,6 +8,9 @@ import DataChip from "../components/DataChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import StatusChip from "../components/StatusChip.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 export default function GeneralPorCliente() {
   const [clientes, setClientes] = useState([]);
@@ -19,6 +22,7 @@ export default function GeneralPorCliente() {
   const [loadingRows, setLoadingRows] = useState(false);
   const [errRows, setErrRows] = useState("");
   const [q, setQ] = useQueryState("q", "");
+  const [sort, setSort] = useQueryState("sort", "");
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [exporting, setExporting] = useState(false);
 
@@ -82,6 +86,21 @@ export default function GeneralPorCliente() {
       return campos.some((c) => norm(c).includes(needle));
     });
   }, [rows, q]);
+
+  const displayRows = useMemo(
+    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
+    [filtered, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "equipo",
+    "identificacion",
+    "estado",
+    "presupuesto",
+    "ubicacion",
+    "fecha_ingreso",
+    "fecha_presupuestado",
+  ]);
 
   // Mantener el comportamiento actual: buscar sólo al presionar el botón
 
@@ -232,8 +251,9 @@ export default function GeneralPorCliente() {
         </div>
       ) : (
         <div>
+          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
           <MobileDataList>
-            {filtered.map((row) => {
+            {displayRows.map((row) => {
               const rowId = ingresoIdOf(row);
               return (
                 <MobileDataCard
@@ -291,18 +311,18 @@ export default function GeneralPorCliente() {
                     aria-label="Seleccionar todos los visibles"
                   />
                 </th>
-                <th scope="col" className="p-2">OS</th>
-                <th scope="col" className="p-2">Equipo</th>
-                <th scope="col" className="p-2">Serie</th>
-                <th scope="col" className="p-2">Estado</th>
-                <th scope="col" className="p-2">Presupuesto</th>
-                <th scope="col" className="p-2">Ubicación</th>
-                <th scope="col" className="p-2">Fecha ingreso</th>
-                <th scope="col" className="p-2">Fecha presupuestado</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
+                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
+                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="p-2">Estado</SortableTh>
+                <SortableTh field="presupuesto" sort={sort} onSortChange={setSort} className="p-2">Presupuesto</SortableTh>
+                <SortableTh field="ubicacion" sort={sort} onSortChange={setSort} className="p-2">Ubicación</SortableTh>
+                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2">Fecha ingreso</SortableTh>
+                <SortableTh field="fecha_presupuestado" sort={sort} onSortChange={setSort} className="p-2">Fecha presupuestado</SortableTh>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row) => (
+              {displayRows.map((row) => (
                 <tr
                   key={ingresoIdOf(row)}
                   onClick={() => go(row)}
@@ -337,7 +357,7 @@ export default function GeneralPorCliente() {
           </table>
           </DesktopTableWrap>
           <div className="text-xs text-gray-500 mt-2">
-            Mostrando {filtered.length} de {rows.length}.
+            Mostrando {displayRows.length} de {rows.length}.
           </div>
         </div>
       )}

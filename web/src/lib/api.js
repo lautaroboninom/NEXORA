@@ -333,6 +333,10 @@ import { MOTIVO_OPTIONS } from "./constants";
   export const getBejermanCredentials = () => api.get("/api/auth/bejerman-credentials/");
   export const postBejermanCredentials = (payload) =>
     api.post("/api/auth/bejerman-credentials/", payload);
+  export const patchBejermanCredentialsPrompt = (dismissPrompt) =>
+    api.patch("/api/auth/bejerman-credentials/", { dismissPrompt });
+  export const getBejermanWorkstations = (username) =>
+    api.get(`/api/auth/bejerman-workstations/?username=${encodeURIComponent(username || "")}`);
   export const getBejermanSellerCode = () => api.get("/api/auth/bejerman-seller-code/");
   export const postBejermanSellerCode = (payload) =>
     api.post("/api/auth/bejerman-seller-code/", payload);
@@ -341,9 +345,12 @@ import { MOTIVO_OPTIONS } from "./constants";
   /* =============== USUARIOS ================= */
   export const getUsuarios = () => api.get("/api/usuarios/");
   export const postUsuario = (payload) => api.post("/api/usuarios/", payload);
+  export const getUsuario = (id) => api.get(`/api/usuarios/${id}/`);
+  export const patchUsuario = (id, payload) =>
+    api.patch(`/api/usuarios/${id}/`, payload);
   export const patchUsuarioActivo = (id, activo) =>
     api.patch(`/api/usuarios/${id}/activar/`, { activo });
-  // Enviar enlace de restablecimiento/invitacin por email
+  // Enviar enlace de restablecimiento/invitación por email
   export const patchUsuarioReset = (id) =>
     api.patch(`/api/usuarios/${id}/reset-pass/`, {});
   export const patchUsuarioRolePerm = (id, payload) =>
@@ -359,9 +366,21 @@ import { MOTIVO_OPTIONS } from "./constants";
     api.get(`/api/usuarios/${id}/notificaciones/`);
   export const putUsuarioNotificaciones = (id, payload) =>
     api.put(`/api/usuarios/${id}/notificaciones/`, payload);
+  export const getUsuarioBejermanWorkstations = (id, username) =>
+    api.get(
+      `/api/usuarios/${id}/bejerman-workstations/?username=${encodeURIComponent(username || "")}`,
+    );
+  export const putUsuarioBejermanCredentials = (id, payload) =>
+    api.put(`/api/usuarios/${id}/bejerman-credentials/`, payload);
+  export const deleteUsuarioBejermanCredentials = (id) =>
+    api.del(`/api/usuarios/${id}/bejerman-credentials/`);
   export const getNotificaciones = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/notificaciones/${qs ? `?${qs}` : ""}`);
+  };
+  export const getNotificacionesEmailEstado = (ids = []) => {
+    const qs = buildQuery({ ids: (ids || []).join(",") });
+    return api.get(`/api/notificaciones/emails/estado/${qs ? `?${qs}` : ""}`);
   };
   export const postNotificacionClick = (id) =>
     api.post(`/api/notificaciones/${id}/click/`, {});
@@ -907,6 +926,15 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postBejermanJobRetry = (jobId) =>
     api.post(`/api/bejerman/jobs/${jobId}/retry/`, {});
 
+  export const getBejermanPdfQueueStatus = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/pdf-queue/status/${qs ? `?${qs}` : ""}`);
+  };
+
+  // Abre un ciclo de generación nuevo para un PDF que Bejerman no publicó.
+  export const postBejermanPdfQueueRetry = (documentKey, payload = {}) =>
+    api.post(`/api/bejerman/pdf-queue/${encodeURIComponent(documentKey)}/retry/`, payload);
+
   export const getBejermanRemitoProcesses = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/bejerman/remitos/${qs ? `?${qs}` : ""}`);
@@ -938,6 +966,11 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.get(`/api/bejerman/purchase-articles/${qs ? `?${qs}` : ""}`);
   };
 
+  export const getBejermanPurchaseOrders = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/purchase-orders/${qs ? `?${qs}` : ""}`);
+  };
+
   export const getBejermanPurchaseEntries = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/bejerman/purchase-entries/${qs ? `?${qs}` : ""}`);
@@ -957,6 +990,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export const postBejermanPurchaseEntryLine = (entryId, payload = {}) =>
     api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/lines/`, payload);
+
+  export const postBejermanPurchaseEntryPopulateFromOrder = (entryId) =>
+    api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/populate-from-order/`, {});
 
   export const patchBejermanPurchaseEntryLine = (entryId, lineId, payload = {}) =>
     api.patch(
@@ -988,6 +1024,12 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postBejermanPurchaseEntryEmit = (entryId, payload = {}) =>
     api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/emit/`, payload);
 
+  export const postBejermanPurchaseEntryVerify = (entryId) =>
+    api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/verify/`, {});
+
+  export const postBejermanPurchaseEntryReopen = (entryId, payload = {}) =>
+    api.post(`/api/bejerman/purchase-entries/${encodeURIComponent(entryId)}/reopen/`, payload);
+
   export const getBejermanPurchaseHistory = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/bejerman/purchase-entries/historial/${qs ? `?${qs}` : ""}`);
@@ -1014,11 +1056,17 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postDeliveryOrderPrepared = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/preparar/`, payload);
 
+  export const postDeliveryOrderRemitos = (orderId, payload = {}) =>
+    api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/remitos/`, payload);
+
   export const postDeliveryOrderDelivered = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/entregar/`, payload);
 
   export const postDeliveryOrderInvoiced = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/facturar/`, payload);
+
+  export const postDeliveryOrdersInvoicedBatch = (payload = {}) =>
+    api.post("/api/ordenes-entrega/facturar-lote/", payload);
 
   export const postDeliveryOrderNotBillable = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/no-facturar/`, payload);
@@ -1268,6 +1316,19 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export async function getIngresoBejermanEstado(id) {
     return api.get(`/api/ingresos/${id}/bejerman-estado/`);
+  }
+
+  export async function postIngresoBejermanEstadoAccion(id, payload) {
+    return api.post(`/api/ingresos/${id}/bejerman-estado/accion/`, payload);
+  }
+
+  export async function getIngresoAlquilerRemitoEstado(id, remito) {
+    const qs = remito ? `?remito=${encodeURIComponent(remito)}` : "";
+    return api.get(`/api/ingresos/${id}/alquiler/remito/${qs}`);
+  }
+
+  export async function postIngresoAlquilerRemitoAccion(id, payload) {
+    return api.post(`/api/ingresos/${id}/alquiler/remito/accion/`, payload);
   }
 
   export async function patchIngreso(id, payload) {

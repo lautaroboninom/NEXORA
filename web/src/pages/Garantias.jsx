@@ -9,6 +9,8 @@ import {
   getModelosByBrand,
   getBejermanIngressCompanies,
 } from "@/lib/api";
+import { SortableTh } from "@/components/TableSortControls.jsx";
+import { sortRows } from "@/lib/table-sort.js";
 
 const DEFAULT_BEJERMAN_COMPANIES = [
   { key: "SEPID", label: "SEPID SA" },
@@ -46,10 +48,22 @@ export default function Garantias() {
   const [busyRule, setBusyRule] = useState(false);
   const [modelNames, setModelNames] = useState({});
   const [loadedBrands, setLoadedBrands] = useState(new Set());
+  const [rulesSort, setRulesSort] = useState("");
 
   const selectedSearchBrand = useMemo(
     () => (marcas || []).find((m) => String(m.id) === String(searchMarcaId)) || null,
     [marcas, searchMarcaId]
+  );
+  const sortedRules = useMemo(
+    () => sortRows(rules, rulesSort, {
+      id: { getValue: (row) => row.id, type: "number" },
+      marca: { getValue: (row) => marcas.find((brand) => brand.id === row.brand_id)?.nombre || row.brand_id },
+      modelo: { getValue: (row) => row.model_id ? (modelNames[row.model_id] || row.model_id) : "" },
+      dias: { getValue: (row) => row.days, type: "number" },
+      notas: { getValue: (row) => row.notas },
+      activo: { getValue: (row) => row.activo, type: "boolean" },
+    }),
+    [marcas, modelNames, rules, rulesSort],
   );
 
   useEffect(() => {
@@ -338,17 +352,17 @@ export default function Garantias() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th className="p-2">ID</th>
-                <th className="p-2">Marca</th>
-                <th className="p-2">Modelo</th>
-                <th className="p-2">Días</th>
-                <th className="p-2">Notas</th>
-                <th className="p-2">Activo</th>
+                <SortableTh field="id" label="ID" sort={rulesSort} onSortChange={setRulesSort} className="p-2" />
+                <SortableTh field="marca" label="Marca" sort={rulesSort} onSortChange={setRulesSort} className="p-2" />
+                <SortableTh field="modelo" label="Modelo" sort={rulesSort} onSortChange={setRulesSort} className="p-2" />
+                <SortableTh field="dias" label="Días" sort={rulesSort} onSortChange={setRulesSort} className="p-2" />
+                <SortableTh field="notas" label="Notas" sort={rulesSort} onSortChange={setRulesSort} className="p-2" />
+                <SortableTh field="activo" label="Activo" sort={rulesSort} onSortChange={setRulesSort} className="p-2" />
                 <th className="p-2">Acciones</th>
               </tr>
             </thead>
             <tbody>
-              {(rules || []).map((r) => (
+              {sortedRules.map((r) => (
                 <tr key={r.id} className="border-t">
                   <td className="p-2">{r.id}</td>
                   <td className="p-2">{(marcas.find((m) => m.id === r.brand_id)?.nombre) || (r.brand_id || "-")}</td>

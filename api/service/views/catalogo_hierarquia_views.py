@@ -553,9 +553,10 @@ class CatalogoVariantesCreateView(APIView):
                          WHERE marca_id=%s
                            AND UPPER(TRIM(nombre)) = UPPER(TRIM(%s))
                            AND (COALESCE(TRIM(tipo_equipo),'') = '' OR UPPER(TRIM(tipo_equipo)) = UPPER(TRIM(%s)))
+                         ORDER BY (UPPER(TRIM(COALESCE(tipo_equipo,''))) = UPPER(TRIM(%s))) DESC, id
                          LIMIT 1
                         """,
-                        [marca_id, serie_nombre, tipo_nombre],
+                        [marca_id, serie_nombre, tipo_nombre, tipo_nombre],
                         one=True,
                     ) or {}
                     if cand.get("id"):
@@ -657,6 +658,25 @@ class ModeloTipoEquipoView(APIView):
             tipo_nombre = r["equipo"]
 
         tipo_nombre = sentence_case_tipo_equipo(tipo_nombre)
+
+        # El nuevo tipo no puede chocar contra otro modelo homónimo de la marca que ya
+        # tenga ese mismo tipo: serían el mismo equipo cargado dos veces.
+        clash = q(
+            """
+            SELECT id FROM models
+            WHERE marca_id=%s AND id<>%s
+              AND LOWER(TRIM(nombre)) = (SELECT LOWER(TRIM(nombre)) FROM models WHERE id=%s)
+              AND LOWER(COALESCE(TRIM(tipo_equipo),'')) = LOWER(%s)
+            """,
+            [marca_id, modelo_id, modelo_id, tipo_nombre],
+            one=True,
+        )
+        if clash:
+            return Response({
+                "detail": "Ya existe otro modelo con ese nombre y ese tipo de equipo en la marca. "
+                          "Si son el mismo equipo, unificá los modelos.",
+                "modelo_id": clash["id"],
+            }, status=409)
 
         exec_void("""
             UPDATE models

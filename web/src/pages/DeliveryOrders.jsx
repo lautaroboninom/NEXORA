@@ -10,15 +10,16 @@ import {
   postDeliveryOrderDelivered,
   postDeliveryOrderDriveSync,
   postDeliveryOrderInvoiced,
-  postDeliveryOrderPrepared,
 } from "../lib/api";
 import { openPrintablePdf, waitForPdfBlob } from "../lib/pdf";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import DeliveryOrderCreateForm from "../components/DeliveryOrderCreateForm.jsx";
 import DeliveryOrderCommercialCorrectionModal from "../components/DeliveryOrderCommercialCorrectionModal.jsx";
+import DeliveryOrderManualRemitoModal from "../components/DeliveryOrderManualRemitoModal.jsx";
 import DeliveryOrderRemitoModal from "../components/DeliveryOrderRemitoModal.jsx";
 import {
+  deliveryOrderBejermanCustomerLabel,
   deliveryOrderCompanyLabel,
   deliveryOrderCommercialLabel,
   deliveryOrderItemCanOmitPartida,
@@ -29,7 +30,7 @@ import {
   deliveryOrderServiceReleaseReferences,
   formatServiceOrderReference,
 } from "../lib/delivery-orders";
-import { CloudUpload, MapPinned, Pencil, Plus, Printer, X } from "lucide-react";
+import { CloudUpload, FileText, MapPinned, Pencil, Plus, Printer, X } from "lucide-react";
 import {
   DesktopTableWrap,
   MobileDataCard,
@@ -41,6 +42,9 @@ import {
   fullWidthButtonClass,
 } from "../components/Responsive.jsx";
 import { useLocation, useNavigate } from "react-router-dom";
+import useQueryState from "../hooks/useQueryState";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { DELIVERY_ORDER_SORT_OPTIONS } from "../lib/delivery-order-sort";
 
 const STATUS_LABELS = {
   pendiente_stock: "Pendiente de stock",
@@ -85,21 +89,106 @@ const ORDER_HISTORY_STATUS_FILTER = "entregado_pendiente_facturacion,entregado_n
 const PENDING_DELIVERY_STATUSES = new Set(["pendiente_armado", "armado_pendiente_entrega"]);
 const NON_CANCELABLE_STATUSES = new Set(["entregado_pendiente_facturacion", "entregado_no_facturable", "facturado", "cancelado"]);
 const EDITABLE_STATUSES = new Set(["pendiente_stock", "pendiente_armado", "armado_pendiente_entrega"]);
+const COMMERCIAL_CORRECTION_BLOCKED_STATUSES = new Set(["entregado_no_facturable", "facturado", "cancelado"]);
 const REMITO_LOCATIONS = new Set(["recepcion", "oficina"]);
+const STUCK_REMITO_GROUP_STATUSES = new Set(["sent_unknown", "failed_review", "failed"]);
+
+const REMITO_STATUS_LABELS = {
+  pending: "Pendiente",
+  reserved: "Reservado",
+  sending: "Enviando",
+  generated: "Emitido",
+  reconciled: "Asociado",
+  failed: "Falló",
+  sent_unknown: "Sin confirmar",
+  failed_review: "Requiere revisión",
+};
+
+const REMITO_SET_STATUS = {
+  complete: { label: "Remitos completos", className: "border-emerald-200 bg-emerald-50 text-emerald-800" },
+  partial: { label: "Faltan remitos", className: "border-amber-300 bg-amber-50 text-amber-900" },
+  review: { label: "Requiere revisión", className: "border-red-200 bg-red-50 text-red-700" },
+};
 
 function normalizeRemitoLocation(value) {
   const location = String(value || "").trim().toLowerCase();
   return REMITO_LOCATIONS.has(location) ? location : "";
 }
 
+function deliveryOrderRemitos(order) {
+  if (Array.isArray(order?.remitos) && order.remitos.length) {
+    return order.remitos.filter((remito) => remito && typeof remito === "object");
+  }
+  const remitoNumber = String(order?.remitoNumber || "").trim();
+  const legacyNumbers = Array.isArray(order?.remitoNumbers)
+    ? order.remitoNumbers.map((number) => String(number || "").trim()).filter(Boolean)
+    : [];
+  const groupId = String(order?.bejermanRemitoGroupId || "").trim();
+  if (!remitoNumber && !legacyNumbers.length && !groupId) return [];
+  const group = order?.bejermanRemitoGroup && typeof order.bejermanRemitoGroup === "object"
+    ? order.bejermanRemitoGroup
+    : {};
+  const numbers = legacyNumbers.length ? legacyNumbers : [remitoNumber || group.remitoNumber || ""];
+  return numbers.map((number, index) => {
+    const isPrimary = index === 0;
+    return {
+      id: isPrimary ? group.id || groupId || number : `${number}-${index}`,
+      groupId: isPrimary ? group.id || groupId : "",
+      remitoNumber: number,
+      documentMode: isPrimary ? group.responseSummary?.documentMode || "" : "",
+      allocationStatus: "",
+      status: isPrimary ? group.status || "" : "",
+      generated: isPrimary ? group.generated : undefined,
+      uncertain: isPrimary ? group.uncertain : undefined,
+      pdfUrl: isPrimary ? group.pdfUrl || "" : "",
+      printUrl: isPrimary ? order?.remitoPrintUrl || group.printUrl || "" : "",
+    };
+  });
+}
+
+function orderHasRemitos(order) {
+  return deliveryOrderRemitos(order).some((remito) => String(remito?.remitoNumber || "").trim());
+}
+
+function orderRemitoNumberSummary(order) {
+  const numbers = deliveryOrderRemitos(order)
+    .map((remito) => String(remito?.remitoNumber || "").trim())
+    .filter(Boolean);
+  return numbers.length ? numbers.join(" / ") : String(order?.remitoNumber || "").trim();
+}
+
+function orderHasPendingRemitoParts(order) {
+  return String(order?.remitoSetStatus || "").trim().toLowerCase() === "partial";
+}
+
+function orderHasCompleteRemitoSet(order) {
+  const status = String(order?.remitoSetStatus || "").trim().toLowerCase();
+  return !status || status === "complete";
+}
+
+function orderHasManualRemitoSet(order) {
+  return deliveryOrderRemitos(order).some((remito) =>
+    ["register", "existing"].includes(String(remito?.documentMode || "").trim().toLowerCase()),
+  );
+}
+
+function orderHasOnlineRemitoSet(order) {
+  const remitos = deliveryOrderRemitos(order);
+  if (remitos.some((remito) => ["emit", "online"].includes(String(remito?.documentMode || "").trim().toLowerCase()))) {
+    return true;
+  }
+  const activeStatuses = new Set(["pending", "reserved", "sending"]);
+  return remitos.some((remito) => activeStatuses.has(String(remito?.status || "").trim().toLowerCase()));
+}
+
 function isCancelableOrder(order) {
-  return !NON_CANCELABLE_STATUSES.has(order?.status) && !order?.remitoNumber;
+  return !NON_CANCELABLE_STATUSES.has(order?.status) && !orderHasRemitos(order);
 }
 
 function isEditableOrder(order) {
   return (
     EDITABLE_STATUSES.has(order?.status) &&
-    !order?.remitoNumber &&
+    !orderHasRemitos(order) &&
     !order?.bejermanRemitoGroupId
   );
 }
@@ -113,7 +202,7 @@ function canEditItemDiscounts(user) {
 }
 
 function canEditCommercialFields(user) {
-  return ["admin", "supervisor", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
+  return can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_ASSIGN_ARTICLES);
 }
 
 function safeReturnPath(value) {
@@ -122,11 +211,20 @@ function safeReturnPath(value) {
 }
 
 function canCorrectCommercialTerms(user, order) {
+  const remitoNumber = orderRemitoNumberSummary(order);
+  const billingRequired = order?.bejermanRemitoGroup?.responseSummary?.billingRequired;
+  const billingRequiredText = String(billingRequired ?? "").trim().toLowerCase();
+  const remitoRequiresBilling =
+    billingRequired === true ||
+    billingRequiredText === "true" ||
+    remitoNumber.toUpperCase().split(/\s+/)[0] === "RT";
   return (
-    String(user?.rol || "").trim().toLowerCase() === "supervisor" &&
-    order?.status === "entregado_pendiente_facturacion" &&
-    Boolean(String(order?.remitoNumber || "").trim()) &&
-    !String(order?.invoiceNumber || "").trim()
+    can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_CORRECT_COMMERCIAL_TERMS) &&
+    Boolean(order?.status) &&
+    !COMMERCIAL_CORRECTION_BLOCKED_STATUSES.has(order.status) &&
+    Boolean(remitoNumber) &&
+    !String(order?.invoiceNumber || "").trim() &&
+    remitoRequiresBilling
   );
 }
 
@@ -143,25 +241,38 @@ function isUrgentOrder(order) {
 }
 
 function pendingArmadoRowClass(order) {
-  if (order?.status === "pendiente_stock" && !order?.remitoNumber) {
+  if (order?.status === "pendiente_stock" && !orderHasRemitos(order)) {
     return PENDING_STOCK_ROW_CLASS;
   }
-  if (order?.status !== "pendiente_armado" || order?.remitoNumber) {
+  if (order?.status !== "pendiente_armado" || orderHasRemitos(order)) {
     return "";
   }
   return isUrgentOrder(order) ? URGENT_PENDING_ARMADO_ROW_CLASS : PENDING_ARMADO_ROW_CLASS;
 }
 
 function canSelectForRemito(order) {
-  return PENDING_DELIVERY_STATUSES.has(order?.status) && !order?.remitoNumber && !NON_CANCELABLE_STATUSES.has(order?.status);
+  return (
+    PENDING_DELIVERY_STATUSES.has(order?.status) &&
+    (!orderHasRemitos(order) || (orderHasPendingRemitoParts(order) && orderHasOnlineRemitoSet(order))) &&
+    !NON_CANCELABLE_STATUSES.has(order?.status)
+  );
 }
 
 function canConfirmDelivery(order) {
-  return PENDING_DELIVERY_STATUSES.has(order?.status) && Boolean(order?.remitoNumber);
+  return (
+    PENDING_DELIVERY_STATUSES.has(order?.status) &&
+    orderHasRemitos(order) &&
+    orderHasCompleteRemitoSet(order)
+  );
 }
 
 function canLoadManualRemito(order) {
-  return PENDING_DELIVERY_STATUSES.has(order?.status) && !order?.remitoNumber && !order?.bejermanRemitoGroupId;
+  if (!PENDING_DELIVERY_STATUSES.has(order?.status)) return false;
+  if (orderHasRemitos(order)) {
+    return orderHasPendingRemitoParts(order) && orderHasManualRemitoSet(order);
+  }
+  if (!order?.bejermanRemitoGroupId) return true;
+  return STUCK_REMITO_GROUP_STATUSES.has(String(order?.bejermanRemitoGroup?.status || "").trim().toLowerCase());
 }
 
 function UrgentChip() {
@@ -220,12 +331,113 @@ function OrderNumberCell({ value }) {
 const remitoPrintUrlFromGroupId = (groupId) =>
   `/api/ordenes-entrega/remito-bejerman/${encodeURIComponent(groupId)}/print/`;
 
-function remitoPrintUrl(order) {
-  const directUrl = String(order?.remitoPrintUrl || "").trim();
+function remitoDocumentPrintUrl(remito) {
+  const directUrl = String(remito?.printUrl || "").trim();
   if (directUrl) return directUrl;
-  return order?.remitoNumber && order?.bejermanRemitoGroupId
-    ? remitoPrintUrlFromGroupId(order.bejermanRemitoGroupId)
-    : "";
+  const mode = String(remito?.documentMode || "").trim().toLowerCase();
+  if (mode === "register" || mode === "existing") return "";
+  const groupId = String(remito?.groupId || remito?.bejermanRemitoGroupId || "").trim();
+  return remito?.generated && groupId ? remitoPrintUrlFromGroupId(groupId) : "";
+}
+
+function remitoStatusLabel(remito) {
+  const status = String(remito?.status || "").trim().toLowerCase();
+  if (REMITO_STATUS_LABELS[status]) return REMITO_STATUS_LABELS[status];
+  if (remito?.uncertain) return "Sin confirmar";
+  if (remito?.generated) return "Emitido";
+  return status || "Registrado";
+}
+
+function remitoStatusClass(remito) {
+  const status = String(remito?.status || "").trim().toLowerCase();
+  if (["failed", "failed_review", "sent_unknown"].includes(status) || remito?.uncertain) {
+    return "border-amber-300 bg-amber-50 text-amber-900";
+  }
+  if (["generated", "reconciled"].includes(status) || remito?.generated) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  return "border-gray-200 bg-gray-50 text-gray-700";
+}
+
+function remitoModeLabel(remito) {
+  const mode = String(remito?.documentMode || "").trim().toLowerCase();
+  //if (mode === "register") return "Registrado en Bejerman";
+  //if (mode === "existing") return "Existente en Bejerman";
+  //if (mode === "emit" || mode === "online") return "Emitido desde NEXORA";
+  return "";
+}
+
+function RemitoSetStatusChip({ order }) {
+  const status = String(order?.remitoSetStatus || "").trim().toLowerCase();
+  const config = REMITO_SET_STATUS[status];
+  if (!config || status === "complete" && deliveryOrderRemitos(order).length < 2) return null;
+  return (
+    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${config.className}`}>
+      {config.label}
+    </span>
+  );
+}
+
+function RemitoDocumentLinks({ remito, includeNumber = false, emptyLabel = "" }) {
+  const printUrl = remitoDocumentPrintUrl(remito);
+  const pdfUrl = String(remito?.pdfUrl || "").trim();
+  if (!printUrl && !pdfUrl) return emptyLabel ? <span className="text-gray-500">{emptyLabel}</span> : null;
+  const number = String(remito?.remitoNumber || "").trim();
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+      {includeNumber && number && <span className="w-full font-mono text-[11px] text-gray-600">{number}</span>}
+      {printUrl && (
+        <a href={printUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">
+          <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+          Imprimir
+        </a>
+      )}
+      {pdfUrl && pdfUrl !== printUrl && (
+        <a href={pdfUrl} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
+          PDF
+        </a>
+      )}
+    </div>
+  );
+}
+
+function RemitoDocuments({ order, showLinks = true }) {
+  const remitos = deliveryOrderRemitos(order);
+  if (!remitos.length) return <span>-</span>;
+  return (
+    <div className="space-y-1.5">
+      {remitos.map((remito, index) => {
+        const number = String(remito?.remitoNumber || "").trim() || `Remito ${index + 1}`;
+        const modeLabel = remitoModeLabel(remito);
+        const allocationStatus = String(remito?.allocationStatus || "").trim().toLowerCase();
+        const allocationUnknown = allocationStatus === "unknown" || allocationStatus === "external_unknown";
+        return (
+          <div
+            key={remito?.linkId || remito?.id || remito?.groupId || `${number}-${index}`}
+            className="rounded border border-gray-200 bg-white px-2 py-1.5"
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-mono text-xs font-semibold text-gray-900">{number}</span>
+              <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${remitoStatusClass(remito)}`}>
+                {remitoStatusLabel(remito)}
+              </span>
+            </div>
+            {(modeLabel || allocationUnknown) && (
+              <div className="mt-0.5 text-[10px] text-gray-500">
+                
+              </div>
+            )}
+            {showLinks && (
+              <div className="mt-1">
+                <RemitoDocumentLinks remito={remito} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <RemitoSetStatusChip order={order} />
+    </div>
+  );
 }
 
 function exitRemitoIngresoId(order) {
@@ -282,6 +494,7 @@ export default function DeliveryOrders() {
   const [saving, setSaving] = useState(false);
   const [driveSyncing, setDriveSyncing] = useState(false);
   const [error, setError] = useState("");
+  const [sort, setSort] = useQueryState("sort", "");
   const [driveSyncMessage, setDriveSyncMessage] = useState("");
   const [manualInvoicePrint, setManualInvoicePrint] = useState(null);
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -290,7 +503,11 @@ export default function DeliveryOrders() {
   const [detailOrder, setDetailOrder] = useState(null);
   const [commercialCorrectionOrder, setCommercialCorrectionOrder] = useState(null);
   const [partidasOrder, setPartidasOrder] = useState(null);
+  const [manualRemitoOrder, setManualRemitoOrder] = useState(null);
   const [remitoModalOpen, setRemitoModalOpen] = useState(false);
+  // Las órdenes que se están remitiendo se guardan aparte de la selección de la grilla: el
+  // detalle puede abrirse por link directo (?orderId=) sin que la orden esté en la página actual.
+  const [remitoOrders, setRemitoOrders] = useState([]);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [orderHistory, setOrderHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -383,6 +600,7 @@ export default function DeliveryOrders() {
       status: filters.status,
       q: filters.q,
       deliveryType: filters.deliveryType,
+      sort,
       limit: PAGE_SIZE,
       offset: pageToLoad * PAGE_SIZE,
     })
@@ -425,7 +643,7 @@ export default function DeliveryOrders() {
 
   useEffect(() => {
     load();
-  }, [filters.status, filters.deliveryType, filters.q, page]);
+  }, [filters.status, filters.deliveryType, filters.q, page, sort]);
 
   useEffect(() => {
     if (!user) return;
@@ -491,6 +709,11 @@ export default function DeliveryOrders() {
     setPage(0);
   };
 
+  const updateSort = (value) => {
+    setSort(value);
+    setPage(0);
+  };
+
   const handleDriveSync = async () => {
     setDriveSyncing(true);
     setError("");
@@ -529,19 +752,39 @@ export default function DeliveryOrders() {
   };
 
   const handleDeliverOrder = (order) => {
-    if (!order?.id || !order?.remitoNumber) return;
+    if (!order?.id || !canConfirmDelivery(order)) return;
     const orderLabel = order.orderNumber ? ` ${order.orderNumber}` : "";
-    const remitoLabel = order.remitoNumber ? ` con remito ${order.remitoNumber}` : "";
+    const remitoNumbers = orderRemitoNumberSummary(order);
+    const remitoLabel = remitoNumbers ? ` con remito ${remitoNumbers}` : "";
     if (!window.confirm(`¿Confirmás que la orden de entrega${orderLabel}${remitoLabel} ya fue entregada?`)) return;
     runAction(() => postDeliveryOrderDelivered(order.id));
   };
 
-  const handleLoadManualRemito = (order) => {
+  const handleLoadManualRemito = async (order) => {
     if (!order?.id) return;
-    const remitoNumber = window.prompt("Número de remito", "");
-    const cleanRemitoNumber = String(remitoNumber || "").trim();
-    if (!cleanRemitoNumber) return;
-    runAction(() => postDeliveryOrderPrepared(order.id, { remitoNumber: cleanRemitoNumber }));
+    setSaving(true);
+    try {
+      const refreshed = await refreshOrderForDisplay(order);
+      if (!canLoadManualRemito(refreshed)) {
+        setError("La orden cambió y ya no admite la carga manual de remitos.");
+        return;
+      }
+      const groupStatus = String(refreshed?.bejermanRemitoGroup?.status || "").trim().toLowerCase();
+      if (
+        STUCK_REMITO_GROUP_STATUSES.has(groupStatus) &&
+        !window.confirm(
+          "Esta orden tiene una emisión Bejerman trabada en revisión. Cargar el remito acá va a reemplazar ese proceso por el número que ingreses. ¿Confirmás que ya lo emitiste directamente en Bejerman?"
+        )
+      ) {
+        return;
+      }
+      setError("");
+      setManualRemitoOrder(refreshed);
+    } catch (err) {
+      setError(err?.message || "No se pudo verificar la orden antes de cargar los remitos.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const openInvoiceBlob = (blob, order) =>
@@ -637,28 +880,37 @@ export default function DeliveryOrders() {
     );
   };
 
-  const openRemitoModal = async () => {
-    if (!selectedOrders.length) return;
-    if (selectedOrders.some((order) => !canSelectForRemito(order))) {
+  const openRemitoModal = async (ordersOverride) => {
+    const targetOrders = Array.isArray(ordersOverride) ? ordersOverride : selectedOrders;
+    if (!targetOrders.length) return;
+    if (targetOrders.some((order) => !canSelectForRemito(order))) {
       setError("Solo se pueden generar remitos para pedidos pendientes de armado o entrega.");
       return;
     }
     setSaving(true);
     try {
-      const refreshed = await Promise.all(selectedOrders.map((order) => refreshOrderForDisplay(order)));
+      const refreshed = await Promise.all(targetOrders.map((order) => refreshOrderForDisplay(order)));
       mergeRefreshedOrders(refreshed);
       if (refreshed.some((order) => !canSelectForRemito(order))) {
-        setSelected((current) => current.filter((orderId) => refreshed.some((order) => order.id === orderId && canSelectForRemito(order))));
+        const stillValidIds = new Set(refreshed.filter((order) => canSelectForRemito(order)).map((order) => order.id));
+        setSelected((current) => current.filter((orderId) => stillValidIds.has(orderId)));
         setError("Solo se pueden generar remitos para pedidos pendientes de armado o entrega.");
         return;
       }
       setError("");
+      setSelected(targetOrders.map((order) => order.id));
+      setRemitoOrders(refreshed);
       setRemitoModalOpen(true);
     } catch (err) {
       setError(err?.message || "No se pudieron verificar las órdenes seleccionadas.");
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleRetryRemitoFailure = (order) => {
+    if (!order?.id) return;
+    openRemitoModal([order]);
   };
 
   const openHistoryModal = () => {
@@ -724,7 +976,23 @@ export default function DeliveryOrders() {
   };
 
   const renderOrderActions = (order) => (
-    <div className="flex flex-wrap gap-1" onClick={(event) => event.stopPropagation()}>
+    <div className="flex flex-col gap-1" onClick={(event) => event.stopPropagation()}>
+      {order.lastRemitoFailure?.message && (
+        <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+          <div>No se pudo emitir: {order.lastRemitoFailure.message}</div>
+          {canPrepare && canSelectForRemito(order) && (
+            <button
+              type="button"
+              onClick={() => handleRetryRemitoFailure(order)}
+              disabled={saving}
+              className="mt-1 rounded border border-amber-400 bg-white px-2 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+            >
+              Reintentar
+            </button>
+          )}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-1">
       {canDeliver && canConfirmDelivery(order) && (
         <button
           type="button"
@@ -738,9 +1006,10 @@ export default function DeliveryOrders() {
         <button
           type="button"
           onClick={() => handleLoadManualRemito(order)}
-          className="rounded border px-2 py-1 text-xs hover:bg-gray-50"
+          disabled={saving}
+          className="rounded border px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
         >
-          Cargar remito
+          {orderHasPendingRemitoParts(order) ? "Completar remitos" : "Cargar remito"}
         </button>
       )}
       {canManageRouteSheet && PENDING_DELIVERY_STATUSES.has(order.status) && (
@@ -774,33 +1043,22 @@ export default function DeliveryOrders() {
           Cancelar
         </button>
       )}
+      </div>
     </div>
   );
 
   const renderOrderRemito = (order) => {
-    const printUrl = remitoPrintUrl(order);
     const groupSummary = remitoGroupSummary(order);
     const groupLabels = (groupSummary?.labels || []).slice(0, 4).join(", ");
     return (
       <div onClick={(event) => event.stopPropagation()}>
-        <div>{order.remitoNumber || "-"}</div>
+        <RemitoDocuments order={order} />
         {groupSummary?.count > 1 && (
           <div className="mt-1 rounded border border-blue-100 bg-blue-50 px-2 py-1 text-[11px] text-blue-800">
             Agrupa {groupSummary.count} órdenes{groupLabels ? `: ${groupLabels}` : ""}
           </div>
         )}
-        {printUrl && (
-          <a
-            href={printUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:underline"
-          >
-            <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-            Imprimir remito
-          </a>
-        )}
-        {order.remitoNumber && canMoveRemito && (
+        {orderHasRemitos(order) && canMoveRemito && (
           <select
             value={normalizeRemitoLocation(order.remitoLocation)}
             onPointerDown={() => markRemitoLocationIntent(order.id)}
@@ -874,8 +1132,8 @@ export default function DeliveryOrders() {
           {canGenerateRemito && (
             <button
               type="button"
-              onClick={openRemitoModal}
               disabled={!selectedOrders.length || saving}
+              onClick={() => openRemitoModal()}
               className={`rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50 ${fullWidthButtonClass}`}
             >
               Generar remito Bejerman
@@ -952,6 +1210,13 @@ export default function DeliveryOrders() {
         </div>
       )}
 
+      <MobileSortControl
+        sort={sort}
+        onSortChange={updateSort}
+        options={DELIVERY_ORDER_SORT_OPTIONS.filter((option) => option.value !== "fecha")}
+        className="mb-3"
+      />
+
       <MobileDataList>
         {loading && !orders.length && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
         {orders.map((order) => {
@@ -1007,14 +1272,14 @@ export default function DeliveryOrders() {
           <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
             <tr>
               <th className="px-2 py-2"></th>
-              <th className="w-[116px] px-2 py-2">Orden</th>
-              <th className="px-2 py-2">Cliente</th>
-              <th className="px-2 py-2">Tipo</th>
-              <th className="px-2 py-2">Estado</th>
-              <th className="px-2 py-2">Artículos</th>
-              <th className="px-2 py-2">Comercial</th>
-              <th className="px-2 py-2">Remito</th>
-              <th className="px-2 py-2">Factura</th>
+              <SortableTh field="orden" sort={sort} onSortChange={updateSort} className="w-[116px] px-2 py-2">Orden</SortableTh>
+              <SortableTh field="cliente" sort={sort} onSortChange={updateSort} className="px-2 py-2">Cliente</SortableTh>
+              <SortableTh field="tipo" sort={sort} onSortChange={updateSort} className="px-2 py-2">Tipo</SortableTh>
+              <SortableTh field="estado" sort={sort} onSortChange={updateSort} className="px-2 py-2">Estado</SortableTh>
+              <SortableTh field="articulos" sort={sort} onSortChange={updateSort} className="px-2 py-2">Artículos</SortableTh>
+              <SortableTh field="comercial" sort={sort} onSortChange={updateSort} className="px-2 py-2">Comercial</SortableTh>
+              <SortableTh field="remito" sort={sort} onSortChange={updateSort} className="px-2 py-2">Remito</SortableTh>
+              <SortableTh field="factura" sort={sort} onSortChange={updateSort} className="px-2 py-2">Factura</SortableTh>
               <th className="px-2 py-2">Acciones</th>
             </tr>
           </thead>
@@ -1108,14 +1373,34 @@ export default function DeliveryOrders() {
       </div>
       <DeliveryOrderRemitoModal
         open={remitoModalOpen}
-        orders={selectedOrders}
+        orders={remitoOrders}
         canAssignArticles={canAssignArticles}
         onClose={() => setRemitoModalOpen(false)}
-        onGenerated={(_result, options = {}) => {
+        onGenerated={(result, options = {}) => {
+          const refreshedOrders = Array.isArray(result?.orders)
+            ? result.orders.filter((order) => order?.id)
+            : result?.order?.id
+              ? [result.order]
+              : [];
+          if (refreshedOrders.length) mergeRefreshedOrders(refreshedOrders);
           if (options.keepOpen) return;
           setRemitoModalOpen(false);
           setSelected([]);
           load();
+        }}
+      />
+      <DeliveryOrderManualRemitoModal
+        open={Boolean(manualRemitoOrder)}
+        order={manualRemitoOrder}
+        onClose={() => setManualRemitoOrder(null)}
+        onSaved={(result, options = {}) => {
+          if (result?.order?.id) {
+            mergeRefreshedOrders([result.order]);
+            if (options.keepOpen) setManualRemitoOrder(result.order);
+          }
+          load();
+          if (options.keepOpen) return;
+          setManualRemitoOrder(null);
         }}
       />
       <OrderHistoryModal
@@ -1131,6 +1416,12 @@ export default function DeliveryOrders() {
         canEditPartidas={canAssignArticles && isEditableOrder(detailOrder)}
         canCorrectCommercialTerms={canCorrectCommercialTerms(user, detailOrder)}
         canPrintInvoice={canPrintInvoiceForOrder(user, detailOrder)}
+        canGenerateRemito={canGenerateRemito && canSelectForRemito(detailOrder)}
+        onGenerateRemito={() => {
+          const target = detailOrder;
+          setDetailOrder(null);
+          openRemitoModal([target]);
+        }}
         onEdit={() => openEditOrder(detailOrder)}
         onEditPartidas={() => setPartidasOrder(detailOrder)}
         onCorrectCommercialTerms={() => openCommercialCorrection(detailOrder)}
@@ -1212,13 +1503,17 @@ function DeliveryOrderDetailModal({
   canEditPartidas,
   canCorrectCommercialTerms,
   canPrintInvoice,
+  canGenerateRemito,
   onEdit,
   onEditPartidas,
   onCorrectCommercialTerms,
   onPrintInvoice,
   onPrintExitOrder,
+  onGenerateRemito,
   onClose,
 }) {
+  const navigate = useNavigate();
+
   useEffect(() => {
     if (!open) return undefined;
     const onKeyDown = (event) => {
@@ -1283,6 +1578,16 @@ function DeliveryOrderDetailModal({
                 Corregir precio/plazo
               </button>
             )}
+            {canGenerateRemito && (
+              <button
+                type="button"
+                onClick={onGenerateRemito}
+                className="inline-flex items-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
+              >
+                <FileText className="h-4 w-4" aria-hidden="true" />
+                Generar remito Bejerman
+              </button>
+            )}
             <button type="button" className="text-sm text-gray-500 hover:text-gray-900" onClick={onClose}>
               Cerrar
             </button>
@@ -1292,7 +1597,7 @@ function DeliveryOrderDetailModal({
         <div className="max-h-[calc(100dvh-5rem)] overflow-auto p-3 sm:p-5">
           <div className="grid grid-cols-1 gap-3 rounded border bg-gray-50 p-3 sm:grid-cols-2 lg:grid-cols-4">
             <DetailField label="Cliente" value={order.customerName || "-"} className="lg:col-span-2" />
-            <DetailField label="Cliente Bejerman" value={order.bejermanCustomerCode || "-"} />
+            <DetailField label="Cliente Bejerman" value={deliveryOrderBejermanCustomerLabel(order) || "-"} />
           <DetailField label="Estado">
               <OrderStatusCell order={order} />
           </DetailField>
@@ -1304,7 +1609,9 @@ function DeliveryOrderDetailModal({
             <DetailField label="Moneda" value={currency === "USD" ? "U$S" : "$"} />
             <DetailField label="TC" value={order.commercialExchangeRate || "-"} />
             <DetailField label="Prioridad" value={order.priority === "urgente" ? "Urgente" : "Normal"} />
-            <DetailField label="Remito" value={order.remitoNumber || "-"} />
+            <DetailField label="Remitos">
+              <RemitoDocuments order={order} />
+            </DetailField>
             <DetailField label="Factura" value={order.invoiceNumber || "-"} />
           </div>
 
@@ -1337,17 +1644,33 @@ function DeliveryOrderDetailModal({
                       <tr key={item.id || `${item.articleCode}-${item.description}`} className="align-top">
                         {isServiceRelease && (
                           <td className="whitespace-nowrap px-3 py-2">
-                            <div className="font-mono text-xs font-semibold text-gray-900">{itemServiceReference || "-"}</div>
-                            {itemIngresoId && (
-                              <button
-                                type="button"
-                                onClick={() => onPrintExitOrder?.(itemIngresoId)}
-                                className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:underline"
-                              >
-                                <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                                Imprimir
-                              </button>
-                            )}
+                            <div className="flex flex-col items-start">
+                              {itemIngresoId ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onClose();
+                                    navigate(`/ingresos/${itemIngresoId}`);
+                                  }}
+                                  className="font-mono text-xs font-semibold text-sky-700 hover:underline"
+                                  title="Ir a la orden de servicio"
+                                >
+                                  {itemServiceReference || "-"}
+                                </button>
+                              ) : (
+                                <div className="font-mono text-xs font-semibold text-gray-900">{itemServiceReference || "-"}</div>
+                              )}
+                              {itemIngresoId && (
+                                <button
+                                  type="button"
+                                  onClick={() => onPrintExitOrder?.(itemIngresoId)}
+                                  className="mt-1 inline-flex items-center gap-1 text-xs text-blue-700 hover:underline"
+                                >
+                                  <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                                  Imprimir
+                                </button>
+                              )}
+                            </div>
                           </td>
                         )}
                         <td className="px-3 py-2 font-mono text-xs text-sky-700">{item.articleCode || "-"}</td>
@@ -1499,7 +1822,7 @@ function OrderHistoryModal({ open, loading, items, onClose }) {
                 items.map((order) => {
                   const articles = deliveryOrderItemsSummary(order);
                   const group = order.bejermanRemitoGroup || {};
-                  const printUrl = remitoPrintUrl(order);
+                  const remitos = deliveryOrderRemitos(order);
                   return (
                   <tr key={order.id} className="align-top hover:bg-gray-50">
                     <td className="px-4 py-3">
@@ -1511,7 +1834,7 @@ function OrderHistoryModal({ open, loading, items, onClose }) {
                       {order.bejermanCustomerCode && <div className="text-[11px] text-gray-500">{order.bejermanCustomerCode}</div>}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900">{order.remitoNumber || "-"}</div>
+                      <RemitoDocuments order={order} showLinks={false} />
                       <div className="text-[11px] text-gray-500">
                         {[group.comprobanteTipo, group.operationCode, group.depositCode].filter(Boolean).join(" / ") || "-"}
                       </div>
@@ -1528,19 +1851,17 @@ function OrderHistoryModal({ open, loading, items, onClose }) {
                       {articles.secondary && <div className="mt-1 max-w-sm text-[11px] text-gray-500">{articles.secondary}</div>}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-right">
-                      {printUrl ? (
-                        <a
-                          href={printUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-blue-700 hover:underline"
-                        >
-                          <Printer className="h-3.5 w-3.5" aria-hidden="true" />
-                          Imprimir
-                        </a>
-                      ) : (
-                        <span className="text-gray-500">Pendiente</span>
-                      )}
+                      <div className="space-y-2 text-left">
+                        {remitos.map((remito, index) => (
+                          <RemitoDocumentLinks
+                            key={remito?.linkId || remito?.id || remito?.groupId || index}
+                            remito={remito}
+                            includeNumber={remitos.length > 1}
+                            emptyLabel="Sin PDF"
+                          />
+                        ))}
+                        {!remitos.length && <span className="text-gray-500">Pendiente</span>}
+                      </div>
                     </td>
                   </tr>
                   );

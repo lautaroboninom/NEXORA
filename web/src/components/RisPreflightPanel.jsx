@@ -87,6 +87,7 @@ function ArticleCandidate({ issue, candidate, onApplyArticle }) {
               variante: fix.variante || "",
               article_code: code,
               article_description: candidate?.article_description || fix.article_description || "",
+              company_key: fix.company_key || fix.companyKey || "",
             })
           }
         >
@@ -114,6 +115,7 @@ function ArticleSearch({ issue, onApplyArticle }) {
       const result = await getBejermanArticles({
         model_id: modelId,
         variante: fix.variante || fix.variant || "",
+        company_key: fix.company_key || fix.companyKey || "",
         q: query,
         limit: 20,
       });

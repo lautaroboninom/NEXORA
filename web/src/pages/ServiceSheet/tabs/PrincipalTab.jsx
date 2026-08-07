@@ -19,6 +19,9 @@ import {
   postEntregarIngreso,
   patchIngreso,
   getIngresoBejermanEstado,
+  postIngresoBejermanEstadoAccion,
+  getIngresoAlquilerRemitoEstado,
+  postIngresoAlquilerRemitoAccion,
   checkGarantiaFabrica,
   patchIngresoTecnico,
   postSolicitarAsignacion,
@@ -94,6 +97,8 @@ export default function PrincipalTab(props) {
     setUbicacionId,
     canEditLocation,
     canEditAlquiler,
+    canForceBejermanFix,
+    canForceBejermanStockFix,
     canManageReleaseResolution,
     canShowRisAction,
     ingressDocumentName: ingressDocumentNameProp,
@@ -332,7 +337,95 @@ export default function PrincipalTab(props) {
     setBejermanEstadoError("");
     cargarEstadoBejerman();
   }, [cargarEstadoBejerman, data?.numero_serie, data?.numero_interno, data?.empresa_bejerman]);
+  const [bejermanActionBusy, setBejermanActionBusy] = useState(false);
+  const forzarAccionBejerman = useCallback(async () => {
+    const action = bejermanEstado?.action?.type;
+    if (!action || bejermanActionBusy) return;
+    const label = bejermanEstado?.action?.label || "esta corrección";
+    if (!window.confirm(`Esto va a generar un movimiento real en Bejerman (${label}). ¿Confirmás?`)) return;
+    setBejermanActionBusy(true);
+    setBejermanEstadoError("");
+    try {
+      const result = await postIngresoBejermanEstadoAccion(id, { action });
+      setBejermanEstado(result?.state || null);
+      await refreshIngreso?.({ strong: 1 });
+    } catch (error) {
+      setBejermanEstadoError(error?.data?.detail || error?.message || "No se pudo ejecutar la corrección en Bejerman.");
+    } finally {
+      setBejermanActionBusy(false);
+    }
+  }, [id, bejermanEstado, bejermanActionBusy, refreshIngreso]);
   const bejermanItems = Array.isArray(bejermanEstado?.items) ? bejermanEstado.items : [];
+  const [rentalRemitoState, setRentalRemitoState] = useState(null);
+  const [rentalRemitoLoading, setRentalRemitoLoading] = useState(false);
+  const [rentalRemitoError, setRentalRemitoError] = useState("");
+  const [rentalActionBusy, setRentalActionBusy] = useState(false);
+  const cargarEstadoAlquilerRemito = useCallback(async () => {
+    if (!id) return;
+    setRentalRemitoLoading(true);
+    setRentalRemitoError("");
+    try {
+      const result = await getIngresoAlquilerRemitoEstado(id);
+      setRentalRemitoState(result || null);
+    } catch (error) {
+      setRentalRemitoState(null);
+      setRentalRemitoError(
+        error?.data?.detail || error?.message || "No se pudo consultar el remito de alquiler en Bejerman."
+      );
+    } finally {
+      setRentalRemitoLoading(false);
+    }
+  }, [id]);
+  useEffect(() => {
+    setRentalRemitoState(null);
+    setRentalRemitoError("");
+    if (data?.alquilado && (data?.alquiler_remito || "").trim()) {
+      cargarEstadoAlquilerRemito();
+    }
+  }, [cargarEstadoAlquilerRemito, data?.alquilado, data?.alquiler_remito]);
+  const forzarAccionAlquilerRemito = useCallback(async () => {
+    const action = rentalRemitoState?.action?.type;
+    if (!action || rentalActionBusy) return;
+    const label = rentalRemitoState?.action?.label || "esta corrección";
+    if (!window.confirm(`Esto va a generar un movimiento real en Bejerman (${label}). ¿Confirmás?`)) return;
+    setRentalActionBusy(true);
+    setRentalRemitoError("");
+    try {
+      const result = await postIngresoAlquilerRemitoAccion(id, { action });
+      setRentalRemitoState(result?.state || null);
+      await refreshIngreso?.({ strong: 1 });
+    } catch (error) {
+      setRentalRemitoError(
+        error?.data?.detail || error?.message || "No se pudo ejecutar la corrección en Bejerman."
+      );
+    } finally {
+      setRentalActionBusy(false);
+    }
+  }, [id, rentalRemitoState, rentalActionBusy, refreshIngreso]);
+  const rentalRemitoStatusLabel = (() => {
+    const status = rentalRemitoState?.status;
+    if (rentalRemitoError) return "No disponible";
+    if ({
+      empty: 1, blocked: 1, stock_inconsistent: 1, needs_stock_action: 1, verified: 1,
+    }[status]) {
+      return {
+        empty: "Sin remito cargado",
+        blocked: "Bloqueado",
+        stock_inconsistent: "Stock inconsistente",
+        needs_stock_action: "Acción pendiente",
+        verified: "Verificado",
+      }[status];
+    }
+    return "Sin verificar";
+  })();
+  const rentalRemitoStatusClass = (() => {
+    const status = rentalRemitoState?.status;
+    if (rentalRemitoError) return "bg-red-100 text-red-700";
+    if (status === "verified") return "bg-emerald-100 text-emerald-700";
+    if (status === "stock_inconsistent" || status === "needs_stock_action") return "bg-amber-100 text-amber-800";
+    if (status === "blocked") return "bg-red-100 text-red-700";
+    return "bg-slate-100 text-slate-700";
+  })();
   // Labels auxiliares (evitar expresiones JSX complejas)
   const pendingLabel = (() => {
     if (data?.tecnico_solicitado_nombre) return `Solicitud de asignación pendiente: ${data.tecnico_solicitado_nombre}`;
@@ -923,6 +1016,16 @@ export default function PrincipalTab(props) {
             ) : bejermanEstado?.warning ? (
               <div className="mt-2 text-xs text-amber-700">{bejermanEstado.warning}</div>
             ) : null}
+            {canForceBejermanStockFix && bejermanEstado?.action && (
+              <button
+                type="button"
+                className="mt-2 rounded bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-60"
+                onClick={forzarAccionBejerman}
+                disabled={bejermanActionBusy}
+              >
+                {bejermanActionBusy ? "Ejecutando..." : bejermanEstado.action.label}
+              </button>
+            )}
             {bejermanItems.length > 0 && (
               <div className="mt-2 overflow-x-auto">
                 <div className="min-w-[520px] text-xs">
@@ -1410,6 +1513,58 @@ export default function PrincipalTab(props) {
             disabled={!alquilerEditable}
           />
         </Row>
+        {data.alquilado && (
+          <div className="mt-3 border-t pt-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Estado en Bejerman</div>
+              <button
+                type="button"
+                className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                onClick={cargarEstadoAlquilerRemito}
+                disabled={rentalRemitoLoading}
+              >
+                {rentalRemitoLoading ? "Consultando..." : "Actualizar"}
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className={`rounded-full px-2 py-0.5 font-semibold ${rentalRemitoStatusClass}`}>
+                {rentalRemitoLoading && !rentalRemitoState ? "Consultando Bejerman" : rentalRemitoStatusLabel}
+              </span>
+              {rentalRemitoState?.document?.number && (
+                <span className="text-gray-600">
+                  Remito: <span className="font-medium text-gray-900">{rentalRemitoState.remitoNumber}</span>
+                </span>
+              )}
+              {rentalRemitoState?.stock && (
+                <span className="text-gray-600">
+                  STL: <span className="font-medium text-gray-900">{rentalRemitoState.stock.stlQuantity ?? 0}</span>
+                </span>
+              )}
+            </div>
+            {rentalRemitoState?.message && !rentalRemitoError && (
+              <div className="mt-1 text-xs text-gray-700">{rentalRemitoState.message}</div>
+            )}
+            {rentalRemitoState?.blockedReason && !rentalRemitoError && (
+              <div className="mt-1 text-xs text-amber-700">{rentalRemitoState.blockedReason}</div>
+            )}
+            {rentalRemitoState?.customerMismatch && (
+              <div className="mt-1 text-xs text-amber-700">
+                El cliente en Bejerman ({rentalRemitoState.remitoCustomer?.name || "?"}) no coincide con "{rentalRemitoState.customer?.name || alquilerAInput}".
+              </div>
+            )}
+            {rentalRemitoError && <div className="mt-1 text-xs text-red-700">{rentalRemitoError}</div>}
+            {canForceBejermanFix && rentalRemitoState?.action && (
+              <button
+                type="button"
+                className="mt-2 rounded bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-60"
+                onClick={forzarAccionAlquilerRemito}
+                disabled={rentalActionBusy}
+              >
+                {rentalActionBusy ? "Ejecutando..." : rentalRemitoState.action.label}
+              </button>
+            )}
+          </div>
+        )}
         {data.alquilado && (
           <div className="mt-3 border-t pt-3">
             <div className="text-xs uppercase text-gray-500 mb-1">Accesorios de alquiler</div>

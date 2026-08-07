@@ -12,14 +12,18 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import require_company
+from .bejerman_particular_customers import ensure_particular_customer_enabled
 from .bejerman_documents import parse_bejerman_remito_number
 from .bejerman_sdk import (
+    BEJERMAN_OCCASIONAL_CUSTOMER_CODE,
     BejermanSDKClient as SalesSDKClient,
     BejermanSdkResponseError,
     as_number,
     as_string,
+    bejerman_customer_code_for,
     bejerman_filter,
     build_delivery_remito_comprobante,
+    build_occasional_customer_fields,
     delivery_remito_config,
     first_value,
     parse_remito_response,
@@ -169,6 +173,9 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
             SELECT t.id, t.device_id, t.estado, t.resolucion, t.motivo, t.alquilado,
                    t.alquiler_a, t.alquiler_remito, t.alquiler_fecha,
                    t.empresa_bejerman, t.empresa_facturar,
+                   COALESCE(t.propietario_nombre, '') AS propietario_nombre,
+                   COALESCE(t.propietario_contacto, '') AS propietario_contacto,
+                   COALESCE(t.propietario_doc, '') AS propietario_doc,
                    d.numero_serie, d.numero_interno, d.n_de_control,
                    d.marca_id, d.model_id, COALESCE(NULLIF(t.equipo_variante, ''), d.variante, '') AS variante,
                    c.id AS customer_id, c.cod_empresa AS owner_customer_code,
@@ -225,17 +232,23 @@ def _resolve_customer_from_text(text: Any) -> dict[str, Any]:
         return {"name": value, "code": "", "matched": False}
     return {
         "id": row.get("id"),
-        "code": _clean_text(row.get("cod_empresa")),
+        # Mismo criterio que el resto del circuito: el placeholder local de particulares no lleva
+        # codigo de cliente a Bejerman, se emite como cliente ocasional con los datos del propietario.
+        "code": bejerman_customer_code_for(row.get("razon_social"), row.get("cod_empresa")),
         "name": _clean_text(row.get("razon_social")) or value,
         "alias": _clean_text(row.get("alias_interno")),
         "matched": True,
     }
 
 
-def _mapping_article_for_context(row: dict[str, Any]) -> dict[str, Any]:
+def _mapping_article_for_context(row: dict[str, Any], company_key: str = "SEPID") -> dict[str, Any]:
     model_id = row.get("model_id")
     if not model_id:
         return {}
+    try:
+        resolved_company = require_company(company_key or "SEPID").key
+    except ValueError:
+        resolved_company = "SEPID"
     variant = _clean_text(row.get("variante"))
     with connection.cursor() as cur:
         cur.execute(
@@ -244,10 +257,11 @@ def _mapping_article_for_context(row: dict[str, Any]) -> dict[str, Any]:
               FROM bejerman_article_mappings
              WHERE model_id = %s
                AND COALESCE(variante_norm, '') = LOWER(TRIM(%s))
+               AND company_key = %s
              ORDER BY CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END, updated_at DESC, id DESC
              LIMIT 1
             """,
-            [model_id, variant],
+            [model_id, variant, resolved_company],
         )
         exact = _one(cur)
         if exact:
@@ -257,10 +271,11 @@ def _mapping_article_for_context(row: dict[str, Any]) -> dict[str, Any]:
             SELECT article_code, article_description, match_source
               FROM bejerman_article_mappings
              WHERE model_id = %s
+               AND company_key = %s
              ORDER BY CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END, updated_at DESC, id DESC
              LIMIT 1
             """,
-            [model_id],
+            [model_id, resolved_company],
         )
         return _one(cur) or {}
 
@@ -538,7 +553,7 @@ def get_rental_remito_state(
         raise RentalRemitoError("RENTAL_SERIAL_REQUIRED", "El ingreso no tiene número de serie para validar Bejerman.", status_code=409)
     customer_text = row.get("alquiler_a") if alquiler_a_override is None else alquiler_a_override
     customer = _resolve_customer_from_text(customer_text)
-    mapping = _mapping_article_for_context(row)
+    mapping = _mapping_article_for_context(row, document.company_key)
     sales = sales_client or SalesSDKClient(company_key=document.company_key, actor_user_id=actor_user_id)
     stock = stock_client or StockSDKClient(company_key=document.company_key, actor_user_id=actor_user_id)
     stock_response = stock.stock_by_deposit_partida("", serial)
@@ -624,7 +639,10 @@ def get_rental_remito_state(
             }
         )
         return response
-    if not customer.get("code"):
+    occasional_customer_available = bool(
+        _clean_text(row.get("propietario_nombre")) and _clean_text(row.get("propietario_doc"))
+    )
+    if not customer.get("code") and not occasional_customer_available:
         response.update(
             {
                 "status": "blocked",
@@ -834,7 +852,17 @@ def _register_rta(
     client = sales_client or SalesSDKClient(company_key=document.company_key, actor_user_id=actor_user_id)
     bridge_request = _delivery_request_for_rta(row, state, document)
     try:
-        customer_fields = resolve_customer_document_fields(client, bridge_request["customerCode"])
+        if bridge_request["customerCode"]:
+            customer_fields = resolve_customer_document_fields(client, bridge_request["customerCode"])
+        else:
+            propietario_nombre = _clean_text(row.get("propietario_nombre"))
+            propietario_doc = _clean_text(row.get("propietario_doc"))
+            if not (propietario_nombre and propietario_doc):
+                raise BejermanSdkResponseError("BEJERMAN_CUSTOMER_NOT_FOUND")
+            # Ver el mismo paso en bejerman_ris._resolve_or_build_customer_fields.
+            ensure_particular_customer_enabled(client, document.company_key, propietario_doc)
+            customer_fields = build_occasional_customer_fields(propietario_nombre, propietario_doc)
+            bridge_request["customerCode"] = BEJERMAN_OCCASIONAL_CUSTOMER_CODE
         built = build_delivery_remito_comprobante(
             bridge_request,
             delivery_remito_config(_rental_profile(document)),

@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getProveedoresExternos, postProveedorExterno, deleteProveedorExterno } from "../lib/api";
+import { SortableTh } from "../components/TableSortControls.jsx";
+import { sortRows } from "../lib/table-sort.js";
 
 const Input = (p) => <input {...p} className="border rounded p-2 w-full" />;
 const TextArea = (p) => <textarea {...p} className="border rounded p-2 w-full" />;
@@ -11,6 +13,19 @@ export default function CatalogoProveedores() {
   const [f, setF] = useState(initialForm);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const [sort, setSort] = useState("");
+  const sortedRows = useMemo(
+    () => sortRows(rows, sort, {
+      id: { getValue: (row) => row.id, type: "number" },
+      nombre: { getValue: (row) => row.nombre },
+      contacto: { getValue: (row) => row.contacto },
+      telefono: { getValue: (row) => row.telefono },
+      email: { getValue: (row) => row.email },
+      direccion: { getValue: (row) => row.direccion },
+      notas: { getValue: (row) => row.notas },
+    }),
+    [rows, sort],
+  );
 
   const load = async (preserveMsg = false) => {
     setErr("");
@@ -103,18 +118,18 @@ export default function CatalogoProveedores() {
       <table className="w-full border">
         <thead>
           <tr className="bg-gray-50 text-left">
-            <th className="p-2">ID</th>
-            <th className="p-2">Nombre</th>
-            <th className="p-2">Contacto</th>
-            <th className="p-2">Teléfono</th>
-            <th className="p-2">Email</th>
-            <th className="p-2">Dirección</th>
-            <th className="p-2">Notas</th>
+            <SortableTh field="id" label="ID" sort={sort} onSortChange={setSort} className="p-2" />
+            <SortableTh field="nombre" label="Nombre" sort={sort} onSortChange={setSort} className="p-2" />
+            <SortableTh field="contacto" label="Contacto" sort={sort} onSortChange={setSort} className="p-2" />
+            <SortableTh field="telefono" label="Teléfono" sort={sort} onSortChange={setSort} className="p-2" />
+            <SortableTh field="email" label="Email" sort={sort} onSortChange={setSort} className="p-2" />
+            <SortableTh field="direccion" label="Dirección" sort={sort} onSortChange={setSort} className="p-2" />
+            <SortableTh field="notas" label="Notas" sort={sort} onSortChange={setSort} className="p-2" />
             <th className="p-2 text-right"></th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
+          {sortedRows.map((r) => (
             <tr key={r.id} className="border-t">
               <td className="p-2 align-top">{r.id}</td>
               <td className="p-2 align-top">{r.nombre}</td>

@@ -135,6 +135,7 @@ class IngresoRisPreflightArticleFixView(APIView):
                 article_code=data.get("article_code") or data.get("articleCode") or "",
                 article_description=data.get("article_description") or data.get("articleDescription") or "",
                 user_id=user_id,
+                company_key=data.get("company_key") or data.get("companyKey") or "",
             )
         except BejermanSdkConfigError as exc:
             return Response({"detail": str(exc)}, status=503)

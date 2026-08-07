@@ -1,6 +1,8 @@
 import datetime as dt
 import hashlib
+import ipaddress
 import logging
+import re
 import secrets
 
 from django.conf import settings
@@ -21,8 +23,10 @@ from ..bejerman_sdk import BejermanSDKClient, BejermanSdkConfigError, BejermanSd
 from ..bejerman_user_credentials import (
     BejermanUserCredentialsError,
     BejermanUserCredentialsInvalid,
+    normalize_bejerman_workstation,
     resolve_user_bejerman_workstation,
     save_user_bejerman_credentials,
+    set_user_bejerman_credentials_prompt_dismissed,
     user_bejerman_credentials_status,
 )
 from ..ip_utils import get_client_ip
@@ -42,6 +46,8 @@ from .helpers import (
 
 logger = logging.getLogger(__name__)
 SELLER_CODE_ROLES = {"ventas"}
+BEJERMAN_USERNAME_PATTERN = re.compile(r"^[A-Z0-9_.-]{2,40}$")
+BEJERMAN_WORKSTATION_PRIORITY = ("STEC", "VTAS", "DEPO", "GER", "ADMV")
 
 
 @api_view(["GET"])  # público
@@ -53,6 +59,33 @@ def ping(request):
 def _normalize_role(s: str) -> str:
     s = (s or "").strip().lower().replace(" ", "_").replace("-", "_")
     return s
+
+
+def _record_successful_login(request, user_id: int) -> None:
+    raw_ip = get_client_ip(getattr(request, "META", None)) or ""
+    try:
+        login_ip = str(ipaddress.ip_address(raw_ip)) if raw_ip else None
+    except ValueError:
+        login_ip = None
+    user_agent = str(
+        getattr(request, "META", {}).get("HTTP_USER_AGENT", "") or ""
+    )[:512]
+    try:
+        q(
+            """
+            UPDATE users
+               SET last_login_at = CURRENT_TIMESTAMP,
+                   last_login_ip = %s,
+                   last_login_user_agent = %s
+             WHERE id = %s
+            """,
+            [login_ip, user_agent or None, int(user_id)],
+        )
+    except Exception:
+        logger.exception(
+            "No se pudo registrar el último acceso del usuario.",
+            extra={"user_id": int(user_id)},
+        )
 
 
 def _normalize_seller_code(value: str) -> str:
@@ -149,14 +182,126 @@ def _credential_validation_companies():
     return ordered
 
 
-def _validate_bejerman_credentials(username: str, password: str, user_id: int | None = None) -> None:
+def _discover_bejerman_workstations(username: str, user_id: int | None = None) -> dict:
+    clean_username = (username or "").strip().upper()
+    if not BEJERMAN_USERNAME_PATTERN.fullmatch(clean_username):
+        raise BejermanUserCredentialsInvalid("Ingresá un usuario Bejerman válido")
+
+    from ..bejerman_delivery import _remote_bejerman_sql_csv
+
+    sql = f"""
+    SELECT DISTINCT
+           UPPER(LTRIM(RTRIM(up.upeptr_Cod))) AS code,
+           COALESCE(NULLIF(LTRIM(RTRIM(pt.ptr_Desc)), ''), up.upeptr_Cod) AS label
+      FROM dbo.UsuPerm up
+      JOIN dbo.usu account
+        ON UPPER(LTRIM(RTRIM(account.usu_codigo)))
+         = UPPER(LTRIM(RTRIM(up.upeusu_codigo)))
+      LEFT JOIN dbo.PtoTrabajo pt
+        ON UPPER(LTRIM(RTRIM(pt.ptr_Cod)))
+         = UPPER(LTRIM(RTRIM(up.upeptr_Cod)))
+     WHERE UPPER(LTRIM(RTRIM(up.upeusu_codigo))) = '{clean_username}'
+       AND account.usu_habili = 1
+       AND UPPER(COALESCE(account.usu_Bloqueada, 'N')) <> 'S'
+       AND NULLIF(LTRIM(RTRIM(up.upeptr_Cod)), '') IS NOT NULL
+     ORDER BY code
+    """
     companies = _credential_validation_companies()
-    workstation = resolve_user_bejerman_workstation(user_id)
+    company_options = []
+    labels_by_code = {}
+    company_statuses = []
+    for company in companies:
+        outcome = {}
+        rows = _remote_bejerman_sql_csv(
+            sql,
+            company_key=company.key,
+            outcome=outcome,
+        )
+        status = str(outcome.get("status") or "")
+        successful = status == "success"
+        codes = set()
+        if successful:
+            for row in rows:
+                try:
+                    code = normalize_bejerman_workstation(row.get("code"))
+                except BejermanUserCredentialsInvalid:
+                    continue
+                if not code:
+                    continue
+                codes.add(code)
+                labels_by_code.setdefault(code, (row.get("label") or code).strip())
+            company_options.append(codes)
+        company_statuses.append(
+            {
+                "key": company.key,
+                "label": company.label,
+                "available": successful,
+                "matches": len(codes),
+            }
+        )
+
+    all_companies_available = bool(companies) and len(company_options) == len(companies)
+    common_codes = (
+        set.intersection(*company_options)
+        if all_companies_available and company_options
+        else set()
+    )
+    options = [
+        {"code": code, "label": labels_by_code.get(code) or code}
+        for code in sorted(common_codes)
+    ]
+
+    recommended = ""
+    current = resolve_user_bejerman_workstation(user_id)
+    for candidate in (current, *BEJERMAN_WORKSTATION_PRIORITY):
+        normalized = normalize_bejerman_workstation(candidate)
+        if normalized in common_codes:
+            recommended = normalized
+            break
+
+    if not all_companies_available:
+        detail = (
+            "No se pudo consultar automáticamente todos los puestos. "
+            "Podés completar el puesto manualmente."
+        )
+        recommended = current
+    elif not options:
+        detail = (
+            f"Bejerman no informa un puesto común habilitado para {clean_username} "
+            "en todas las empresas."
+        )
+    elif len(options) == 1:
+        detail = "Puesto Bejerman detectado automáticamente."
+    else:
+        detail = "Se detectaron varios puestos; NEXORA seleccionó el recomendado."
+
+    return {
+        "username": clean_username,
+        "automatic": bool(all_companies_available and options),
+        "recommended": recommended,
+        "options": options,
+        "detail": detail,
+        "companies": company_statuses,
+    }
+
+
+def _validate_bejerman_credentials(
+    username: str,
+    password: str,
+    user_id: int | None = None,
+    *,
+    workstation: str | None = None,
+) -> None:
+    companies = _credential_validation_companies()
+    resolved_workstation = normalize_bejerman_workstation(
+        workstation or resolve_user_bejerman_workstation(user_id),
+        required=True,
+    )
     if not companies:
         BejermanSDKClient(
             bejerman_username=username,
             bejerman_password=password,
-            bejerman_workstation=workstation,
+            bejerman_workstation=resolved_workstation,
         ).register()
         return
 
@@ -170,7 +315,7 @@ def _validate_bejerman_credentials(username: str, password: str, user_id: int | 
                 company_key=company.key,
                 bejerman_username=username,
                 bejerman_password=password,
-                bejerman_workstation=workstation,
+                bejerman_workstation=resolved_workstation,
             ).register()
             validated.append(company.label)
         except BejermanSdkResponseError as exc:
@@ -185,7 +330,7 @@ def _validate_bejerman_credentials(username: str, password: str, user_id: int | 
         ok = ", ".join(validated) or "-"
         detail = _bejerman_credentials_error_message(username, rejected[-1][1])
         raise BejermanSdkResponseError(
-            f"{detail} Puesto Bejerman usado: {workstation}. "
+            f"{detail} Puesto Bejerman usado: {resolved_workstation}. "
             f"Empresas rechazadas: {failed}. Empresas validadas: {ok}."
         )
     if last_config_error:
@@ -228,6 +373,7 @@ class LoginView(APIView):
             raise AuthenticationFailed("Usuario o contraseña inválidos.")
 
         _reset_login_failure(key)
+        _record_successful_login(request, user.id)
         token = issue_token(user)
         permissions_map = resolve_effective_permissions(user_id=user.id, role=user.rol)
         user_payload, bejerman_credentials = _auth_user_payload(user, permissions_map)
@@ -278,8 +424,24 @@ class BejermanCredentialsView(APIView):
         if not username or not password:
             return Response({"detail": "Usuario y clave Bejerman requeridos"}, status=400)
         try:
-            _validate_bejerman_credentials(username, password, int(user_id))
-            status = save_user_bejerman_credentials(int(user_id), username, password)
+            workstation = normalize_bejerman_workstation(
+                request.data.get("workstation")
+                or request.data.get("puesto")
+                or resolve_user_bejerman_workstation(int(user_id)),
+                required=True,
+            )
+            _validate_bejerman_credentials(
+                username,
+                password,
+                int(user_id),
+                workstation=workstation,
+            )
+            status = save_user_bejerman_credentials(
+                int(user_id),
+                username,
+                password,
+                workstation=workstation,
+            )
         except BejermanUserCredentialsInvalid as exc:
             return Response({"detail": str(exc)}, status=400)
         except BejermanUserCredentialsError as exc:
@@ -299,6 +461,37 @@ class BejermanCredentialsView(APIView):
                 status=503,
             )
         return Response({"ok": True, **status})
+
+    def patch(self, request):
+        user_id = getattr(getattr(request, "user", None), "id", None)
+        if not user_id:
+            return Response({"detail": "Usuario no autenticado"}, status=401)
+        if "dismissPrompt" not in request.data and "dismiss_prompt" not in request.data:
+            return Response({"detail": "Falta indicar dismissPrompt"}, status=400)
+        dismissed = request.data.get("dismissPrompt", request.data.get("dismiss_prompt"))
+        if not isinstance(dismissed, bool):
+            return Response({"detail": "dismissPrompt debe ser verdadero o falso"}, status=400)
+        try:
+            set_user_bejerman_credentials_prompt_dismissed(int(user_id), dismissed)
+        except BejermanUserCredentialsInvalid as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except BejermanUserCredentialsError as exc:
+            return Response({"detail": str(exc)}, status=503)
+        return Response(user_bejerman_credentials_status(int(user_id)))
+
+
+class BejermanWorkstationsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user_id = getattr(getattr(request, "user", None), "id", None)
+        username = (request.query_params.get("username") or "").strip().upper()
+        if not user_id:
+            return Response({"detail": "Usuario no autenticado"}, status=401)
+        try:
+            return Response(_discover_bejerman_workstations(username, int(user_id)))
+        except BejermanUserCredentialsInvalid as exc:
+            return Response({"detail": str(exc)}, status=400)
 
 
 class BejermanSellerCodeView(APIView):

@@ -36,12 +36,10 @@ function formatMoney(value, currency = "ARS") {
 }
 
 function blockedReasonForOrder(order, items) {
-  const groupStatus = String(order?.bejermanRemitoGroup?.status || "").trim();
   if (order?.invoiceNumber) return "La orden ya fue facturada.";
   if (!order?.remitoNumber) return "La orden no tiene remito.";
-  if (order?.status !== "entregado_pendiente_facturacion") return "La orden no está pendiente de facturación.";
-  if (groupStatus && !["generated", "reconciled"].includes(groupStatus)) {
-    return "Bejerman no permite corregir este remito con seguridad. Requiere revisión manual.";
+  if (!order?.status || ["entregado_no_facturable", "facturado", "cancelado"].includes(order.status)) {
+    return "La orden no está pendiente de facturación.";
   }
   if (!items.length) return "La orden no tiene renglones para corregir.";
   return "";
@@ -171,6 +169,10 @@ export default function DeliveryOrderCommercialCorrectionModal({ open, order, on
                 {error}
               </div>
             )}
+            <div className="mb-3 rounded border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+              Esta corrección actualiza únicamente NEXORA y notifica a Cobranzas. El RT emitido en Bejerman no se
+              modifica.
+            </div>
 
             <div className="grid grid-cols-1 gap-3 rounded border bg-gray-50 p-3 sm:grid-cols-3">
               <DetailField label="Remito" value={order.remitoNumber || "-"} />

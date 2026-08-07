@@ -4,12 +4,17 @@ import { ingresoIdOf, formatOS, formatDateOnly } from "../lib/ui-helpers";
 import { catalogEquipmentLabel } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import useQueryState from "../hooks/useQueryState";
+import { sortRows } from "../lib/table-sort";
+import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
 
 export default function Derivados() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [fechaMap, setFechaMap] = useState({}); // {ingreso_id: 'YYYY-MM-DD'}
+  const [sort, setSort] = useQueryState("sort", "");
 
   const load = async () => {
     try {
@@ -36,6 +41,18 @@ export default function Derivados() {
     const toDate = (v) => (v && typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? new Date(`${v}T00:00:00`) : (v ? new Date(v) : new Date(0));
     return [...rows].sort((a,b) => toDate(b?.fecha_deriv) - toDate(a?.fecha_deriv));
   }, [rows]);
+  const displayRows = useMemo(
+    () => sortRows(sorted, sort, INGRESO_LIST_SORT_COLUMNS),
+    [sorted, sort]
+  );
+  const sortOptions = ingresoSortOptions([
+    "os",
+    "cliente",
+    "proveedor",
+    "equipo",
+    "identificacion",
+    "fecha_derivacion",
+  ]);
 
   const onDevuelto = async (row) => {
     const ingresoId = ingresoIdOf(row);
@@ -58,12 +75,13 @@ export default function Derivados() {
 
       {loading ? (
         "Cargando..."
-      ) : sorted.length === 0 ? (
+      ) : displayRows.length === 0 ? (
         <div className="text-sm text-gray-500">No hay equipos derivados.</div>
       ) : (
         <div>
+          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
           <MobileDataList>
-            {sorted.map((row) => (
+            {displayRows.map((row) => (
               <MobileDataCard key={ingresoIdOf(row)} className="space-y-3">
                 <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
                 <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
@@ -94,17 +112,17 @@ export default function Derivados() {
           <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left">
-                <th className="p-2">OS</th>
-                <th className="p-2">Cliente</th>
-                <th className="p-2">Proveedor</th>
-                <th className="p-2">Equipo</th>
-                <th className="p-2">Serie</th>
-                <th className="p-2">Fecha derivación</th>
+                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
+                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
+                <SortableTh field="proveedor" sort={sort} onSortChange={setSort} className="p-2">Proveedor</SortableTh>
+                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
+                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
+                <SortableTh field="fecha_derivacion" sort={sort} onSortChange={setSort} className="p-2">Fecha derivación</SortableTh>
                 <th className="p-2 text-right">Acciones</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((row) => (
+              {displayRows.map((row) => (
                 <tr key={ingresoIdOf(row)} className="border-t">
                   <td className="p-2 underline">{formatOS(row)}</td>
                   <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? '-'}</td>

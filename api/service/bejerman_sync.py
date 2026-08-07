@@ -14,6 +14,11 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, require_company
+from .bejerman_sync_alerts import queue_stale_blocked_bejerman_job_alerts
+from .bejerman_sdk import (
+    is_bejerman_sdk_race_message,
+    is_bejerman_table_update_transient_message,
+)
 from .bejerman_user_credentials import (
     BEJERMAN_CREDENTIALS_REQUIRED,
     BejermanUserCredentialsError,
@@ -64,6 +69,7 @@ NEXORA_STOCK_ENTRY_MESSAGE = (
 PORTAL_STOCK_EXIT_MESSAGE = "Salida física Bejerman gestionada por Portal; NEXORA no emite salida final"
 LEGACY_BLOCKED_SYNC_TYPES = (SYNC_TYPE_STOCK_ENTRY_STR, SYNC_TYPE_STOCK_EXIT_RTS)
 RESTORE_TARGET_STOCK_ERROR_PREFIX = "No se pudo restaurar stock en destino"
+TRANSIENT_REOPEN_COUNT_KEY = "transient_reopen_count"
 
 
 class BejermanSyncError(Exception):
@@ -84,6 +90,28 @@ class BejermanTransientError(BejermanSyncError):
 
 def _setting(name: str, default: Any = ""):
     return getattr(settings, name, default)
+
+
+def _positive_int_setting(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        raw_value = _setting(name, default)
+        value = int(default if raw_value in (None, "") else raw_value)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _is_retryable_sync_message(value: Any) -> bool:
+    return is_bejerman_table_update_transient_message(value) or is_bejerman_sdk_race_message(
+        value
+    )
+
+
+def _sync_transient_max_attempts(general_max_attempts: int) -> int:
+    # Los bloqueos temporales del SDK/importador necesitan una ventana mayor
+    # que los errores comunes, sin alterar el máximo general de los demás jobs.
+    configured = _positive_int_setting("BEJERMAN_SYNC_TRANSIENT_MAX_ATTEMPTS", 12)
+    return max(int(general_max_attempts), configured)
 
 
 def q(sql: str, params=None, one: bool = False):
@@ -653,6 +681,7 @@ class BejermanSDKClient:
         self.bejerman_workstation = str(bejerman_workstation or "").strip()
         self.allow_system_credentials = bool(allow_system_credentials)
         self.token = ""
+        self._http = requests.Session()
 
     def _credentials(self) -> tuple[str, str]:
         if self.bejerman_username and self.bejerman_password:
@@ -685,7 +714,7 @@ class BejermanSDKClient:
             "</s:Envelope>"
         )
         try:
-            response = requests.post(
+            response = self._http.post(
                 self.endpoint_url,
                 data=envelope.encode("utf-8"),
                 headers={
@@ -700,8 +729,13 @@ class BejermanSDKClient:
         parsed = _response_dict(response.text)
         if not _is_ok_response(parsed):
             error = parsed.get("ErrorMsg") or parsed.get("Resultado") or "Respuesta no OK de Bejerman"
+            if _is_retryable_sync_message(error):
+                raise BejermanTransientError(error)
             raise BejermanBlockedError(error)
         return parsed
+
+    def close(self) -> None:
+        self._http.close()
 
     def register(self) -> str:
         username, password = self._credentials()
@@ -1208,12 +1242,24 @@ def _finish_job(
     )
 
 
-def _retry_job(job: dict[str, Any], error: str, max_attempts: int):
+def _retry_job(job: dict[str, Any], error: str, max_attempts: int) -> str:
     attempts = int(job.get("attempts") or 0)
-    if attempts >= max_attempts:
+    retryable_sync_error = _is_retryable_sync_message(error)
+    effective_max_attempts = (
+        _sync_transient_max_attempts(max_attempts) if retryable_sync_error else int(max_attempts)
+    )
+    if attempts >= effective_max_attempts:
         _finish_job(job["id"], JOB_STATUS_BLOCKED, error=f"Máximos reintentos agotados: {error}")
-        return
-    delay_seconds = min(3600, max(60, 2 ** max(0, attempts - 1) * 60))
+        return JOB_STATUS_BLOCKED
+    base_delay_seconds = (
+        _positive_int_setting("BEJERMAN_SYNC_TRANSIENT_RETRY_BASE_SECONDS", 300)
+        if retryable_sync_error
+        else 60
+    )
+    delay_seconds = min(
+        3600,
+        max(base_delay_seconds, 2 ** max(0, attempts - 1) * base_delay_seconds),
+    )
     next_attempt = timezone.now() + timedelta(seconds=delay_seconds)
     q(
         """
@@ -1226,21 +1272,128 @@ def _retry_job(job: dict[str, Any], error: str, max_attempts: int):
         """,
         [error, next_attempt, job["id"]],
     )
+    return JOB_STATUS_FAILED
 
 
-def _mapping_for_context(context: dict[str, Any]) -> dict[str, Any] | None:
+def reopen_transient_blocked_jobs(
+    *,
+    cooldown_seconds: int | None = None,
+    max_cycles: int | None = None,
+    limit: int = 100,
+) -> int:
+    if cooldown_seconds is None:
+        cooldown_seconds = _positive_int_setting(
+            "BEJERMAN_SYNC_TRANSIENT_REOPEN_COOLDOWN_SECONDS",
+            1800,
+            minimum=0,
+        )
+    else:
+        cooldown_seconds = max(0, int(cooldown_seconds))
+    if max_cycles is None:
+        max_cycles = _positive_int_setting("BEJERMAN_SYNC_TRANSIENT_REOPEN_MAX_CYCLES", 2)
+    else:
+        max_cycles = max(1, int(max_cycles))
+    limit = max(1, int(limit or 1))
+
+    reopened = 0
+    with transaction.atomic():
+        rows = q(
+            """
+            SELECT id, last_error, response_payload
+              FROM bejerman_sync_jobs
+             WHERE status = 'blocked'
+               AND actor_user_id IS NOT NULL
+               AND updated_at <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+             ORDER BY updated_at ASC, id ASC
+             FOR UPDATE SKIP LOCKED
+             LIMIT %s
+            """,
+            [cooldown_seconds, limit],
+        ) or []
+        for row in rows:
+            last_error = str(row.get("last_error") or "")
+            if not _is_retryable_sync_message(last_error):
+                continue
+            response_payload = _dict_payload(row.get("response_payload"))
+            try:
+                reopen_count = int(response_payload.get(TRANSIENT_REOPEN_COUNT_KEY) or 0)
+            except (TypeError, ValueError):
+                reopen_count = 0
+            if reopen_count >= max_cycles:
+                continue
+            reopen_metadata = {
+                TRANSIENT_REOPEN_COUNT_KEY: reopen_count + 1,
+                "transient_reopened_at": timezone.now().isoformat(),
+                "transient_last_error": last_error,
+            }
+            updated = q(
+                """
+                UPDATE bejerman_sync_jobs
+                   SET status = 'pending',
+                       attempts = 0,
+                       last_error = NULL,
+                       next_attempt_at = CURRENT_TIMESTAMP,
+                       response_payload = COALESCE(response_payload, '{}'::jsonb) || %s::jsonb,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE id = %s
+                   AND status = 'blocked'
+                RETURNING id
+                """,
+                [_json_param(reopen_metadata), row["id"]],
+                one=True,
+            )
+            if updated:
+                reopened += 1
+    return reopened
+
+
+def _reopen_blocked_job_inline(job_id: int, actor_user_id: int | None = None) -> bool:
+    updated = q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = 'pending',
+               attempts = 0,
+               last_error = NULL,
+               next_attempt_at = CURRENT_TIMESTAMP,
+               actor_user_id = COALESCE(%s, actor_user_id),
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+           AND status = 'blocked'
+        RETURNING id
+        """,
+        [actor_user_id, job_id],
+        one=True,
+    )
+    return bool(updated)
+
+
+def _company_key_for_mapping_lookup(context: dict[str, Any], company_key: str | None = None) -> str:
+    if company_key:
+        try:
+            return require_company(company_key).key
+        except ValueError:
+            return "SEPID"
+    try:
+        return _company_key_for_ingreso_row(context)
+    except BejermanBlockedError:
+        return "SEPID"
+
+
+def _mapping_for_context(context: dict[str, Any], company_key: str | None = None) -> dict[str, Any] | None:
     model_id = context.get("model_id")
     if not model_id:
         return None
+    resolved_company = _company_key_for_mapping_lookup(context, company_key)
     return q(
         """
         SELECT *
           FROM bejerman_article_mappings
          WHERE model_id = %s
            AND variante_norm = %s
+           AND company_key = %s
          LIMIT 1
         """,
-        [model_id, normalize_article_variant(context.get("variante"))],
+        [model_id, normalize_article_variant(context.get("variante")), resolved_company],
         one=True,
     )
 
@@ -1266,20 +1419,25 @@ def upsert_article_mapping(
     match_source: str = "manual",
     source_payload: Any = None,
     confirmed_by: int | None = None,
+    company_key: str = "SEPID",
 ) -> dict[str, Any]:
     code = (article_code or "").strip()
     if not code:
         raise BejermanBlockedError("Código de artículo Bejerman requerido")
     variant = (variante or "").strip()
     variant_norm = normalize_article_variant(variant)
+    try:
+        resolved_company = require_company(company_key or "SEPID").key
+    except ValueError:
+        resolved_company = "SEPID"
     now_confirmed_sql = "CURRENT_TIMESTAMP" if match_source == "manual" else "NULL"
     row = q(
         f"""
         INSERT INTO bejerman_article_mappings(
           model_id, variante, variante_norm, article_code, article_description,
-          match_source, source_payload, confirmed_by, confirmed_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,{now_confirmed_sql})
-        ON CONFLICT (model_id, variante_norm) DO UPDATE
+          match_source, source_payload, confirmed_by, confirmed_at, company_key
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,{now_confirmed_sql},%s)
+        ON CONFLICT (model_id, variante_norm, company_key) DO UPDATE
            SET variante = EXCLUDED.variante,
                article_code = EXCLUDED.article_code,
                article_description = EXCLUDED.article_description,
@@ -1302,16 +1460,19 @@ def upsert_article_mapping(
             match_source,
             _json_param(source_payload or {}),
             confirmed_by,
+            resolved_company,
         ],
         one=True,
     )
     return row or {}
 
 
-def article_mapping_summary_for_context(model_id: int | None, variante: str = "") -> dict[str, Any] | None:
+def article_mapping_summary_for_context(
+    model_id: int | None, variante: str = "", company_key: str | None = None
+) -> dict[str, Any] | None:
     if not model_id:
         return None
-    mapping = _mapping_for_context({"model_id": model_id, "variante": variante})
+    mapping = _mapping_for_context({"model_id": model_id, "variante": variante}, company_key)
     if not mapping:
         return None
     return {
@@ -1322,6 +1483,7 @@ def article_mapping_summary_for_context(model_id: int | None, variante: str = ""
         "article_code": mapping.get("article_code") or "",
         "article_description": mapping.get("article_description") or "",
         "match_source": mapping.get("match_source") or "",
+        "company_key": mapping.get("company_key") or "",
         "confirmed_at": mapping.get("confirmed_at"),
         "updated_at": mapping.get("updated_at"),
     }
@@ -1367,7 +1529,8 @@ def remember_article_mapping_from_stock_record(
         return ""
     try:
         context = _ingreso_context(int(job["ingreso_id"]))
-        mapping = _mapping_for_context(context)
+        company_key = job.get("company_key") or _company_key_for_mapping_lookup(context)
+        mapping = _mapping_for_context(context, company_key)
         existing_code = (mapping or {}).get("article_code") or ""
         if mapping and (mapping.get("match_source") or "") == "manual" and existing_code.strip() != code:
             return code
@@ -1378,6 +1541,7 @@ def remember_article_mapping_from_stock_record(
             article_description=_article_description_from_record(record),
             match_source="auto",
             source_payload=_record_payload_for_article_match(job, record, source),
+            company_key=company_key,
         )
     except Exception:
         logger.exception("No se pudo asentar artículo Bejerman por serie para job %s", job.get("id"))
@@ -1397,15 +1561,25 @@ def remember_article_mapping_from_stock_records(
     return ""
 
 
-def _blocked_article_job_ids_for_context(model_id: int, variante: str) -> list[int]:
+def _blocked_article_job_ids_for_context(model_id: int, variante: str, company_key: str | None = None) -> list[int]:
     variant_norm = normalize_article_variant(variante)
+    params: list[Any] = [model_id]
+    company_clause = ""
+    if company_key:
+        try:
+            company_clause = "AND j.company_key = %s"
+            params.append(require_company(company_key).key)
+        except ValueError:
+            company_clause = ""
+            params.pop()
     rows = q(
-        """
+        f"""
         SELECT j.id, j.ingreso_id
           FROM bejerman_sync_jobs j
           JOIN ingresos t ON t.id = j.ingreso_id
           JOIN devices d ON d.id = t.device_id
          WHERE d.model_id = %s
+           {company_clause}
            AND j.status = 'blocked'
            AND COALESCE(j.article_code, '') = ''
            AND (
@@ -1415,7 +1589,7 @@ def _blocked_article_job_ids_for_context(model_id: int, variante: str) -> list[i
              OR j.response_payload ? 'stock_restore_diagnostic'
            )
         """,
-        [model_id],
+        params,
     ) or []
     ids: list[int] = []
     for row in rows:
@@ -1428,12 +1602,14 @@ def _blocked_article_job_ids_for_context(model_id: int, variante: str) -> list[i
     return ids
 
 
-def count_blocked_article_jobs_for_context(model_id: int, variante: str) -> int:
-    return len(_blocked_article_job_ids_for_context(model_id, variante))
+def count_blocked_article_jobs_for_context(model_id: int, variante: str, company_key: str | None = None) -> int:
+    return len(_blocked_article_job_ids_for_context(model_id, variante, company_key))
 
 
-def reopen_jobs_for_article_mapping(model_id: int, variante: str, article_code: str) -> int:
-    ids = _blocked_article_job_ids_for_context(model_id, variante)
+def reopen_jobs_for_article_mapping(
+    model_id: int, variante: str, article_code: str, company_key: str | None = None
+) -> int:
+    ids = _blocked_article_job_ids_for_context(model_id, variante, company_key)
     if not ids:
         return 0
     q(
@@ -1577,11 +1753,13 @@ def search_bejerman_articles_for_context(
     query: str = "",
     client: BejermanSDKClient | None = None,
     limit: int = 20,
+    company_key: str | None = None,
 ) -> dict[str, Any]:
     model_id = context.get("model_id")
     if not model_id:
         raise BejermanBlockedError("Modelo requerido para buscar artículos Bejerman")
-    client = client or BejermanSDKClient()
+    resolved_company = company_key or _company_key_for_mapping_lookup(context)
+    client = client or BejermanSDKClient(company_key=resolved_company)
     query = (query or "").strip()
     response = client.obtener_articulos(query)
     candidates: list[dict[str, Any]] = []
@@ -1612,9 +1790,9 @@ def search_bejerman_articles_for_context(
             "variante": context.get("variante") or "",
             "scope": "modelo_variante",
         },
-        "mapping": article_mapping_summary_for_context(int(model_id), context.get("variante") or ""),
+        "mapping": article_mapping_summary_for_context(int(model_id), context.get("variante") or "", resolved_company),
         "related_blocked_jobs": count_blocked_article_jobs_for_context(
-            int(model_id), context.get("variante") or ""
+            int(model_id), context.get("variante") or "", resolved_company
         ),
         "items": candidates[: max(1, int(limit or 1))],
     }
@@ -1661,10 +1839,11 @@ def article_resolution_for_job_row(row: dict[str, Any]) -> dict[str, Any]:
     related = 0
     mapping = None
     model_id = row.get("model_id")
+    company_key = row.get("company_key") or None
     if model_id:
         try:
-            related = count_blocked_article_jobs_for_context(int(model_id), row.get("variante") or "")
-            mapping = article_mapping_summary_for_context(int(model_id), row.get("variante") or "")
+            related = count_blocked_article_jobs_for_context(int(model_id), row.get("variante") or "", company_key)
+            mapping = article_mapping_summary_for_context(int(model_id), row.get("variante") or "", company_key)
         except Exception:
             related = 0
             mapping = None
@@ -1683,7 +1862,7 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
     if existing:
         return existing
     context = _ingreso_context(int(job["ingreso_id"]))
-    mapping = _mapping_for_context(context)
+    mapping = _mapping_for_context(context, job.get("company_key"))
     if mapping and (mapping.get("article_code") or "").strip():
         code = (mapping.get("article_code") or "").strip()
         _finish_job(job["id"], JOB_STATUS_RUNNING, article_code=code)
@@ -1711,6 +1890,21 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
     raise BejermanBlockedError("Hay más de un artículo Bejerman posible para este modelo/variante")
 
 
+def _stock_transfer_comprobante_number(job: dict[str, Any]) -> str:
+    """El número base es determinístico (ingreso_id) para mantener idempotencia
+    en el primer intento. Pero si Bejerman ya "aceptó fantasma" ese número en un
+    intento previo (acepta el comprobante y rechaza el movimiento de stock en
+    silencio, ver force_stock_entry_for_ingreso), todo reintento posterior con el
+    mismo número choca para siempre con 'el mismo ya existe... importación
+    anterior'. A partir del segundo intento se corre el número para poder
+    reintentar de verdad."""
+    base = int(job["ingreso_id"]) % 100000000
+    attempts = int(job.get("attempts") or 0)
+    if attempts > 0:
+        base = (base + attempts * 100000) % 100000000
+    return f"{base:08d}"
+
+
 def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobante: str, deposit: str) -> dict[str, Any]:
     document_date = _stock_document_date()
     reference = f"NEXORA-OS-{job['ingreso_id']}"
@@ -1720,7 +1914,7 @@ def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobant
         "Comprobante_Tipo": comprobante,
         "Comprobante_Letra": "",
         "Comprobante_PtoVenta": "",
-        "Comprobante_Numero": f"{int(job['ingreso_id']) % 100000000:08d}",
+        "Comprobante_Numero": _stock_transfer_comprobante_number(job),
         "Comprobante_Art_CodGen": article_code,
         "Comprobante_ArtPartida": serial,
         "Comprobante_DescArticulo": f"NEXORA {serial}"[:50],
@@ -2163,6 +2357,31 @@ def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient)
     return JOB_STATUS_SUCCEEDED
 
 
+def _verify_stock_transfer_target(
+    client: BejermanSDKClient,
+    *,
+    target: str,
+    serial: str,
+) -> dict[str, Any]:
+    attempts = _positive_int_setting("BEJERMAN_SYNC_STOCK_VERIFY_ATTEMPTS", 3)
+    try:
+        delay_ms = int(_setting("BEJERMAN_SYNC_STOCK_VERIFY_DELAY_MS", 1500) or 0)
+    except (TypeError, ValueError):
+        delay_ms = 1500
+    delay_ms = max(0, delay_ms)
+    last_response: dict[str, Any] = {}
+    for attempt in range(attempts):
+        last_response = client.stock_by_deposit_partida(target, serial)
+        if _records_for_partida(last_response, serial, target):
+            return last_response
+        if attempt < attempts - 1 and delay_ms:
+            time.sleep(delay_ms / 1000)
+    raise BejermanTransientError(
+        f"Bejerman aceptó el ENT pero todavía no se confirmó stock positivo para la partida "
+        f"{serial} en el depósito {target}."
+    )
+
+
 def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> str:
     validate_bejerman_config()
     sync_type = (job.get("sync_type") or "").strip()
@@ -2307,6 +2526,19 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
         article_code=article_code,
     )
     ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    ent_response_payload = {**next_response_payload, "target_stock_entry": ent_response}
+    _finish_job(
+        job["id"],
+        JOB_STATUS_RUNNING,
+        request_payload=ent_request_payload,
+        response_payload=ent_response_payload,
+        article_code=article_code,
+    )
+    target_verification = _verify_stock_transfer_target(
+        client,
+        target=target,
+        serial=serial,
+    )
     _finish_job(
         job["id"],
         JOB_STATUS_SUCCEEDED,
@@ -2315,7 +2547,10 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
             "target_stock_entry_done": True,
             "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
         },
-        response_payload={**next_response_payload, "target_stock_entry": ent_response},
+        response_payload={
+            **ent_response_payload,
+            "target_stock_verification": target_verification,
+        },
         article_code=article_code,
     )
     return JOB_STATUS_SUCCEEDED
@@ -2344,28 +2579,53 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
         _finish_job(job["id"], JOB_STATUS_BLOCKED, error=str(exc))
         return JOB_STATUS_BLOCKED
     except BejermanBlockedError as exc:
+        if _is_retryable_sync_message(str(exc)):
+            return _retry_job(job, str(exc), max_attempts)
         _finish_job(job["id"], JOB_STATUS_BLOCKED, error=str(exc))
         return JOB_STATUS_BLOCKED
     except BejermanTransientError as exc:
-        _retry_job(job, str(exc), max_attempts)
-        return JOB_STATUS_FAILED
+        return _retry_job(job, str(exc), max_attempts)
     except Exception as exc:
         logger.exception("Error sincronizando job Bejerman %s", job.get("id"))
-        _retry_job(job, str(exc), max_attempts)
-        return JOB_STATUS_FAILED
+        return _retry_job(job, str(exc), max_attempts)
 
 
-def process_bejerman_jobs(limit: int = 10, job_id: int | None = None, client: BejermanSDKClient | None = None) -> dict[str, int]:
+def process_bejerman_jobs(
+    limit: int = 10,
+    job_id: int | None = None,
+    client: BejermanSDKClient | None = None,
+    *,
+    actor_user_id: int | None = None,
+    reopen_blocked: bool = False,
+) -> dict[str, int]:
     if not bool(_setting("BEJERMAN_SYNC_ENABLED", False)):
         return {"processed": 0, "disabled": 1}
-    max_attempts = int(_setting("BEJERMAN_MAX_ATTEMPTS", 8) or 8)
+    if reopen_blocked and job_id is None:
+        raise ValueError("reopen_blocked requiere indicar job_id")
+    max_attempts = _positive_int_setting("BEJERMAN_MAX_ATTEMPTS", 8)
+    claim_max_attempts = _sync_transient_max_attempts(max_attempts)
     stats = {"processed": 0, JOB_STATUS_SUCCEEDED: 0, JOB_STATUS_FAILED: 0, JOB_STATUS_BLOCKED: 0}
     for _ in range(max(1, int(limit or 1))):
         with transaction.atomic():
-            job = _claim_job(max_attempts=max_attempts, job_id=job_id)
+            if reopen_blocked and job_id is not None:
+                _reopen_blocked_job_inline(job_id, actor_user_id)
+            job = _claim_job(max_attempts=claim_max_attempts, job_id=job_id)
         if not job:
             break
-        if client is None and not job.get("actor_user_id"):
+        effective_actor_user_id = (
+            actor_user_id if actor_user_id is not None else job.get("actor_user_id")
+        )
+        previous_error = str(job.get("last_error") or "")
+        if int(job.get("attempts") or 0) > max_attempts and not _is_retryable_sync_message(
+            previous_error
+        ):
+            status = JOB_STATUS_BLOCKED
+            _finish_job(
+                job["id"],
+                status,
+                error=f"Máximos reintentos agotados: {previous_error or 'error de sincronización'}",
+            )
+        elif client is None and not effective_actor_user_id:
             status = JOB_STATUS_BLOCKED
             _finish_job(
                 job["id"],
@@ -2375,9 +2635,15 @@ def process_bejerman_jobs(limit: int = 10, job_id: int | None = None, client: Be
         else:
             job_client = client or BejermanSDKClient(
                 company_key=job.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY,
-                actor_user_id=job.get("actor_user_id"),
+                actor_user_id=effective_actor_user_id,
             )
-            status = _process_claimed_job(job, job_client, max_attempts)
+            try:
+                status = _process_claimed_job(job, job_client, max_attempts)
+            finally:
+                if client is None:
+                    close = getattr(job_client, "close", None)
+                    if callable(close):
+                        close()
         stats["processed"] += 1
         stats[status] = stats.get(status, 0) + 1
         if job_id is not None:
@@ -2435,7 +2701,7 @@ def reconcile_article_mapping_for_job(job: dict[str, Any], client: BejermanSDKCl
 
     try:
         context = _ingreso_context(int(job["ingreso_id"]))
-        mapping = _mapping_for_context(context)
+        mapping = _mapping_for_context(context, job.get("company_key"))
     except Exception:
         mapping = None
     existing_code = (mapping or {}).get("article_code") or ""
@@ -2759,22 +3025,71 @@ def run_bejerman_sync_loop(
     limit: int = 10,
     sale_items_interval_seconds: int | None = None,
 ):
+    transient_reopen_interval = _positive_int_setting(
+        "BEJERMAN_SYNC_TRANSIENT_REOPEN_INTERVAL_SECONDS",
+        300,
+        minimum=0,
+    )
+    blocked_alert_interval = _positive_int_setting(
+        "BEJERMAN_SYNC_BLOCKED_ALERT_INTERVAL_SECONDS",
+        900,
+        minimum=0,
+    )
     sale_interval = (
         int(sale_items_interval_seconds)
         if sale_items_interval_seconds is not None
         else int(getattr(settings, "BEJERMAN_SALE_ITEMS_LOOP_INTERVAL_SECONDS", 21600) or 0)
     )
-    sale_days = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_DAYS", 365) or 365)
+    sale_days = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_DAYS", 2) or 2)
     sale_max = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_MAX_COMPROBANTES", 500) or 500)
     sale_company = getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEY", "SEPID") or "SEPID"
-    next_sale_sync_at = 0.0
+    sale_startup_delay = max(
+        0,
+        int(getattr(settings, "BEJERMAN_SALE_ITEMS_STARTUP_DELAY_SECONDS", 300) or 0),
+    )
+    next_transient_reopen_at = time.monotonic()
+    next_blocked_alert_at = time.monotonic()
+    next_sale_sync_at = time.monotonic() + sale_startup_delay
+    logger.info(
+        "bejerman_sale_items_scheduler interval_seconds=%s startup_delay_seconds=%s days=%s max_comprobantes=%s",
+        sale_interval,
+        sale_startup_delay,
+        sale_days,
+        sale_max,
+    )
     while True:
+        now = time.monotonic()
+        if transient_reopen_interval > 0 and now >= next_transient_reopen_at:
+            try:
+                reopened = reopen_transient_blocked_jobs()
+                if reopened:
+                    logger.info(
+                        "bejerman_sync_transient_jobs_reopened count=%s",
+                        reopened,
+                    )
+            except Exception:
+                logger.exception("bejerman_sync_transient_reopen falló")
+            finally:
+                next_transient_reopen_at = time.monotonic() + transient_reopen_interval
         try:
             stats = process_bejerman_jobs(limit=limit)
             logger.info("bejerman_sync_loop stats=%s", stats)
         except Exception:
             logger.exception("bejerman_sync_loop falló")
+        if blocked_alert_interval > 0 and time.monotonic() >= next_blocked_alert_at:
+            try:
+                alert_stats = queue_stale_blocked_bejerman_job_alerts()
+                if alert_stats.get("matched") or alert_stats.get("errors"):
+                    logger.info(
+                        "bejerman_sync_blocked_alerts stats=%s",
+                        alert_stats,
+                    )
+            except Exception:
+                logger.exception("bejerman_sync_blocked_alerts falló")
+            finally:
+                next_blocked_alert_at = time.monotonic() + blocked_alert_interval
         if sale_interval > 0 and time.monotonic() >= next_sale_sync_at:
+            sale_started_at = time.monotonic()
             try:
                 from .bejerman_sales import sync_bejerman_sale_items
                 from .bejerman_sdk import BejermanSDKClient as SalesBejermanSDKClient
@@ -2788,9 +3103,13 @@ def run_bejerman_sync_loop(
                     days=sale_days,
                     max_comprobantes=sale_max,
                 )
-                logger.info("bejerman_sale_items_sync stats=%s", sale_stats)
+                logger.info(
+                    "bejerman_sale_items_sync duration_ms=%s stats=%s",
+                    int((time.monotonic() - sale_started_at) * 1000),
+                    sale_stats,
+                )
             except Exception:
-                logger.exception("bejerman_sale_items_sync fallÃ³")
+                logger.exception("bejerman_sale_items_sync falló")
             finally:
                 next_sale_sync_at = time.monotonic() + sale_interval
         time.sleep(max(1, int(interval_seconds or 30)))
