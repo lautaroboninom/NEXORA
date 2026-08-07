@@ -3,6 +3,7 @@ import {
   deleteUsuario,
   getPermisosCatalogo,
   getRoles,
+  getUsuario,
   getUsuarioNotificaciones,
   getUsuarioPermisos,
   getUsuarios,
@@ -14,8 +15,16 @@ import {
   putUsuarioNotificaciones,
   putUsuarioPermisos,
 } from "@/lib/api";
+import UserDetailDrawer from "@/components/UserDetailDrawer";
 import { useAuth } from "@/context/AuthContext";
 import { can, PERMISSION_CODES } from "@/lib/permissions";
+import {
+  bejermanStatus,
+  filterUsers,
+  formatUserDate,
+} from "@/lib/usuarios";
+import { SortableTh } from "@/components/TableSortControls.jsx";
+import { sortRows } from "@/lib/table-sort.js";
 
 const Input = (p) => <input {...p} className="border rounded p-2 w-full" />;
 const Select = (p) => <select {...p} className="border rounded p-2 w-full" />;
@@ -67,6 +76,17 @@ export default function Usuarios() {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const [nuevo, setNuevo] = useState({ nombre: "", email: "", rol: "tecnico" });
+  const [newOpen, setNewOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [detailLoadingId, setDetailLoadingId] = useState(null);
+  const [filters, setFilters] = useState({
+    query: "",
+    role: "all",
+    active: "all",
+    bejerman: "all",
+  });
+  const [sort, setSort] = useState("");
 
   const [menuOpenId, setMenuOpenId] = useState(null);
   const [menuPos, setMenuPos] = useState(null);
@@ -132,7 +152,7 @@ export default function Usuarios() {
       if (!btnEl) return;
       const rect = btnEl.getBoundingClientRect();
       const menuWidth = 176; // w-44
-      const menuHeightEstimate = 176;
+      const menuHeightEstimate = 224;
       let left = rect.right - menuWidth;
       let top = rect.bottom + 6;
       left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
@@ -161,6 +181,34 @@ export default function Usuarios() {
   const roleLabel = useMemo(
     () => (val) => roles.find((o) => o.value === val)?.label || val,
     [roles],
+  );
+  const roleOptions = useMemo(() => {
+    if (roles.length) return roles;
+    const values = Array.from(
+      new Set(rows.map((user) => user?.rol).filter(Boolean)),
+    );
+    return values
+      .sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }))
+      .map((value) => ({ value, label: roleLabel(value) }));
+  }, [roleLabel, roles, rows]);
+  const sortedRows = useMemo(
+    () => sortRows(filterUsers(rows, filters), sort, {
+      id: { getValue: (row) => row.id, type: "number" },
+      nombre: { getValue: (row) => row.nombre },
+      email: { getValue: (row) => row.email },
+      rol: { getValue: (row) => roleLabel(row.rol) },
+      bejerman: {
+        getValue: (row) => row.bejerman_credentials_valid ? 2 : row.bejerman_credentials_configured ? 1 : 0,
+        type: "number",
+      },
+      permisos: { getValue: (row) => row.permisos_personalizados, type: "number" },
+      ultimo_acceso: {
+        getValue: (row) => row.last_login_at,
+        type: "date",
+      },
+      activo: { getValue: (row) => row.activo, type: "boolean" },
+    }),
+    [filters, roleLabel, rows, sort],
   );
   const menuUser = useMemo(
     () => rows.find((u) => Number(u.id) === Number(menuOpenId)) || null,
@@ -196,13 +244,24 @@ export default function Usuarios() {
   async function crear(e) {
     e.preventDefault();
     if (!canManageUsers) return;
+    setCreating(true);
+    setErr("");
+    setMsg("");
     try {
-      await postUsuario(nuevo);
+      const result = await postUsuario(nuevo);
       setNuevo({ nombre: "", email: "", rol: "tecnico" });
-      setMsg("Usuario creado o actualizado. Mail de bienvenida enviado.");
+      setNewOpen(false);
+      setMsg(
+        result?.invitation?.sent
+          ? "Usuario creado. El correo de bienvenida fue enviado."
+          : "Usuario creado. El enlace se generó, pero el correo no pudo enviarse.",
+      );
       await load();
+      if (result?.user) setSelectedUser(result.user);
     } catch (e2) {
       setErr(normalizeErr(e2));
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -212,6 +271,9 @@ export default function Usuarios() {
       await patchUsuarioActivo(u.id, !u.activo);
       setMsg(`Usuario ${!u.activo ? "activado" : "desactivado"}`);
       await load();
+      if (Number(selectedUser?.id) === Number(u.id)) {
+        await openDetail(u.id);
+      }
     } catch (e) {
       setErr(normalizeErr(e));
     }
@@ -223,18 +285,32 @@ export default function Usuarios() {
       await patchUsuarioRolePerm(u.id, { rol });
       setMsg("Rol actualizado");
       await load();
+      if (Number(selectedUser?.id) === Number(u.id)) {
+        await openDetail(u.id);
+      }
     } catch (e) {
       setErr(normalizeErr(e));
     }
   }
 
-  async function enviarLinkPw(u) {
+  async function enviarLinkPw(u, { propagate = false } = {}) {
     if (!canManageUsers) return;
     try {
-      await patchUsuarioReset(u.id);
-      setMsg("Enlace de restablecimiento enviado");
+      const result = await patchUsuarioReset(u.id);
+      setMsg(
+        result?.sent
+          ? "Enlace de restablecimiento enviado."
+          : "El enlace se generó, pero el correo no pudo enviarse.",
+      );
+      await load();
+      if (Number(selectedUser?.id) === Number(u.id)) {
+        await openDetail(u.id);
+      }
+      return result;
     } catch (e) {
       setErr(normalizeErr(e));
+      if (propagate) throw e;
+      return null;
     }
   }
 
@@ -244,9 +320,14 @@ export default function Usuarios() {
     try {
       await deleteUsuario(u.id);
       setMsg("Usuario eliminado");
+      if (Number(selectedUser?.id) === Number(u.id)) {
+        setSelectedUser(null);
+      }
       await load();
+      return true;
     } catch (e) {
       setErr(normalizeErr(e));
+      return false;
     }
   }
 
@@ -466,57 +547,244 @@ export default function Usuarios() {
     }
   }
 
+  async function openDetail(userOrId) {
+    const id = Number(userOrId?.id || userOrId);
+    if (!id) return;
+    setDetailLoadingId(id);
+    setErr("");
+    try {
+      setSelectedUser(await getUsuario(id));
+    } catch (e) {
+      setErr(normalizeErr(e));
+    } finally {
+      setDetailLoadingId(null);
+    }
+  }
+
+  async function refreshDetail(nextUser = null) {
+    if (nextUser?.id) {
+      setSelectedUser(nextUser);
+      await load();
+      return;
+    }
+    if (selectedUser?.id) {
+      await load();
+      await openDetail(selectedUser.id);
+    }
+  }
+
+  const summary = useMemo(
+    () => ({
+      total: rows.length,
+      active: rows.filter((user) => !!user.activo).length,
+      inactive: rows.filter((user) => !user.activo).length,
+      pendingBejerman: rows.filter(
+        (user) => bejermanStatus(user) !== "valid",
+      ).length,
+    }),
+    [rows],
+  );
+
+  function setFilter(key, value) {
+    setFilters((current) => ({ ...current, [key]: value }));
+  }
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-bold">Usuarios</h1>
-        <span className="text-gray-500">({roleLabel(yo?.rol)})</span>
+    <div className="space-y-6" data-no-route-state="true">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold">Usuarios</h1>
+            <span className="text-sm text-gray-500">({roleLabel(yo?.rol)})</span>
+          </div>
+          <p className="mt-1 text-sm text-gray-600">
+            Administrá accesos, roles, permisos, notificaciones y la conexión personal con Bejerman.
+          </p>
+        </div>
+        {canManageUsers && (
+          <button
+            type="button"
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            onClick={() => setNewOpen((open) => !open)}
+          >
+            {newOpen ? "Cerrar alta" : "Nuevo usuario"}
+          </button>
+        )}
       </div>
 
-      {err && <div className="bg-red-100 text-red-700 p-2 rounded">{err}</div>}
-      {msg && <div className="bg-green-100 text-green-700 p-2 rounded">{msg}</div>}
+      {err && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {err}
+        </div>
+      )}
+      {msg && (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+          {msg}
+        </div>
+      )}
 
-      {canManageUsers && (
-        <form onSubmit={crear} className="border rounded p-4 grid md:grid-cols-5 gap-3">
-          <div className="md:col-span-2">
-            <label className="text-sm">Nombre</label>
-            <Input value={nuevo.nombre} onChange={onNew("nombre")} required />
+      {canManageUsers && newOpen && (
+        <form
+          onSubmit={crear}
+          className="rounded-lg border border-blue-100 bg-blue-50/40 p-4"
+        >
+          <div className="mb-3">
+            <h2 className="font-semibold text-gray-900">Alta de usuario</h2>
+            <p className="mt-1 text-xs text-gray-600">
+              Primero se crea la cuenta NEXORA. Después se abrirá su ficha para configurar Bejerman.
+            </p>
           </div>
-          <div className="md:col-span-2">
-            <label className="text-sm">Email</label>
-            <Input type="email" value={nuevo.email} onChange={onNew("email")} required />
+          <div className="grid gap-3 md:grid-cols-5">
+            <div className="md:col-span-2">
+              <label className="text-sm font-medium text-gray-700">Nombre</label>
+              <Input value={nuevo.nombre} onChange={onNew("nombre")} required />
+            </div>
+            <div className="md:col-span-2">
+              <label className="text-sm font-medium text-gray-700">Email</label>
+              <Input type="email" value={nuevo.email} onChange={onNew("email")} required />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700">Rol</label>
+              <Select value={nuevo.rol} onChange={onNew("rol")}>
+                {roles.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </Select>
+            </div>
           </div>
-          <div>
-            <label className="text-sm">Rol</label>
-            <Select value={nuevo.rol} onChange={onNew("rol")}>
-              {roles.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </Select>
-          </div>
-          <div className="md:col-span-1 self-end">
-            <Btn type="submit" className="w-full">
-              Guardar
+          <div className="mt-3 flex justify-end gap-2">
+            <Btn
+              type="button"
+              variant="ghost"
+              onClick={() => setNewOpen(false)}
+            >
+              Cancelar
+            </Btn>
+            <Btn type="submit" disabled={creating}>
+              {creating ? "Creando..." : "Crear usuario"}
             </Btn>
           </div>
         </form>
       )}
 
-      <div className="overflow-auto border rounded">
-        <table className="min-w-full">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        {[
+          ["Total", summary.total, "border-slate-200 bg-white"],
+          ["Activos", summary.active, "border-emerald-200 bg-emerald-50"],
+          ["Inactivos", summary.inactive, "border-gray-200 bg-gray-50"],
+          [
+            "Bejerman pendiente",
+            summary.pendingBejerman,
+            "border-amber-200 bg-amber-50",
+          ],
+        ].map(([label, value, colors]) => (
+          <div key={label} className={`rounded-lg border p-4 ${colors}`}>
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              {label}
+            </div>
+            <div className="mt-1 text-2xl font-bold text-gray-900">{value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-lg border bg-white p-4">
+        <div className="grid gap-3 lg:grid-cols-[minmax(260px,1fr)_180px_160px_190px_auto]">
+          <label className="text-xs font-medium text-gray-600">
+            Buscar
+            <input
+              type="search"
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm"
+              placeholder="Nombre, email, ID, usuario o puesto Bejerman"
+              value={filters.query}
+              onChange={(event) => setFilter("query", event.target.value)}
+            />
+          </label>
+          <label className="text-xs font-medium text-gray-600">
+            Rol
+            <select
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm"
+              value={filters.role}
+              onChange={(event) => setFilter("role", event.target.value)}
+            >
+              <option value="all">Todos los roles</option>
+              {roleOptions.map((role) => (
+                <option key={role.value} value={role.value}>
+                  {role.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs font-medium text-gray-600">
+            Estado
+            <select
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm"
+              value={filters.active}
+              onChange={(event) => setFilter("active", event.target.value)}
+            >
+              <option value="all">Todos</option>
+              <option value="active">Activos</option>
+              <option value="inactive">Inactivos</option>
+            </select>
+          </label>
+          <label className="text-xs font-medium text-gray-600">
+            Bejerman
+            <select
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm"
+              value={filters.bejerman}
+              onChange={(event) => setFilter("bejerman", event.target.value)}
+            >
+              <option value="all">Todos los estados</option>
+              <option value="valid">Validado</option>
+              <option value="review">Revisar</option>
+              <option value="pending">Pendiente</option>
+            </select>
+          </label>
+          <div className="flex items-end">
+            <button
+              type="button"
+              className="w-full rounded-md border px-3 py-2 text-sm hover:bg-gray-50"
+              onClick={() => {
+                setFilters({
+                  query: "",
+                  role: "all",
+                  active: "all",
+                  bejerman: "all",
+                });
+                setSort("");
+              }}
+            >
+              Limpiar
+            </button>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+          <span className="font-medium">Estados Bejerman:</span>
+          <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">
+            Validado: listo para operar
+          </span>
+          <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
+            Revisar: hay credenciales con un error
+          </span>
+          <span className="rounded bg-gray-100 px-2 py-1">
+            Pendiente: todavía no se configuró
+          </span>
+          <span className="ml-auto">{sortedRows.length} usuario(s) visibles</span>
+        </div>
+      </div>
+
+      <div className="overflow-auto rounded-lg border bg-white">
+        <table className="min-w-[1100px] w-full">
           <thead>
             <tr className="bg-gray-50 text-left">
-              <th className="p-2">ID</th>
-              <th className="p-2">Nombre</th>
-              <th className="p-2">Email</th>
-              <th className="p-2">Rol</th>
-              <th className="p-2">Bejerman</th>
-              <th className="p-2 w-[92px] whitespace-nowrap" title="Permisos personalizados">
-                Perm.
-              </th>
-              <th className="p-2">Activo</th>
+              <SortableTh field="id" label="ID" sort={sort} onSortChange={setSort} className="p-2" />
+              <SortableTh field="nombre" label="Usuario" sort={sort} onSortChange={setSort} className="p-2" />
+              <SortableTh field="rol" label="Rol" sort={sort} onSortChange={setSort} className="p-2" />
+              <SortableTh field="bejerman" label="Bejerman" sort={sort} onSortChange={setSort} className="p-2" />
+              <SortableTh field="ultimo_acceso" label="Último acceso" sort={sort} onSortChange={setSort} className="p-2" />
+              <SortableTh field="permisos" label="Permisos" sort={sort} onSortChange={setSort} className="p-2 w-[110px] whitespace-nowrap" title="Permisos personalizados: modificaciones sobre lo heredado por el rol" />
+              <SortableTh field="activo" label="Estado NEXORA" sort={sort} onSortChange={setSort} className="p-2" />
               <th className="p-2 w-[52px] text-center" title="Acciones">
                 <span className="sr-only">Acciones</span>
                 <span aria-hidden="true">⋮</span>
@@ -524,16 +792,34 @@ export default function Usuarios() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((u) => {
-              const canOpenActions = canManageUsers || canManagePermissions;
+            {sortedRows.map((u) => {
               return (
-                <tr key={u.id} className="border-t">
+                <tr
+                  key={u.id}
+                  className={`border-t hover:bg-blue-50/40 ${
+                    Number(selectedUser?.id) === Number(u.id) ? "bg-blue-50" : ""
+                  }`}
+                  onDoubleClick={() => openDetail(u.id)}
+                >
                   <td className="p-2">{u.id}</td>
-                  <td className="p-2">{u.nombre}</td>
-                  <td className="p-2">{u.email}</td>
+                  <td className="p-2">
+                    <button
+                      type="button"
+                      className="text-left"
+                      onClick={() => openDetail(u.id)}
+                    >
+                      <span className="block font-medium text-gray-900 hover:text-blue-700">
+                        {u.nombre}
+                      </span>
+                      <span className="block text-xs text-gray-500">{u.email}</span>
+                    </button>
+                  </td>
                   <td className="p-2">
                     {canChangeRole ? (
-                      <Select value={u.rol} onChange={(e) => cambiarRol(u, e.target.value)}>
+                      <Select
+                        value={u.rol}
+                        onChange={(e) => cambiarRol(u, e.target.value)}
+                      >
                         {roles.map((o) => (
                           <option key={o.value} value={o.value}>
                             {o.label}
@@ -546,9 +832,16 @@ export default function Usuarios() {
                   </td>
                   <td className="p-2">
                     {u.bejerman_credentials_valid ? (
-                      <span className="inline-flex rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
-                        Validado {u.bejerman_credentials_username || ""}
-                      </span>
+                      <div>
+                        <span className="inline-flex rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                          Validado {u.bejerman_credentials_username || ""}
+                        </span>
+                        {u.bejerman_workstation && (
+                          <div className="mt-1 text-xs text-gray-500">
+                            Puesto {u.bejerman_workstation}
+                          </div>
+                        )}
+                      </div>
                     ) : u.bejerman_credentials_configured ? (
                       <span
                         className="inline-flex rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700"
@@ -562,8 +855,20 @@ export default function Usuarios() {
                       </span>
                     )}
                   </td>
-                  <td className="p-2 w-[92px]">
-                    <span className="inline-flex min-w-7 justify-center rounded bg-gray-100 px-2 py-1 text-sm">
+                  <td className="p-2">
+                    <button
+                      type="button"
+                      className="text-left text-sm hover:text-blue-700"
+                      onClick={() => openDetail(u.id)}
+                    >
+                      {formatUserDate(u.last_login_at)}
+                    </button>
+                  </td>
+                  <td className="p-2 w-[110px]">
+                    <span
+                      className="inline-flex min-w-7 justify-center rounded bg-gray-100 px-2 py-1 text-sm"
+                      title={`${Number(u?.permisos_permitidos || 0)} permitidos y ${Number(u?.permisos_bloqueados || 0)} bloqueados`}
+                    >
                       {Number(u?.permisos_personalizados || 0)}
                     </span>
                   </td>
@@ -582,32 +887,30 @@ export default function Usuarios() {
                     )}
                   </td>
                   <td className="p-2 w-[52px] text-right">
-                    {canOpenActions ? (
-                      <div className="inline-flex justify-end">
-                        <button
-                          type="button"
-                          className="h-8 w-8 rounded border hover:bg-gray-50"
-                          aria-label="Abrir acciones"
-                          ref={(el) => {
-                            if (el) menuButtonRefs.current[u.id] = el;
-                            else delete menuButtonRefs.current[u.id];
-                          }}
-                          onClick={() => toggleActionsMenu(u.id)}
-                        >
-                          {"\u22EE"}
-                        </button>
-                      </div>
-                    ) : (
-                      <span className="text-gray-400">-</span>
-                    )}
+                    <div className="inline-flex justify-end">
+                      <button
+                        type="button"
+                        className="h-8 w-8 rounded border hover:bg-gray-50"
+                        aria-label={`Abrir acciones de ${u.nombre}`}
+                        ref={(el) => {
+                          if (el) menuButtonRefs.current[u.id] = el;
+                          else delete menuButtonRefs.current[u.id];
+                        }}
+                        onClick={() => toggleActionsMenu(u.id)}
+                      >
+                        {detailLoadingId === Number(u.id) ? "…" : "\u22EE"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
             })}
-            {!rows.length && (
+            {!sortedRows.length && (
               <tr>
-                <td colSpan="8" className="p-4 text-center text-gray-500">
-                  Sin usuarios
+                <td colSpan="8" className="p-8 text-center text-gray-500">
+                  {rows.length
+                    ? "No hay usuarios que coincidan con los filtros."
+                    : "Todavía no hay usuarios."}
                 </td>
               </tr>
             )}
@@ -622,6 +925,17 @@ export default function Usuarios() {
           style={{ top: `${menuPos.top}px`, left: `${menuPos.left}px` }}
         >
           <div className="py-1 text-left">
+            <button
+              type="button"
+              className="w-full px-3 py-2 text-sm font-medium hover:bg-gray-50 text-left"
+              onClick={() => {
+                setMenuOpenId(null);
+                setMenuPos(null);
+                openDetail(menuUser.id);
+              }}
+            >
+              Ver detalle
+            </button>
             {canManageUsers && (
               <button
                 type="button"
@@ -668,6 +982,31 @@ export default function Usuarios() {
             )}
           </div>
         </div>
+      )}
+
+      {selectedUser && (
+        <UserDetailDrawer
+          user={selectedUser}
+          roles={roles}
+          isJefe={isJefe}
+          canManageUsers={canManageUsers}
+          canManagePermissions={canManagePermissions}
+          onClose={() => setSelectedUser(null)}
+          onRefresh={refreshDetail}
+          onOpenPermissions={(user) => {
+            setSelectedUser(null);
+            openPermEditor(user);
+          }}
+          onOpenNotifications={(user) => {
+            setSelectedUser(null);
+            openNotifEditor(user);
+          }}
+          onResetPassword={(user) =>
+            enviarLinkPw(user, { propagate: true })
+          }
+          onToggleActive={toggleActivo}
+          onDelete={borrar}
+        />
       )}
 
       {permOpen && (
