@@ -14,12 +14,14 @@ import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
 import { documentNameFromRis, isRisRegistered, risRemitoFrom } from "../../../lib/ris-print";
 import { getReleaseFlow } from "../../../lib/release-flow";
-import { Printer } from "lucide-react";
+import { Printer, X } from "lucide-react";
+import { ResponsiveModalOverlay, ResponsiveModalPanel } from "../../../components/Responsive.jsx";
 import {
   postEntregarIngreso,
   patchIngreso,
   getIngresoBejermanEstado,
   postIngresoBejermanEstadoAccion,
+  getBejermanRemitosBySerial,
   getIngresoAlquilerRemitoEstado,
   postIngresoAlquilerRemitoAccion,
   checkGarantiaFabrica,
@@ -61,6 +63,305 @@ function bejermanItemQuantity(item) {
   const available = item?.availableQuantity;
   if (available !== null && available !== undefined && available !== "") return available;
   return item?.realQuantity;
+}
+
+// El comprobante dice a quién salió, pero con el código de Bejerman: se muestra la razón
+// social, que es lo que el operador reconoce.
+function nombreClienteDeCandidato(candidate) {
+  return String(candidate?.customer?.name || candidate?.customerName || candidate?.customerCode || "").trim();
+}
+
+function textoCantidadRenglon(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const numero = Number(value);
+  if (!Number.isFinite(numero)) return String(value);
+  return numero.toLocaleString("es-AR", { maximumFractionDigits: 4 });
+}
+
+// Ficha del comprobante tal como está en Bejerman. Es lo que se mira antes de confirmar:
+// el número solo no alcanza para reconocerlo, y una vez asociado el movimiento se deshace
+// a mano.
+function DetalleRemitoBejerman({ candidate, serial }) {
+  const renglones = Array.isArray(candidate?.lines) ? candidate.lines : [];
+  const clienteLocal = String(candidate?.customer?.name || "").trim();
+  const clienteBejerman = String(candidate?.customerName || "").trim();
+  const codigo = String(candidate?.customerCode || "").trim();
+  const otros = Number(candidate?.otherItemCount || 0);
+  const traeElEquipo = renglones.some((linea) => linea?.isSearchedItem);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div>
+          <div className="text-[11px] font-semibold uppercase text-gray-500">Comprobante</div>
+          <div className="font-mono text-sm text-gray-900">{candidate?.remitoNumber || "-"}</div>
+        </div>
+        <div>
+          <div className="text-[11px] font-semibold uppercase text-gray-500">Fecha de emisión</div>
+          <div className="text-sm text-gray-900">
+            {candidate?.issueDate ? formatDateOnlyHelper(candidate.issueDate) : "-"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] font-semibold uppercase text-gray-500">Cliente en Bejerman</div>
+          <div className="text-sm text-gray-900">
+            {clienteBejerman || "-"}
+            {codigo ? <span className="ml-1 text-xs text-gray-500">({codigo})</span> : null}
+          </div>
+          {candidate?.customerCuit ? (
+            <div className="text-xs text-gray-500">CUIT {candidate.customerCuit}</div>
+          ) : null}
+        </div>
+        <div>
+          <div className="text-[11px] font-semibold uppercase text-gray-500">Cliente en NEXORA</div>
+          <div className="text-sm text-gray-900">
+            {clienteLocal || <span className="text-amber-700">No está en el maestro de clientes</span>}
+          </div>
+        </div>
+      </div>
+      {candidate?.notes ? (
+        <div>
+          <div className="text-[11px] font-semibold uppercase text-gray-500">Observaciones</div>
+          <div className="text-sm text-gray-900">{candidate.notes}</div>
+        </div>
+      ) : null}
+      <div>
+        <div className="mb-1 text-[11px] font-semibold uppercase text-gray-500">
+          Renglones del remito ({candidate?.lineCount ?? renglones.length})
+        </div>
+        <div className="overflow-x-auto rounded border">
+          <table className="min-w-full text-xs">
+            <thead className="bg-gray-50 text-gray-600">
+              <tr>
+                <th className="px-2 py-1 text-left">Artículo</th>
+                <th className="px-2 py-1 text-left">Descripción</th>
+                <th className="px-2 py-1 text-left">Serie / partida</th>
+                <th className="px-2 py-1 text-right">Cant.</th>
+                <th className="px-2 py-1 text-left">Depósito</th>
+              </tr>
+            </thead>
+            <tbody>
+              {renglones.map((linea, index) => (
+                <tr
+                  key={`${candidate?.remitoNumber}-${linea?.row || index}`}
+                  className={linea?.isSearchedItem ? "bg-emerald-50 font-medium text-emerald-900" : "text-gray-800"}
+                >
+                  <td className="px-2 py-1 font-mono">{linea?.articleCode || "-"}</td>
+                  <td className="px-2 py-1">{linea?.description || "-"}</td>
+                  <td className="px-2 py-1 font-mono">
+                    {linea?.partida || "-"}
+                    {linea?.isSearchedItem ? <span className="ml-1 text-[10px] uppercase">(este equipo)</span> : null}
+                  </td>
+                  <td className="px-2 py-1 text-right">{textoCantidadRenglon(linea?.quantity)}</td>
+                  <td className="px-2 py-1">{linea?.warehouse || "-"}</td>
+                </tr>
+              ))}
+              {!renglones.length && (
+                <tr>
+                  <td className="px-2 py-2 text-gray-600" colSpan={5}>Bejerman no devolvió el detalle de este remito.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {candidate?.linesTruncated && (
+          <div className="mt-1 text-xs text-gray-600">Se muestran los primeros renglones del comprobante.</div>
+        )}
+        {otros > 0 && (
+          <div className="mt-1 text-xs text-gray-700">
+            El remito lleva {otros === 1 ? "un renglón más" : `${otros} renglones más`} además de este equipo.
+          </div>
+        )}
+        {renglones.length > 0 && !traeElEquipo && (
+          <div className="mt-1 text-xs text-amber-700">
+            En el detalle no figura la serie {serial || "buscada"}: revisá que sea el remito correcto.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Busca en Bejerman el remito ya emitido para este equipo. El operador tiene el equipo
+// delante, no el número de comprobante: pedirle el número era pedirle lo que no tiene.
+// Elegir un candidato no aplica nada por sí solo: abre la ficha del comprobante y recién
+// ahí se confirma, porque asociarlo escribe el alquiler y deshacerlo es a mano.
+function BuscadorRemitoBejerman({
+  flow,
+  ingresoId,
+  serial,
+  onPick,
+  disabled = false,
+  resumenCambios,
+  advertencia = "",
+  confirmLabel = "Confirmar y guardar",
+}) {
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [pendiente, setPendiente] = useState(null);
+  const [aplicando, setAplicando] = useState(false);
+  const [errorConfirmacion, setErrorConfirmacion] = useState("");
+  const etiqueta = flow === "rental" ? "RTA" : "RSS";
+
+  const buscar = async () => {
+    const identificador = String(serial || "").trim();
+    if (!identificador) {
+      setResult({ status: "sin_serie", detail: "El ingreso no tiene número de serie ni MG cargado." });
+      return;
+    }
+    setLoading(true);
+    try {
+      setResult(await getBejermanRemitosBySerial({ serial: identificador, flow, ingresoId }));
+    } catch (err) {
+      setResult({ status: "error", detail: err?.data?.detail || err?.message || "No se pudo consultar Bejerman." });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cerrarConfirmacion = () => {
+    if (aplicando) return;
+    setPendiente(null);
+    setErrorConfirmacion("");
+  };
+
+  useEffect(() => {
+    if (!pendiente) return undefined;
+    const alTeclear = (event) => {
+      if (event.key === "Escape" && !aplicando) {
+        setPendiente(null);
+        setErrorConfirmacion("");
+      }
+    };
+    window.addEventListener("keydown", alTeclear);
+    return () => window.removeEventListener("keydown", alTeclear);
+  }, [pendiente, aplicando]);
+
+  const confirmar = async () => {
+    if (!pendiente || aplicando) return;
+    setAplicando(true);
+    setErrorConfirmacion("");
+    try {
+      await onPick(pendiente.remitoNumber, pendiente);
+      setPendiente(null);
+      setResult(null);
+    } catch (err) {
+      setErrorConfirmacion(err?.data?.detail || err?.message || "No se pudo guardar el remito.");
+    } finally {
+      setAplicando(false);
+    }
+  };
+
+  const candidatos = result?.status === "ok" ? result.candidates || [] : [];
+  const yaAsociados = result?.status === "ok" ? result.alreadyLinked || [] : [];
+  const cambios = pendiente && typeof resumenCambios === "function" ? resumenCambios(pendiente) || [] : [];
+
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        className="rounded border border-sky-300 px-2 py-1 text-xs text-sky-900 hover:bg-sky-50 disabled:opacity-60"
+        onClick={buscar}
+        disabled={disabled || loading}
+      >
+        {loading ? "Buscando..." : `Buscar ${etiqueta} en Bejerman`}
+      </button>
+      {result && result.status !== "ok" && (
+        <div className="mt-1 text-xs text-amber-700">{result.detail || "No se pudo consultar Bejerman."}</div>
+      )}
+      {result?.status === "ok" && (
+        <div className="mt-1 space-y-1">
+          {candidatos.map((candidate) => (
+            <button
+              key={candidate.remitoNumber}
+              type="button"
+              className="block w-full rounded border border-sky-200 bg-sky-50 px-2 py-1 text-left text-xs hover:bg-sky-100"
+              onClick={() => { setErrorConfirmacion(""); setPendiente(candidate); }}
+            >
+              <span className="font-mono font-semibold">{candidate.remitoNumber}</span>
+              <span className="ml-2 text-gray-600">
+                {candidate.issueDate}
+                {nombreClienteDeCandidato(candidate) ? ` · ${nombreClienteDeCandidato(candidate)}` : ""}
+              </span>
+              {Number(candidate?.lineCount || 0) > 1 && (
+                <span className="ml-2 text-gray-500">{candidate.lineCount} renglones</span>
+              )}
+              <span className="ml-2 text-sky-800 underline">Ver y confirmar</span>
+            </button>
+          ))}
+          {!candidatos.length && (
+            <div className="text-xs text-gray-600">
+              {yaAsociados.length
+                ? `Ya asociado a esta serie: ${yaAsociados.map((item) => item.remitoNumber).join(", ")}`
+                : `Bejerman no tiene ${etiqueta} para este equipo desde su fecha de ingreso.`}
+            </div>
+          )}
+        </div>
+      )}
+      {pendiente && (
+        <ResponsiveModalOverlay align="center" onClick={cerrarConfirmacion}>
+          <ResponsiveModalPanel className="max-w-3xl" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4 border-b px-4 py-3">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Confirmar el remito {etiqueta}</h2>
+                <p className="text-xs text-gray-600">Revisá el comprobante en Bejerman antes de asociarlo al equipo.</p>
+              </div>
+              <button
+                type="button"
+                onClick={cerrarConfirmacion}
+                disabled={aplicando}
+                className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                aria-label="Cerrar"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="space-y-3 px-4 py-3">
+              <DetalleRemitoBejerman candidate={pendiente} serial={result?.serial || serial} />
+              {cambios.length > 0 && (
+                <div className="rounded border border-sky-200 bg-sky-50 p-2">
+                  <div className="text-[11px] font-semibold uppercase text-sky-900">Se va a guardar en NEXORA</div>
+                  <ul className="mt-1 space-y-0.5 text-xs text-sky-950">
+                    {cambios.map((cambio) => (
+                      <li key={cambio.campo}>
+                        <span className="font-semibold">{cambio.campo}:</span>{" "}
+                        <span className="text-gray-600 line-through">{cambio.actual || "vacío"}</span>{" "}
+                        <span aria-hidden="true">→</span> <span>{cambio.nuevo || "vacío"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {typeof resumenCambios === "function" && !cambios.length && (
+                <div className="text-xs text-gray-600">
+                  Este remito ya figura así en NEXORA: confirmar no cambia nada.
+                </div>
+              )}
+              {advertencia ? <div className="text-xs text-amber-700">{advertencia}</div> : null}
+              {errorConfirmacion ? <div className="text-xs text-red-700">{errorConfirmacion}</div> : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t px-4 py-3">
+              <button
+                type="button"
+                className="rounded border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                onClick={cerrarConfirmacion}
+                disabled={aplicando}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="rounded bg-sky-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-sky-800 disabled:opacity-50"
+                onClick={confirmar}
+                disabled={aplicando}
+              >
+                {aplicando ? "Guardando..." : confirmLabel}
+              </button>
+            </div>
+          </ResponsiveModalPanel>
+        </ResponsiveModalOverlay>
+      )}
+    </div>
+  );
 }
 
 export default function PrincipalTab(props) {
@@ -360,6 +661,7 @@ export default function PrincipalTab(props) {
   const [rentalRemitoLoading, setRentalRemitoLoading] = useState(false);
   const [rentalRemitoError, setRentalRemitoError] = useState("");
   const [rentalActionBusy, setRentalActionBusy] = useState(false);
+  const equipoIdentificador = String(data?.numero_serie || data?.numero_interno || "").trim();
   const cargarEstadoAlquilerRemito = useCallback(async () => {
     if (!id) return;
     setRentalRemitoLoading(true);
@@ -482,6 +784,53 @@ export default function PrincipalTab(props) {
     await patch({ [field]: next });
   }, [alquilerEditable, clientes, data?.alquiler_a, data?.alquiler_remito, normClient, patch]);
 
+  // Al elegir el RTA encontrado se completa también a quién salió: el comprobante ya lo
+  // dice y volver a tipearlo a mano es justo donde se perdía el cliente del alquiler.
+  // La fecha se pone sólo si estaba vacía, para no pisar una carga deliberada.
+  const camposAlquilerDesdeRemito = useCallback((candidato) => {
+    const remito = String(candidato?.remitoNumber || "").trim();
+    const nombreBejerman = String(candidato?.customer?.name || candidato?.customerName || "").trim();
+    const codigoBejerman = String(candidato?.customer?.code || candidato?.customerCode || "").trim();
+    const clienteCatalogo = (clientes || []).find((c) => (
+      (nombreBejerman && normClient(c?.razon_social) === normClient(nombreBejerman))
+      || (codigoBejerman && normClient(c?.cod_empresa) === normClient(codigoBejerman))
+    ));
+    const cliente = String(clienteCatalogo?.razon_social || nombreBejerman).trim();
+    const fecha = String(candidato?.issueDate || "").slice(0, 10);
+    const fields = {};
+    if (remito && remito !== String(data?.alquiler_remito || "").trim()) fields.alquiler_remito = remito;
+    if (cliente && cliente !== String(data?.alquiler_a || "").trim()) fields.alquiler_a = cliente;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha) && !String(data?.alquiler_fecha || "").trim()) {
+      fields.alquiler_fecha = fecha;
+    }
+    return { fields, remito, cliente };
+  }, [clientes, data?.alquiler_a, data?.alquiler_fecha, data?.alquiler_remito, normClient]);
+
+  // Lo que va a quedar escrito, campo por campo: el operador confirma sobre esto, no sobre
+  // un numero suelto.
+  const resumenAlquilerDesdeRemito = useCallback((candidato) => {
+    const { fields } = camposAlquilerDesdeRemito(candidato);
+    const etiquetas = { alquiler_remito: "Remito", alquiler_a: "¿A quién?", alquiler_fecha: "Fecha" };
+    const actuales = {
+      alquiler_remito: String(data?.alquiler_remito || "").trim(),
+      alquiler_a: String(data?.alquiler_a || "").trim(),
+      alquiler_fecha: String(data?.alquiler_fecha || "").slice(0, 10),
+    };
+    return Object.keys(fields).map((campo) => ({
+      campo: etiquetas[campo] || campo,
+      actual: campo === "alquiler_fecha" && actuales[campo] ? formatDateOnlyHelper(actuales[campo]) : actuales[campo],
+      nuevo: campo === "alquiler_fecha" ? formatDateOnlyHelper(fields[campo]) : String(fields[campo] || ""),
+    }));
+  }, [camposAlquilerDesdeRemito, data?.alquiler_a, data?.alquiler_fecha, data?.alquiler_remito]);
+
+  const aplicarRemitoAlquilerEncontrado = useCallback(async (_numero, candidato) => {
+    if (!alquilerEditable) return;
+    const { fields, remito, cliente } = camposAlquilerDesdeRemito(candidato);
+    if (remito) setAlquilerRemitoInput(remito);
+    if (cliente) setAlquilerAInput(cliente);
+    if (Object.keys(fields).length) await patch(fields);
+  }, [alquilerEditable, camposAlquilerDesdeRemito, patch]);
+
   const blurOnEnter = useCallback((event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -593,9 +942,11 @@ export default function PrincipalTab(props) {
           model_id: data?.model_id ?? null,
         });
         if (typeof r?.within_365_days !== "boolean") {
-          setForm((f) => ({ ...f, garantia_fabrica: false }));
+          setFormBasics((s) => ({ ...(s || {}), garantia: false }));
           return;
         }
+        // Fecha estimada por remito: se deja como está y decide la persona.
+        if (r?.estimated === true) return;
         const enGarantia = r.within_365_days;
         setFormBasics((s) => ({ ...(s || {}), garantia: enGarantia }));
       } catch {
@@ -1268,11 +1619,26 @@ export default function PrincipalTab(props) {
             <div className="grid grid-cols-1 gap-3">
                 <Row label="Remito salida (requerido)">{
 
-                <input
-                  className="border rounded p-2 w-full"
-                  value={entrega.remito_salida}
-                  onChange={(e) => setEntrega({ ...entrega, remito_salida: e.target.value })}
-                />
+                <div>
+                  <input
+                    className="border rounded p-2 w-full"
+                    value={entrega.remito_salida}
+                    onChange={(e) => setEntrega({ ...entrega, remito_salida: e.target.value })}
+                  />
+                  <BuscadorRemitoBejerman
+                    flow="service_release"
+                    ingresoId={id}
+                    serial={equipoIdentificador}
+                    onPick={(numero) => setEntrega((current) => ({ ...current, remito_salida: numero }))}
+                    resumenCambios={(candidato) => {
+                      const actual = String(entrega?.remito_salida || "").trim();
+                      const nuevo = String(candidato?.remitoNumber || "").trim();
+                      return actual === nuevo ? [] : [{ campo: "Remito salida", actual, nuevo }];
+                    }}
+                    confirmLabel="Usar este remito"
+                    advertencia="Se completa el campo; la entrega se registra con el botón de abajo."
+                  />
+                </div>
                 }
                 </Row>
               <Row label="Factura (opcional)">{
@@ -1495,14 +1861,26 @@ export default function PrincipalTab(props) {
           </div>
         </Row>
         <Row label="Remito">
-          <input
-            className="border rounded p-1 w-60"
-            value={alquilerRemitoInput}
-            onChange={(e) => { if (alquilerEditable) setAlquilerRemitoInput(e.target.value); }}
-            onBlur={() => commitAlquilerText("alquiler_remito", alquilerRemitoInput)}
-            onKeyDown={blurOnEnter}
-            disabled={!alquilerEditable}
-          />
+          <div className="w-full">
+            <input
+              className="border rounded p-1 w-60"
+              value={alquilerRemitoInput}
+              onChange={(e) => { if (alquilerEditable) setAlquilerRemitoInput(e.target.value); }}
+              onBlur={() => commitAlquilerText("alquiler_remito", alquilerRemitoInput)}
+              onKeyDown={blurOnEnter}
+              disabled={!alquilerEditable}
+            />
+            {alquilerEditable && (
+              <BuscadorRemitoBejerman
+                flow="rental"
+                ingresoId={id}
+                serial={equipoIdentificador}
+                onPick={aplicarRemitoAlquilerEncontrado}
+                resumenCambios={resumenAlquilerDesdeRemito}
+                advertencia="Al confirmar, el equipo queda asociado a este remito de alquiler."
+              />
+            )}
+          </div>
         </Row>
         <Row label="Fecha">
           <input

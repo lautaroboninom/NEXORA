@@ -62,8 +62,8 @@ import { MOTIVO_OPTIONS } from "./constants";
     if (pathname.includes("/api/cobranzas/remitos/") && pathname.includes("/pdf/")) {
       return {
         title: "Preparando PDF de remito",
-        status: "Consultando Bejerman",
-        detail: "NEXORA está esperando el PDF del remito.",
+        status: "Preparando el PDF en NEXORA",
+        detail: "NEXORA está preparando el PDF del remito para abrirlo cuando esté listo.",
       };
     }
     if (pathname.includes("/api/cobranzas/remitos/")) {
@@ -104,8 +104,8 @@ import { MOTIVO_OPTIONS } from "./constants";
     if (pathname.includes("/api/ordenes-entrega/remito-bejerman/") && pathname.includes("/pdf/")) {
       return {
         title: "Preparando PDF de remito",
-        status: "Consultando Bejerman",
-        detail: "NEXORA está esperando el PDF del remito.",
+        status: "Preparando el PDF en NEXORA",
+        detail: "NEXORA está preparando el PDF del remito para abrirlo cuando esté listo.",
       };
     }
     if (pathname.includes("/api/ordenes-entrega/remito-bejerman/historial/")) {
@@ -201,6 +201,57 @@ import { MOTIVO_OPTIONS } from "./constants";
     return String(contentType || "").toLowerCase().includes("html") || value.startsWith("<!doctype") || value.startsWith("<html");
   }
 
+  function looksLikeBejermanInternalError(text) {
+    const normalized = String(text || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    return [
+      "invalid column name",
+      "multi-part identifier",
+      "order by items must appear",
+      "error en la ejecucion",
+      "exception has been thrown by the target of an invocation",
+    ].some((marker) => normalized.includes(marker));
+  }
+
+  function httpErrorMessage(res, data, contentType = "") {
+    const status = Number(res?.status);
+    const gatewayUnavailable = [502, 503, 504].includes(status);
+    const htmlResponse = typeof data === "string" && looksLikeHtmlResponse(data, contentType);
+    if (gatewayUnavailable) {
+      return status === 504
+        ? "El servidor no respondió a tiempo. Reintentá en unos minutos."
+        : "El servidor no está disponible en este momento. Reintentá en unos minutos.";
+    }
+    if (htmlResponse) return `No se pudo completar la solicitud (HTTP ${res.status}).`;
+    return typeof data === "string" ? data : data?.detail || JSON.stringify(data);
+  }
+
+  // Las consultas de catálogo/stock pueden cruzar el proxy antes de que NEXORA
+  // reciba una respuesta de Bejerman. Nunca se debe propagar la página HTML del
+  // gateway al operador: una caída temporal no significa que no haya partidas.
+  export function bejermanLookupErrorMessage(error, fallback = "No se pudo consultar Bejerman.") {
+    const status = Number(error?.status || error?.response?.status);
+    const contentType = error?.response?.headers?.get?.("content-type") || "";
+    const responseData = typeof error?.data === "string" ? error.data : "";
+    const message = String(error?.message || "").trim();
+    const gatewayUnavailable = [502, 503, 504].includes(status);
+    const htmlResponse = looksLikeHtmlResponse(responseData, contentType) || looksLikeHtmlResponse(message, contentType);
+    if (gatewayUnavailable || htmlResponse) {
+      const base = String(fallback || "No se pudo consultar Bejerman").replace(/[.\s]+$/, "");
+      const detail = status === 504
+        ? "Bejerman no respondió a tiempo"
+        : "Bejerman no está disponible en este momento";
+      return `${base}: ${detail}. Reintentá en unos minutos.`;
+    }
+    if (looksLikeBejermanInternalError(message)) {
+      const base = String(fallback || "No se pudo consultar Bejerman").replace(/[.\s]+$/, "");
+      return `${base}: Bejerman devolvió un error interno. Podés completar los datos manualmente o reintentar en unos minutos.`;
+    }
+    return message || fallback;
+  }
+
   /* ===== Token en memoria (compatibilidad) ===== */
   let token = null;
   export const setToken = (t) => {
@@ -276,8 +327,7 @@ import { MOTIVO_OPTIONS } from "./constants";
     }
 
     if (!res.ok) {
-      const msg =
-        typeof data === "string" ? data : data.detail || JSON.stringify(data);
+      const msg = httpErrorMessage(res, data, ct);
       const err = new Error(`${res.status} ${res.statusText}: ${msg}`);
       err.status = res.status;
       err.data = data;
@@ -716,6 +766,10 @@ export const postModelo = (brandId, payloadOrNombre) => {
     api.post("/api/ingresos/ris/preflight/customer-fix/", payload);
   export const postRisPreflightArticleFix = (payload) =>
     api.post("/api/ingresos/ris/preflight/article-fix/", payload);
+  export const postIngresoConflictoEvidencia = (payload) =>
+    api.post("/api/ingresos/conflictos/evidencia/", payload);
+  export const postIngresoConflictoResolver = (payload) =>
+    api.post("/api/ingresos/conflictos/resolver/", payload);
   export const postIngresoRisEmitir = (ingresoId) =>
     api.post(`/api/ingresos/${ingresoId}/ris/emitir/`);
   export const getIngresoRisPdfBlob = (ingresoId) =>
@@ -854,6 +908,10 @@ export const postModelo = (brandId, payloadOrNombre) => {
     params.set("code", code || "");
     const companyKey = opts?.company_key || opts?.companyKey || "";
     if (companyKey) params.set("company_key", companyKey);
+    // Un mismo N/S puede traer dos equipos (el humidificador va con la serie del CPAP).
+    // `device_id` fija cuál, cuando el operador ya eligió.
+    const deviceId = opts?.device_id || opts?.deviceId || "";
+    if (deviceId) params.set("device_id", String(deviceId));
     return api.get(`/api/scan/lookup/?${params.toString()}`);
   };
   // Entregar (requiere remito; opcional factura y fecha; si resolucion=cambio: serial_confirm requerido)
@@ -1059,6 +1117,18 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postDeliveryOrderRemitos = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/remitos/`, payload);
 
+  // Busca en Bejerman el remito ya emitido para un equipo, por serie o por MG: el
+  // operador tiene el equipo en la mano, no el número de comprobante.
+  export const getBejermanRemitosBySerial = ({ serial, flow, companyKey, ingresoId, since } = {}) => {
+    const params = new URLSearchParams();
+    params.set("serial", String(serial ?? "").trim());
+    if (flow) params.set("flow", flow);
+    if (companyKey) params.set("companyKey", companyKey);
+    if (ingresoId) params.set("ingresoId", String(ingresoId));
+    if (since) params.set("since", since);
+    return api.get(`/api/bejerman/remitos/buscar-por-serie/?${params.toString()}`);
+  };
+
   export const postDeliveryOrderDelivered = (orderId, payload = {}) =>
     api.post(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/entregar/`, payload);
 
@@ -1098,8 +1168,31 @@ export const postModelo = (brandId, payloadOrNombre) => {
       { partidas }
     );
 
+  // Devuelve `{jobId, status}`, no el remito: la emisión corre fuera del request.
+  // Ver `lib/delivery-remito-job.js` para el porqué (pestañas congeladas).
   export const postDeliveryOrderBejermanRemito = (payload = {}) =>
     api.post("/api/ordenes-entrega/remito-bejerman/", payload);
+
+  export const getDeliveryOrderBejermanRemitoJob = (jobId) =>
+    api.get(`/api/ordenes-entrega/remito-bejerman/jobs/${encodeURIComponent(jobId)}/`, {
+      // El sondeo no debe encender el aviso global de "NEXORA está hablando con
+      // Bejerman": ya hay un modal contándolo, y el cartel parpadearía cada segundo.
+      skipBejermanActivity: true,
+    });
+
+  // La consulta simple no toca Bejerman (es la cola de jobs en la base) y no debe
+  // levantar el aviso global; el reintento sí lo toca y puede tardar.
+  export const postDeliveryOrderBejermanRemitoPreflight = (payload = {}) =>
+    api.post("/api/ordenes-entrega/remito-bejerman/preflight/", payload, {
+      skipBejermanActivity: !payload?.retry,
+      bejermanActivity: payload?.retry
+        ? {
+            title: "Sincronizando stock",
+            status: "Reintentando la transferencia en Bejerman",
+            detail: "NEXORA está reintentando mover el equipo al depósito de entrega.",
+          }
+        : null,
+    });
 
   export const getDeliveryOrderRemitoHistory = (params = {}) => {
     const qs = buildQuery(params);
@@ -1275,11 +1368,14 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const patchDeviceIdentificadores = patchDeviceEditable;
   export const postDevicesMerge = (payload) =>
     api.post("/api/devices/merge/", payload);
-  // Check garantía de reparación por N/S
-  export const checkGarantiaReparacion = (numero_serie, numero_interno) => {
+  // Check garantía de reparación por N/S.
+  // El tipo de equipo es opcional y desempata los equipos que comparten serie: el
+  // humidificador entra con la del CPAP y no hereda la garantía de reparación del CPAP.
+  export const checkGarantiaReparacion = (numero_serie, numero_interno, tipo_equipo = "") => {
     const params = new URLSearchParams();
     if (numero_serie) params.set("numero_serie", numero_serie);
     if (numero_interno) params.set("numero_interno", numero_interno);
+    if (tipo_equipo) params.set("tipo_equipo", tipo_equipo);
     const qs = params.toString();
     return api.get(`/api/equipos/garantia-reparacion/${qs ? `?${qs}` : ""}`);
   };
@@ -1419,7 +1515,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
     api.post(`/api/quotes/${ingresoId}/no-aplica/quitar/`);
 
   // === GET binario (Blob) con auth y cookies ===
-  export async function getBlob(path, opts = {}) {
+  // Devuelve tambin los headers: algunos endpoints (el lote de rdenes de
+  // salida) responden el PDF y cuentan aparte qu sali y qu fall.
+  export async function getBlobWithMeta(path, opts = {}) {
     const res = await fetchWithAuth(path, {
       method: "GET",
       ...opts,
@@ -1444,7 +1542,12 @@ export const postModelo = (brandId, payloadOrNombre) => {
       err.response = res;
       throw err;
     }
-    return await res.blob();
+    return { blob: await res.blob(), headers: res.headers };
+  }
+
+  export async function getBlob(path, opts = {}) {
+    const { blob } = await getBlobWithMeta(path, opts);
+    return blob;
   }
 
   export const postQuoteAnular = (ingresoId) =>

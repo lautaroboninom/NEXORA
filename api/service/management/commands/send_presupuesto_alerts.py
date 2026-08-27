@@ -4,8 +4,8 @@ from django.core.management.base import BaseCommand
 from django.core.mail import EmailMessage, get_connection, send_mail
 from django.utils import timezone
 
-from service.views.helpers import _email_append_footer_text, exec_void, os_label, q
-from service.notifications import emit_notification
+from service.views.helpers import _email_append_footer_text, exec_void, mg_estado_select_sql, os_label, q
+from service.notifications import emit_notification, filter_email_recipients_by_preference
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,9 @@ def _ns_label(r):
     try:
         interno = (r.get("numero_interno") or "").strip()
         serie = (r.get("numero_serie") or "").strip()
+        # Un MG vendido es histórico: el equipo ya se identifica por su N/S.
+        if str(r.get("mg_estado") or "").strip().lower() == "inactivo_venta":
+            return serie or "-"
         return interno or serie or "-"
     except Exception:
         return "-"
@@ -143,13 +146,15 @@ class Command(BaseCommand):
                AND COALESCE(email,'') <> ''
             """
         ) or []
-        recipients = [r.get("email") for r in recips if r.get("email")]
-        if not recipients:
+        campana = [r.get("email") for r in recips if r.get("email")]
+        # El correo respeta el toggle "Mail" de cada jefe; la campana no.
+        recipients = filter_email_recipients_by_preference("presupuesto_pendiente", campana)
+        if not campana:
             self.stdout.write("No hay destinatarios (rol jefe).")
             return
 
         rows = q(
-            """
+            f"""
             WITH base AS (
               SELECT
                 t.id,
@@ -160,6 +165,7 @@ class Command(BaseCommand):
                 COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
                 COALESCE(d.numero_interno,'') AS numero_interno,
                 COALESCE(d.numero_serie,'') AS numero_serie,
+                {mg_estado_select_sql()}
                 q.fecha_emitido AS presupuesto_fecha_emision,
                 CASE
                   WHEN ipa.last_sent_at IS NOT NULL AND ipa.last_sent_at >= q.fecha_emitido THEN ipa.last_sent_at
@@ -248,7 +254,7 @@ class Command(BaseCommand):
             try:
                 emit_notification(
                     "presupuesto_pendiente",
-                    emails=recipients,
+                    emails=campana,
                     title=f"Presupuesto pendiente - {os_txt}",
                     body="\n".join(
                         [
@@ -262,29 +268,40 @@ class Command(BaseCommand):
                     severity="critical",
                     entity_type="ingreso",
                     entity_id=ingreso_id,
-                    dedupe_key=f"ingreso:{ingreso_id}:presupuesto_pendiente:{timezone.localdate().isoformat()}",
+                    # Sin la fecha adentro: un renglón por OS que se refresca
+                    # en cada repetición, en vez de uno nuevo por día.
+                    dedupe_key=f"ingreso:{ingreso_id}:presupuesto_pendiente",
                     payload={"ingreso_id": ingreso_id, "dias": dias},
+                    push=True,
+                    refresh=True,
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo crear la notificación de presupuesto pendiente",
+                    extra={"ingreso_id": ingreso_id},
+                )
 
             ok, debug = _send_mail_with_fallback(subject, body, recipients)
-            if ok:
-                try:
-                    exec_void(
-                        """
-                        INSERT INTO ingreso_presupuesto_alerts (ingreso_id, last_sent_at, created_at, updated_at)
-                        VALUES (%s, NOW(), NOW(), NOW())
-                        ON CONFLICT (ingreso_id) DO UPDATE
-                           SET last_sent_at = EXCLUDED.last_sent_at,
-                               updated_at = EXCLUDED.updated_at
-                        """,
-                        [ingreso_id],
-                    )
+            # `last_sent_at` marca la cadencia del aviso completo, no la del
+            # correo: si se actualiza sólo cuando el mail sale bien, un envío
+            # fallido hace que la campana se repita todos los días en lugar de
+            # cada PRESUPUESTO_ALERT_REPEAT_DAYS.
+            try:
+                exec_void(
+                    """
+                    INSERT INTO ingreso_presupuesto_alerts (ingreso_id, last_sent_at, created_at, updated_at)
+                    VALUES (%s, NOW(), NOW(), NOW())
+                    ON CONFLICT (ingreso_id) DO UPDATE
+                       SET last_sent_at = EXCLUDED.last_sent_at,
+                           updated_at = EXCLUDED.updated_at
+                    """,
+                    [ingreso_id],
+                )
+                if ok:
                     sent_count += 1
-                except Exception:
-                    logger.exception("presupuesto_alerts failed to update last_sent_at", extra={"ingreso_id": ingreso_id})
-            else:
+            except Exception:
+                logger.exception("presupuesto_alerts failed to update last_sent_at", extra={"ingreso_id": ingreso_id})
+            if not ok:
                 logger.warning(
                     "presupuesto_alerts failed",
                     extra={"ingreso_id": ingreso_id, "recipients": recipients, "debug": debug},

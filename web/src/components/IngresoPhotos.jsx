@@ -8,6 +8,7 @@ import {
   downloadAuth,
 } from "../lib/api";
 import { formatDateTime } from "../lib/ui-helpers";
+import { openPdfBlob } from "../lib/pdf";
 
 const PAGE_SIZE = 20;
 
@@ -257,6 +258,19 @@ export default function IngresoPhotos({ ingresoId, canManage, showFilters = fals
       await downloadAuth(photo.url, photo.original_name || `ingreso-${ingresoId}-archivo-${photo.id}`);
     } catch (err) {
       setUploadErrors([err?.message || "No se pudo descargar la foto"]);
+    }
+  };
+
+  // "Ver" un PDF: hay que traerlo autenticado, la URL directa no lleva el token.
+  const handleOpenInline = async (photo) => {
+    if (!photo) return;
+    try {
+      const { blob } = await fetchBlobAuth(photo.url);
+      if (!openPdfBlob(blob)) {
+        setUploadErrors(["El navegador bloqueó la ventana. Habilite ventanas emergentes para NEXORA."]);
+      }
+    } catch (err) {
+      setUploadErrors([err?.message || "No se pudo abrir el archivo"]);
     }
   };
 

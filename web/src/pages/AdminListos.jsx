@@ -5,19 +5,56 @@ import { useNavigate } from "react-router-dom";
 import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
+import IngresoTable from "../components/IngresoTable.jsx";
 import { resolutionLabel } from "../lib/constants";
 import useQueryState from "../hooks/useQueryState";
+import useColumnFilters from "../hooks/useColumnFilters";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
-import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
-import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
-import { sortRows } from "../lib/table-sort";
-import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
+import {
+  columnFilterOptions,
+  matchesColumnFilters,
+} from "../lib/ingreso-list-filters";
 
 
 // Ajustar si el backend usa otra ruta.
 const ENDPOINT = "/api/listos-para-retiro/";
 
+const COLUMNS = [
+  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "cliente",
+    label: "Cliente",
+    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    filter: "text",
+  },
+  {
+    field: "equipo",
+    label: "Equipo",
+    render: (row) => catalogEquipmentLabel(row) ?? "-",
+    filter: "select",
+  },
+  {
+    field: "resolucion",
+    label: "Resolución",
+    render: (row) => <StatusChip value={resolutionLabel(row?.resolucion)} title="Resolución" />,
+    filter: "select",
+  },
+  {
+    field: "identificacion",
+    label: "Serie",
+    render: (row) => <DeviceIdentifier row={row} />,
+    filter: "text",
+  },
+  {
+    field: "fecha_listo",
+    label: "Fecha listo",
+    cellClassName: "whitespace-nowrap",
+    render: (row) => formatDateOnly(row?.fecha_listo ?? "-"),
+  },
+];
 
 export default function AdminListos() {
   const [rows, setRows] = useState([]);
@@ -27,6 +64,8 @@ export default function AdminListos() {
   const [sort, setSort] = useQueryState("sort", "");
   const [busyId, setBusyId] = useState(null);
   const [remitoBusyId, setRemitoBusyId] = useState(null);
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
   const navigate = useNavigate();
   const { user } = useAuth();
   const release = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
@@ -63,8 +102,9 @@ export default function AdminListos() {
 
   const filtered = useMemo(() => {
     const needle = norm(q);
-    if (!needle) return rows;
     return rows.filter((row) => {
+      if (!matchesColumnFilters(row, COLUMNS, filters)) return false;
+      if (!needle) return true;
       const campos = [
         formatOS(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
@@ -79,32 +119,14 @@ export default function AdminListos() {
       ];
       return campos.some((c) => norm(c).includes(needle));
     });
-  }, [rows, q]);
+  }, [rows, q, filters]);
 
-  const displayRows = useMemo(
-    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
-    [filtered, sort]
-  );
-  const sortOptions = ingresoSortOptions([
-    "os",
-    "cliente",
-    "equipo",
-    "resolucion",
-    "identificacion",
-    "fecha_listo",
-  ]);
+  const filterOptions = useMemo(() => columnFilterOptions(rows, COLUMNS), [rows]);
 
   const go = (row) => {
     const id = ingresoIdOf(row);
     if (!id) return;
     navigate(`/ingresos/${id}`);
-  };
-
-  const onRowKeyDown = (e, row) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      go(row);
-    }
   };
 
   async function entregar(row) {
@@ -145,188 +167,78 @@ export default function AdminListos() {
     }
   }
 
+  const rowActions = (row, { mobile } = {}) => {
+    const id = ingresoIdOf(row);
+    const isSalePending = String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega";
+    return (
+      <div className={mobile ? "grid grid-cols-1 gap-2 min-[420px]:grid-cols-2" : "flex gap-2 justify-end"}>
+        {release && (
+          <button
+            className={mobile ? "btn w-full justify-center" : "btn"}
+            type="button"
+            onClick={() => verOrdenSalida(row)}
+            disabled={remitoBusyId === id}
+            aria-busy={remitoBusyId === id ? "true" : "false"}
+            title="Ver o reimprimir orden de salida"
+          >
+            Ver OS
+          </button>
+        )}
+        {canDeliver && (
+          <button
+            className={mobile ? "btn-secondary w-full justify-center" : "btn-secondary"}
+            type="button"
+            onClick={() => entregar(row)}
+            disabled={busyId === id}
+            aria-busy={busyId === id ? "true" : "false"}
+            title={isSalePending ? "Completar entrega de venta" : "Marcar como entregado"}
+          >
+            {isSalePending ? "Completar entrega" : "Entregado"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="card">
-      <div className="h1 mb-3">Listos para retiro</div>
+      {/* El menú lateral lo llama "Liberados"; el subtítulo mantiene el nombre
+          con el que se lo conoce en el mostrador. */}
+      <div className="h1">Liberados</div>
+      <div className="mb-3 text-sm text-gray-600">Equipos listos para retiro</div>
 
-      {err && (
-        <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">
-          {err}
-        </div>
-      )}
+      <AlertBanner tone="error">{err}</AlertBanner>
 
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          type="text"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Filtrar por OS, cliente, equipo, serie, resolución"
-          className="border rounded p-2 w-full max-w-md"
-          aria-label="Filtrar listos para retiro"
-        />
-        <button
-          className="btn"
-          onClick={load}
-          title="Recargar lista"
-          disabled={loading}
-          aria-busy={loading ? "true" : "false"}
-        >
-          Recargar
-        </button>
-      </div>
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, cliente, equipo, serie, resolución"
+        searchLabel="Filtrar liberados"
+        onReload={load}
+        loading={loading}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+      />
 
-      {loading ? (
-        "Cargando..."
-      ) : displayRows.length === 0 ? (
-        <div className="text-sm text-gray-500">No hay equipos listos para retiro.</div>
-      ) : (
-        <div>
-          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
-          <MobileDataList>
-            {displayRows.map((row) => {
-              const rowId = ingresoIdOf(row);
-              const isSalePending = String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega";
-              return (
-                <MobileDataCard
-                  key={rowId}
-                  onClick={() => go(row)}
-                  onKeyDown={(e) => onRowKeyDown(e, row)}
-                  className="cursor-pointer hover:bg-gray-50"
-                  role="link"
-                  tabIndex={0}
-                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                  data-testid={`row-mobile-${rowId}`}
-                >
-                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
-                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                    <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
-                    <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
-                    <MobileDataField label="Resolución">
-                      <StatusChip value={resolutionLabel(row?.resolucion)} title="Resolución" />
-                    </MobileDataField>
-                    <MobileDataField label="Serie">
-                      <DeviceIdentifier row={row} />
-                    </MobileDataField>
-                    <MobileDataField label="Fecha listo" value={formatDateOnly(row?.fecha_listo ?? "-")} />
-                  </div>
-                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                    {release && (
-                      <button
-                        className="btn w-full justify-center"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          verOrdenSalida(row);
-                        }}
-                        disabled={remitoBusyId === rowId}
-                        aria-busy={remitoBusyId === rowId ? "true" : "false"}
-                        title="Ver o reimprimir orden de salida"
-                      >
-                        Ver OS
-                      </button>
-                    )}
-                    {canDeliver && (
-                      <button
-                        className="btn-secondary w-full justify-center"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          entregar(row);
-                        }}
-                        disabled={busyId === rowId}
-                        aria-busy={busyId === rowId ? "true" : "false"}
-                        title={isSalePending ? "Completar entrega de venta" : "Marcar como entregado"}
-                      >
-                        {isSalePending ? "Completar entrega" : "Entregado"}
-                      </button>
-                    )}
-                  </div>
-                </MobileDataCard>
-              );
-            })}
-          </MobileDataList>
-          <DesktopTableWrap>
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="text-left">
-                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
-                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
-                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
-                <SortableTh field="resolucion" sort={sort} onSortChange={setSort} className="p-2">Resolución</SortableTh>
-                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
-                <SortableTh field="fecha_listo" sort={sort} onSortChange={setSort} className="p-2">Fecha listo</SortableTh>
-                <th scope="col" className="p-2 text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map((row) => (
-                <tr
-                  key={ingresoIdOf(row)}
-                  onClick={() => go(row)}
-                  onKeyDown={(e) => onRowKeyDown(e, row)}
-                  className="hover:bg-gray-50 cursor-pointer border-t"
-                  role="link"
-                  tabIndex={0}
-                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                  data-testid={`row-${ingresoIdOf(row)}`}
-                >
-                  <td className="p-2 underline">{formatOS(row)}</td>
-                  <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}</td>
-                  <td className="p-2">{catalogEquipmentLabel(row) ?? "-"}</td>
-                  <td className="p-2">
-                    <StatusChip value={resolutionLabel(row?.resolucion)} title="Resolución" />
-                  </td>
-                  <td className="p-2"><DeviceIdentifier row={row} /></td>
-                  <td className="p-2 whitespace-nowrap">
-                    {formatDateOnly(row?.fecha_listo ?? "-")}
-                  </td>
-                  <td className="p-2">
-                    <div className="flex gap-2 justify-end">
-                      {release && (
-                        <button
-                          className="btn"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            verOrdenSalida(row);
-                          }}
-                          disabled={remitoBusyId === ingresoIdOf(row)}
-                          aria-busy={remitoBusyId === ingresoIdOf(row) ? "true" : "false"}
-                          title="Ver o reimprimir orden de salida"
-                        >
-                          Ver OS
-                        </button>
-                      )}
-                      {canDeliver && (
-                        <button
-                          className="btn-secondary"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            entregar(row);
-                          }}
-                          disabled={busyId === ingresoIdOf(row)}
-                          aria-busy={busyId === ingresoIdOf(row) ? "true" : "false"}
-                          title={String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega" ? "Completar entrega de venta" : "Marcar como entregado"}
-                        >
-                          {String(row?.estado || "").toLowerCase() === "vendido_pendiente_entrega" ? "Completar entrega" : "Entregado"}
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </DesktopTableWrap>
-          <div className="text-xs text-gray-500 mt-2">
-            Mostrando {displayRows.length} de {rows.length}.
-          </div>
-        </div>
-      )}
+      <IngresoTable
+        rows={filtered}
+        columns={COLUMNS}
+        sort={sort}
+        onSortChange={setSort}
+        onOpen={go}
+        openLabel={(row) => `Abrir hoja de servicio de ${formatOS(row)}`}
+        rowActions={release || canDeliver ? rowActions : undefined}
+        filters={filters}
+        onFilterChange={setFilter}
+        filterOptions={filterOptions}
+        showFilters={filtersOpen}
+        loading={loading}
+        emptyText="No hay equipos listos para retiro."
+        totalCount={rows.length}
+      />
     </div>
   );
 }
-
-
-
-
-
-
-

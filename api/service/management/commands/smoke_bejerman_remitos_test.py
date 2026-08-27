@@ -303,13 +303,13 @@ def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -
     comprobante = built["comprobante"]
     article_lines = [item for item in comprobante["Comprobante_Items"] if item.get("Item_Tipo") == "A"]
     if (
-        built.get("amountMode") != "tax_included"
+        built.get("amountMode") != "tax_discriminated"
         or len(article_lines) != 1
-        or Decimal(str(article_lines[0].get("Item_ImporteTotal"))) != Decimal("121.0")
-        or Decimal(str(article_lines[0].get("Item_ImporteIVAInscrip"))) != Decimal("0")
+        or Decimal(str(article_lines[0].get("Item_ImporteTotal"))) != Decimal("100.0")
+        or Decimal(str(article_lines[0].get("Item_ImporteIVAInscrip"))) != Decimal("21.0")
         or Decimal(str(comprobante.get("Comprobante_ImporteTotal"))) != Decimal("121.0")
     ):
-        raise CommandError("El contrato local SitIVA 6 no produjo un RT final de 121,00 sin IVA discriminado.")
+        raise CommandError("El contrato local SitIVA 6 no produjo un RT de 100,00 neto + 21,00 de IVA discriminado.")
     response = client.ingresar_comprobante_ventas_json(
         comprobante,
         circuito="VENTAS",

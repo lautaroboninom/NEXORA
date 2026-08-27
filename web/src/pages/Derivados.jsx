@@ -1,20 +1,65 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import api, { postDerivacionDevuelto } from "../lib/api";
-import { ingresoIdOf, formatOS, formatDateOnly } from "../lib/ui-helpers";
-import { catalogEquipmentLabel } from "../lib/ui-helpers";
+import {
+  ingresoIdOf,
+  formatOS,
+  formatDateOnly,
+  norm,
+  tipoEquipoOf,
+  catalogEquipmentLabel,
+} from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
-import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
-import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
+import IngresoTable from "../components/IngresoTable.jsx";
 import useQueryState from "../hooks/useQueryState";
-import { sortRows } from "../lib/table-sort";
-import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
+import useColumnFilters from "../hooks/useColumnFilters";
+import {
+  columnFilterOptions,
+  matchesColumnFilters,
+} from "../lib/ingreso-list-filters";
+
+const COLUMNS = [
+  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "cliente",
+    label: "Cliente",
+    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    filter: "text",
+  },
+  { field: "proveedor", label: "Proveedor", render: (row) => row?.proveedor ?? "-", filter: "select" },
+  {
+    field: "equipo",
+    label: "Equipo",
+    render: (row) => catalogEquipmentLabel(row) ?? "-",
+    filter: "select",
+  },
+  {
+    field: "identificacion",
+    label: "Serie",
+    render: (row) => <DeviceIdentifier row={row} />,
+    filter: "text",
+  },
+  {
+    field: "fecha_derivacion",
+    label: "Fecha derivación",
+    cellClassName: "whitespace-nowrap",
+    render: (row) => (row?.fecha_deriv ? formatDateOnly(row.fecha_deriv) : "-"),
+  },
+];
 
 export default function Derivados() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [fechaMap, setFechaMap] = useState({}); // {ingreso_id: 'YYYY-MM-DD'}
+  const [busyId, setBusyId] = useState(null);
+  const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
+  const navigate = useNavigate();
 
   const load = async () => {
     try {
@@ -41,116 +86,116 @@ export default function Derivados() {
     const toDate = (v) => (v && typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? new Date(`${v}T00:00:00`) : (v ? new Date(v) : new Date(0));
     return [...rows].sort((a,b) => toDate(b?.fecha_deriv) - toDate(a?.fecha_deriv));
   }, [rows]);
-  const displayRows = useMemo(
-    () => sortRows(sorted, sort, INGRESO_LIST_SORT_COLUMNS),
-    [sorted, sort]
-  );
-  const sortOptions = ingresoSortOptions([
-    "os",
-    "cliente",
-    "proveedor",
-    "equipo",
-    "identificacion",
-    "fecha_derivacion",
-  ]);
+
+  const filtered = useMemo(() => {
+    const needle = norm(q);
+    return sorted.filter((row) => {
+      if (!matchesColumnFilters(row, COLUMNS, filters)) return false;
+      if (!needle) return true;
+      const campos = [
+        formatOS(row),
+        row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
+        row?.proveedor,
+        row?.marca ?? row?.equipo?.marca,
+        catalogEquipmentLabel(row),
+        tipoEquipoOf(row),
+        row?.numero_serie,
+        row?.numero_interno,
+      ];
+      return campos.some((c) => norm(c).includes(needle));
+    });
+  }, [sorted, q, filters]);
+
+  const filterOptions = useMemo(() => columnFilterOptions(rows, COLUMNS), [rows]);
+
+  const go = (row) => {
+    const id = ingresoIdOf(row);
+    if (!id) return;
+    navigate(`/ingresos/${id}`);
+  };
 
   const onDevuelto = async (row) => {
     const ingresoId = ingresoIdOf(row);
     const f = fechaMap[ingresoId] || null;
     try {
+      setBusyId(ingresoId);
+      setErr("");
       await postDerivacionDevuelto(ingresoId, (row?.deriv_id ?? row?.id), { fecha_entrega: f });
       await load();
     } catch (e) {
       setErr(e?.message || "No se pudo marcar como devuelto");
+    } finally {
+      setBusyId(null);
     }
+  };
+
+  const rowActions = (row, { mobile } = {}) => {
+    const ingresoId = ingresoIdOf(row);
+    return (
+      <div
+        className={
+          mobile
+            ? "grid grid-cols-1 gap-2 min-[420px]:grid-cols-[1fr_auto]"
+            : "flex items-center gap-2 justify-end"
+        }
+      >
+        <input
+          type="date"
+          value={fechaMap[ingresoId] || ""}
+          onChange={(e) => setFechaMap((m) => ({ ...m, [ingresoId]: e.target.value }))}
+          className={mobile ? "h-10 rounded border px-2" : "border rounded p-1"}
+          aria-label={`Fecha de devolución de ${formatOS(row)}`}
+        />
+        <button
+          className={mobile ? "btn justify-center" : "btn"}
+          type="button"
+          onClick={() => onDevuelto(row)}
+          disabled={busyId === ingresoId}
+          aria-busy={busyId === ingresoId ? "true" : "false"}
+          title="Marcar la derivación como devuelta"
+        >
+          Devuelto
+        </button>
+      </div>
+    );
   };
 
   return (
     <div className="card">
       <div className="h1 mb-3">Derivados</div>
 
-      {err && (
-        <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">{err}</div>
-      )}
+      <AlertBanner tone="error">{err}</AlertBanner>
 
-      {loading ? (
-        "Cargando..."
-      ) : displayRows.length === 0 ? (
-        <div className="text-sm text-gray-500">No hay equipos derivados.</div>
-      ) : (
-        <div>
-          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
-          <MobileDataList>
-            {displayRows.map((row) => (
-              <MobileDataCard key={ingresoIdOf(row)} className="space-y-3">
-                <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
-                <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                  <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
-                  <MobileDataField label="Proveedor" value={row?.proveedor ?? "-"} />
-                  <MobileDataField label="Equipo" value={catalogEquipmentLabel(row)} />
-                  <MobileDataField label="Serie">
-                    <DeviceIdentifier row={row} />
-                  </MobileDataField>
-                  <MobileDataField label="Fecha derivación" value={row?.fecha_deriv ? formatDateOnly(row.fecha_deriv) : "-"} />
-                </div>
-                <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-[1fr_auto]">
-                  <input
-                    type="date"
-                    value={fechaMap[ingresoIdOf(row)] || ""}
-                    onChange={(e) => setFechaMap((m) => ({ ...m, [ingresoIdOf(row)]: e.target.value }))}
-                    className="h-10 rounded border px-2"
-                    aria-label="Fecha devolución"
-                  />
-                  <button className="btn justify-center" onClick={() => onDevuelto(row)}>
-                    Devuelto
-                  </button>
-                </div>
-              </MobileDataCard>
-            ))}
-          </MobileDataList>
-          <DesktopTableWrap>
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="text-left">
-                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
-                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
-                <SortableTh field="proveedor" sort={sort} onSortChange={setSort} className="p-2">Proveedor</SortableTh>
-                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
-                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
-                <SortableTh field="fecha_derivacion" sort={sort} onSortChange={setSort} className="p-2">Fecha derivación</SortableTh>
-                <th className="p-2 text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map((row) => (
-                <tr key={ingresoIdOf(row)} className="border-t">
-                  <td className="p-2 underline">{formatOS(row)}</td>
-                  <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? '-'}</td>
-                  <td className="p-2">{row?.proveedor ?? '-'}</td>
-                  <td className="p-2">{catalogEquipmentLabel(row)}</td>
-                  <td className="p-2"><DeviceIdentifier row={row} /></td>
-                  <td className="p-2 whitespace-nowrap">{row?.fecha_deriv ? formatDateOnly(row.fecha_deriv) : '-'}</td>
-                  <td className="p-2 text-right">
-                    <div className="flex items-center gap-2 justify-end">
-                      <input
-                        type="date"
-                        value={fechaMap[ingresoIdOf(row)] || ''}
-                        onChange={(e) => setFechaMap((m) => ({ ...m, [ingresoIdOf(row)]: e.target.value }))}
-                        className="border rounded p-1"
-                        aria-label="Fecha devolución"
-                      />
-                      <button className="btn" onClick={() => onDevuelto(row)}>
-                        Devuelto
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </DesktopTableWrap>
-        </div>
-      )}
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, cliente, proveedor, equipo, serie"
+        searchLabel="Filtrar derivados"
+        onReload={load}
+        loading={loading}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+      />
+
+      <IngresoTable
+        rows={filtered}
+        columns={COLUMNS}
+        sort={sort}
+        onSortChange={setSort}
+        onOpen={go}
+        openLabel={(row) => `Abrir hoja de servicio de ${formatOS(row)}`}
+        rowActions={rowActions}
+        filters={filters}
+        onFilterChange={setFilter}
+        filterOptions={filterOptions}
+        showFilters={filtersOpen}
+        loading={loading}
+        emptyText="No hay equipos derivados."
+        totalCount={rows.length}
+      />
     </div>
   );
 }

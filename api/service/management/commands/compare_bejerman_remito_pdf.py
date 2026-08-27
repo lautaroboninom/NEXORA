@@ -6,13 +6,43 @@ posición de línea base, su tamaño y su columna.
 """
 
 import json
+import re
 
 from django.core.management.base import BaseCommand
 
-from service.bejerman_remito_pdf import render_remito_pdf
+from service.bejerman_remito_pdf import render_remito_pdf, template_for
 
 
 TOLERANCIA_PT = 0.5
+CANTIDAD = re.compile(r"^[\s-]?(\d+,\d{2})$")
+
+
+def _sin_pie(spans, comprobante):
+    """Descarta el pie 'VALOR DECLARADO' del original.
+
+    Es una de las dos divergencias deliberadas: no va en el remito, así que NEXORA no
+    lo dibuja y sin este filtro el original siempre saldría con dos textos "faltantes".
+    """
+
+    tpl = template_for(comprobante=comprobante)
+    pie = (tpl.footer_label_baseline, tpl.footer_amount_baseline)
+    return [s for s in spans if not any(abs(s[0] - y) <= TOLERANCIA_PT for y in pie)]
+
+
+def _sin_signo(spans):
+    """Compara las cantidades por su magnitud, en los dos PDF.
+
+    La otra divergencia deliberada: NEXORA imprime la cantidad en positivo aunque el
+    comprobante viaje en negativo (ver `bejerman_remito_pdf._format_quantity`). Sin
+    esto, cada renglón de un RDA/RD/RDN saldría reportado como texto faltante más otro
+    sobrante, tapando las diferencias que sí importan. La posición se sigue comparando
+    tal cual: el signo ocupa el mismo lugar que el espacio que NEXORA deja en su lugar.
+
+    De paso empareja el espacio inicial, que según el productor del PDF PyMuPDF
+    conserva o se come.
+    """
+
+    return [(y, x, size, CANTIDAD.sub(r"\1", text)) for y, x, size, text in spans]
 
 
 def _spans(pdf_bytes: bytes) -> list[tuple[float, float, float, str]]:
@@ -53,8 +83,8 @@ class Command(BaseCommand):
             with open(opts["salida"], "wb") as handle:
                 handle.write(generado_bytes)
 
-        original = _spans(original_bytes)
-        generado = _spans(generado_bytes)
+        original = _sin_signo(_sin_pie(_spans(original_bytes), comprobante))
+        generado = _sin_signo(_spans(generado_bytes))
 
         self.stdout.write(f"spans original: {len(original)} | generado: {len(generado)}")
 

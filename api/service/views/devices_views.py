@@ -263,27 +263,39 @@ class DeviceIdentificadoresView(APIView):
             if not loc:
                 return Response({"detail": "ubicacion_id inexistente"}, status=400)
 
-        if "numero_serie" in data and next_numero_serie:
+        # El número de serie solo no alcanza para decir que hay choque: la identidad de un
+        # equipo es la serie **más** el tipo, porque los accesorios que no traen serie propia
+        # entran con la del equipo principal (el humidificador con la del CPAP). Se revisa
+        # también al cambiar el tipo: mover un equipo a otro tipo puede chocar con el que ya
+        # ocupa ese lugar. Es el mismo par que enforcea uq_devices_ns_tipo_norm.
+        if next_numero_serie and ("numero_serie" in data or "tipo_equipo" in data):
             ns_key = next_numero_serie.replace(" ", "").replace("-", "").upper()
+            tipo_key = next_tipo_equipo.strip().lower()
             other = q(
                 """
                 SELECT id
                   FROM devices
                  WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                   AND LOWER(TRIM(COALESCE(tipo_equipo,''))) = %s
                    AND id <> %s
                  LIMIT 1
                 """,
-                [ns_key, device_id],
+                [ns_key, tipo_key, device_id],
                 one=True,
             )
             if other:
                 return Response(
                     {
-                        "detail": "El número de serie ya está asignado a otro equipo.",
+                        "detail": (
+                            "El número de serie ya está asignado a otro equipo del mismo tipo. "
+                            "Dos equipos pueden compartir el número de serie sólo si son de "
+                            "tipos distintos."
+                        ),
                         "conflict_type": "NS_DUPLICATE",
                         "conflict_device_id": other["id"],
                         "current_device_id": device_id,
                         "numero_serie_input": next_numero_serie,
+                        "tipo_equipo_input": next_tipo_equipo,
                     },
                     status=400,
                 )
@@ -467,6 +479,7 @@ class DevicesListView(APIView):
                 {mg_sale_customer_join}
                 LEFT JOIN LATERAL (
                   SELECT i.id AS ingreso_id,
+                         i.estado::text AS estado,
                          COALESCE(i.fecha_ingreso, i.fecha_creacion) AS fecha_ingreso
                     FROM ingresos i
                    WHERE i.device_id = d.id
@@ -499,6 +512,7 @@ class DevicesListView(APIView):
                 {mg_sale_customer_join}
                 LEFT JOIN LATERAL (
                   SELECT i.id AS ingreso_id,
+                         i.estado::text AS estado,
                          COALESCE(i.fecha_ingreso, i.fecha_creacion) AS fecha_ingreso
                     FROM ingresos i
                    WHERE i.device_id = d.id
@@ -779,6 +793,7 @@ class DevicesListView(APIView):
                   d.propietario_doc,
                   {mg_select_sql}
                   lasti.ingreso_id AS last_ingreso_id,
+                  COALESCE(lasti.estado, '') AS last_ingreso_estado,
                   NULL::integer AS last_customer_id,
                   ''::text AS last_customer_nombre,
                   lasti.fecha_ingreso AS last_fecha_ingreso,
@@ -907,6 +922,9 @@ class DeviceDirectCreateView(APIView):
                 status=400,
             )
 
+        # Identidad = número de serie + tipo de equipo (uq_devices_ns_tipo_norm). Un CPAP y el
+        # calentador humidificador que lo acompaña comparten la serie —el humidificador no
+        # trae una propia—, así que el alta del segundo tiene que poder entrar.
         if numero_serie:
             ns_key = numero_serie.replace(" ", "").replace("-", "").upper()
             other_ns = q(
@@ -914,17 +932,23 @@ class DeviceDirectCreateView(APIView):
                 SELECT id
                   FROM devices
                  WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                   AND LOWER(TRIM(COALESCE(tipo_equipo,''))) = %s
                  LIMIT 1
                 """,
-                [ns_key],
+                [ns_key, tipo_equipo.strip().lower()],
                 one=True,
             )
             if other_ns:
                 return Response(
                     {
-                        "detail": "El número de serie ya esta asignado a otro equipo.",
+                        "detail": (
+                            "El número de serie ya está asignado a otro equipo del mismo tipo. "
+                            "Dos equipos pueden compartir el número de serie sólo si son de "
+                            "tipos distintos."
+                        ),
                         "conflict_type": "NS_DUPLICATE",
                         "conflict_device_id": other_ns["id"],
+                        "tipo_equipo_input": tipo_equipo,
                     },
                     status=400,
                 )
@@ -1049,17 +1073,37 @@ class DevicesMergeView(APIView):
         desired_mg_raw = (data.get("numero_interno") or "").strip() if has_mg_override else None
 
         target = q(
-            "SELECT id, numero_serie, numero_interno FROM devices WHERE id=%s",
+            "SELECT id, numero_serie, numero_interno, COALESCE(tipo_equipo,'') AS tipo_equipo FROM devices WHERE id=%s",
             [target_id],
             one=True,
         )
         source = q(
-            "SELECT id, numero_serie, numero_interno FROM devices WHERE id=%s",
+            "SELECT id, numero_serie, numero_interno, COALESCE(tipo_equipo,'') AS tipo_equipo FROM devices WHERE id=%s",
             [source_id],
             one=True,
         )
         if not target or not source:
             return Response({"detail": "Device destino o fuente inexistente"}, status=404)
+
+        tipo_target = (target.get("tipo_equipo") or "").strip()
+        tipo_source = (source.get("tipo_equipo") or "").strip()
+        # Dos equipos de tipos distintos no son el mismo equipo cargado dos veces, aunque
+        # compartan el número de serie: es justamente el caso del CPAP y su calentador
+        # humidificador. Unificarlos borraría uno de los dos y su historial.
+        if tipo_target and tipo_source and tipo_target.lower() != tipo_source.lower():
+            return Response(
+                {
+                    "detail": (
+                        f"No se pueden unificar: uno es «{tipo_target}» y el otro «{tipo_source}». "
+                        "Los equipos de distinto tipo son equipos distintos, aunque compartan "
+                        "el número de serie."
+                    ),
+                    "conflict_type": "TIPO_MISMATCH",
+                    "tipo_target": tipo_target,
+                    "tipo_source": tipo_source,
+                },
+                status=400,
+            )
 
         mg_target = _norm_mg(target.get("numero_interno") or "")
         mg_source = _norm_mg(source.get("numero_interno") or "")
@@ -1109,20 +1153,26 @@ class DevicesMergeView(APIView):
 
         if new_ns:
             ns_key = new_ns.replace(" ", "").replace("-", "").upper()
+            # El equipo unificado queda con el tipo del destino: el choque es contra los
+            # equipos que tengan ese mismo par serie + tipo, no contra cualquiera que
+            # comparta la serie.
             ns_conflict = q(
                 """
                 SELECT id FROM devices
                  WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                   AND LOWER(TRIM(COALESCE(tipo_equipo,''))) = %s
                    AND id NOT IN (%s, %s)
                  LIMIT 1
                 """,
-                [ns_key, target_id, source_id],
+                [ns_key, (tipo_target or tipo_source).strip().lower(), target_id, source_id],
                 one=True,
             )
             if ns_conflict:
                 return Response(
                     {
-                        "detail": "El número de serie ya está asignado a otro equipo.",
+                        "detail": (
+                            "El número de serie ya está asignado a otro equipo del mismo tipo."
+                        ),
                         "conflict_type": "NS_DUPLICATE",
                         "conflict_device_id": ns_conflict["id"],
                     },

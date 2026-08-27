@@ -143,7 +143,9 @@ export const propiedadEquipoLabelOf = (row) => {
   return "Cliente";
 };
 
-export const deviceIdentifierPartsOf = (row, fallback = "-") => {
+// `includeHistoricalMg` es para las vistas de detalle de una OS/equipo, donde el
+// MG viejo sigue siendo trazabilidad útil. Los listados usan el default.
+export const deviceIdentifierPartsOf = (row, fallback = "-", { includeHistoricalMg = false } = {}) => {
   if (!row) {
     return {
       primary: fallback,
@@ -169,19 +171,28 @@ export const deviceIdentifierPartsOf = (row, fallback = "-") => {
     str(row?.equipo?.mg_venta_numero_alternativo) ||
     str(row?.numero_alternativo) ||
     str(row?.equipo?.numero_alternativo);
-  const historicalMg = sold;
-  const primary = (sold || clientOwned) ? (serie || interno || fallback) : (interno || serie || fallback);
+  const historicalMg = sold && Boolean(interno);
+  // Un MG histórico ya no identifica al equipo: se vendió y el número interno
+  // dejó de ser suyo. En los listados sólo confunde al lado del N/S del cliente,
+  // así que se esconde mientras quede algún otro identificador para mostrar.
+  const hideHistoricalMg =
+    historicalMg && !includeHistoricalMg && Boolean(serie || alternativo);
+  const primary = (sold || clientOwned)
+    ? (serie || alternativo || interno || fallback)
+    : (interno || serie || fallback);
   const isMgOwner = mgOwned && !sold;
   const ownerLabel = isMgOwner ? "propio" : "cliente";
   const internalOwnerLabel = sold ? "MG histórico" : ownerLabel;
   const identifiers = [
     serie ? { label: `N/S (${ownerLabel})`, value: serie, kind: "serie" } : null,
-    interno ? { label: `N° interno (${internalOwnerLabel})`, value: interno, kind: "interno" } : null,
+    interno && !hideHistoricalMg
+      ? { label: `N° interno (${internalOwnerLabel})`, value: interno, kind: "interno" }
+      : null,
     alternativo ? { label: "N° alternativo (cliente)", value: alternativo, kind: "alternativo" } : null,
   ].filter(Boolean);
   return {
     primary,
-    secondary: historicalMg && interno ? `MG histórico: ${interno}` : "",
+    secondary: historicalMg && !hideHistoricalMg ? `MG histórico: ${interno}` : "",
     identifiers,
     sold,
     clientOwned,
@@ -196,6 +207,55 @@ export const deviceIdentifierPartsOf = (row, fallback = "-") => {
 export const nsPreferInternoOf = (row, fallback = "-") => {
   return deviceIdentifierPartsOf(row, fallback).primary;
 };
+
+// "Particular" y "MG BIO" son clientes contenedores: cuando el equipo tiene dueño
+// propio cargado aparte, el nombre que le interesa al operador es el del dueño.
+const isOwnerDisplayCustomer = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "particular") return true;
+  return normalized.includes("mg") && normalized.includes("bio");
+};
+
+// `razon_social` cubre el detalle de ingreso; las filas de equipo traen
+// last_customer_nombre / customer_nombre.
+const deviceCustomerName = (row) =>
+  String(row?.last_customer_nombre || row?.customer_nombre || row?.razon_social || "").trim();
+
+export const deviceCustomerTitle = (row) => {
+  const customer = deviceCustomerName(row);
+  const owner = String(row?.propietario_nombre || "").trim();
+  if (owner && isOwnerDisplayCustomer(customer)) return owner;
+  return customer || owner || "-";
+};
+
+export const deviceCustomerSubtitle = (row) => {
+  const customer = deviceCustomerName(row);
+  const owner = String(row?.propietario_nombre || "").trim();
+  if (owner && customer && isOwnerDisplayCustomer(customer)) {
+    return `Cliente base: ${customer}`;
+  }
+  if (owner && customer && owner.toLowerCase() !== customer.toLowerCase()) {
+    return `Dueño: ${owner}`;
+  }
+  return "";
+};
+
+export const deviceOwnerMeta = (row) => {
+  const parts = [row?.propietario_contacto, row?.propietario_doc]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return parts.join(" | ");
+};
+
+export const deviceModelTitle = (row) => {
+  const modelo = String(row?.modelo || "").trim();
+  const variante = String(row?.variante || "").trim();
+  return [modelo, variante].filter(Boolean).join(" ").trim() || "-";
+};
+
+export const deviceBarcodeValue = (row) =>
+  String(row?.numero_serie || row?.numero_interno || "").trim();
 export const norm = (v) => {
   const s = (v ?? "").toString().toLowerCase().trim();
   try {

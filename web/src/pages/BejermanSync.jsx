@@ -23,9 +23,11 @@ import {
   postBejermanArticleMapping,
   postBejermanJobRetry,
   postBejermanRemitoProcessRetry,
+  postIngresoConflictoEvidencia,
+  postIngresoConflictoResolver,
   putBejermanPdfOutputSettings,
 } from "../lib/api";
-import { reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
+import { PDF_REPRINT_STEPS, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
 import { remitoDocumentLabel, remitoPdfUnavailableReason, remitoPrintableLabel } from "../lib/remitos";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
@@ -68,6 +70,7 @@ const TYPE_LABELS = {
 const REMITO_SOURCE_LABELS = {
   ingreso: "Ingreso de servicio",
   orden_entrega: "Orden de entrega",
+  ingreso_conflicto: "Conflicto de ingreso",
 };
 
 const PROCESS_TYPE_LABELS = {
@@ -739,10 +742,13 @@ function RemitoPdfAction({ row }) {
   const openPdf = async () => {
     if (loading || (!printUrl && !pdfUrl)) return;
     const reservedWindow = reservePdfWindow({
-      title: "Remito Bejerman",
-      message: `Preparando PDF del ${printableLabel}...`,
+      title: "Remito - NEXORA",
+      heading: `Abriendo ${printableLabel}`,
+      message: "Buscando el PDF en Bejerman",
+      detail: "Esta pestaña abre la impresión cuando el archivo esté listo.",
       fallbackMessage:
-        "NEXORA sigue esperando el PDF de Bejerman. Si esta pestaña no cambia, puede cerrarla y reintentar desde Procesos.",
+        "NEXORA sigue preparando el PDF del remito. Si esta pestaña no cambia, puede cerrarla y reintentar desde Procesos.",
+      steps: PDF_REPRINT_STEPS,
     });
     setLoading(true);
     setStatus("Preparando PDF...");
@@ -751,10 +757,11 @@ function RemitoPdfAction({ row }) {
       if (pdfUrl) {
         const blob = await waitForPdfBlob(pdfUrl, {
           label: printableLabel,
+          reservedWindow,
           onProgress: (progress) => setStatus(progress?.status || "Preparando PDF..."),
         });
         const opened = reservedWindow.openPrintable(blob, {
-          title: "Remito Bejerman",
+          title: "Remito - NEXORA",
           documentLabel: printableLabel,
         }).opened;
         if (!opened) {
@@ -814,7 +821,163 @@ function RemitoPdfAction({ row }) {
   );
 }
 
-function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRetry, actionState, className = "" }) {
+/**
+ * Acciones de un equipo que entró con su orden anterior todavía abierta.
+ *
+ * Es un pendiente administrativo, no una emisión fallada: el remito ya salió. Lo único que
+ * falta es decidir qué pasa con la orden vieja, y para eso primero hay que saber si el equipo
+ * había salido. Eso lo contesta Bejerman.
+ */
+function IngresoConflictActions({ row, onRefresh, className = "" }) {
+  const allowed = row?.actions?.resolve_conflict?.allowed !== false;
+  const canForce = row?.actions?.force_close?.allowed === true;
+  const blockedReason = row?.actions?.resolve_conflict?.blockedReason || "";
+  const [evidence, setEvidence] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [error, setError] = useState("");
+  const [manual, setManual] = useState("");
+
+  const payload = {
+    conflict_id: row?.conflict_id || row?.id,
+    conflicting_ingreso_id: row?.conflicting_ingreso_id,
+    numero_serie: row?.numero_serie || "",
+    company_key: row?.company_key || "",
+  };
+
+  const buscar = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setEvidence(await postIngresoConflictoEvidencia(payload));
+    } catch (err) {
+      setEvidence(null);
+      setError(err?.data?.detail || err?.message || "No se pudo consultar Bejerman.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cerrar = async (extra = {}) => {
+    setResolving(true);
+    setError("");
+    try {
+      await postIngresoConflictoResolver({ ...payload, ...extra });
+      onRefresh?.();
+    } catch (err) {
+      setError(err?.data?.detail || err?.message || "No se pudo cerrar la orden anterior.");
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const forzar = () => {
+    const confirmado = window.confirm(
+      `Se cerrará la OS ${row?.conflicting_os || ""} sin ningún comprobante de salida que lo respalde. ¿Desea continuar?`,
+    );
+    if (confirmado) cerrar();
+  };
+
+  const documents = Array.isArray(evidence?.documents) ? evidence.documents : [];
+  const found = evidence?.status === "found" && documents.length > 0;
+  const sinPrueba = Boolean(evidence) && !found;
+
+  return (
+    <div className={`flex flex-col gap-2 ${className}`.trim()}>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={buscar}
+          disabled={!allowed || loading || resolving}
+          title={blockedReason || "Buscar en Bejerman un RSS o RTA posterior a la orden anterior"}
+        >
+          <Search className="h-3.5 w-3.5" />
+          {loading ? "Consultando..." : "Buscar la salida en Bejerman"}
+        </button>
+        {found && (
+          <button
+            type="button"
+            className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-emerald-600 bg-white px-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => cerrar()}
+            disabled={!allowed || resolving}
+            title="Cerrar la orden anterior usando ese comprobante como respaldo"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            {resolving ? "Cerrando..." : `Cerrar OS ${row?.conflicting_os || ""}`}
+          </button>
+        )}
+        <Link
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
+          to={`/ingresos/${row?.conflicting_ingreso_id}?tab=principal`}
+          title="Abrir la hoja de servicio de la orden anterior"
+        >
+          <FileText className="h-3.5 w-3.5" />
+          Ver OS {row?.conflicting_os || ""}
+        </Link>
+      </div>
+      {found && (
+        <div className="text-xs text-emerald-800">
+          {documents.slice(0, 2).map((document, index) => (
+            <div key={`${document.remitoNumber || index}`}>
+              {document.remitoNumber} · {document.issueDate}
+            </div>
+          ))}
+        </div>
+      )}
+      {sinPrueba && (
+        <div className="flex max-w-[280px] flex-col gap-1">
+          <div className="text-xs text-gray-600">
+            {evidence.reason || "Bejerman no muestra ningún remito de salida posterior."}
+          </div>
+          {/* Que la búsqueda por serie no lo encuentre no significa que el equipo no haya
+              salido: alcanza con que la serie esté escrita distinto acá y en Bejerman. Si
+              la persona tiene el remito, se carga el número y el servidor lo verifica. */}
+          <div className="flex flex-wrap items-center gap-1">
+            <input
+              className="h-7 w-[150px] rounded border border-gray-300 px-2 text-xs"
+              placeholder="00004-00004893"
+              value={manual}
+              onChange={(event) => setManual(event.target.value)}
+              disabled={!allowed || resolving}
+            />
+            <button
+              type="button"
+              className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-emerald-600 bg-white px-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => cerrar({ remito_salida: manual.trim() })}
+              disabled={!allowed || resolving || !manual.trim()}
+              title="Verificar ese número en Bejerman y cerrar la orden anterior con él"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              {resolving ? "Cerrando..." : "Cerrar con este remito"}
+            </button>
+          </div>
+          <div className="text-[11px] leading-snug text-gray-500">
+            Si el equipo salió y la búsqueda no lo encuentra, cargue el número del RSS o RTA: se
+            verifica contra Bejerman antes de cerrar.
+          </div>
+          {canForce && (
+            <button
+              type="button"
+              className="inline-flex h-7 w-fit shrink-0 items-center justify-center gap-1 rounded border border-amber-500 bg-white px-2 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={forzar}
+              disabled={resolving}
+              title="Cerrar la orden anterior sin comprobante de salida (queda asentado en el historial)"
+            >
+              Cerrar sin comprobante
+            </button>
+          )}
+        </div>
+      )}
+      {error && <div className="max-w-[280px] text-xs leading-snug text-rose-700">{error}</div>}
+    </div>
+  );
+}
+
+function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRetry, onResolve, onRefresh, actionState, className = "" }) {
+  if (row?.source === "ingreso_conflicto") {
+    return <IngresoConflictActions row={row} onRefresh={onRefresh} className={className} />;
+  }
   const needsReview = row?.status === "failed_review";
   const reviewState = row?.reviewState || (needsReview ? "requires_verification" : "");
   const actions = row?.actions || {};
@@ -831,6 +994,7 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
   const verifyAllowed = actions?.verify?.allowed ?? (canManage && needsReview);
   const editAllowed = actions?.edit?.allowed ?? (canEditOrders && ["ready_for_correction", "ready_to_reissue"].includes(reviewState));
   const reissueAllowed = actions?.reissue?.allowed ?? (canManage && canGenerateRemito && reviewState === "ready_to_reissue");
+  const resolveAllowed = actions?.resolve?.allowed ?? (canManage && needsReview);
   const actionLoading = Boolean(actionState?.loading);
   const actionError = trimValue(actionState?.error);
   const verifyBlockedReason = !verifyAllowed ? trimValue(actions?.verify?.blockedReason) : "";
@@ -882,6 +1046,18 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           Abrir y corregir
         </button>
       ))}
+      {needsReview && onResolve && (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => onResolve(row)}
+          disabled={!resolveAllowed || actionLoading}
+          title={actions?.resolve?.blockedReason || "Indicar a mano si el remito existe en Bejerman o si no se emitió"}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Resolver revisión
+        </button>
+      )}
       {needsReview && (
         <button
           type="button"
@@ -900,6 +1076,213 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
       {!actionError && verifyBlockedReason && (
         <div className="w-full text-xs leading-relaxed text-amber-800">{verifyBlockedReason}</div>
       )}
+    </div>
+  );
+}
+
+function candidateLabel(candidate) {
+  const tipo = [trimValue(candidate?.comprobanteTipo), trimValue(candidate?.comprobanteLetra)].filter(Boolean).join(" ");
+  const numero = [trimValue(candidate?.comprobantePtoVenta), trimValue(candidate?.comprobanteNumero)].filter(Boolean).join("-");
+  return [tipo, numero].filter(Boolean).join(" ") || trimValue(candidate?.remitoNumber) || "-";
+}
+
+// El desempate que antes había que hacer por SQL: el operador mira Bejerman y dice
+// si el remito existe (y cuál) o si no se emitió. Sin esto, un proceso "en revisión"
+// que la verificación no puede cerrar se queda trabado para siempre.
+function RemitoReviewResolveModal({ target, onClose, onSubmit }) {
+  const [decision, setDecision] = useState("adopt");
+  const [numero, setNumero] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const row = target?.row;
+  const candidates = useMemo(
+    () => (Array.isArray(row?.actions?.resolve?.candidates) ? row.actions.resolve.candidates : []),
+    [row],
+  );
+
+  useEffect(() => {
+    setDecision("adopt");
+    setReason("");
+    setError("");
+    setNumero(trimValue(candidates[0]?.comprobanteNumero));
+  }, [row?.id, candidates]);
+
+  if (!target?.row) return null;
+
+  const submit = async () => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) {
+      setError("Escriba qué verificó en Bejerman: queda asentado en el proceso.");
+      return;
+    }
+    if (decision === "adopt" && !trimValue(numero)) {
+      setError("Indique el número de comprobante que Bejerman tiene emitido.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const payload = { action: "resolve", decision, confirm: true, reason: cleanReason };
+      if (decision === "adopt") {
+        const chosen = candidates.find((item) => trimValue(item?.comprobanteNumero) === trimValue(numero));
+        payload.comprobanteNumero = trimValue(numero);
+        if (chosen?.comprobantePtoVenta) payload.comprobantePtoVenta = trimValue(chosen.comprobantePtoVenta);
+        if (candidates.length && !chosen) payload.allowUnlistedNumber = true;
+      }
+      await onSubmit(row, payload);
+      onClose();
+    } catch (e) {
+      setError(e?.data?.detail || e?.message || "No se pudo resolver la revisión.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true">
+      <div className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-gray-200 p-4">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold text-gray-900">Resolver revisión</h2>
+            <div className="mt-1 truncate text-sm text-gray-600">{remitoDocumentLabel(row)}</div>
+          </div>
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-60"
+            onClick={onClose}
+            disabled={saving}
+            aria-label="Cerrar"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-4">
+          <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
+            NEXORA no pudo confirmar por su cuenta si este remito llegó a emitirse en Bejerman. Mire el
+            comprobante en Bejerman y elija una de las dos opciones: lo que responda acá se aplica tal cual.
+          </div>
+
+          {error && <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+
+          <label className="flex items-start gap-2 rounded border border-gray-200 p-3 text-sm">
+            <input
+              type="radio"
+              className="mt-1"
+              checked={decision === "adopt"}
+              onChange={() => setDecision("adopt")}
+            />
+            <span>
+              <span className="font-medium text-gray-900">El remito existe en Bejerman</span>
+              <span className="mt-0.5 block text-xs text-gray-600">
+                Se adopta ese comprobante y el proceso queda cerrado, sin volver a emitir.
+              </span>
+            </span>
+          </label>
+
+          {decision === "adopt" && (
+            <div className="space-y-2 pl-6">
+              {candidates.length > 0 ? (
+                <>
+                  <div className="text-xs font-semibold uppercase text-gray-500">Comprobantes que devolvió Bejerman</div>
+                  {candidates.map((candidate) => (
+                    <label key={candidateLabel(candidate)} className="flex items-start gap-2 rounded border border-gray-200 p-2 text-sm">
+                      <input
+                        type="radio"
+                        className="mt-1"
+                        checked={trimValue(numero) === trimValue(candidate?.comprobanteNumero)}
+                        onChange={() => setNumero(trimValue(candidate?.comprobanteNumero))}
+                      />
+                      <span>
+                        <span className="font-mono font-medium text-gray-900">{candidateLabel(candidate)}</span>
+                        <span className="mt-0.5 block text-xs text-gray-600">
+                          {trimValue(candidate?.fechaEmision) || "sin fecha"}
+                          {trimValue(candidate?.mensaje) ? ` · ${trimValue(candidate.mensaje)}` : ""}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                  <div className="pt-1 text-xs text-gray-600">
+                    Los que no adopte siguen existiendo en Bejerman: hay que anularlos ahí a mano.
+                  </div>
+                </>
+              ) : null}
+              <div>
+                <div className="text-xs font-medium text-gray-600">Número de comprobante</div>
+                <input
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-1 font-mono text-sm"
+                  value={numero}
+                  onChange={(e) => setNumero(e.target.value)}
+                  placeholder="00004741"
+                />
+              </div>
+            </div>
+          )}
+
+          <label className="flex items-start gap-2 rounded border border-gray-200 p-3 text-sm">
+            <input
+              type="radio"
+              className="mt-1"
+              checked={decision === "not_emitted"}
+              onChange={() => setDecision("not_emitted")}
+            />
+            <span>
+              <span className="font-medium text-gray-900">No se emitió: lo verifiqué en Bejerman</span>
+              <span className="mt-0.5 block text-xs text-gray-600">
+                Libera las órdenes para corregirlas y volver a emitir el remito.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 rounded border border-gray-200 p-3 text-sm">
+            <input
+              type="radio"
+              className="mt-1"
+              checked={decision === "duplicate"}
+              onChange={() => setDecision("duplicate")}
+            />
+            <span>
+              <span className="font-medium text-gray-900">Es un duplicado: la orden ya quedó con su remito</span>
+              <span className="mt-0.5 block text-xs text-gray-600">
+                Cierra este proceso sin tocar la orden ni el stock. Si Bejerman quedó con un comprobante
+                de más, hay que anularlo ahí.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <div className="text-xs font-medium text-gray-600">Qué verificó en Bejerman</div>
+            <textarea
+              className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+              rows={3}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Ej.: busqué por cliente y fecha en Bejerman; está el RSS 00004-00004741 y anulé el 00004740."
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-gray-200 p-4">
+          <button
+            type="button"
+            className="inline-flex h-8 items-center rounded border border-gray-300 bg-white px-3 text-sm hover:bg-gray-50 disabled:opacity-60"
+            onClick={onClose}
+            disabled={saving}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            className="inline-flex h-8 items-center rounded border border-orange-300 bg-orange-50 px-3 text-sm text-orange-900 hover:bg-orange-100 disabled:opacity-60"
+            onClick={submit}
+            disabled={saving}
+          >
+            {saving ? "Aplicando..." : "Aplicar resolución"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1183,11 +1566,14 @@ export default function BejermanSync() {
   const canManage = can(user, PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE);
   const canEditOrders = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_ASSIGN_ARTICLES);
   const canGenerateRemito = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_GENERATE_BEJERMAN_REMITO);
+  // Los avisos por mail linkean acá ya filtrados (p. ej. ?source=ingreso_conflicto). Sin leer
+  // la query, el jefe caía en la lista completa y tenía que volver a buscar el caso a mano.
+  const initialQuery = new URLSearchParams(window.location.search);
   const [filters, setFilters] = useState({
-    process_type: "all",
-    status: "",
+    process_type: initialQuery.get("process_type") || (initialQuery.get("source") ? "remito" : "all"),
+    status: initialQuery.get("status") || "",
     sync_type: "",
-    source: "",
+    source: initialQuery.get("source") || "",
     company_key: "",
     q: "",
     cliente: "",
@@ -1205,6 +1591,7 @@ export default function BejermanSync() {
   const [err, setErr] = useState("");
   const [remitoErr, setRemitoErr] = useState("");
   const [remitoActionState, setRemitoActionState] = useState({});
+  const [resolveTarget, setResolveTarget] = useState(null);
   const [retryingJobId, setRetryingJobId] = useState(null);
   const [msg, setMsg] = useState("");
   const [expanded, setExpanded] = useState({});
@@ -1567,7 +1954,7 @@ export default function BejermanSync() {
     }
   };
 
-  const retryRemito = async (row, action = "retry") => {
+  const retryRemito = async (row, action = "retry", extraPayload = null) => {
     if (!row?.source || !row?.id) return;
     const actionKey = row.process_id || `${row.source}:${row.id}`;
     if (action === "reissue_corrected") {
@@ -1586,9 +1973,22 @@ export default function BejermanSync() {
       await postBejermanRemitoProcessRetry(
         row.source,
         row.id,
-        action === "reissue_corrected" ? { action, confirm: true } : { action },
+        extraPayload
+          ? { action, ...extraPayload }
+          : action === "reissue_corrected"
+          ? { action, confirm: true }
+          : { action },
       );
-      if (action === "verify") {
+      if (action === "resolve") {
+        const mensajePorDecision = {
+          adopt: `Se adoptó el comprobante indicado para ${remitoDocumentLabel(row)}.`,
+          duplicate: `${remitoDocumentLabel(row)} se cerró como duplicado.`,
+        };
+        setMsg(
+          mensajePorDecision[extraPayload?.decision]
+            || `${remitoDocumentLabel(row)} quedó habilitado para corregir y reemitir.`,
+        );
+      } else if (action === "verify") {
         setMsg(`Se verificó ${remitoDocumentLabel(row)} en Bejerman. Revise el nuevo estado antes de continuar.`);
       } else if (action === "reissue_corrected") {
         setMsg(`Se emitió el remito corregido para ${remitoDocumentLabel(row)}.`);
@@ -1602,6 +2002,9 @@ export default function BejermanSync() {
         ...prev,
         [actionKey]: { loading: false, action, error: actionError },
       }));
+      // El modal de resolución muestra el error donde el operador está mirando; para
+      // eso necesita que la falla le llegue y no muera acá.
+      if (extraPayload) throw e;
     } finally {
       await loadRemitos();
       setRemitoActionState((prev) => ({
@@ -2021,6 +2424,8 @@ export default function BejermanSync() {
             canEditOrders={canEditOrders}
             canGenerateRemito={canGenerateRemito}
             onRetry={retryRemito}
+            onResolve={(target) => setResolveTarget({ row: target })}
+            onRefresh={() => loadRemitos()}
             actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
           />
         ) : (
@@ -2127,6 +2532,8 @@ export default function BejermanSync() {
                 canEditOrders={canEditOrders}
                 canGenerateRemito={canGenerateRemito}
                 onRetry={retryRemito}
+                onResolve={(target) => setResolveTarget({ row: target })}
+                onRefresh={() => loadRemitos()}
                 actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
                 className="justify-end"
               />
@@ -2397,6 +2804,11 @@ export default function BejermanSync() {
         onSearch={searchModalArticles}
         onSelectCandidate={selectModalCandidate}
         onSave={saveEditModal}
+      />
+      <RemitoReviewResolveModal
+        target={resolveTarget}
+        onClose={() => setResolveTarget(null)}
+        onSubmit={(row, payload) => retryRemito(row, "resolve", payload)}
       />
     </div>
   );

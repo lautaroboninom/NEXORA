@@ -28,6 +28,7 @@ _EDIT_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin", "supervisor"}
 _VIEW_ROLES = {"tecnico", "jefe", "jefe_veedor", "admin", "supervisor", "recepcion"}
 _BLOCKED_EDIT_STATES = {"entregado", "baja", "vendido_pendiente_entrega", "vendido_entregado"}
 _VALID_GLOBAL_RESULTS = {"", "pendiente", "apto", "apto_condicional", "no_apto"}
+_COMPLETED_RESULTS = {"apto", "apto_condicional", "no_apto"}
 _VALID_ITEM_RESULTS = {"", "ok", "observado", "no_ok", "na"}
 
 
@@ -149,6 +150,7 @@ def _load_test_row(ingreso_id: int) -> dict[str, Any] | None:
           t.firmado_por,
           t.fecha_ejecucion,
           t.tecnico_id,
+          t.updated_at,
           COALESCE(u.nombre, '') AS tecnico_nombre
         FROM ingreso_tests t
         LEFT JOIN users u ON u.id = t.tecnico_id
@@ -254,6 +256,7 @@ def _save_test_row(
     instrumentos: str,
     firmado_por: str,
     tecnico_id: int | None,
+    fecha_ejecucion: datetime | None = None,
 ) -> None:
     is_pg = connection.vendor == "postgresql"
     now_dt = timezone.now()
@@ -312,7 +315,7 @@ def _save_test_row(
                 conclusion,
                 instrumentos,
                 firmado_por,
-                now_dt,
+                fecha_ejecucion,
                 tecnico_id,
                 now_dt,
                 now_dt,
@@ -352,7 +355,7 @@ def _save_test_row(
                 conclusion,
                 instrumentos,
                 firmado_por,
-                now_dt,
+                fecha_ejecucion,
                 tecnico_id,
                 now_dt,
                 ingreso_id,
@@ -392,7 +395,7 @@ def _save_test_row(
                 conclusion,
                 instrumentos,
                 firmado_por,
-                now_dt,
+                fecha_ejecucion,
                 tecnico_id,
                 now_dt,
                 now_dt,
@@ -637,6 +640,16 @@ class IngresoTestView(APIView):
         tipo_equipo_snapshot = (row or {}).get("tipo_equipo_snapshot") or (ingreso.get("tipo_equipo") or "")
         tecnico_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
 
+        # La fecha de ejecución se fija cuando el test se completa por
+        # primera vez y no cambia en guardados posteriores.  Si el test
+        # vuelve a estado pendiente se limpia para que se recalcule cuando
+        # se vuelva a completar.
+        fecha_previa = (row or {}).get("fecha_ejecucion")
+        if resultado_global in _COMPLETED_RESULTS:
+            fecha_ejecucion = fecha_previa or timezone.now()
+        else:
+            fecha_ejecucion = None
+
         _save_test_row(
             ingreso_id=ingreso_id,
             template_key=template_key,
@@ -650,6 +663,7 @@ class IngresoTestView(APIView):
             instrumentos=instrumentos,
             firmado_por=firmado_por,
             tecnico_id=tecnico_id,
+            fecha_ejecucion=fecha_ejecucion,
         )
 
         return Response({"ok": True})
@@ -707,7 +721,7 @@ class IngresoTestPdfView(APIView):
         report = {
             "ingreso_id": ingreso_id,
             "os": ingreso_id,
-            "fecha_ejecucion": row.get("fecha_ejecucion") or timezone.now(),
+            "fecha_ejecucion": row.get("fecha_ejecucion") or row.get("updated_at"),
             "cliente": ingreso.get("cliente") or "",
             "tipo_equipo": ingreso.get("tipo_equipo") or "",
             "marca": ingreso.get("marca") or "",

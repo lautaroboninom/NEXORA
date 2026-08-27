@@ -5,6 +5,7 @@ problema que el renderer propio viene a resolver —, así que lo que más se pr
 es que todo lo que falle degrade a columna vacía en vez de romper.
 """
 
+from time import monotonic
 from unittest.mock import patch
 
 from django.db import connection
@@ -12,6 +13,7 @@ from django.test import TestCase
 
 from service.bejerman_remito_pdf_data import (
     _PM_CACHE,
+    comprobante_from_emission,
     enrich_comprobante_for_pdf,
     expiration_dates_from_nexora,
     pm_from_bejerman,
@@ -40,6 +42,18 @@ def _item(id_, *, article_code, partida, vence, updated="2026-08-01"):
             VALUES (%s, %s, %s, %s, %s::date, %s::timestamptz)
             """,
             [id_, ORDEN, article_code, partida, vence, updated],
+        )
+
+
+def _item_partida(id_, *, item_id, partida, vence, updated="2026-08-01"):
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO delivery_order_item_partidas
+                   (id, order_item_id, partida, assigned_quantity, partida_expiration_date, updated_at)
+            VALUES (%s, %s, %s, 1, %s::date, %s::timestamptz)
+            """,
+            [id_, item_id, partida, vence, updated],
         )
 
 
@@ -75,20 +89,53 @@ class RemitoPdfDatosTests(TestCase):
     def test_el_vencimiento_sale_de_la_orden_de_entrega(self):
         _item("a", article_code="1204001", partida="20260007", vence="2029-03-01")
         self.assertEqual(
-            expiration_dates_from_nexora(["20260007"], ["1204001"])["20260007"].isoformat(),
+            expiration_dates_from_nexora(["20260007"], ["1204001"])[("1204001", "20260007")].isoformat(),
             "2029-03-01",
         )
 
     def test_la_partida_se_busca_sin_distinguir_mayusculas_ni_espacios(self):
         _item("a", article_code="1205013", partida="  r22082822 ", vence="2027-10-28")
-        self.assertIn("R22082822", expiration_dates_from_nexora(["R22082822"], []))
+        self.assertIn(("1205013", "R22082822"), expiration_dates_from_nexora(["R22082822"], []))
 
     def test_ante_dos_cargas_de_la_misma_partida_gana_la_ultima(self):
         _item("vieja", article_code="1204001", partida="20260007", vence="2028-01-01", updated="2026-01-01")
         _item("nueva", article_code="1204001", partida="20260007", vence="2029-03-01", updated="2026-08-01")
         self.assertEqual(
-            expiration_dates_from_nexora(["20260007"], [])["20260007"].isoformat(), "2029-03-01"
+            expiration_dates_from_nexora(["20260007"], [])[('1204001', '20260007')].isoformat(), "2029-03-01"
         )
+
+    def test_el_vencimiento_de_la_partida_hija_sale_en_el_rt(self):
+        _item("padre", article_code="1210001", partida=None, vence=None)
+        _item_partida("partida-asdf23", item_id="padre", partida=" asdf23 ", vence="2027-03-15")
+        comprobante = {
+            "Comprobante_Items": [
+                {
+                    "Item_CodigoArticulo": "1210001",
+                    "Item_Partida": "asdf23",
+                }
+            ]
+        }
+
+        item = enrich_comprobante_for_pdf(comprobante, allow_remote_pm_lookup=False)["Comprobante_Items"][0]
+
+        self.assertEqual(item["Item_Vencimiento"].isoformat(), "2027-03-15")
+
+    def test_lotes_iguales_de_articulos_distintos_no_cruzan_su_vencimiento(self):
+        _item("padre-a", article_code="1210001", partida=None, vence=None)
+        _item("padre-b", article_code="1210002", partida=None, vence=None)
+        _item_partida("partida-a", item_id="padre-a", partida="LOTE-1", vence="2027-03-15")
+        _item_partida("partida-b", item_id="padre-b", partida="LOTE-1", vence="2028-04-16")
+        comprobante = {
+            "Comprobante_Items": [
+                {"Item_CodigoArticulo": "1210001", "Item_Partida": "LOTE-1"},
+                {"Item_CodigoArticulo": "1210002", "Item_Partida": "LOTE-1"},
+            ]
+        }
+
+        items = enrich_comprobante_for_pdf(comprobante, allow_remote_pm_lookup=False)["Comprobante_Items"]
+
+        self.assertEqual(items[0]["Item_Vencimiento"].isoformat(), "2027-03-15")
+        self.assertEqual(items[1]["Item_Vencimiento"].isoformat(), "2028-04-16")
 
     def test_sin_partidas_no_consulta_nada(self):
         self.assertEqual(expiration_dates_from_nexora([], ["1204001"]), {})
@@ -115,6 +162,18 @@ class RemitoPdfDatosTests(TestCase):
     def test_si_bejerman_no_responde_el_pm_queda_vacio_pero_no_rompe(self):
         with patch("service.bejerman_delivery._remote_bejerman_sql_csv", side_effect=OSError("sin SSH")):
             self.assertEqual(pm_from_bejerman(["1204001"]), {})
+
+    def test_emision_interactiva_usa_pm_cacheado_sin_esperar_bejerman(self):
+        _PM_CACHE[("SEPID", "1204001")] = (monotonic(), "2046-10")
+        with patch("service.bejerman_delivery._remote_bejerman_sql_csv") as consulta:
+            items = enrich_comprobante_for_pdf(
+                COMPROBANTE,
+                company_key="SEPID",
+                allow_remote_pm_lookup=False,
+            )["Comprobante_Items"]
+        consulta.assert_not_called()
+        self.assertEqual(items[0]["Item_PM"], "2046-10")
+        self.assertEqual(items[1]["Item_PM"], "")
 
     # --- Enriquecido completo ------------------------------------------------
 
@@ -241,3 +300,60 @@ class RemitoPdfPayloadLookupTests(TestCase):
         for _ in range(20):
             nodo = {"n": nodo}
         self.assertIsNone(_find_comprobante(nodo))
+
+    def test_combina_la_cabecera_confirmada_con_los_renglones_enviados(self):
+        response = {
+            "issueDate": "2026-08-10",
+            "response": {
+                "comprobanteTipo": "RT",
+                "comprobanteLetra": "R",
+                "comprobantePtoVenta": "00007",
+                "comprobanteNumero": "00000734",
+            },
+        }
+        request = {
+            "customerCode": "CLIENTE",
+            "comprobante": {
+                "Comprobante_Tipo": "RT",
+                "Comprobante_Letra": "R",
+                "Comprobante_PtoVenta": "00007",
+                "Comprobante_Numero": "",
+                "Comprobante_Items": [{"Item_CodigoArticulo": "1204001"}],
+            },
+        }
+
+        comprobante = comprobante_from_emission(response, request)
+
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RT")
+        self.assertEqual(comprobante["Comprobante_Letra"], "R")
+        self.assertEqual(comprobante["Comprobante_PtoVenta"], "00007")
+        self.assertEqual(comprobante["Comprobante_Numero"], "00000734")
+        self.assertEqual(comprobante["Comprobante_FechaEmision"], "2026-08-10")
+        self.assertEqual(comprobante["Cliente_Codigo"], "CLIENTE")
+        self.assertEqual(comprobante["Comprobante_Items"][0]["Item_CodigoArticulo"], "1204001")
+
+    def test_combina_intentos_separados_de_la_misma_emision(self):
+        from service.bejerman_remito_pdf_data import _comprobante_from_payload_rows
+
+        rows = [
+            (
+                {
+                    "comprobanteTipo": "RIS",
+                    "comprobanteLetra": "R",
+                    "comprobantePtoVenta": "00004",
+                    "comprobanteNumero": "00001357",
+                    "issueDate": "2026-08-10",
+                },
+                {"bridgeRequest": {"issueDate": "2026-08-10"}},
+            ),
+            (
+                {"raw": {"Comprobante_Numero": "00001357"}},
+                {"comprobante": {"Comprobante_Items": [{"Item_CodigoArticulo": "1115003"}]}},
+            ),
+        ]
+
+        comprobante = _comprobante_from_payload_rows(rows)
+
+        self.assertEqual(comprobante["Comprobante_Tipo"], "RIS")
+        self.assertEqual(comprobante["Comprobante_Numero"], "00001357")
+        self.assertEqual(comprobante["Comprobante_Items"][0]["Item_CodigoArticulo"], "1115003")

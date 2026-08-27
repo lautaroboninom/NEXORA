@@ -14,6 +14,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
 
+from . import bejerman_catalog_cache
 from .bejerman_companies import require_company
 from .bejerman_particular_customers import ensure_particular_customer_enabled
 from .bejerman_documents import (
@@ -30,6 +31,7 @@ from .bejerman_sdk import (
     BejermanSdkConfigError,
     BejermanSdkResponseError,
     BejermanSdkUnavailable,
+    article_description_for,
     as_bool,
     as_string,
     bejerman_customer_code_for,
@@ -57,6 +59,7 @@ from .bejerman_pdf_requests import (
     BejermanPdfFolderUnavailableError,
     BejermanPdfNotPublishedError,
     BejermanPdfWorkerStalledError,
+    REMITO_PDF_LINE_LIMIT_ERROR_CODE,
     fetch_or_enqueue_comprobante_pdf,
     pdf_error_metadata,
     store_rendered_remito_pdf,
@@ -87,7 +90,10 @@ RIS_DOCUMENT_MODE_REGISTER = "register"
 RIS_REGISTER_POINT_OF_SALE = "00001"
 RIS_REGISTER_NUMERA_FLEX = "N"
 RIS_REGISTER_EMITE_REG = "R"
+RIS_DEFAULT_MAX_PRINT_LINES = 22
 MG_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", re.IGNORECASE)
+
+
 class BejermanRisError(RuntimeError):
     pass
 
@@ -136,6 +142,20 @@ class BejermanRisPreflightError(BejermanRisError):
     def __init__(self, payload: dict[str, Any]):
         super().__init__(payload.get("detail") or "La validación previa del RIS falló")
         self.payload = payload
+
+
+class BejermanRisLineLimitError(BejermanRisError):
+    code = "BEJERMAN_RIS_ITEM_EXCEEDS_MAX_LINES"
+
+    def __init__(self, *, item_index: int, line_count: int, max_lines: int, identifier: str = ""):
+        label = f"El equipo {identifier}" if identifier else f"El equipo {item_index + 1}"
+        super().__init__(
+            f"{label} ocupa {line_count} renglones y no entra completo en un remito de {max_lines}. "
+            "Reduzca sus leyendas, accesorios o comentarios antes de emitir."
+        )
+        self.item_index = item_index
+        self.line_count = line_count
+        self.max_lines = max_lines
 
 
 class BejermanRisRegisteredNoPdfError(BejermanRisError):
@@ -950,6 +970,22 @@ def _update_ris_failure_many(
         )
 
 
+def _ris_pdf_batch_ingreso_ids(row: dict[str, Any], ingreso_id: int) -> list[int]:
+    ingreso_ids = _existing_ingreso_ids(_ingreso_ids_from_payload(row.get("request_payload")))
+    if ingreso_id not in ingreso_ids:
+        ingreso_ids.append(ingreso_id)
+    return ingreso_ids
+
+
+def _update_ris_pdf_ready_many(ingreso_ids: list[int], requested_ingreso_id: int) -> dict[str, Any]:
+    requested_row: dict[str, Any] | None = None
+    for ingreso_id in ingreso_ids:
+        updated = _update_ris_pdf_ready(ingreso_id)
+        if ingreso_id == requested_ingreso_id:
+            requested_row = updated
+    return requested_row or (_row_for_ingreso(requested_ingreso_id) or {})
+
+
 @transaction.atomic
 def _update_ris_generated(
     ingreso_id: int,
@@ -1065,6 +1101,110 @@ def _update_ris_generated_many(ingreso_ids: list[int], payload: dict[str, Any], 
         if first_row is None:
             first_row = row
     return first_row or {}
+
+
+def _ris_batch_result_entry(
+    row: dict[str, Any],
+    ingreso_ids: list[int],
+    *,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    stored_request = _json_dict(row.get("request_payload")) if request_payload is None else request_payload
+    stored_response = _json_dict(row.get("response_payload")) if response_payload is None else response_payload
+    clean_ids: list[int] = []
+    for raw in ingreso_ids:
+        try:
+            ingreso_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if ingreso_id > 0 and ingreso_id not in clean_ids:
+            clean_ids.append(ingreso_id)
+    if not clean_ids:
+        try:
+            representative_id = int(row.get("ingreso_id"))
+        except (TypeError, ValueError):
+            representative_id = 0
+        if representative_id > 0:
+            clean_ids.append(representative_id)
+    profile = stored_response.get("profile") if isinstance(stored_response.get("profile"), dict) else None
+    if profile is None:
+        profile = stored_request.get("documentProfile") if isinstance(stored_request.get("documentProfile"), dict) else None
+    try:
+        line_count = int(stored_response.get("lineCount") or 0)
+    except (TypeError, ValueError):
+        line_count = 0
+    remito_number = _clean(row.get("remito_number")) or _clean(stored_response.get("remitoNumber"))
+    return {
+        **row,
+        "ingreso_ids": clean_ids,
+        "ingresoIds": clean_ids,
+        "remitoNumber": remito_number,
+        "lineCount": line_count,
+        "document_profile": profile,
+        "documentProfile": profile,
+    }
+
+
+def _generated_ris_batch_entries(
+    ingreso_ids: list[int], rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rows_by_id: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            ingreso_id = int(row.get("ingreso_id"))
+        except (TypeError, ValueError):
+            continue
+        rows_by_id[ingreso_id] = row
+    entries: list[dict[str, Any]] = []
+    visited: set[int] = set()
+    for ingreso_id in ingreso_ids:
+        if ingreso_id in visited:
+            continue
+        row = rows_by_id.get(ingreso_id) or {}
+        remito_number = _clean(row.get("remito_number"))
+        if row.get("status") != "generated" or not remito_number:
+            continue
+        stored_group_ids = _ingreso_ids_from_payload(row.get("request_payload"))
+        candidates = stored_group_ids or ingreso_ids
+        group_ids = [
+            candidate_id
+            for candidate_id in ingreso_ids
+            if candidate_id in candidates
+            and (rows_by_id.get(candidate_id) or {}).get("status") == "generated"
+            and _clean((rows_by_id.get(candidate_id) or {}).get("remito_number")) == remito_number
+        ]
+        if not group_ids:
+            group_ids = [ingreso_id]
+        visited.update(group_ids)
+        entries.append(_ris_batch_result_entry(row, group_ids))
+    return entries
+
+
+def _aggregate_ris_batch_result(ingreso_ids: list[int], entries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not entries:
+        raise BejermanRisError("No se pudo recuperar el resultado de los remitos emitidos")
+    order = {ingreso_id: index for index, ingreso_id in enumerate(ingreso_ids)}
+    ordered_entries = sorted(
+        entries,
+        key=lambda entry: min((order.get(item, len(order)) for item in entry.get("ingresoIds") or []), default=len(order)),
+    )
+    first = ordered_entries[0]
+    for entry in ordered_entries:
+        if ingreso_ids and ingreso_ids[0] in (entry.get("ingresoIds") or []):
+            first = entry
+            break
+    remito_numbers: list[str] = []
+    for entry in ordered_entries:
+        remito_number = _clean(entry.get("remito_number") or entry.get("remitoNumber"))
+        if remito_number and remito_number not in remito_numbers:
+            remito_numbers.append(remito_number)
+    return {
+        **first,
+        "multiple": len(ordered_entries) > 1,
+        "remitos": ordered_entries,
+        "remitoNumbers": remito_numbers,
+    }
 
 
 def _update_ris_pdf_ready(ingreso_id: int) -> dict[str, Any]:
@@ -1414,6 +1554,9 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
     issue_date = _date_iso(context.get("fecha_ingreso")) or timezone.localdate().isoformat()
     serial_number = _clean(context.get("numero_serie"))
     serial = serial_number or _clean(context.get("numero_interno"))
+    # Igual que en el lote: si la OS anterior del equipo quedó abierta, el comprobante sale
+    # sin número de OS hasta que alguien decida cuál de las dos vale.
+    suppress_os = context["id"] in _pending_conflict_ingreso_ids([context["id"]])
     return {
         "requestId": f"reparaciones-ingreso-{context['id']}",
         "ingresoId": context["id"],
@@ -1428,8 +1571,9 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
         "propietarioDoc": propietario_doc,
         "sellerCode": _clean(getattr(settings, "BEJERMAN_RIS_SELLER_CODE", "ADM")),
         "paymentTermCode": _clean(getattr(settings, "BEJERMAN_RIS_PAYMENT_TERM", "30")),
-        "notes": f"OS {os_label(context['id'])}",
+        "notes": "" if suppress_os else f"OS {os_label(context['id'])}",
         "equipment": {
+            "suppressOsLabel": suppress_os,
             "articleCode": article_code,
             "articleSource": "mapping" if mapped_article_code else ("generic" if allow_generic_article and article_code else ""),
             "articleMapped": bool(mapped_article_code),
@@ -1448,6 +1592,22 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
             "equipmentLabel": equipment_label,
         },
     }
+
+
+def _pending_conflict_ingreso_ids(ingreso_ids: list[Any]) -> set[Any]:
+    """Ingresos del lote que arrastran un conflicto de ingreso abierto sin resolver.
+
+    Import diferido: la consulta es opcional y no puede tumbar una emisión. Si la tabla no
+    está aplicada todavía, no hay conflictos y el remito sale como siempre.
+    """
+
+    try:
+        from .bejerman_ingreso_conflicts import pending_conflict_ingreso_ids
+
+        return pending_conflict_ingreso_ids([item for item in ingreso_ids if str(item).isdigit()])
+    except Exception:
+        logger.warning("ingreso_open_conflict_lookup_failed", exc_info=True)
+        return set()
 
 
 def _build_batch_payload(ingreso_ids: list[int]) -> dict[str, Any]:
@@ -1469,13 +1629,24 @@ def _build_batch_payload(ingreso_ids: list[int]) -> dict[str, Any]:
     if profile_mismatch:
         raise BejermanRisError(profile_mismatch)
     first = payloads[0]
+    # Un equipo cuya OS anterior quedó abierta sale en el remito sin número de OS: todavía no
+    # se sabe cuál de las dos órdenes es la buena, y poner la nueva sería afirmar algo que
+    # después hay que desdecir en un papel que ya se le entregó al cliente. El equipo igual
+    # queda identificado por su partida en el renglón del artículo.
+    conflicted = _pending_conflict_ingreso_ids([context["id"] for context in contexts])
     equipments: list[dict[str, Any]] = []
     for context, payload in zip(contexts, payloads):
         equipment = dict(payload.get("equipment") or {})
         equipment["ingresoId"] = context["id"]
-        equipment["osLabel"] = os_label(context["id"])
+        if context["id"] in conflicted:
+            equipment["osLabel"] = ""
+            equipment["suppressOsLabel"] = True
+        else:
+            equipment["osLabel"] = os_label(context["id"])
         equipments.append(equipment)
-    os_list = ", ".join(f"OS {os_label(context['id'])}" for context in contexts)
+    os_list = ", ".join(
+        f"OS {os_label(context['id'])}" for context in contexts if context["id"] not in conflicted
+    )
     return {
         **first,
         "requestId": f"reparaciones-ingreso-lote-{'-'.join(str(item) for item in ingreso_ids)}",
@@ -1518,6 +1689,169 @@ def _payload_equipment_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return [item for item in equipments if isinstance(item, dict)]
     equipment = payload.get("equipment")
     return [equipment] if isinstance(equipment, dict) else []
+
+
+def _ris_max_print_lines() -> int:
+    try:
+        configured = int(getattr(settings, "BEJERMAN_RIS_MAX_PRINT_LINES", RIS_DEFAULT_MAX_PRINT_LINES))
+    except (TypeError, ValueError):
+        configured = RIS_DEFAULT_MAX_PRINT_LINES
+    # El formulario tiene 22 renglones físicos; la configuración sólo puede
+    # reducir el límite para instalaciones más restrictivas.
+    return max(1, min(RIS_DEFAULT_MAX_PRINT_LINES, configured))
+
+
+def _built_service_ingress_print_lines(built: dict[str, Any]) -> int:
+    comprobante = built.get("comprobante") if isinstance(built.get("comprobante"), dict) else {}
+    items = comprobante.get("Comprobante_Items") if isinstance(comprobante.get("Comprobante_Items"), list) else []
+    highest_row = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            highest_row = max(highest_row, int(item.get("Item_NumeroRenglon") or 0))
+        except (TypeError, ValueError):
+            continue
+    try:
+        declared_count = int(built.get("lineCount") or 0)
+    except (TypeError, ValueError):
+        declared_count = 0
+    return max(declared_count, len(items), highest_row)
+
+
+def _batch_payload_for_equipment_block(
+    payload: dict[str, Any], equipments: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if not equipments:
+        raise BejermanRisError("No hay equipos para armar el bloque del remito")
+    block_equipments = [dict(item) for item in equipments]
+    raw_ingreso_ids = [item.get("ingresoId") for item in block_equipments if item.get("ingresoId") not in (None, "")]
+    ingreso_ids = raw_ingreso_ids or list(payload.get("ingresoIds") or [])[: len(block_equipments)]
+    request_suffix = "-".join(str(item) for item in ingreso_ids) or "sin-id"
+    # Los equipos con conflicto abierto tampoco aparecen en el mensaje de cabecera: si el
+    # renglón va sin OS, nombrarla arriba sería contradecirse dentro del mismo remito.
+    silenced = {
+        item.get("ingresoId")
+        for item in block_equipments
+        if item.get("suppressOsLabel")
+    }
+    notes = ", ".join(f"OS {os_label(item)}" for item in ingreso_ids if item not in silenced)
+    return {
+        **payload,
+        "requestId": f"reparaciones-ingreso-lote-{request_suffix}",
+        "ingresoId": ingreso_ids[0] if ingreso_ids else payload.get("ingresoId"),
+        "ingresoIds": ingreso_ids,
+        "notes": notes or payload.get("notes") or "",
+        "equipment": block_equipments[0],
+        "equipments": block_equipments,
+    }
+
+
+def _partition_service_ingress_payload(
+    payload: dict[str, Any],
+    customer_fields: dict[str, str] | None = None,
+    *,
+    max_lines: int | None = None,
+) -> list[dict[str, Any]]:
+    """Parte un lote por equipos completos usando el builder real del SDK.
+
+    Cada candidato se vuelve a construir con ``build_service_ingress_comprobante``;
+    de ese modo el preflight y la emisión cuentan exactamente las mismas leyendas,
+    artículos y títulos repetidos.
+    """
+
+    limit = _ris_max_print_lines() if max_lines is None else max(1, min(RIS_DEFAULT_MAX_PRINT_LINES, int(max_lines)))
+    raw_equipments = payload.get("equipments")
+    if not isinstance(raw_equipments, list) or not raw_equipments:
+        built = build_service_ingress_comprobante(payload, customer_fields or {})
+        line_count = _built_service_ingress_print_lines(built)
+        if line_count > limit:
+            equipment = payload.get("equipment") if isinstance(payload.get("equipment"), dict) else {}
+            identifier = _clean(equipment.get("serial")) or _clean(equipment.get("internalNumber"))
+            raise BejermanRisLineLimitError(
+                item_index=0,
+                line_count=line_count,
+                max_lines=limit,
+                identifier=identifier,
+            )
+        return [
+            {
+                "payload": payload,
+                "built": built,
+                "lineCount": line_count,
+                "equipmentCount": 1 if payload.get("equipment") else 0,
+                "ingresoIds": _payload_ingreso_ids(payload),
+            }
+        ]
+
+    equipments = [dict(item) for item in raw_equipments if isinstance(item, dict)]
+    blocks: list[dict[str, Any]] = []
+    current_equipments: list[dict[str, Any]] = []
+    current_payload: dict[str, Any] | None = None
+    current_built: dict[str, Any] | None = None
+
+    for item_index, equipment in enumerate(equipments):
+        candidate_equipments = [*current_equipments, equipment]
+        candidate_payload = _batch_payload_for_equipment_block(payload, candidate_equipments)
+        candidate_built = build_service_ingress_comprobante(candidate_payload, customer_fields or {})
+        candidate_line_count = _built_service_ingress_print_lines(candidate_built)
+        if candidate_line_count <= limit:
+            current_equipments = candidate_equipments
+            current_payload = candidate_payload
+            current_built = candidate_built
+            continue
+
+        if not current_equipments:
+            identifier = (
+                _clean(equipment.get("serial"))
+                or _clean(equipment.get("internalNumber"))
+                or _clean(equipment.get("osLabel"))
+            )
+            raise BejermanRisLineLimitError(
+                item_index=item_index,
+                line_count=candidate_line_count,
+                max_lines=limit,
+                identifier=identifier,
+            )
+
+        assert current_payload is not None and current_built is not None
+        blocks.append(
+            {
+                "payload": current_payload,
+                "built": current_built,
+                "lineCount": _built_service_ingress_print_lines(current_built),
+                "equipmentCount": len(current_equipments),
+                "ingresoIds": _payload_ingreso_ids(current_payload),
+            }
+        )
+        current_equipments = [equipment]
+        current_payload = _batch_payload_for_equipment_block(payload, current_equipments)
+        current_built = build_service_ingress_comprobante(current_payload, customer_fields or {})
+        singleton_line_count = _built_service_ingress_print_lines(current_built)
+        if singleton_line_count > limit:
+            identifier = (
+                _clean(equipment.get("serial"))
+                or _clean(equipment.get("internalNumber"))
+                or _clean(equipment.get("osLabel"))
+            )
+            raise BejermanRisLineLimitError(
+                item_index=item_index,
+                line_count=singleton_line_count,
+                max_lines=limit,
+                identifier=identifier,
+            )
+
+    if current_equipments and current_payload is not None and current_built is not None:
+        blocks.append(
+            {
+                "payload": current_payload,
+                "built": current_built,
+                "lineCount": _built_service_ingress_print_lines(current_built),
+                "equipmentCount": len(current_equipments),
+                "ingresoIds": _payload_ingreso_ids(current_payload),
+            }
+        )
+    return blocks
 
 
 def _is_stock_ingress_payload(payload: dict[str, Any]) -> bool:
@@ -2263,7 +2597,11 @@ def _combined_payload(payloads: list[dict[str, Any]], issues: list[dict[str, Any
     for index, payload in enumerate(payloads):
         equipment = dict(payload.get("equipment") or {})
         equipment["ingresoId"] = payload.get("ingresoId")
-        equipment["osLabel"] = f"preflight-{index + 1}"
+        # Los IDs provisionales tienen forma ``preflight-N`` y no son una OS
+        # válida para el formateador. Se usa un ordinal sólo para la vista previa:
+        # así el builder agrega el mismo renglón de OS que agregará al emitir con
+        # los IDs definitivos, sin confundirlo con un ingreso real.
+        equipment["osLabel"] = index + 1
         equipments.append(equipment)
     return {
         **first,
@@ -2361,6 +2699,40 @@ def _apply_bejerman_partida_articles(payload: dict[str, Any], client: BejermanSD
     out["equipment"] = resolved_items[0]
     if isinstance(payload.get("equipments"), list):
         out["equipments"] = resolved_items
+    return out
+
+
+def _apply_bejerman_article_descriptions(payload: dict[str, Any], client: BejermanSDKClient) -> dict[str, Any]:
+    """Deja en cada equipo la descripción que Bejerman tiene para su código.
+
+    `equipment_article_description` ya prefiere `mappedArticleName` justamente porque
+    el nexo entre los dos sistemas es el número de artículo; lo que faltaba es que ese
+    texto salga del maestro **vivo** y no de la copia que quedó guardada en
+    `bejerman_article_mappings` cuando se confirmó el mapeo. Esa copia envejece: en
+    MGBIO el 1111001 se venía imprimiendo como "Calentador humidificador BMC G2 B-20V"
+    cuando en Bejerman hace rato que es "Calentador humidificador BMC H60-GII".
+
+    Nunca levanta: si el catálogo no responde, cada equipo se queda con el texto que
+    ya tenía y el remito sale igual.
+    """
+
+    items = _payload_equipment_items(payload)
+    codes = [_clean(item.get("articleCode")) for item in items]
+    descriptions = bejerman_catalog_cache.article_descriptions(
+        client, codes, company_key=_clean(payload.get("companyKey")) or None
+    )
+    if not descriptions:
+        return payload
+    resolved: list[dict[str, Any]] = []
+    for item in items:
+        description = _clean(article_description_for(item.get("articleCode"), descriptions))
+        resolved.append({**item, "mappedArticleName": description} if description else item)
+    out = dict(payload)
+    if isinstance(payload.get("equipments"), list) and payload.get("equipments"):
+        out["equipments"] = resolved
+        out["equipment"] = resolved[0]
+    elif resolved:
+        out["equipment"] = resolved[0]
     return out
 
 
@@ -2660,6 +3032,7 @@ def _preflight_from_contexts(
     user_id: int | None = None,
     *,
     skip_equipment_duplicate_check: bool = False,
+    compact_service_ingress_legends: bool = False,
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     payloads = _payloads_from_contexts(contexts, issues)
@@ -2673,7 +3046,9 @@ def _preflight_from_contexts(
             if client is None:
                 client = BejermanSDKClient(company_key=company_key, actor_user_id=user_id)
                 stock_clients[company_key] = client
-            payloads[index] = _apply_bejerman_partida_articles(payload, client)
+            payloads[index] = _apply_bejerman_article_descriptions(
+                _apply_bejerman_partida_articles(payload, client), client
+            )
         except BejermanRisError as exc:
             issues.append(
                 _issue(
@@ -2685,6 +3060,8 @@ def _preflight_from_contexts(
                 )
             )
     combined = _combined_payload(payloads, issues)
+    if combined and compact_service_ingress_legends:
+        combined = {**combined, "compactServiceIngressLegends": True}
     client_cache: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
     customer_fields = None
     for index, (context, payload) in enumerate(zip(contexts, payloads)):
@@ -2709,17 +3086,39 @@ def _preflight_from_contexts(
             actor_user_id=user_id,
         )
     built = None
+    split_blocks: list[dict[str, Any]] = []
     document_profile = combined.get("documentProfile") if isinstance(combined, dict) else None
     document_type = _clean((document_profile or {}).get("type")) or "RIS"
     if combined and customer_fields and not _has_errors(issues):
         try:
             built = build_service_ingress_comprobante(combined, customer_fields)
+            split_blocks = _partition_service_ingress_payload(combined, customer_fields)
+        except BejermanRisLineLimitError as exc:
+            issues.append(
+                _issue(
+                    exc.code,
+                    str(exc),
+                    scope="equipo",
+                    field="equipo",
+                    item_index=exc.item_index if len(contexts) > 1 else None,
+                )
+            )
         except Exception as exc:
             issues.append(_issue("BEJERMAN_COMPROBANTE_INVALID", f"No se pudo armar el comprobante {document_type}: {exc}"))
+    preview = _preview_payload(combined, built)
+    if split_blocks:
+        preview.update(
+            {
+                "splitRequired": len(split_blocks) > 1,
+                "documentCount": len(split_blocks),
+                "documentLineCounts": [int(block.get("lineCount") or 0) for block in split_blocks],
+                "maxLinesPerDocument": _ris_max_print_lines(),
+            }
+        )
     return {
         "can_emit": not _has_errors(issues),
         "issues": issues,
-        "preview": _preview_payload(combined, built),
+        "preview": preview,
         "document_profile": document_profile,
         "documentProfile": document_profile,
         "detail": f"{document_type} validado correctamente." if not _has_errors(issues) else "La validación previa del comprobante de ingreso encontró problemas.",
@@ -2785,7 +3184,12 @@ def preflight_ris_for_request_payload(data: dict[str, Any], user_id: int | None 
         contexts,
         user_id=user_id,
         skip_equipment_duplicate_check=document_mode == RIS_DOCUMENT_MODE_REGISTER,
+        compact_service_ingress_legends=document_mode == RIS_DOCUMENT_MODE_REGISTER,
     )
+    # Sólo en el alta: acá los ingresos todavía no existen, así que una orden abierta con este
+    # equipo es de una entrada anterior. En una reemisión el ingreso ya está creado y se
+    # encontraría a sí mismo.
+    _validate_no_open_ingreso(contexts, result.setdefault("issues", []))
     result["document_mode"] = document_mode
     if document_mode == RIS_DOCUMENT_MODE_REGISTER:
         raw_manual_remito_number = (
@@ -2860,6 +3264,88 @@ def preflight_ris_for_request_payload(data: dict[str, Any], user_id: int | None 
         if result.get("can_emit"):
             result["detail"] = "Remito validado correctamente para registrar."
     return result
+
+
+def _open_ingreso_for_equipment(numero_serie: str, tipo_equipo: str) -> dict[str, Any] | None:
+    """La orden de servicio todavía abierta de este equipo, si la hay.
+
+    Identidad por número de serie **más** tipo de equipo: un CPAP y el humidificador que lo
+    acompaña comparten la serie, y sin el tipo uno se lee como duplicado del otro.
+    """
+
+    serial = _clean(numero_serie)
+    if not serial:
+        return None
+    ns_key = serial.replace(" ", "").replace("-", "").upper()
+    return q(
+        """
+        SELECT t.id,
+               COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
+               COALESCE(t.estado::text, '') AS estado,
+               COALESCE(c.razon_social, '') AS cliente
+          FROM ingresos t
+          JOIN devices d ON d.id = t.device_id
+          LEFT JOIN models m ON m.id = d.model_id
+          LEFT JOIN customers c ON c.id = d.customer_id
+         WHERE REPLACE(REPLACE(UPPER(d.numero_serie),' ',''),'-','') = %s
+           AND LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))) = %s
+           AND t.estado NOT IN ('entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
+         ORDER BY t.id DESC
+         LIMIT 1
+        """,
+        [ns_key, _clean(tipo_equipo).lower()],
+        one=True,
+    )
+
+
+def _validate_no_open_ingreso(contexts: list[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
+    """Avisa (sin bloquear) que un equipo del lote ya tiene una orden abierta.
+
+    Es warning a propósito: el cliente está esperando el remito y frenarlo no arregla nada.
+    Lo que hace falta es que quien atiende **vea qué equipo es** y tenga cómo resolverlo.
+    La búsqueda de evidencia en Bejerman no se hace acá: es una consulta remota lenta y esto
+    corre cada vez que se agrega un equipo a la lista. Va a demanda, por botón.
+    """
+
+    for index, context in enumerate(contexts):
+        serial = _clean(context.get("numero_serie"))
+        tipo = _clean(context.get("tipo_equipo"))
+        if not serial or not tipo:
+            continue
+        open_ingreso = _open_ingreso_for_equipment(serial, tipo)
+        if not open_ingreso:
+            continue
+        fecha = _date_iso(open_ingreso.get("fecha_ingreso")) or "-"
+        equipo = " ".join(
+            part for part in (tipo, _clean(context.get("marca")), _clean(context.get("modelo"))) if part
+        )
+        issues.append(
+            _issue(
+                "INGRESO_OPEN_CONFLICT",
+                (
+                    f"{equipo} (N/S {serial}) ya tiene la OS {os_label(open_ingreso['id'])} abierta "
+                    f"desde el {fecha}. Suele pasar cuando no se tildó la entrega anterior. "
+                    "El remito se emite igual: ese renglón sale sin número de OS y el caso queda "
+                    "pendiente de resolución."
+                ),
+                scope="ingreso",
+                field="equipo.numero_serie",
+                severity="warning",
+                item_index=index if len(contexts) > 1 else None,
+                fix={
+                    "type": "open_ingreso_conflict",
+                    "conflicting_ingreso_id": open_ingreso["id"],
+                    "conflicting_os": os_label(open_ingreso["id"]),
+                    "conflicting_fecha_ingreso": fecha,
+                    "conflicting_estado": open_ingreso.get("estado") or "",
+                    "conflicting_cliente": open_ingreso.get("cliente") or "",
+                    "numero_serie": serial,
+                    "tipo_equipo": tipo,
+                    "equipo": equipo,
+                    "company_key": _clean(context.get("empresa_bejerman")) or "SEPID",
+                },
+            )
+        )
 
 
 def ensure_ris_preflight_ok(preflight: dict[str, Any]) -> None:
@@ -3313,15 +3799,19 @@ def _verify_register_stock_entries(client: BejermanSDKClient, partidas: list[str
 
 def _ensure_register_stock_entries(
     client: BejermanSDKClient, payload: dict[str, Any], ingreso_ids: list[int]
-) -> None:
+) -> list[dict[str, Any]]:
     """Da de alta por circuito STOCK las partidas que aún no existen en el depósito
     destino y verifica que el importador de Bejerman las haya reflejado antes de
-    mandar el comprobante (que va con ActualizaStock=N y partida informada). El
-    importador de VENTAS no crea partidas: sin este ENT el comprobante fallaría con
-    'Partida inexistente y/o no informada'."""
+    mandar el comprobante. El importador de VENTAS no crea partidas: sin este ENT el
+    comprobante fallaría con 'Partida inexistente y/o no informada'.
+
+    Devuelve los ENT que efectivamente emitió. Eso importa porque cada uno deja la
+    partida en +1, y esa unidad de más es la razón por la que después el comprobante
+    tiene que ir con `ActualizaStock=N` — que es justamente lo que lo vuelve invisible
+    en los reportes por cliente (ver `_neutralize_register_stock_entries`)."""
     equipments = _payload_equipment_items(payload)
     if not equipments:
-        return
+        return []
     deposit = _register_target_deposit(payload)
     issue_date = _date_iso(payload.get("issueDate")) or timezone.localdate().isoformat()
     entries: list[dict[str, Any]] = []
@@ -3344,13 +3834,121 @@ def _ensure_register_stock_entries(
         )
         pending_partidas.append(partida)
     if not entries:
-        return
+        return []
     numera_flex = _clean(getattr(settings, "BEJERMAN_STOCK_NUMERA_FLEX", "N")) or "N"
     response = client.ingresar_lista_comprobantes_stock_json(entries, numera_flex=numera_flex)
     if not is_ok_response(response):
         detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
         raise BejermanRisError(f"No se envió el RIS: Bejerman rechazó el alta de stock. {detail}")
     _verify_register_stock_entries(client, pending_partidas, deposit)
+    return entries
+
+
+def _recovery_keeps_stock_movement() -> bool:
+    return bool(getattr(settings, "BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT", True))
+
+
+def _counter_stock_entries(
+    entries: list[dict[str, Any]], tipo: str, prefijo: str, *, signo: int = 1
+) -> list[dict[str, Any]]:
+    """Los mismos renglones del ENT, con otro tipo de comprobante y otro origen.
+
+    `signo` importa: el importador de stock **guarda la cantidad tal como se la
+    mandan**, no la deduce del tipo de comprobante. Verificado en el simulacro del
+    13/08/2026: una SAL con cantidad 1 sumó igual que el ENT y dejó la partida en 3
+    en vez de 0. La compensación tiene que viajar en negativo.
+    """
+
+    salidas: list[dict[str, Any]] = []
+    for entry in entries:
+        numero = _clean(entry.get("Comprobante_Numero"))
+        salida = {
+            **entry,
+            "Comprobante_Tipo": tipo,
+            "Comprobante_IdOrigen": f"{prefijo}-{numero}"[:50],
+        }
+        for campo in ("Comprobante_CantidadUM1", "Comprobante_CantidadUM2"):
+            valor = entry.get(campo)
+            if isinstance(valor, (int, float)) and valor:
+                salida[campo] = signo * abs(valor)
+        salidas.append(salida)
+    return salidas
+
+
+def _neutralize_register_stock_entries(
+    client: BejermanSDKClient, entries: list[dict[str, Any]], deposit: str
+) -> None:
+    """Deja en cero las partidas que acaba de crear el ENT, sin borrarlas.
+
+    Por qué: el ENT existe sólo para que la partida **exista** en el depósito — el
+    importador de VENTAS no las crea. Pero además suma una unidad, y esa unidad de más
+    obligaba a mandar el comprobante con `ActualizaStock=N`, que es lo que dejaba la
+    devolución sin movimiento propio y por lo tanto sin cliente: invisible en
+    trazabilidad de alquiler y en el listado de N/S por cliente.
+
+    Con la SAL que compensa, la partida queda existiendo en cero y el remito puede
+    hacer su propio movimiento, que es como se comportan los RDA que hoy sí funcionan.
+    Bejerman conserva las filas en cero — en MGBIO 3.667 de 3.672 filas de STL lo
+    están — así que la partida no desaparece al compensarla.
+    """
+
+    if not entries:
+        return
+    tipo = _clean(getattr(settings, "BEJERMAN_STOCK_EXIT_COMPROBANTE", "SAL")) or "SAL"
+    numera_flex = _clean(getattr(settings, "BEJERMAN_STOCK_NUMERA_FLEX", "N")) or "N"
+    response = client.ingresar_lista_comprobantes_stock_json(
+        _counter_stock_entries(entries, tipo, "NEXORA-NEU", signo=-1), numera_flex=numera_flex
+    )
+    if not is_ok_response(response):
+        detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
+        raise BejermanRisError(f"Bejerman rechazó la salida que compensa el alta de partida. {detail}")
+    partidas = [_clean(entry.get("Comprobante_ArtPartida")) for entry in entries]
+    _verify_partidas_present(client, [p for p in partidas if p], deposit)
+
+
+def _verify_partidas_present(client: BejermanSDKClient, partidas: list[str], deposit: str) -> None:
+    """Confirma que la partida quedó en el depósito, con la cantidad que sea.
+
+    A diferencia de `_verify_register_stock_entries`, acá cero es el resultado
+    buscado, así que se mira presencia y no cantidad positiva.
+    """
+
+    faltantes = []
+    for partida in dict.fromkeys(partidas):
+        try:
+            response = client.obtener_stock_partida(partida)
+        except Exception:
+            faltantes.append(partida)
+            continue
+        if not _records_for_partida_any_quantity(response, partida, deposit):
+            faltantes.append(partida)
+    if faltantes:
+        raise BejermanRisError(
+            "No se pudo confirmar la partida en el depósito " + deposit + ": " + ", ".join(faltantes)
+        )
+
+
+def _restore_register_stock_entries(client: BejermanSDKClient, entries: list[dict[str, Any]]) -> None:
+    """Vuelve a sumar la unidad que sacó la SAL, para retomar el camino de siempre.
+
+    Se usa cuando el remito con movimiento de stock no salió: hay que dejar el stock
+    exactamente como lo dejaba el fallback viejo antes de reintentar con
+    `ActualizaStock=N`, porque en ese camino la unidad la aporta el ENT y no el
+    comprobante.
+    """
+
+    if not entries:
+        return
+    tipo = _clean(getattr(settings, "BEJERMAN_STOCK_ENTRY_COMPROBANTE", "ENT")) or "ENT"
+    numera_flex = _clean(getattr(settings, "BEJERMAN_STOCK_NUMERA_FLEX", "N")) or "N"
+    response = client.ingresar_lista_comprobantes_stock_json(
+        _counter_stock_entries(entries, tipo, "NEXORA-RST"), numera_flex=numera_flex
+    )
+    if not is_ok_response(response):
+        detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
+        raise BejermanRisError(
+            "Quedó stock sin reponer después de compensar el alta de partida. " + detail
+        )
 
 
 def force_stock_entry_for_ingreso(ingreso_id: int, user_id: int | None = None) -> dict[str, Any]:
@@ -3459,11 +4057,53 @@ def _recover_emit_partida_rejection(
     emite_reg: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fallback cuando el WS procesa la 'emisión' como importador y rechaza la
-    partida (pasa en MGBIO y también en SEPID según el comprobante): da de alta por
-    ENT y reintenta el mismo documento con ActualizaStock=N, partida informada y
-    cantidad positiva. El importador con numera_flex=S autonumera igual."""
+    partida (pasa en MGBIO y también en SEPID según el comprobante).
+
+    El ENT existe porque el importador de VENTAS no crea partidas. Pero deja la
+    partida en +1, y por eso el reintento iba con `ActualizaStock=N`: sin eso la
+    unidad se contaba dos veces. El costo de esa decisión era invisible hasta que lo
+    reclamó cobranzas — un comprobante con `ActualizaStock=N` **no genera movimiento
+    de stock**, y los reportes por cliente (trazabilidad de alquiler, N/S por cliente)
+    se arman recorriendo movimientos. Medido el 12/08/2026: los 19 RDA que salieron
+    con `N` no aparecen en ningún reporte; los 27 que no lo mandan, sí.
+
+    Por eso ahora, si el ENT tuvo que crear la partida, se la compensa con una SAL
+    para dejarla existiendo en cero y se reintenta el **mismo comprobante**, con su
+    movimiento de stock y su cliente. Si algo de ese camino falla se repone el ENT y
+    se vuelve al reintento de siempre: el peor caso es el comportamiento anterior.
+    """
     deposit = _register_target_deposit(payload)
-    _ensure_register_stock_entries(client, payload, _payload_ingreso_ids(payload))
+    created_entries = _ensure_register_stock_entries(client, payload, _payload_ingreso_ids(payload))
+
+    if created_entries and _recovery_keeps_stock_movement():
+        try:
+            _neutralize_register_stock_entries(client, created_entries, deposit)
+        except Exception:
+            logger.warning("bejerman_ris_partida_neutralize_failed", exc_info=True)
+        else:
+            try:
+                raw_response = client.ingresar_comprobante_ventas_json(
+                    built["comprobante"],
+                    circuito="VENTAS",
+                    operacion=operation,
+                    numera_flex=numera_flex,
+                    emite_reg=emite_reg,
+                )
+            except Exception:
+                logger.warning("bejerman_ris_partida_stock_retry_failed", exc_info=True)
+                _restore_register_stock_entries(client, created_entries)
+            else:
+                request_payload = {
+                    **payload,
+                    "comprobante": built["comprobante"],
+                    "operation": operation,
+                    "numeraFlex": numera_flex,
+                    "emiteReg": emite_reg,
+                    "partidaRejectionRecovered": True,
+                    "partidaNeutralized": True,
+                }
+                return request_payload, _service_ingress_response(request_payload, built, raw_response)
+
     comprobante = _comprobante_import_with_partidas(built["comprobante"], payload, deposit)
     raw_response = client.ingresar_comprobante_ventas_json(
         comprobante,
@@ -3529,6 +4169,7 @@ def _register_payload_to_bejerman(
                 return _registered_document_association_response(payload, document)
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         payload = _apply_bejerman_partida_articles(payload, client)
+        payload = _apply_bejerman_article_descriptions(payload, client)
         if not skip_duplicate_checks:
             duplicate_remote = _remote_ris_duplicate(document, payload["companyKey"], client)
             if duplicate_remote:
@@ -3600,6 +4241,23 @@ def _build_service_ingress_request(
     emite_reg: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     built = build_service_ingress_comprobante(payload, customer_fields)
+    line_count = _built_service_ingress_print_lines(built)
+    max_lines = _ris_max_print_lines()
+    if line_count > max_lines:
+        equipments = _payload_equipment_items(payload)
+        if len(equipments) == 1:
+            equipment = equipments[0]
+            identifier = _clean(equipment.get("serial")) or _clean(equipment.get("internalNumber"))
+            raise BejermanRisLineLimitError(
+                item_index=0,
+                line_count=line_count,
+                max_lines=max_lines,
+                identifier=identifier,
+            )
+        raise BejermanRisError(
+            f"El bloque del remito ocupa {line_count} renglones y supera el máximo físico de {max_lines}. "
+            "La emisión se canceló antes de contactar a Bejerman."
+        )
     request_payload = {
         **payload,
         "comprobante": built["comprobante"],
@@ -3681,6 +4339,7 @@ def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = Non
     try:
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         payload = _apply_bejerman_partida_articles(payload, client)
+        payload = _apply_bejerman_article_descriptions(payload, client)
         _ensure_equipment_remito_not_duplicated(payload, _payload_ingreso_ids(payload), client)
         payload, customer_fields = _resolve_or_build_customer_fields(client, payload)
         return _send_service_ingress_comprobante(
@@ -3749,6 +4408,7 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
     try:
         client = BejermanSDKClient(company_key=payload["companyKey"], actor_user_id=user_id)
         payload = _apply_bejerman_partida_articles(payload, client)
+        payload = _apply_bejerman_article_descriptions(payload, client)
         _ensure_equipment_remito_not_duplicated(payload, [ingreso_id], client)
         payload, customer_fields = _resolve_or_build_customer_fields(client, payload)
         request_payload, response = _send_service_ingress_comprobante(
@@ -3812,31 +4472,71 @@ def emit_or_get_ris_batch(ingreso_ids: list[int], user_id: int | None = None) ->
     for ingreso_id in clean_ids:
         _ensure_ris_row(ingreso_id, user_id)
     rows = [_row_for_ingreso(ingreso_id) or {} for ingreso_id in clean_ids]
-    remito_numbers = [_clean(row.get("remito_number")) for row in rows]
-    generated_numbers = {
-        remito_number
-        for row, remito_number in zip(rows, remito_numbers)
-        if row.get("status") == "generated" and remito_number
+    generated_entries = _generated_ris_batch_entries(clean_ids, rows)
+    generated_ids = {
+        ingreso_id
+        for entry in generated_entries
+        for ingreso_id in (entry.get("ingresoIds") or [])
     }
-    if len(generated_numbers) == 1 and all(remito_number in generated_numbers for remito_number in remito_numbers):
-        return rows[0]
+    pending_ids = [ingreso_id for ingreso_id in clean_ids if ingreso_id not in generated_ids]
+    if not pending_ids:
+        return _aggregate_ris_batch_result(clean_ids, generated_entries)
 
-    ensure_ris_preflight_ok(preflight_ris_for_ingresos(clean_ids, user_id=user_id))
+    # En un reintento parcial se validan sólo los equipos todavía pendientes. Los
+    # ya generados conservan su número y jamás vuelven a contactar a Bejerman.
+    ensure_ris_preflight_ok(preflight_ris_for_ingresos(pending_ids, user_id=user_id))
     payload: dict[str, Any] = {
-        "requestId": f"reparaciones-ingreso-lote-{'-'.join(str(item) for item in clean_ids)}",
-        "ingresoId": clean_ids[0],
-        "ingresoIds": clean_ids,
+        "requestId": f"reparaciones-ingreso-lote-{'-'.join(str(item) for item in pending_ids)}",
+        "ingresoId": pending_ids[0],
+        "ingresoIds": pending_ids,
     }
-    request_payload: dict[str, Any] | None = None
-    _lock_for_emit_many(clean_ids)
+    _lock_for_emit_many(pending_ids)
     try:
-        payload = _build_batch_payload(clean_ids)
-        request_payload, response = _emit_payload_to_bejerman(payload, user_id=user_id)
+        payload = _build_batch_payload(pending_ids)
+        blocks = _partition_service_ingress_payload(payload)
     except BejermanRisError as exc:
-        _update_ris_failure_many(clean_ids, str(exc), pdf_error=False, request_payload=request_payload or payload or None)
+        _update_ris_failure_many(pending_ids, str(exc), pdf_error=False, request_payload=payload or None)
         raise
-    row = _update_ris_generated_many(clean_ids, request_payload, response)
-    return row
+
+    emitted_entries: list[dict[str, Any]] = []
+    for block_index, block in enumerate(blocks):
+        block_payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        block_ids = [int(item) for item in (block.get("ingresoIds") or []) if str(item).isdigit()]
+        if not block_ids:
+            error = BejermanRisError("No se pudieron identificar los ingresos del bloque RIS")
+            _update_ris_failure_many(pending_ids, str(error), pdf_error=False, request_payload=block_payload or payload)
+            raise error
+        try:
+            request_payload, response = _emit_payload_to_bejerman(block_payload, user_id=user_id)
+        except BejermanRisError as exc:
+            # Los bloques anteriores ya fueron confirmados y quedan generados. El
+            # bloque fallido y los todavía no intentados quedan reintentables sin
+            # poner en riesgo una doble emisión de los primeros.
+            for remaining in blocks[block_index:]:
+                remaining_payload = (
+                    remaining.get("payload") if isinstance(remaining.get("payload"), dict) else payload
+                )
+                remaining_ids = [
+                    int(item) for item in (remaining.get("ingresoIds") or []) if str(item).isdigit()
+                ]
+                if remaining_ids:
+                    _update_ris_failure_many(
+                        remaining_ids,
+                        str(exc),
+                        pdf_error=False,
+                        request_payload=remaining_payload,
+                    )
+            raise
+        row = _update_ris_generated_many(block_ids, request_payload, response)
+        emitted_entries.append(
+            _ris_batch_result_entry(
+                row,
+                block_ids,
+                request_payload=request_payload,
+                response_payload=response,
+            )
+        )
+    return _aggregate_ris_batch_result(clean_ids, [*generated_entries, *emitted_entries])
 
 
 def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_id: int | None = None) -> dict[str, Any]:
@@ -3951,6 +4651,15 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
             payload=pdf_error_metadata(exc),
         ) from exc
     except BejermanPdfNotPublishedError as exc:
+        metadata = pdf_error_metadata(exc)
+        queue_error_code = _clean(getattr(exc, "queue_error_code", "") or metadata.get("queue_error_code"))
+        if queue_error_code == REMITO_PDF_LINE_LIMIT_ERROR_CODE:
+            batch_ids = _ris_pdf_batch_ingreso_ids(row, ingreso_id)
+            _update_ris_failure_many(batch_ids, str(exc), pdf_error=True)
+            logger.warning(
+                "bejerman_ris_pdf_line_limit_failed",
+                extra={"ingreso_id": ingreso_id, "ingreso_ids": batch_ids},
+            )
         logger.warning(
             "bejerman_ris_pdf_not_published",
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
@@ -3959,7 +4668,7 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
             str(exc),
             code=exc.code,
             status_code=exc.status_code,
-            payload=pdf_error_metadata(exc),
+            payload=metadata,
         ) from exc
     except BejermanPdfFolderUnavailableError as exc:
         logger.warning(
@@ -3990,7 +4699,7 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
         )
         _update_ris_failure(ingreso_id, str(exc), pdf_error=True)
         raise BejermanRisPdfError(str(exc)) from exc
-    row = _update_ris_pdf_ready(ingreso_id)
+    row = _update_ris_pdf_ready_many(_ris_pdf_batch_ingreso_ids(row, ingreso_id), ingreso_id)
     logger.info(
         "bejerman_ris_pdf_ready",
         extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},

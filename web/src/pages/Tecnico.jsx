@@ -2,15 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import WorkQueueTable from "../components/WorkQueueTable.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
 import useQueryState from "../hooks/useQueryState";
-import {
-  catalogEquipmentLabel,
-  formatOS,
-  ingresoIdOf,
-  norm,
-  resolveFechaCreacion,
-  tipoEquipoOf,
-} from "../lib/ui-helpers";
+import useColumnFilters from "../hooks/useColumnFilters";
+import { ingresoIdOf, resolveFechaCreacion } from "../lib/ui-helpers";
+import { matchesWorkQueueFilters } from "../lib/work-queue";
+import { workQueueFilterOptions } from "../lib/work-queue-filter-options";
 
 export default function Tecnico() {
   const [rows, setRows] = useState([]);
@@ -18,6 +16,8 @@ export default function Tecnico() {
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
   const navigate = useNavigate();
 
   const sortPendientes = (arr) => {
@@ -57,23 +57,16 @@ export default function Tecnico() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const displayRows = useMemo(() => {
-    const needle = norm(q);
-    if (!needle) return rows;
-    return rows.filter((row) => {
-      const campos = [
-        formatOS(row),
-        row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
-        catalogEquipmentLabel(row),
-        tipoEquipoOf(row),
-        row?.numero_serie,
-        row?.numero_interno,
-        row?.estado,
-        row?.presupuesto_estado,
-      ];
-      return campos.some((campo) => norm(campo).includes(needle));
-    });
-  }, [rows, q]);
+  const displayRows = useMemo(
+    () => rows.filter((row) => matchesWorkQueueFilters(row, { q, ...filters })),
+    [rows, q, filters]
+  );
+
+  // "Mis pendientes" son siempre del mismo técnico: ese filtro no aporta nada.
+  const filterOptions = useMemo(() => {
+    const { tecnico, ...resto } = workQueueFilterOptions(rows);
+    return resto;
+  }, [rows]);
 
   const go = (row) => {
     const id = ingresoIdOf(row);
@@ -85,28 +78,35 @@ export default function Tecnico() {
     <div className="card">
       <div className="h1 mb-3">Mis pendientes</div>
 
-      {err && (
-        <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">{err}</div>
-      )}
+      <AlertBanner tone="error">{err}</AlertBanner>
 
-      <div className="flex justify-end mb-3">
-        <input
-          className="border rounded p-2 w-full max-w-md"
-          placeholder="Filtrar por OS, cliente, equipo, serie, estado..."
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          aria-label="Filtrar mis pendientes"
-        />
-      </div>
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, cliente, equipo, serie, estado..."
+        searchLabel="Filtrar mis pendientes"
+        onReload={load}
+        loading={loading}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+      />
 
       <WorkQueueTable
         rows={displayRows}
+        totalCount={rows.length}
         loading={loading}
         emptyText={q ? "No se encontraron pendientes para el filtro aplicado." : "No tiene pendientes por ahora."}
         onOpen={go}
         showTechnician={false}
         sort={sort}
         onSortChange={setSort}
+        showFilters={filtersOpen}
+        filters={filters}
+        onFilterChange={setFilter}
+        filterOptions={filterOptions}
       />
     </div>
   );

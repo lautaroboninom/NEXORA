@@ -33,7 +33,9 @@ function Field({ label, children, title, className = "", truncateValue = true })
 }
 
 function identifierLine(data) {
-  const parts = deviceIdentifierPartsOf(data, "-");
+  // La cabecera de la OS es detalle, no listado: acá el MG histórico se sigue
+  // mostrando porque es la trazabilidad del equipo que vendimos.
+  const parts = deviceIdentifierPartsOf(data, "-", { includeHistoricalMg: true });
   const items = [parts.primary];
   if (parts.secondary) items.push(parts.secondary);
   if (parts.numeroAlternativo) items.push(`N° alternativo: ${parts.numeroAlternativo}`);

@@ -5,7 +5,14 @@ from django.core.mail import EmailMessage, get_connection, send_mail
 from django.db import connection, transaction
 
 from .email_delivery import dispatch_email_delivery
-from .notifications import active_user_ids_for_roles, notify_reparacion_lista_remito
+from .notifications import (
+    active_user_ids_for_roles,
+    filter_email_recipients_by_preference,
+    notify_no_se_repara_listo_remito,
+    notify_reparacion_lista_remito,
+    resolve_notifications,
+    user_ids_subscribed_to,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +82,79 @@ def _repair_ready_recipients():
     )
 
 
-def _repair_ready_notification_user_ids():
+def _assigned_technician_id(ingreso_id):
     try:
-        return active_user_ids_for_roles(["recepcion"])
+        row = q("SELECT asignado_a FROM ingresos WHERE id = %s", [ingreso_id], one=True) or {}
+    except Exception:
+        logger.exception(
+            "No se pudo resolver el técnico asignado del ingreso",
+            extra={"ingreso_id": ingreso_id},
+        )
+        return None
+    try:
+        return int(row.get("asignado_a")) if row.get("asignado_a") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _actor_email(actor_user_id):
+    if actor_user_id is None:
+        return ""
+    try:
+        row = q("SELECT COALESCE(email,'') AS email FROM users WHERE id = %s", [actor_user_id], one=True) or {}
+    except Exception:
+        logger.exception(
+            "No se pudo resolver el correo del autor del aviso",
+            extra={"actor_user_id": actor_user_id},
+        )
+        return ""
+    return str(row.get("email") or "").strip().lower()
+
+
+def _remito_audience_user_ids(notification_key, ingreso_id=None, actor_user_id=None):
+    """Recepción imprime la orden de salida; el técnico asignado sigue su equipo.
+
+    La lista de correos del aviso queda deliberadamente afuera: pasarla como
+    ``emails`` a ``emit_notification`` le creaba la campana al usuario dueño de
+    esa casilla, sin mirar si la había pedido. Jefatura entra por el camino
+    correcto, que es tener el aviso prendido en su configuración.
+
+    ``actor_user_id`` queda fuera de la audiencia: quien aprueba el presupuesto
+    o marca el equipo reparado no necesita que le avisen de su propio clic, y
+    era la mitad del ruido de este aviso.
+    """
+    user_ids = []
+    try:
+        user_ids.extend(active_user_ids_for_roles(["recepcion"]))
     except Exception:
         logger.exception("No se pudieron resolver destinatarios internos de recepción")
-        return []
+    try:
+        # Jefatura no entra por la lista de correos, entra si tiene el aviso
+        # prendido en el centro de notificaciones.
+        for uid in user_ids_subscribed_to(
+            notification_key, ["jefe", "jefe_veedor", "admin", "supervisor"]
+        ):
+            if uid not in user_ids:
+                user_ids.append(uid)
+    except Exception:
+        logger.exception("No se pudieron resolver destinatarios de jefatura suscriptos al aviso")
+    if ingreso_id is not None:
+        tecnico_id = _assigned_technician_id(ingreso_id)
+        if tecnico_id and tecnico_id not in user_ids:
+            user_ids.append(tecnico_id)
+    try:
+        actor_id = int(actor_user_id) if actor_user_id is not None else None
+    except (TypeError, ValueError):
+        actor_id = None
+    if actor_id is not None:
+        user_ids = [uid for uid in user_ids if uid != actor_id]
+    return user_ids
+
+
+def _repair_ready_notification_user_ids(ingreso_id=None, actor_user_id=None):
+    return _remito_audience_user_ids(
+        "reparacion_lista_remito", ingreso_id=ingreso_id, actor_user_id=actor_user_id
+    )
 
 
 def _send_mail_with_fallback(subject, body, recipients):
@@ -221,12 +295,79 @@ def _repair_ready_email(ingreso_id, request=None, actor_name=""):
     return subject, body
 
 
-def notify_repair_ready_for_remito(ingreso_id, *, request=None, actor_name="", recipients=None):
-    recips = _normalize_recipients(recipients) or _repair_ready_recipients()
-    user_ids = _repair_ready_notification_user_ids()
+# Los avisos que sólo tienen sentido mientras el equipo no salió del taller.
+# Todos se cierran solos cuando se imprime la orden de salida.
+REMITO_PENDING_NOTIFICATION_KEYS = (
+    "reparacion_lista_remito",
+    "no_se_repara_listo_remito",
+    "presupuesto_rechazado_reparado",
+)
+
+
+def resolve_remito_pending_notifications(ingreso_id):
+    """La orden de salida ya se imprimió: esos avisos dejan de estar pendientes.
+
+    Sin esto la campana quedaba con "falta imprimir el remito" de equipos que
+    ya habían salido — incluso cuando entre el aviso y la impresión pasaban
+    segundos, como al aprobar el presupuesto de un equipo ya reparado.
+    """
+    total = 0
+    for key in REMITO_PENDING_NOTIFICATION_KEYS:
+        total += resolve_notifications(key, entity_type="ingreso", entity_id=ingreso_id)
+    return total
+
+
+def resolve_presupuesto_rechazado_reparado(ingreso_id):
+    """El técnico ya deshizo la reparación: el pedido deja de estar abierto."""
+    return resolve_notifications(
+        "presupuesto_rechazado_reparado",
+        entity_type="ingreso",
+        entity_id=ingreso_id,
+    )
+
+
+def notify_no_se_repara_for_remito(ingreso_id, *, request=None, actor_user_id=None):
+    """El equipo sale sin reparar: Recepción tiene que imprimir la orden.
+
+    Es el gemelo de ``notify_repair_ready_for_remito`` para el otro final del
+    circuito. Va por campana y push: el correo del circuito de reparación
+    avisa de trabajo terminado, y este avisa de trabajo que no se va a hacer.
+    """
+    if actor_user_id is None and request is not None:
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+    user_ids = _remito_audience_user_ids(
+        "no_se_repara_listo_remito", ingreso_id=ingreso_id, actor_user_id=actor_user_id
+    )
+    try:
+        return notify_no_se_repara_listo_remito(ingreso_id, user_ids=user_ids)
+    except Exception:
+        logger.exception(
+            "No se pudo avisar que el equipo sale sin reparar",
+            extra={"ingreso_id": ingreso_id},
+        )
+        return 0
+
+
+def notify_repair_ready_for_remito(ingreso_id, *, request=None, actor_name="", recipients=None, actor_user_id=None):
+    if actor_user_id is None and request is not None:
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+    configured = _normalize_recipients(recipients) or _repair_ready_recipients()
+    # El correo también tiene que respetar el toggle "Mail" del centro de
+    # notificaciones: antes iba a la lista de entorno pasara lo que pasara.
+    recips = filter_email_recipients_by_preference("reparacion_lista_remito", configured)
+    # Y tampoco tiene sentido mandarle el correo al que acaba de provocar el
+    # hecho: la lista de entorno es la casilla de jefatura, que es justo quien
+    # aprueba los presupuestos.
+    actor_email = _actor_email(actor_user_id)
+    if actor_email:
+        recips = [addr for addr in recips if str(addr).strip().lower() != actor_email]
+    user_ids = _repair_ready_notification_user_ids(ingreso_id, actor_user_id=actor_user_id)
     inserted = 0
     try:
-        inserted = notify_reparacion_lista_remito(ingreso_id, user_ids=user_ids, emails=recips)
+        # `recips` es sólo para el correo de abajo: si se pasara como `emails`
+        # acá, cualquier casilla que coincida con un usuario de NEXORA recibiría
+        # la campana sin haberla configurado.
+        inserted = notify_reparacion_lista_remito(ingreso_id, user_ids=user_ids)
     except Exception:
         logger.exception("No se pudo crear la notificación de reparación lista", extra={"ingreso_id": ingreso_id})
 

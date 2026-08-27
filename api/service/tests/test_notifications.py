@@ -12,6 +12,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from service import bejerman_catalog_cache
 from service.auth import issue_token
 from service.bejerman_delivery import (
     _current_multi_remito_result,
@@ -47,10 +48,17 @@ from service.notifications import (
     notify_estado_patrimonial,
     notify_ingreso_asignado,
     notify_ingreso_liberado,
+    notify_presupuesto_rechazado_reparado,
 )
+from service.permissions import apply_overrides
 from service.remito_pdf_notifications import notify_bejerman_remito_pdf_issued
 from service.bejerman_sdk import BejermanSdkResponseError
-from service.repair_ready_notifications import notify_repair_ready_for_remito
+from service.repair_ready_notifications import (
+    notify_no_se_repara_for_remito,
+    notify_repair_ready_for_remito,
+    resolve_presupuesto_rechazado_reparado,
+    resolve_remito_pending_notifications,
+)
 from service.service_order_billing import (
     list_service_orders_to_bill,
     notify_service_order_ready_to_bill,
@@ -196,6 +204,7 @@ class NotificationsAPITest(TestCase):
                 cur.execute(statement)
 
         call_command("apply_notifications_schema", verbosity=0)
+        call_command("apply_customer_bejerman_schema", verbosity=0)
         call_command("apply_delivery_orders_schema", verbosity=0)
         call_command("apply_bejerman_pdf_requests_schema", verbosity=0)
         call_command("apply_user_permissions_schema", verbosity=0)
@@ -320,6 +329,9 @@ class NotificationsAPITest(TestCase):
 
     def setUp(self):
         self.client = APIClient()
+        # El cache de catálogos vive a nivel de proceso: sin esto, el stock que
+        # dejó cacheado un test con su SDK stubeado se le sirve al siguiente.
+        bejerman_catalog_cache.invalidate_all()
         with connection.cursor() as cur:
             cur.execute("DELETE FROM delivery_order_events")
             cur.execute("DELETE FROM delivery_order_item_partidas")
@@ -332,6 +344,9 @@ class NotificationsAPITest(TestCase):
             cur.execute("DELETE FROM notification_user_preferences")
             cur.execute("DELETE FROM notification_email_addresses")
             cur.execute("DELETE FROM notification_push_subscriptions")
+
+    def tearDown(self):
+        bejerman_catalog_cache.invalidate_all()
 
     def _auth_as_jefe(self):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.jefe_token}")
@@ -348,6 +363,23 @@ class NotificationsAPITest(TestCase):
                 ON CONFLICT (user_id, notification_key) DO UPDATE SET enabled=EXCLUDED.enabled
                 """,
                 [user.id, notification_key, enabled],
+            )
+
+    def _set_channel_preference(self, user, notification_key, *, bell=None, email=None, push=None):
+        """Guarda la preferencia por canal tal como la deja el centro de notificaciones."""
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notification_user_preferences(
+                  user_id, notification_key, enabled, bell_enabled, email_enabled, push_enabled
+                ) VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (user_id, notification_key) DO UPDATE SET
+                  enabled = EXCLUDED.enabled,
+                  bell_enabled = EXCLUDED.bell_enabled,
+                  email_enabled = EXCLUDED.email_enabled,
+                  push_enabled = EXCLUDED.push_enabled
+                """,
+                [user.id, notification_key, bell, bell, email, push],
             )
 
     def _enable_liberado_for_tecnico(self):
@@ -493,10 +525,17 @@ class NotificationsAPITest(TestCase):
         COMPANY_FOOTER_EMAIL=None,
         COMPANY_FOOTER_EMAIL_2=None,
     )
-    def test_aviso_reparacion_lista_notifica_recepcion_por_defecto(self):
+    def test_aviso_reparacion_lista_notifica_recepcion_tecnico_y_jefatura(self):
+        """Jefatura entra por tener el aviso prendido, no por la lista de correo.
+
+        El aviso lo imprime Recepción y lo sigue el técnico asignado, pero
+        jefatura también lo quiere: es el "ya se puede entregar, sólo falta la
+        orden de salida". Como `emit_notification` sólo le escribe a la
+        audiencia explícita, entra vía `user_ids_subscribed_to`.
+        """
         result = notify_repair_ready_for_remito(self.ingreso_id, actor_name="Tecnico")
 
-        self.assertEqual(result["notifications"], 1)
+        self.assertEqual(result["notifications"], 3)
         self.assertEqual(result["recipients"], [])
         with connection.cursor() as cur:
             cur.execute(
@@ -508,15 +547,17 @@ class NotificationsAPITest(TestCase):
                 """
             )
             rows = cur.fetchall()
+        title = f"Reparación lista para remito - OS {str(self.ingreso_id).zfill(5)}"
+        href = f"/ingresos/{self.ingreso_id}?tab=principal"
         self.assertEqual(
             rows,
-            [
-                (
-                    self.recepcion.id,
-                    f"Reparación lista para remito - OS {str(self.ingreso_id).zfill(5)}",
-                    f"/ingresos/{self.ingreso_id}?tab=principal",
-                )
-            ],
+            sorted(
+                [
+                    (self.recepcion.id, title, href),
+                    (self.tecnico.id, title, href),
+                    (self.jefe.id, title, href),
+                ]
+            ),
         )
 
     @override_settings(
@@ -527,6 +568,8 @@ class NotificationsAPITest(TestCase):
     )
     def test_aviso_reparacion_lista_respeta_baja_de_recepcion(self):
         self._enable_notification(self.recepcion, "reparacion_lista_remito", False)
+        self._enable_notification(self.tecnico, "reparacion_lista_remito", False)
+        self._enable_notification(self.jefe, "reparacion_lista_remito", False)
 
         result = notify_repair_ready_for_remito(self.ingreso_id, actor_name="Tecnico")
 
@@ -541,6 +584,305 @@ class NotificationsAPITest(TestCase):
             )
             total = int(cur.fetchone()[0])
         self.assertEqual(total, 0)
+
+    @override_settings(
+        REPAIR_READY_RECIPIENTS=["jefe@notif.test", "externo@proveedor.test"],
+        ASSIGNMENT_REQUEST_RECIPIENTS=[],
+        COMPANY_FOOTER_EMAIL=None,
+        COMPANY_FOOTER_EMAIL_2=None,
+    )
+    def test_aviso_reparacion_lista_no_crea_campana_por_la_lista_de_correo(self):
+        """Estar en la lista de correo no alcanza para tener la campana.
+
+        Regresión: la lista de destinatarios se pasaba como `emails` a
+        `emit_notification`, que resuelve el usuario dueño de esa dirección y le
+        crea la campana. Jefatura terminaba con la campana llena de avisos de
+        Recepción que nunca configuró. Con el aviso apagado, la dirección sigue
+        estando en la lista y aun así no tiene que aparecer ninguna campana; la
+        casilla externa, que no es usuario de NEXORA, sigue recibiendo el mail.
+        """
+        self._enable_notification(self.jefe, "reparacion_lista_remito", False)
+
+        result = notify_repair_ready_for_remito(self.ingreso_id, actor_name="Tecnico")
+
+        self.assertEqual(result["recipients"], ["externo@proveedor.test"])
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'reparacion_lista_remito'
+                   AND user_id = %s
+                """,
+                [self.jefe.id],
+            )
+            total_jefe = int(cur.fetchone()[0])
+        self.assertEqual(total_jefe, 0)
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        REPAIR_READY_RECIPIENTS=["jefe@notif.test", "externo@proveedor.test"],
+        ASSIGNMENT_REQUEST_RECIPIENTS=[],
+        COMPANY_FOOTER_EMAIL=None,
+        COMPANY_FOOTER_EMAIL_2=None,
+    )
+    def test_apagar_el_canal_mail_corta_el_correo_de_reparacion_lista(self):
+        """El toggle "Mail" del centro de notificaciones tiene que mandar.
+
+        Regresión: el correo salía con `send_mail` a la lista de entorno sin
+        pasar nunca por las preferencias, así que apagar "Mail" en la campana no
+        servía de nada. Las casillas externas, que no son usuarios de NEXORA y
+        por lo tanto no se pueden configurar, siguen recibiéndolo.
+        """
+        self._set_channel_preference(self.jefe, "reparacion_lista_remito", email=False)
+
+        # El envío vive en un `transaction.on_commit`, que en TestCase no corre solo.
+        with self.captureOnCommitCallbacks(execute=True):
+            result = notify_repair_ready_for_remito(self.ingreso_id, actor_name="Tecnico")
+
+        self.assertEqual(result["recipients"], ["externo@proveedor.test"])
+        self.assertEqual(
+            sorted(address for message in mail.outbox for address in message.to),
+            ["externo@proveedor.test"],
+        )
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'reparacion_lista_remito'
+                   AND user_id = %s
+                """,
+                [self.jefe.id],
+            )
+            total_jefe = int(cur.fetchone()[0])
+        # Apagó "Mail", no la campana: el aviso le sigue apareciendo adentro.
+        self.assertEqual(total_jefe, 1)
+
+    @override_settings(
+        REPAIR_READY_RECIPIENTS=["jefe@notif.test", "externo@proveedor.test"],
+        ASSIGNMENT_REQUEST_RECIPIENTS=[],
+        COMPANY_FOOTER_EMAIL=None,
+        COMPANY_FOOTER_EMAIL_2=None,
+    )
+    def test_aviso_reparacion_lista_no_le_llega_al_que_lo_provoco(self):
+        """Nadie necesita que le avisen de su propio clic.
+
+        El jefe aprueba el presupuesto de un equipo que ya estaba reparado y el
+        sistema le devolvía la campana (y el mail, porque la lista de entorno es
+        justo su casilla) contándole lo que él mismo acababa de hacer.
+        """
+        result = notify_repair_ready_for_remito(
+            self.ingreso_id,
+            actor_name="Jefe Notificaciones",
+            actor_user_id=self.jefe.id,
+        )
+
+        self.assertEqual(result["recipients"], ["externo@proveedor.test"])
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id
+                  FROM notifications
+                 WHERE notification_key = 'reparacion_lista_remito'
+                 ORDER BY user_id
+                """
+            )
+            user_ids = [int(row[0]) for row in cur.fetchall()]
+        self.assertNotIn(self.jefe.id, user_ids)
+        self.assertEqual(sorted(user_ids), sorted([self.recepcion.id, self.tecnico.id]))
+
+    @override_settings(
+        REPAIR_READY_RECIPIENTS=[],
+        ASSIGNMENT_REQUEST_RECIPIENTS=[],
+        COMPANY_FOOTER_EMAIL=None,
+        COMPANY_FOOTER_EMAIL_2=None,
+    )
+    def test_imprimir_la_orden_de_salida_cierra_el_aviso_de_remito(self):
+        """El aviso es un pendiente: cuando la salida sale, deja de serlo.
+
+        Antes la fila quedaba sin leer para siempre aunque el equipo se
+        liberara segundos después, y la campana se llenaba de trabajo hecho.
+        """
+        notify_repair_ready_for_remito(self.ingreso_id, actor_name="Tecnico")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'reparacion_lista_remito'
+                   AND read_at IS NULL
+                """
+            )
+            self.assertEqual(int(cur.fetchone()[0]), 3)
+
+        cerradas = resolve_remito_pending_notifications(self.ingreso_id)
+
+        self.assertEqual(cerradas, 3)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'reparacion_lista_remito'
+                   AND read_at IS NULL
+                """
+            )
+            self.assertEqual(int(cur.fetchone()[0]), 0)
+        # Idempotente: liberar de nuevo no vuelve a contar lo ya cerrado.
+        self.assertEqual(resolve_remito_pending_notifications(self.ingreso_id), 0)
+
+    @override_settings(
+        REPAIR_READY_RECIPIENTS=[],
+        ASSIGNMENT_REQUEST_RECIPIENTS=[],
+        COMPANY_FOOTER_EMAIL=None,
+        COMPANY_FOOTER_EMAIL_2=None,
+    )
+    def test_cerrar_el_aviso_no_toca_otras_os_ni_otros_avisos(self):
+        notify_repair_ready_for_remito(self.ingreso_id, actor_name="Tecnico")
+        self._enable_liberado_for_tecnico()
+        notify_ingreso_liberado(self.ingreso_id)
+
+        self.assertEqual(resolve_remito_pending_notifications(self.ingreso_id + 9999), 0)
+        resolve_remito_pending_notifications(self.ingreso_id)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'ingreso_liberado'
+                   AND read_at IS NULL
+                """
+            )
+            self.assertEqual(int(cur.fetchone()[0]), 1)
+
+    def test_rechazar_con_el_equipo_reparado_le_avisa_al_tecnico(self):
+        """Rechazar deja al técnico con trabajo que hay que desandar.
+
+        El equipo se quedaba en 'reparado' con el presupuesto rechazado y nadie
+        se lo decía al que tiene que abrirlo de nuevo.
+        """
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparado', asignado_a=%s WHERE id=%s",
+                [self.tecnico.id, self.ingreso_id],
+            )
+
+        inserted = notify_presupuesto_rechazado_reparado(self.ingreso_id)
+
+        self.assertEqual(inserted, 1)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id, title, body, severity, href
+                  FROM notifications
+                 WHERE notification_key = 'presupuesto_rechazado_reparado'
+                """
+            )
+            rows = cur.fetchall()
+        self.assertEqual(len(rows), 1)
+        user_id, title, body, severity, href = rows[0]
+        self.assertEqual(user_id, self.tecnico.id)
+        self.assertIn(str(self.ingreso_id).zfill(5), title)
+        self.assertIn("No se repara", body)
+        self.assertEqual(severity, "warning")
+        self.assertEqual(href, f"/ingresos/{self.ingreso_id}?tab=principal")
+
+    def test_rechazo_sin_tecnico_asignado_no_crea_nada(self):
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET asignado_a=NULL WHERE id=%s", [self.ingreso_id])
+
+        self.assertEqual(notify_presupuesto_rechazado_reparado(self.ingreso_id), 0)
+
+    def test_no_se_repara_avisa_a_recepcion_y_jefatura_para_imprimir_la_salida(self):
+        """El otro final del circuito también termina en la orden de salida.
+
+        El técnico asignado queda afuera a propósito: acaba de marcarlo él, y
+        además imprimir la salida no es tarea suya. Por eso el aviso no lo trae
+        prendido por defecto para el rol `tecnico`.
+        """
+        result = notify_no_se_repara_for_remito(self.ingreso_id)
+
+        self.assertEqual(result, 2)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id, title
+                  FROM notifications
+                 WHERE notification_key = 'no_se_repara_listo_remito'
+                 ORDER BY user_id
+                """
+            )
+            rows = cur.fetchall()
+        title = f"No se repara - listo para remito - OS {str(self.ingreso_id).zfill(5)}"
+        self.assertEqual(
+            sorted(row[0] for row in rows),
+            sorted([self.recepcion.id, self.jefe.id]),
+        )
+        self.assertEqual({row[1] for row in rows}, {title})
+
+    def test_no_se_repara_no_le_avisa_al_que_lo_marco(self):
+        """Un jefe también puede marcar "no se repara": no se autoavisa."""
+        result = notify_no_se_repara_for_remito(self.ingreso_id, actor_user_id=self.jefe.id)
+
+        self.assertEqual(result, 1)
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT user_id FROM notifications WHERE notification_key = 'no_se_repara_listo_remito'"
+            )
+            user_ids = [int(row[0]) for row in cur.fetchall()]
+        self.assertEqual(user_ids, [self.recepcion.id])
+
+    def test_marcar_no_se_repara_cierra_el_pedido_de_deshacer_la_reparacion(self):
+        """Deshacer la reparación era exactamente lo que el aviso pedía."""
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparado', asignado_a=%s WHERE id=%s",
+                [self.tecnico.id, self.ingreso_id],
+            )
+        notify_presupuesto_rechazado_reparado(self.ingreso_id)
+
+        self.client.force_authenticate(user=self.tecnico)
+        resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/no-se-repara/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'presupuesto_rechazado_reparado'
+                   AND read_at IS NULL
+                """
+            )
+            self.assertEqual(int(cur.fetchone()[0]), 0)
+            # Y el técnico, que fue quien lo marcó, no se autoavisa del remito.
+            cur.execute(
+                """
+                SELECT user_id
+                  FROM notifications
+                 WHERE notification_key = 'no_se_repara_listo_remito'
+                """
+            )
+            destinatarios = [int(row[0]) for row in cur.fetchall()]
+        self.assertNotIn(self.tecnico.id, destinatarios)
+        self.assertEqual(sorted(destinatarios), sorted([self.recepcion.id, self.jefe.id]))
+
+    def test_la_orden_de_salida_tambien_cierra_el_aviso_de_no_se_repara(self):
+        notify_no_se_repara_for_remito(self.ingreso_id)
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparado', asignado_a=%s WHERE id=%s",
+                [self.tecnico.id, self.ingreso_id],
+            )
+        notify_presupuesto_rechazado_reparado(self.ingreso_id)
+
+        cerradas = resolve_remito_pending_notifications(self.ingreso_id)
+
+        # 2 de "no se repara" (recepción + jefatura) + 1 del pedido al técnico.
+        self.assertEqual(cerradas, 3)
+        self.assertEqual(resolve_presupuesto_rechazado_reparado(self.ingreso_id), 0)
 
     def _create_service_release_order(self, order_id: str) -> dict:
         return create_delivery_order(
@@ -1123,7 +1465,11 @@ class NotificationsAPITest(TestCase):
         line_counts = [len(comprobante["Comprobante_Items"]) for comprobante in sent_comprobantes]
         self.assertEqual(article_counts, [7, 7, 7, 7, 7, 7, 6])
         self.assertTrue(all(count <= 22 for count in line_counts))
-        self.assertEqual(line_counts, [21, 21, 21, 21, 21, 21, 18])
+        # Dos renglones por equipo (leyenda + artículo). Eran tres mientras el
+        # RSS cerraba cada equipo con una línea de guiones; el reparto sigue
+        # siendo de 7 equipos por remito porque BEJERMAN_RSS_PRINT_LINES_PER_ITEM
+        # conserva a propósito el margen de 3 por el envolvimiento de texto.
+        self.assertEqual(line_counts, [14, 14, 14, 14, 14, 14, 12])
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -2271,6 +2617,175 @@ class NotificationsAPITest(TestCase):
 
         self.assertEqual(inserted, 0)
 
+    def test_refresh_identico_no_reabre_la_notificacion_ya_leida(self):
+        """El cron que repite el mismo aviso no puede volver a marcarlo sin leer.
+
+        Antes, cada corrida pisaba la fila con los mismos datos, le ponía
+        ``created_at`` de hoy y la dejaba sin leer: el mismo aviso reaparecía
+        arriba de todo todos los días.
+        """
+        self._enable_notification(self.tecnico, "ingreso_asignado", True)
+        common = dict(
+            user_ids=[self.tecnico.id],
+            href=f"/ingresos/{self.ingreso_id}?tab=principal",
+            entity_type="ingreso",
+            entity_id=self.ingreso_id,
+            dedupe_key="test:refresh:estable",
+        )
+
+        self.assertEqual(
+            emit_notification(
+                "ingreso_asignado", title="Pendiente", body="Lleva 3 días.", refresh=True, **common
+            ),
+            1,
+        )
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE notifications
+                   SET read_at = CURRENT_TIMESTAMP
+                 WHERE dedupe_key = 'test:refresh:estable'
+                RETURNING created_at
+                """
+            )
+            created_at = cur.fetchone()[0]
+
+        # Misma corrida, mismo texto: no debe tocar nada ni contarse como emitida.
+        self.assertEqual(
+            emit_notification(
+                "ingreso_asignado", title="Pendiente", body="Lleva 3 días.", refresh=True, **common
+            ),
+            0,
+        )
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT read_at, created_at FROM notifications WHERE dedupe_key = 'test:refresh:estable'"
+            )
+            read_at, created_after = cur.fetchone()
+        self.assertIsNotNone(read_at)
+        self.assertEqual(created_after, created_at)
+
+        # Cambió el texto: es un aviso nuevo de verdad y vuelve a quedar sin leer.
+        self.assertEqual(
+            emit_notification(
+                "ingreso_asignado", title="Pendiente", body="Lleva 6 días.", refresh=True, **common
+            ),
+            1,
+        )
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT read_at, body, COUNT(*) OVER ()
+                  FROM notifications
+                 WHERE dedupe_key = 'test:refresh:estable'
+                """
+            )
+            read_at, body, total = cur.fetchone()
+        self.assertIsNone(read_at)
+        self.assertEqual(body, "Lleva 6 días.")
+        self.assertEqual(total, 1)
+
+    def test_colapso_junta_las_copias_diarias_en_un_solo_renglon(self):
+        """`deduplicate_notifications` limpia lo que dejó el dedupe_key con fecha.
+
+        El arreglo del emisor no toca lo ya acumulado: sin este comando la
+        campana sigue mostrando una copia por día de cada aviso.
+        """
+        self._enable_notification(self.jefe, "presupuesto_pendiente", True)
+        for dia in ("2026-08-20", "2026-08-21", "2026-08-22"):
+            emit_notification(
+                "presupuesto_pendiente",
+                user_ids=[self.jefe.id],
+                title=f"Presupuesto pendiente - OS {self.ingreso_id}",
+                body="Sin aprobación.",
+                href=f"/ingresos/{self.ingreso_id}?tab=presupuesto",
+                severity="critical",
+                entity_type="ingreso",
+                entity_id=self.ingreso_id,
+                dedupe_key=f"ingreso:{self.ingreso_id}:presupuesto_pendiente:{dia}",
+            )
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM notifications WHERE notification_key = 'presupuesto_pendiente'"
+            )
+            self.assertEqual(int(cur.fetchone()[0]), 3)
+
+        # Los avisos sin entidad (un solo renglón global) van por la otra rama.
+        self._enable_notification(self.jefe, "preventivo_vencido", True)
+        for dia in ("2026-08-20", "2026-08-21"):
+            emit_notification(
+                "preventivo_vencido",
+                user_ids=[self.jefe.id],
+                title="Preventivos vencidos: 4",
+                body="detalle",
+                href="/equipos?tab=preventivos",
+                severity="critical",
+                entity_type="preventivo",
+                entity_id="vencidos",
+                dedupe_key=f"preventivo_vencido:{dia}",
+            )
+
+        call_command("deduplicate_notifications", "--apply", "--purge", stdout=StringIO())
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT notification_key, dedupe_key
+                  FROM notifications
+                 WHERE notification_key IN ('presupuesto_pendiente', 'preventivo_vencido')
+                 ORDER BY notification_key
+                """
+            )
+            rows = cur.fetchall()
+        self.assertEqual(
+            rows,
+            [
+                ("presupuesto_pendiente", f"ingreso:{self.ingreso_id}:presupuesto_pendiente"),
+                ("preventivo_vencido", "preventivo_vencido"),
+            ],
+        )
+
+    def test_panel_muestra_primero_las_sin_leer_aunque_sean_viejas(self):
+        """La lista viene cortada; las no leídas no pueden quedar afuera.
+
+        Ordenada sólo por fecha, una tanda de avisos repetidos por cron tapaba
+        los avisos de hechos reales que el usuario todavía no vio.
+        """
+        self._enable_notification(self.tecnico, "ingreso_asignado", True)
+        for idx in range(3):
+            emit_notification(
+                "ingreso_asignado",
+                user_ids=[self.tecnico.id],
+                title=f"Aviso {idx}",
+                body="detalle",
+                href=f"/ingresos/{self.ingreso_id}?tab=principal",
+                entity_type="ingreso",
+                entity_id=self.ingreso_id,
+                dedupe_key=f"test:orden:{idx}",
+            )
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE notifications
+                   SET created_at = CURRENT_TIMESTAMP - INTERVAL '30 days'
+                 WHERE dedupe_key = 'test:orden:0'
+                """
+            )
+            cur.execute(
+                """
+                UPDATE notifications
+                   SET read_at = CURRENT_TIMESTAMP
+                 WHERE dedupe_key IN ('test:orden:1', 'test:orden:2')
+                """
+            )
+        self._auth_as_tecnico()
+
+        resp = self.client.get("/api/notificaciones/?limit=20")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["unread_count"], 1)
+        self.assertEqual(resp.data["items"][0]["title"], "Aviso 0")
+
     def test_panel_no_marca_leida_y_click_mantiene_historial_reciente(self):
         self._enable_liberado_for_tecnico()
         notify_ingreso_liberado(self.ingreso_id)
@@ -2494,6 +3009,7 @@ class NotificationsAPITest(TestCase):
             "billing_remito_postponement_due",
             "service_order_ready_to_bill",
             "sales_order_commercial_terms_updated",
+            "presupuesto_mg_aprobado",
             "remito_pdf_rt",
             "remito_pdf_rd",
             "remito_pdf_rta",
@@ -2504,6 +3020,9 @@ class NotificationsAPITest(TestCase):
             "remito_pdf_rdn",
         }
         self.assertEqual(set(items), expected_keys)
+        # Como los PDF de remitos, el aviso de presupuesto de MG es sólo correo.
+        self.assertEqual(items["presupuesto_mg_aprobado"]["group"], "Cobranzas")
+        self.assertEqual(items["presupuesto_mg_aprobado"]["allowed_channels"], ["email"])
         for key in ("sales_order_remito_ready", "billing_pending_summary", "service_order_ready_to_bill"):
             self.assertEqual(items[key]["group"], "Cobranzas")
             self.assertEqual(items[key]["allowed_channels"], ["bell", "email", "push"])
@@ -3978,10 +4497,7 @@ class NotificationsAPITest(TestCase):
         )
         sent_comprobantes = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
                 self._fake_rt_split_client(sent_comprobantes),
@@ -3991,11 +4507,11 @@ class NotificationsAPITest(TestCase):
         self.assertTrue(result["multiple"])
         self.assertEqual(
             result["remitoNumbers"],
-            ["RT R 00004-00003234", "RT R 00004-00003235", "RT R 00004-00003236"],
+            ["RT R 00004-00003234", "RT R 00004-00003235"],
         )
-        self.assertEqual(len(sent_comprobantes), 3)
+        self.assertEqual(len(sent_comprobantes), 2)
         line_counts = [len(comprobante["Comprobante_Items"]) for comprobante in sent_comprobantes]
-        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 10, 5])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [22, 3])
         self.assertTrue(all(count <= 22 for count in line_counts))
         with connection.cursor() as cur:
             cur.execute(
@@ -4026,49 +4542,47 @@ class NotificationsAPITest(TestCase):
             )
             fragment_count = int(cur.fetchone()[0])
         self.assertEqual(row, ("OE-DO-REMITO-VENTA-SPLIT", " / ".join(result["remitoNumbers"]), 25))
-        self.assertEqual(link_rows, [(1, 3, 10), (2, 3, 10), (3, 3, 5)])
+        self.assertEqual(link_rows, [(1, 2, 22), (2, 2, 3)])
         self.assertEqual(fragment_count, 0)
 
-    def test_rt_respeta_los_limites_de_diez_y_once_articulos(self):
-        order_10 = self._create_rt_split_order(
-            "do-remito-venta-diez",
-            10,
-            partida_prefix="P-DIEZ",
+    def test_rt_respeta_los_limites_de_veintidos_y_veintitres_renglones(self):
+        order_22 = self._create_rt_split_order(
+            "do-remito-venta-veintidos",
+            22,
+            partida_prefix="P-VEINTIDOS",
         )
-        order_11 = self._create_rt_split_order(
-            "do-remito-venta-once",
-            11,
-            partida_prefix="P-ONCE",
+        order_23 = self._create_rt_split_order(
+            "do-remito-venta-veintitres",
+            23,
+            partida_prefix="P-VEINTITRES",
         )
-        sent_10 = []
-        sent_11 = []
+        sent_22 = []
+        sent_23 = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
-                self._fake_rt_split_client(sent_10, first_number=3300),
+                self._fake_rt_split_client(sent_22, first_number=3300),
             ):
-                result_10 = generate_bejerman_remito([order_10["id"]], self.jefe.id, {})
+                result_22 = generate_bejerman_remito([order_22["id"]], self.jefe.id, {})
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
-                self._fake_rt_split_client(sent_11, first_number=3310),
+                self._fake_rt_split_client(sent_23, first_number=3310),
             ):
-                result_11 = generate_bejerman_remito([order_11["id"]], self.jefe.id, {})
+                result_23 = generate_bejerman_remito([order_23["id"]], self.jefe.id, {})
 
-        self.assertFalse(result_10.get("multiple", False))
-        self.assertEqual(self._rt_article_counts(sent_10), [10])
-        self.assertTrue(result_11["multiple"])
-        self.assertEqual(result_11["remitoNumbers"], ["RT R 00004-00003310", "RT R 00004-00003311"])
-        self.assertEqual(self._rt_article_counts(sent_11), [10, 1])
-        self.assertTrue(all(len(comprobante["Comprobante_Items"]) <= 22 for comprobante in sent_10 + sent_11))
+        self.assertFalse(result_22.get("multiple", False))
+        self.assertEqual(self._rt_article_counts(sent_22), [22])
+        self.assertEqual(len(sent_22[0]["Comprobante_Items"]), 22)
+        self.assertTrue(result_23["multiple"])
+        self.assertEqual(result_23["remitoNumbers"], ["RT R 00004-00003310", "RT R 00004-00003311"])
+        self.assertEqual(self._rt_article_counts(sent_23), [22, 1])
+        self.assertTrue(all(len(comprobante["Comprobante_Items"]) <= 22 for comprobante in sent_22 + sent_23))
 
     def test_rt_reserva_el_conjunto_y_reintenta_solo_el_remito_faltante(self):
         order = self._create_rt_split_order(
             "do-remito-parcial-retry",
-            11,
+            23,
             partida_prefix="P-PARCIAL-RETRY",
         )
         first_sent = []
@@ -4105,6 +4619,7 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(partial["remitoSetStatus"], "partial")
         self.assertEqual(reservation_snapshots, [["sending", "reserved"]])
         self.assertEqual(len(first_sent), 1)
+        self.assertEqual(self._rt_article_counts(first_sent), [22])
         with connection.cursor() as cur:
             cur.execute(
                 "SELECT sequence, expected_count FROM delivery_order_remito_links WHERE order_id = %s",
@@ -4122,75 +4637,70 @@ class NotificationsAPITest(TestCase):
         self.assertTrue(completed["success"])
         self.assertEqual(completed["remitoSetStatus"], "complete")
         self.assertEqual(len(retry_sent), 1)
+        self.assertEqual(self._rt_article_counts(retry_sent), [1])
         self.assertEqual(completed["remitoNumbers"], ["RT R 00004-00003330", "RT R 00004-00003331"])
 
-    def test_rt_agrupa_ordenes_sin_superar_diez_articulos(self):
-        orders_5 = [
+    def test_rt_agrupa_ordenes_once_mas_once_por_renglones_reales(self):
+        orders_11 = [
             self._create_rt_split_order(
-                f"do-remito-cinco-{index}",
-                5,
-                partida_prefix=f"P-CINCO-{index}",
+                f"do-remito-once-{index}",
+                11,
+                partida_prefix=f"P-ONCE-{index}",
             )
             for index in range(2)
         ]
-        orders_6 = [
+        orders_12 = [
             self._create_rt_split_order(
-                f"do-remito-seis-{index}",
-                6,
-                partida_prefix=f"P-SEIS-{index}",
+                f"do-remito-doce-{index}",
+                12,
+                partida_prefix=f"P-DOCE-{index}",
             )
             for index in range(2)
         ]
-        sent_5 = []
-        sent_6 = []
+        sent_11 = []
+        sent_12 = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
-                self._fake_rt_split_client(sent_5, first_number=3320),
+                self._fake_rt_split_client(sent_11, first_number=3320),
             ):
-                result_5 = generate_bejerman_remito(
-                    [order["id"] for order in orders_5],
+                result_11 = generate_bejerman_remito(
+                    [order["id"] for order in orders_11],
                     self.jefe.id,
                     {},
                 )
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
-                self._fake_rt_split_client(sent_6, first_number=3330),
+                self._fake_rt_split_client(sent_12, first_number=3330),
             ):
-                result_6 = generate_bejerman_remito(
-                    [order["id"] for order in orders_6],
+                result_12 = generate_bejerman_remito(
+                    [order["id"] for order in orders_12],
                     self.jefe.id,
                     {},
                 )
 
-        self.assertFalse(result_5.get("multiple", False))
-        self.assertEqual(self._rt_article_counts(sent_5), [10])
-        grouped_result = _current_multi_remito_result([order["id"] for order in orders_5])
+        self.assertFalse(result_11.get("multiple", False))
+        self.assertEqual(self._rt_article_counts(sent_11), [22])
+        grouped_result = _current_multi_remito_result([order["id"] for order in orders_11])
         self.assertEqual(len(grouped_result["remitos"]), 1)
         self.assertEqual(len(grouped_result["groupIds"]), 1)
         self.assertEqual(len(grouped_result["orders"]), 2)
-        self.assertTrue(result_6["multiple"])
-        self.assertEqual(result_6["remitoNumbers"], ["RT R 00004-00003330", "RT R 00004-00003331"])
-        self.assertEqual(self._rt_article_counts(sent_6), [6, 6])
-        self.assertTrue(all(len(comprobante["Comprobante_Items"]) <= 22 for comprobante in sent_5 + sent_6))
+        self.assertTrue(result_12["multiple"])
+        self.assertEqual(result_12["remitoNumbers"], ["RT R 00004-00003330", "RT R 00004-00003331"])
+        self.assertEqual(self._rt_article_counts(sent_12), [12, 12])
+        self.assertTrue(all(len(comprobante["Comprobante_Items"]) <= 22 for comprobante in sent_11 + sent_12))
 
-    def test_rt_diez_articulos_con_descuento_caben_en_veintidos_renglones(self):
+    def test_rt_once_articulos_con_descuento_caben_en_veintidos_renglones(self):
         order = self._create_rt_split_order(
-            "do-remito-diez-descuento",
-            10,
+            "do-remito-once-descuento",
+            11,
             partida_prefix="P-DESCUENTO",
             discount_percent="5",
         )
         sent_comprobantes = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
                 self._fake_rt_split_client(sent_comprobantes, first_number=3340),
@@ -4198,10 +4708,12 @@ class NotificationsAPITest(TestCase):
                 result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
 
         self.assertFalse(result.get("multiple", False))
-        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [11])
+        # Cada artículo usa un renglón y su descuento agrega otro. El RT no
+        # consume una línea adicional para la leyenda de orden.
         self.assertEqual(len(sent_comprobantes[0]["Comprobante_Items"]), 22)
 
-    def test_rt_divide_un_item_con_trece_partidas_sin_perder_datos(self):
+    def test_rt_un_item_con_trece_partidas_cabe_en_un_remito_sin_perder_datos(self):
         order = self._create_rt_multipartida_split_order(
             "do-remito-multipartida-trece",
             13,
@@ -4209,10 +4721,7 @@ class NotificationsAPITest(TestCase):
         )
         sent_comprobantes = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
                 self._fake_rt_split_client(
@@ -4223,9 +4732,10 @@ class NotificationsAPITest(TestCase):
             ):
                 result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
 
-        self.assertTrue(result["multiple"])
-        self.assertEqual(result["remitoNumbers"], ["RT R 00004-00003350", "RT R 00004-00003351"])
-        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 3])
+        self.assertFalse(result.get("multiple", False))
+        self.assertEqual(result["remitoNumber"], "RT R 00004-00003350")
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [13])
+        self.assertEqual(len(sent_comprobantes[0]["Comprobante_Items"]), 13)
         article_lines = [
             item
             for comprobante in sent_comprobantes
@@ -4290,7 +4800,7 @@ class NotificationsAPITest(TestCase):
         self.assertTrue(all(Decimal(row[4]) == Decimal("0") for row in item_rows))
         self.assertEqual([int(row[5]) for row in item_rows], [13])
         self.assertEqual([int(row[6]) for row in item_rows], [13])
-        self.assertEqual([(row[0], int(row[1]), int(row[2])) for row in allocation_rows], [(1, 10, 10), (2, 3, 3)])
+        self.assertEqual([(row[0], int(row[1]), int(row[2])) for row in allocation_rows], [(1, 13, 13)])
         self.assertEqual([row[0] for row in partida_rows], expected_partidas)
         self.assertEqual({row[1] for row in partida_rows}, {"VAL"})
         self.assertTrue(all(Decimal(row[2]) == Decimal("1") for row in partida_rows))
@@ -4303,10 +4813,7 @@ class NotificationsAPITest(TestCase):
         )
         sent_comprobantes = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
                 self._fake_rt_split_client(
@@ -4320,9 +4827,9 @@ class NotificationsAPITest(TestCase):
         self.assertTrue(result["multiple"])
         self.assertEqual(
             result["remitoNumbers"],
-            ["RT R 00004-00003380", "RT R 00004-00003381", "RT R 00004-00003382"],
+            ["RT R 00004-00003380", "RT R 00004-00003381"],
         )
-        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 10, 6])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [22, 4])
         article_lines = [
             item
             for comprobante in sent_comprobantes
@@ -4381,7 +4888,7 @@ class NotificationsAPITest(TestCase):
         self.assertEqual([int(row[3]) for row in item_rows], [26])
         self.assertEqual(
             [(row[0], int(row[1]), int(row[2])) for row in allocation_rows],
-            [(1, 10, 10), (2, 10, 10), (3, 6, 6)],
+            [(1, 22, 22), (2, 4, 4)],
         )
         self.assertEqual([row[0] for row in partida_rows], expected_partidas)
         self.assertEqual(len({row[0] for row in partida_rows}), 26)
@@ -4390,15 +4897,12 @@ class NotificationsAPITest(TestCase):
     def test_rt_ignora_skip_print_split_recibido_en_el_payload(self):
         order = self._create_rt_split_order(
             "do-remito-skip-publico",
-            11,
+            23,
             partida_prefix="P-SKIP-PUBLICO",
         )
         sent_comprobantes = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch(
                 "service.bejerman_delivery.BejermanSDKClient",
                 self._fake_rt_split_client(sent_comprobantes, first_number=3360),
@@ -4411,20 +4915,17 @@ class NotificationsAPITest(TestCase):
 
         self.assertTrue(result["multiple"])
         self.assertEqual(result["remitoNumbers"], ["RT R 00004-00003360", "RT R 00004-00003361"])
-        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 1])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [22, 1])
 
     def test_rt_defensa_final_bloquea_exceso_antes_de_enviar_al_sdk(self):
         order = self._create_rt_split_order(
             "do-remito-guard-final",
-            11,
+            23,
             partida_prefix="P-GUARD-FINAL",
         )
         sent_comprobantes = []
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with (
                 patch(
                     "service.bejerman_delivery._split_remito_orders_for_printing",
@@ -4446,13 +4947,13 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(sent_comprobantes, [])
         self.assertFalse(get_delivery_order(order["id"], include_events=False)["bejermanRemitoGroupId"])
 
-    def test_revision_rt_grande_confirmado_no_importado_reemite_diez_mas_uno(self):
+    def test_revision_rt_grande_confirmado_no_importado_reemite_veintidos_mas_uno(self):
         order = self._create_rt_split_order(
-            "do-rt-review-split-once",
-            11,
+            "do-rt-review-split-veintitres",
+            23,
             partida_prefix="P-RT-REVIEW",
         )
-        old_group_id = "brg-rt-review-split-once"
+        old_group_id = "brg-rt-review-split-veintitres"
         self._attach_failed_rt_review_group(order["id"], old_group_id, issue_date="2026-07-21")
         sent_comprobantes = []
         lookup_calls = []
@@ -4463,10 +4964,7 @@ class NotificationsAPITest(TestCase):
                 lookup_calls.append(filters)
                 return {"DatosJSON": []}
 
-        with override_settings(
-            BEJERMAN_SALE_MAX_ARTICLE_LINES=10,
-            BEJERMAN_SALE_MAX_PRINT_LINES=22,
-        ):
+        with override_settings(BEJERMAN_SALE_MAX_PRINT_LINES=22):
             with patch("service.bejerman_delivery.BejermanSDKClient", ReviewSplitRtClient):
                 verify_result = verify_bejerman_remito_review(old_group_id, self.jefe.id)
                 self.assertEqual(verify_result["reviewState"], "ready_for_correction")
@@ -4487,7 +4985,7 @@ class NotificationsAPITest(TestCase):
             ["RT R 00004-00003400", "RT R 00004-00003401"],
         )
         self.assertEqual(len(result["groupIds"]), 2)
-        self.assertEqual(self._rt_article_counts(sent_comprobantes), [10, 1])
+        self.assertEqual(self._rt_article_counts(sent_comprobantes), [22, 1])
         self.assertTrue(all(len(item["Comprobante_Items"]) <= 22 for item in sent_comprobantes))
         with connection.cursor() as cur:
             cur.execute(
@@ -4522,7 +5020,7 @@ class NotificationsAPITest(TestCase):
             with self.subTest(lookup_status=lookup_status):
                 order = self._create_rt_split_order(
                     f"do-rt-review-{lookup_status}",
-                    11,
+                    23,
                     partida_prefix=f"P-RT-REVIEW-{index}",
                 )
                 old_group_id = f"brg-rt-review-{lookup_status}"
@@ -5553,7 +6051,17 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(ambiguous_attempts, 1)
 
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
-    def test_remito_rtn_emitido_queda_no_facturable_sin_notificar_cobranzas(self):
+    def test_remito_rtn_emitido_queda_no_facturable_pero_manda_el_pdf_a_cobranzas(self):
+        """Un RTN no genera aviso de facturación, pero el PDF se reparte igual.
+
+        Son dos cosas distintas y conviene no confundirlas: `billingRequired` en
+        false apaga la notificación `sales_order_remito_ready` (no hay nada que
+        facturar), mientras que el mail con el PDF del remito va a todos los
+        destinatarios configurados —cobranzas incluida— porque es la copia del
+        comprobante, no un pedido de facturación. Antes este mail no salía sólo
+        porque el ERP no entregaba el PDF y no había nada que adjuntar; desde que
+        NEXORA arma el papel, sale.
+        """
         mail.outbox = []
         with self._delivery_partida_stock_patch(
             [{"articleCode": "ART-DEMO", "depositCode": "VAL", "partida": "P-DEMO", "availableQuantity": 1}]
@@ -5634,7 +6142,11 @@ class NotificationsAPITest(TestCase):
                 ["%OE-RTN-NO-BILLING%"],
             )
             self.assertEqual(cur.fetchone()[0], 0)
-        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(
+            sorted(address for message in mail.outbox for address in message.to),
+            ["admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"],
+        )
+        self.assertTrue(all("RTN R 00004-00004567" in message.subject for message in mail.outbox))
 
     @override_settings(
         EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
@@ -5875,8 +6387,38 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(resp.data["commercialDeadline"], "30 días")
         self.assertEqual(Decimal(str(resp.data["items"][0]["unitPrice"])), Decimal("1495.50"))
 
-    def test_correccion_comercial_rechaza_roles_no_supervisor(self):
-        roles = [self.admin, self.jefe, self.ventas, self.recepcion, self.cobranzas]
+    def test_correccion_comercial_permite_usuario_con_permiso_individual(self):
+        order = self._create_commercial_correction_order("do-commercial-individual-permission")
+        item = order["items"][0]
+        apply_overrides(
+            self.ventas.id,
+            {"action.delivery_order.correct_commercial_terms": "allow"},
+            updated_by=self.jefe.id,
+        )
+        self.client.force_authenticate(user=self.ventas)
+
+        resp = self.client.patch(
+            f"/api/ordenes-entrega/{order['id']}/correccion-comercial/",
+            {
+                "commercialDeadline": "30 días",
+                "items": [
+                    {
+                        "id": item["id"],
+                        "unitPrice": "1500.00",
+                        "priceCurrency": "ARS",
+                        "discountPercent": "0",
+                    }
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["commercialDeadline"], "30 días")
+        self.assertEqual(Decimal(str(resp.data["items"][0]["unitPrice"])), Decimal("1500.00"))
+
+    def test_correccion_comercial_rechaza_usuarios_sin_el_permiso(self):
+        roles = [self.admin, self.ventas, self.recepcion, self.cobranzas]
         for user in roles:
             with self.subTest(role=user.rol):
                 order = self._create_commercial_correction_order(order_id=f"do-commercial-role-{user.rol}")

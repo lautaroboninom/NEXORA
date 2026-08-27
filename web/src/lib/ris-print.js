@@ -1,15 +1,41 @@
 import { openDetachedWindow, openPrintablePdf, reservePdfWindow, waitForPdfBlob } from "./pdf";
 
-export function risRemitoFrom(source = {}) {
+const normalizedRemitoNumber = (value) => String(value || "").trim();
+
+export function risRemitosFrom(source = {}) {
   const ris = source?.ris || source || {};
-  return (
-    ris?.remito_number ||
-    ris?.remitoNumber ||
-    source?.remito_number ||
-    source?.remitoNumber ||
-    source?.remito_ingreso ||
-    ""
-  ).toString().trim();
+  const candidates = [source?.remitos, ris?.remitos].find(Array.isArray) || [];
+  return candidates.filter((item) => item && typeof item === "object");
+}
+
+export function risRemitoNumbersFrom(source = {}) {
+  const ris = source?.ris || source || {};
+  const explicit = [
+    source?.remito_numbers,
+    source?.remitoNumbers,
+    ris?.remito_numbers,
+    ris?.remitoNumbers,
+  ].find(Array.isArray) || [];
+  const fromRemitos = risRemitosFrom(source).flatMap((item) => [
+    item?.remito_number,
+    item?.remitoNumber,
+  ]);
+  const direct = [
+    ris?.remito_number,
+    ris?.remitoNumber,
+    source?.remito_number,
+    source?.remitoNumber,
+    source?.remito_ingreso,
+  ];
+  return [...explicit, ...fromRemitos, ...direct].reduce((numbers, value) => {
+    const normalized = normalizedRemitoNumber(value);
+    if (normalized && !numbers.includes(normalized)) numbers.push(normalized);
+    return numbers;
+  }, []);
+}
+
+export function risRemitoFrom(source = {}) {
+  return risRemitoNumbersFrom(source)[0] || "";
 }
 
 export function risDocumentTypeFrom(source = {}) {
@@ -26,6 +52,8 @@ export function risDocumentTypeFrom(source = {}) {
 }
 
 export function risDocumentLabelFrom(source = {}) {
+  const remitoCount = risRemitoNumbersFrom(source).length;
+  if (remitoCount > 1) return `lote de ${remitoCount} remitos`;
   const documentType = risDocumentTypeFrom(source);
   return documentType ? `remito ${documentType}` : "remito";
 }
@@ -91,22 +119,37 @@ export function waitForRisPdfBlob(ingresoId, source = {}, options = {}) {
   });
 }
 
-export function openRisPrintablePdf(blob, source = {}, options = {}) {
-  const remito = risRemitoFrom(source);
-  const documentLabel = remito ? `remito ${remito}` : risDocumentLabelFrom(source);
-  return openPrintablePdf(blob, {
+export function risPrintableOptions(source = {}, options = {}) {
+  const remitoNumbers = risRemitoNumbersFrom(source);
+  const documentLabel = remitoNumbers.length > 1
+    ? `lote de ${remitoNumbers.length} remitos`
+    : remitoNumbers[0]
+      ? `remito ${remitoNumbers[0]}`
+      : risDocumentLabelFrom(source);
+  return {
     title: documentLabel,
     documentLabel,
     ...options,
-  });
+  };
+}
+
+export function openRisPrintablePdf(blob, source = {}, options = {}) {
+  return openPrintablePdf(blob, risPrintableOptions(source, options));
+}
+
+export function openReservedRisPrintablePdf(reservedWindow, blob, source = {}, options = {}) {
+  if (!reservedWindow) return openRisPrintablePdf(blob, source, options);
+  return reservedWindow.openPrintable(blob, risPrintableOptions(source, options));
 }
 
 export function reserveRisPrintWindow(options = {}) {
   return reservePdfWindow({
-    title: "REMITO",
-    message: "Preparando remito...",
+    title: "Remito - NEXORA",
+    heading: "Preparando el remito",
+    message: "NEXORA está preparando el remito",
+    detail: "Esta pestaña abre la impresión cuando el PDF esté listo.",
     fallbackMessage:
-      "La emisión sigue en NEXORA. Si el remito ya se imprimió, puede cerrar esta pestaña y reimprimir desde la hoja de servicio.",
+      "La emisión sigue en NEXORA. Aguarde un momento más.",
     ...options,
   });
 }
@@ -124,5 +167,6 @@ export function openGeneratedRisPrint(ingresoId, source = {}) {
     opened: openRisPrintUrl(printUrl),
     printUrl,
     remito: risRemitoFrom(source),
+    remitos: risRemitoNumbersFrom(source),
   };
 }

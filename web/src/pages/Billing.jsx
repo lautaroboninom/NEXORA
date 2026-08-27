@@ -26,7 +26,7 @@ import {
   postDeliveryOrderNotBillable,
   postDeliveryOrdersInvoicedBatch,
 } from "../lib/api";
-import { openPrintablePdf, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
+import { openPrintablePdf, PDF_REPRINT_STEPS, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import DeliveryOrderCommercialCorrectionModal from "../components/DeliveryOrderCommercialCorrectionModal.jsx";
@@ -1506,10 +1506,13 @@ export default function Billing() {
       companyKey: remitoFilters.companyKey,
     });
     const reservedWindow = reservePdfWindow({
-      title: "Remito Bejerman",
-      message: `Preparando PDF del ${documentLabel || "remito"}...`,
+      title: "Remito - NEXORA",
+      heading: `Abriendo ${documentLabel || "el remito"}`,
+      message: "Buscando el PDF en Bejerman",
+      detail: "Esta pestaña abre la impresión cuando el archivo esté listo.",
       fallbackMessage:
-        "NEXORA sigue esperando el PDF de Bejerman. Si esta pestaña no cambia, puede cerrarla y reintentar desde Cobranzas.",
+        "NEXORA sigue preparando el PDF del remito. Si esta pestaña no cambia, puede cerrarla y reintentar desde Cobranzas.",
+      steps: PDF_REPRINT_STEPS,
     });
     setRemitoError("");
     setLoadingRemitoPdfId(documentId);
@@ -1518,18 +1521,19 @@ export default function Billing() {
       loading: true,
       documentLabel,
       status: "Buscando PDF del remito...",
-      detail: "Consultando Bejerman sin abrir una nueva ventana.",
+      detail: "NEXORA está comprobando el PDF sin abrir una nueva ventana.",
       error: "",
       blob: null,
     });
     try {
       const blob = await waitForPdfBlob(pdfUrl, {
         label: documentLabel || "remito",
+        reservedWindow,
         onProgress: (progress) => {
           setRemitoPdf((current) => ({
             ...current,
             status: progress?.status || "Preparando PDF del remito...",
-            detail: progress?.detail || "Esperando el archivo de Bejerman.",
+            detail: progress?.detail || "NEXORA sigue preparando el PDF del remito.",
           }));
         },
       });
@@ -1538,9 +1542,15 @@ export default function Billing() {
         status: "Abriendo impresión",
         detail: "El PDF está listo. Intentando abrir la ventana de impresión.",
       }));
+      reservedWindow.update({
+        status: "Abriendo impresión",
+        detail: "El PDF está listo. Intentando abrir la ventana de impresión.",
+        step: "print",
+        state: "ready",
+      });
       const opened = reservedWindow.openPrintable(blob, {
-        title: "Remito Bejerman",
-        documentLabel: documentLabel || "Remito Bejerman",
+        title: "Remito - NEXORA",
+        documentLabel: documentLabel || "Remito",
       }).opened;
       if (opened) {
         setRemitoPdf(initialRemitoPdfState());

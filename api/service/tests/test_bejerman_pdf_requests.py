@@ -15,6 +15,7 @@ from service.bejerman_pdf_requests import (
     BejermanPdfNotPublishedError,
     BejermanPdfRequestPending,
     BejermanPdfWorkerStalledError,
+    REMITO_PDF_LINE_LIMIT_ERROR_CODE,
     document_key_for,
     fetch_or_enqueue_comprobante_pdf,
     pdf_error_metadata,
@@ -275,7 +276,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         row = self._row(document_key)
         self.assertEqual(row["state"], "ready_folder")
         self.assertEqual(row["generation_attempt_count"], 1)
-        self.assertIsNone(row["pdf_payload"])
+        self.assertEqual(bytes(row["pdf_payload"]), PDF_BYTES)
         worker_client.register.assert_called_once_with()
         worker_client.generar_comprobante_ventas_pdf.assert_called_once()
         store.assert_called_once()
@@ -401,9 +402,13 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             self._force_due(document_key)
             self.assertEqual(process_bejerman_pdf_requests_once(), 1)
 
+            pdf_after_copy, content_type_after_copy = fetch_or_enqueue_comprobante_pdf(request_client, reference)
+            self.assertEqual(pdf_after_copy, PDF_BYTES)
+            self.assertEqual(content_type_after_copy, "application/pdf")
+
         final_row = self._row(document_key)
         self.assertEqual(final_row["state"], "ready_folder")
-        self.assertIsNone(final_row["pdf_payload"])
+        self.assertEqual(bytes(final_row["pdf_payload"]), PDF_BYTES)
         worker_client.generar_comprobante_ventas_pdf.assert_called_once()
         self.assertEqual(store.call_count, 2)
         self.assertEqual([call.args[2] for call in store.call_args_list], [PDF_BYTES, PDF_BYTES])
@@ -412,6 +417,106 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         self.assertEqual(probe.call_count, 2)
         for call in probe.call_args_list:
             self.assertFalse(call.kwargs["allow_directory_scan"])
+
+    def test_ready_folder_con_payload_invalido_recurre_a_la_copia(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with patch(
+            "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+            return_value=(None, "missing"),
+        ):
+            self._enqueue(client, reference)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bejerman_pdf_requests
+                   SET state='ready_folder',
+                       ready_at=CURRENT_TIMESTAMP,
+                       pdf_payload=%s,
+                       payload_sha256='huella-invalida'
+                 WHERE document_key=%s
+                """,
+                [b"no-es-un-pdf", document_key],
+            )
+
+        with patch(
+            "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+            return_value=(PDF_BYTES, "ready"),
+        ) as probe:
+            pdf, content_type = fetch_or_enqueue_comprobante_pdf(client, reference)
+
+        self.assertEqual(pdf, PDF_BYTES)
+        self.assertEqual(content_type, "application/pdf")
+        row = self._row(document_key)
+        self.assertEqual(row["state"], "ready_folder")
+        self.assertIsNone(row["pdf_payload"])
+        probe.assert_called_once_with(client, reference, interactive=True, allow_directory_scan=True)
+
+    def test_ready_folder_libera_el_cache_directo_despues_de_la_retencion(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with patch(
+            "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+            return_value=(None, "missing"),
+        ):
+            self._enqueue(client, reference)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bejerman_pdf_requests
+                   SET state='ready_folder',
+                       ready_at=CURRENT_TIMESTAMP - INTERVAL '6 minutes',
+                       pdf_payload=%s,
+                       payload_sha256='huella'
+                 WHERE document_key=%s
+                """,
+                [PDF_BYTES, document_key],
+            )
+
+        from service.bejerman_pdf_requests import _purge_expired_direct_payloads
+
+        self.assertEqual(_purge_expired_direct_payloads(), 1)
+        self.assertIsNone(self._row(document_key)["pdf_payload"])
+
+    def test_fallo_por_limite_propaga_el_codigo_original_sin_reencolar(self):
+        client = self._client()
+        reference = self._reference()
+        document_key = document_key_for(client, reference)
+
+        with patch(
+            "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+            return_value=(None, "missing"),
+        ):
+            self._enqueue(client, reference)
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE bejerman_pdf_requests
+                       SET state='failed',
+                           last_error_code=%s,
+                           last_error_detail='El remito supera los 22 renglones.'
+                     WHERE document_key=%s
+                    """,
+                    [REMITO_PDF_LINE_LIMIT_ERROR_CODE, document_key],
+                )
+
+            with self.assertRaises(BejermanPdfNotPublishedError) as ctx:
+                fetch_or_enqueue_comprobante_pdf(client, reference)
+
+        self.assertEqual(ctx.exception.queue_error_code, REMITO_PDF_LINE_LIMIT_ERROR_CODE)
+        self.assertEqual(
+            pdf_error_metadata(ctx.exception)["queue_error_code"],
+            REMITO_PDF_LINE_LIMIT_ERROR_CODE,
+        )
+        row = self._row(document_key)
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["regeneration_count"], 0)
+        client.register.assert_not_called()
+        client.generar_comprobante_ventas_pdf.assert_not_called()
 
     def test_deadline_devuelve_504_y_admite_recuperacion_tardia_desde_carpeta(self):
         client = self._client()
@@ -634,7 +739,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
 
         payload = pdf_error_metadata(ctx.exception)
         self.assertIs(payload["worker_alive"], True)
-        self.assertEqual(payload["stage_label"], "En cola para generar el remito")
+        self.assertEqual(payload["stage_label"], "Preparando el PDF")
         self.assertEqual(payload["document_key"], document_key)
         self.assertGreaterEqual(payload["queued_seconds"], 300)
 
@@ -842,6 +947,67 @@ class RemitoPdfGeneradoPorNexoraTests(TransactionTestCase):
         self.assertEqual(tipo, "RT")
         self.assertTrue(bytes(payload).startswith(b"%PDF"))
 
+    def test_todos_los_tipos_de_remito_quedan_listos_en_nexora(self):
+        for offset, tipo in enumerate(("RT", "RD", "RTA", "RTN", "RSS", "RIS", "RDA", "RDN"), start=1):
+            numero = f"{4345 + offset:08d}"
+            comprobante = dict(COMPROBANTE_EMITIDO, Comprobante_Tipo=tipo, Comprobante_Numero=numero)
+
+            with self.subTest(tipo=tipo):
+                self.assertTrue(self._guardar(comprobante))
+                state, payload, persisted_tipo = self._fila(numero)
+                self.assertEqual(state, "ready_direct")
+                self.assertEqual(persisted_tipo, tipo)
+                self.assertTrue(bytes(payload).startswith(b"%PDF"))
+
+    def test_la_emision_directa_no_espera_el_pm_remoto(self):
+        with patch(
+            "service.bejerman_pdf_requests._render_remito_pdf_bytes",
+            return_value=PDF_BYTES,
+        ) as render:
+            self.assertTrue(self._guardar())
+
+        self.assertFalse(render.call_args.kwargs["allow_remote_pm_lookup"])
+
+    def test_no_genera_un_pdf_truncado_si_supera_los_22_renglones(self):
+        base_item = COMPROBANTE_EMITIDO["Comprobante_Items"][0]
+        cases = (
+            (
+                "00004390",
+                [dict(base_item, Item_NumeroRenglon=index) for index in range(1, 24)],
+            ),
+            (
+                "00004391",
+                [dict(base_item, Item_NumeroRenglon=23)],
+            ),
+        )
+
+        for numero, items in cases:
+            comprobante = dict(
+                COMPROBANTE_EMITIDO,
+                Comprobante_Numero=numero,
+                Comprobante_Items=items,
+            )
+            with self.subTest(numero=numero), patch(
+                "service.bejerman_pdf_requests._render_remito_pdf_bytes",
+            ) as render:
+                self.assertFalse(self._guardar(comprobante))
+
+            render.assert_not_called()
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT state, pdf_payload, last_error_code, last_error_detail
+                      FROM bejerman_pdf_requests
+                     WHERE numero=%s
+                    """,
+                    [numero],
+                )
+                state, payload, error_code, error_detail = cur.fetchone()
+            self.assertEqual(state, "failed")
+            self.assertIsNone(payload)
+            self.assertEqual(error_code, "BEJERMAN_REMITO_PDF_LINE_LIMIT_EXCEEDED")
+            self.assertIn("supera la capacidad física de 22", error_detail)
+
     def test_el_request_devuelve_el_pdf_sin_pedirle_nada_a_bejerman(self):
         self._guardar()
         client = BejermanSDKClient.__new__(BejermanSDKClient)
@@ -926,6 +1092,40 @@ class RemitoPdfGeneradoPorNexoraTests(TransactionTestCase):
         state, payload, _tipo = self._fila()
         self.assertEqual(state, "ready_direct")
         self.assertTrue(bytes(payload).startswith(b"%PDF"))
+
+    def test_un_remito_viejo_sobrepasado_falla_sin_contactar_al_sdk(self):
+        from service.bejerman_pdf_requests import _load_request, _process_queued
+
+        row = self._fila_pendiente()
+        base_item = COMPROBANTE_EMITIDO["Comprobante_Items"][0]
+        comprobante = dict(
+            COMPROBANTE_EMITIDO,
+            Comprobante_Items=[dict(base_item, Item_NumeroRenglon=index) for index in range(1, 24)],
+        )
+        client = Mock()
+        with (
+            patch("service.bejerman_pdf_requests._client_from_row", return_value=client),
+            patch(
+                "service.bejerman_pdf_requests.probe_comprobante_pdf_copy",
+                return_value=(None, "missing"),
+            ),
+            patch(
+                "service.bejerman_remito_pdf_data.load_comprobante_for_document",
+                return_value=comprobante,
+            ),
+            patch("service.bejerman_pdf_requests._render_remito_pdf_bytes") as render,
+            patch("service.bejerman_pdf_requests._process_direct_copy") as copy,
+        ):
+            self.assertTrue(_process_queued(row))
+
+        render.assert_not_called()
+        copy.assert_not_called()
+        client.register.assert_not_called()
+        client.generar_comprobante_ventas_pdf.assert_not_called()
+        failed = _load_request(row["document_key"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["last_error_code"], "BEJERMAN_REMITO_PDF_LINE_LIMIT_EXCEEDED")
+        self.assertIsNone(failed["pdf_payload"])
 
     def test_sin_nada_guardado_no_se_inventa_un_pdf(self):
         from service.bejerman_pdf_requests import _render_own_remito_pdf

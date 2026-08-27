@@ -12,13 +12,19 @@ class Command(BaseCommand):
                 cur.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ubicacion_id INTEGER NULL REFERENCES locations(id) ON DELETE SET NULL")
 
                 # Índices únicos (idempotentes)
-                cur.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_norm
-                      ON devices ((UPPER(REPLACE(REPLACE(numero_serie, ' ', ''), '-', ''))))
-                      WHERE NULLIF(TRIM(numero_serie), '') IS NOT NULL;
-                    """
-                )
+                # OJO: este índice quedó superado por apply_devices_ns_tipo_unique_schema, que lo
+                # reemplaza por uno que incluye el tipo de equipo (el humidificador comparte la
+                # serie del CPAP). Volver a crearlo acá encima del nuevo rompería esos ingresos,
+                # así que sólo se crea si el reemplazo todavía no está puesto.
+                cur.execute("SELECT to_regclass('public.uq_devices_ns_tipo_norm')")
+                if not (cur.fetchone() or [None])[0]:
+                    cur.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_norm
+                          ON devices ((UPPER(REPLACE(REPLACE(numero_serie, ' ', ''), '-', ''))))
+                          WHERE NULLIF(TRIM(numero_serie), '') IS NOT NULL;
+                        """
+                    )
                 # Intentar crear índice único sobre numero_interno normalizado. Si hay duplicados, degradar a índice normal
                 try:
                     cur.execute(

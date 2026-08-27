@@ -10,7 +10,10 @@ from service.bejerman_user_credentials import (
     bejerman_workstation_for_role,
     decrypt_bejerman_password,
     encrypt_bejerman_password,
+    get_user_bejerman_credentials,
     resolve_user_bejerman_workstation,
+    save_user_bejerman_credentials,
+    user_bejerman_credentials_status,
 )
 from service.models import User
 
@@ -555,3 +558,114 @@ class BejermanUserCredentialsApiTests(TestCase):
             self.assertEqual(cur.fetchone()[0], "ADM")
             cur.execute("SELECT bejerman_seller_code FROM users WHERE id = %s", [second_user.id])
             self.assertIsNone(cur.fetchone()[0])
+
+
+class BejermanTechnicalDelegateTests(TestCase):
+    """Los técnicos no tienen usuario propio en Bejerman: operan con el delegado.
+
+    Antes de esto, todo lo que disparaba un técnico se bloqueaba pidiéndole
+    credenciales que por diseño nunca iba a tener, y el equipo quedaba parado.
+    """
+
+    DELEGATE_EMAIL = "delegado-bejerman@example.com"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        call_command("apply_bejerman_user_credentials_schema", verbosity=0)
+
+    def setUp(self):
+        with connection.cursor() as cur:
+            cur.execute("DELETE FROM user_bejerman_credentials")
+        User.objects.all().delete()
+        self.administrativo = User.objects.create(
+            nombre="Administrativa",
+            email="administrativa-bejerman@example.com",
+            hash_pw="",
+            rol="admin",
+            activo=True,
+        )
+
+    def _crear_tecnico(self):
+        return User.objects.create(
+            nombre="Técnico sin credenciales",
+            email="tecnico-sin-credenciales@example.com",
+            hash_pw="",
+            rol="tecnico",
+            activo=True,
+        )
+
+    def _crear_delegado_con_credenciales(self):
+        delegado = User.objects.create(
+            nombre="Jefe con credenciales",
+            email=self.DELEGATE_EMAIL,
+            hash_pw="",
+            rol="jefe",
+            activo=True,
+        )
+        save_user_bejerman_credentials(delegado.id, "JEFE1", "clave-del-jefe")
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE user_bejerman_credentials SET is_valid = TRUE WHERE user_id = %s",
+                [delegado.id],
+            )
+        return delegado
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="delegate-secret")
+    def test_tecnico_sin_credenciales_usa_las_del_delegado(self):
+        tecnico = self._crear_tecnico()
+        self._crear_delegado_con_credenciales()
+
+        with override_settings(BEJERMAN_TECHNICAL_DELEGATE_EMAIL=self.DELEGATE_EMAIL):
+            usuario, clave = get_user_bejerman_credentials(tecnico.id)
+
+        self.assertEqual(usuario, "JEFE1")
+        self.assertEqual(clave, "clave-del-jefe")
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="delegate-secret")
+    def test_a_un_tecnico_no_se_le_piden_credenciales_propias(self):
+        tecnico = self._crear_tecnico()
+        self._crear_delegado_con_credenciales()
+
+        with override_settings(BEJERMAN_TECHNICAL_DELEGATE_EMAIL=self.DELEGATE_EMAIL):
+            estado = user_bejerman_credentials_status(tecnico.id)
+
+        self.assertTrue(estado["delegated"])
+        self.assertFalse(estado["required"])
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="delegate-secret")
+    def test_sin_delegado_configurado_el_error_explica_por_que(self):
+        tecnico = self._crear_tecnico()
+
+        with override_settings(BEJERMAN_TECHNICAL_DELEGATE_EMAIL=""):
+            with self.assertRaises(BejermanUserCredentialsRequired) as ctx:
+                get_user_bejerman_credentials(tecnico.id)
+
+        self.assertIn("credencial delegada", str(ctx.exception))
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="delegate-secret")
+    def test_delegado_sin_credenciales_dice_de_quien_son_las_que_faltan(self):
+        tecnico = self._crear_tecnico()
+        User.objects.create(
+            nombre="Delegado sin credenciales",
+            email=self.DELEGATE_EMAIL,
+            hash_pw="",
+            rol="jefe",
+            activo=True,
+        )
+
+        with override_settings(BEJERMAN_TECHNICAL_DELEGATE_EMAIL=self.DELEGATE_EMAIL):
+            with self.assertRaises(BejermanUserCredentialsRequired) as ctx:
+                get_user_bejerman_credentials(tecnico.id)
+
+        self.assertIn(self.DELEGATE_EMAIL, str(ctx.exception))
+
+    @override_settings(BEJERMAN_CREDENTIALS_SECRET="delegate-secret")
+    def test_un_administrativo_sin_credenciales_las_sigue_necesitando(self):
+        """La delegación es sólo para técnicos: al resto hay que seguir pidiéndoselas."""
+        self._crear_delegado_con_credenciales()
+
+        with override_settings(BEJERMAN_TECHNICAL_DELEGATE_EMAIL=self.DELEGATE_EMAIL):
+            with self.assertRaises(BejermanUserCredentialsRequired):
+                get_user_bejerman_credentials(self.administrativo.id)
+            self.assertTrue(user_bejerman_credentials_status(self.administrativo.id)["required"])

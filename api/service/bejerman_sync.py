@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import unicodedata
+from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -480,6 +481,64 @@ def _extract_article_code(records: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _article_code_for_partida_deposit(
+    records: list[dict[str, Any]],
+    *,
+    serial: str,
+    deposit: str,
+    expected_article_codes: Sequence[str] = (),
+) -> str:
+    """Resuelve el artículo de una partida dentro de un único depósito.
+
+    El artículo elegido para un movimiento de stock no puede venir del mapeo
+    general del modelo: Bejerman valida la terna depósito + artículo + partida.
+
+    Que un depósito devuelva más de un artículo para la misma partida es
+    normal y no es un error de datos: el CPAP y su humidificador comparten el
+    número de serie y son artículos distintos. En ese caso desempata el
+    artículo que el equipo ya tiene resuelto; sólo se bloquea si ninguno de los
+    artículos con stock es el del equipo, o si el equipo todavía no tiene
+    artículo definido.
+    """
+    article_codes = list(
+        dict.fromkeys(
+            _article_code_from_record(record)
+            for record in records
+            if _article_code_from_record(record)
+        )
+    )
+    if len(article_codes) > 1:
+        expected = list(
+            dict.fromkeys(
+                str(code or "").strip()
+                for code in expected_article_codes
+                if str(code or "").strip()
+            )
+        )
+        for candidate in expected:
+            for code in article_codes:
+                if _norm(code) == _norm(candidate):
+                    return code
+        if expected:
+            raise BejermanBlockedError(
+                f"La partida {serial} tiene stock en el depósito {deposit} para los artículos "
+                f"{', '.join(article_codes)}, y ninguno es el artículo del equipo "
+                f"({', '.join(expected)}); revise el mapeo del modelo antes de moverla."
+            )
+        raise BejermanBlockedError(
+            f"La partida {serial} tiene más de un artículo con stock en el depósito {deposit} "
+            f"({', '.join(article_codes)}) y el equipo no tiene artículo confirmado; "
+            "confirme el artículo del modelo para saber cuál mover."
+        )
+    if article_codes:
+        return article_codes[0]
+    if records:
+        raise BejermanBlockedError(
+            f"La partida {serial} existe en el depósito {deposit}, pero Bejerman no informó su artículo."
+        )
+    return ""
+
+
 def _quantity_from_record(record: dict[str, Any]) -> float | None:
     qty = _first_value(
         record,
@@ -558,6 +617,27 @@ def _records_for_partida(response: dict[str, Any], serial: str, deposit: str | N
             continue
         records.append(record)
     return records
+
+
+def _records_for_equipment_article(
+    records: list[dict[str, Any]], article_code: str
+) -> list[dict[str, Any]]:
+    """Deja sólo los renglones de stock del artículo de este equipo.
+
+    Ver la partida en un depósito no alcanza para saber si el equipo está ahí:
+    el CPAP y su humidificador comparten el número de serie, así que la misma
+    partida aparece bajo dos artículos. Sin artículo conocido se devuelve todo,
+    que es el comportamiento de siempre.
+    """
+    code = str(article_code or "").strip()
+    if not code:
+        return records
+    wanted = _norm(code)
+    return [
+        record
+        for record in records
+        if _norm(_article_code_from_record(record)) == wanted
+    ]
 
 
 def _other_positive_records(response: dict[str, Any], serial: str, expected_deposit: str) -> list[dict[str, Any]]:
@@ -1347,6 +1427,99 @@ def reopen_transient_blocked_jobs(
     return reopened
 
 
+def recover_stuck_sync_jobs(*, running_timeout_seconds: int | None = None) -> dict[str, int]:
+    """Devuelve a la cola —o al panel— los jobs de los que nadie los saca.
+
+    `_claim_job` sólo toma `pending`/`failed` con `attempts < max`. Eso deja dos
+    agujeros por los que un job desaparece sin que nadie se entere:
+
+    - **`running` huérfano**: si el proceso que lo tomó se murió (deploy, reinicio,
+      caída del contenedor), el job queda `running` para siempre. Nadie lo reclama y
+      en el panel parece que está trabajando.
+    - **`pending` con los intentos agotados**: deja de ser elegible, pero el estado
+      sigue diciendo `pending`, que se lee como "en camino". Es el peor de los dos,
+      porque se ve sano.
+
+    Los primeros vuelven a `pending` (la operación es idempotente: se reconsulta el
+    stock antes de mover nada). Los segundos pasan a `blocked`, que es lo que en
+    realidad son, para que aparezcan donde se los mira.
+    """
+
+    if running_timeout_seconds is None:
+        running_timeout_seconds = _positive_int_setting("BEJERMAN_SYNC_RUNNING_TIMEOUT_SECONDS", 1800)
+    max_attempts = _positive_int_setting("BEJERMAN_MAX_ATTEMPTS", 8)
+    claim_max_attempts = _sync_transient_max_attempts(max_attempts)
+
+    requeued = q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = 'pending',
+               next_attempt_at = CURRENT_TIMESTAMP,
+               last_error = 'Se reanudó: el proceso que lo estaba ejecutando no terminó (reinicio o caída).',
+               updated_at = CURRENT_TIMESTAMP
+         WHERE status = 'running'
+           AND updated_at <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+           AND attempts < %s
+        RETURNING id
+        """,
+        [running_timeout_seconds, claim_max_attempts],
+    ) or []
+
+    abandoned = q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = 'blocked',
+               last_error = COALESCE(
+                 NULLIF(last_error, ''),
+                 'Máximos reintentos agotados sin un error registrado.'
+               ),
+               updated_at = CURRENT_TIMESTAMP
+         WHERE status IN ('pending', 'running')
+           AND attempts >= %s
+           AND next_attempt_at <= CURRENT_TIMESTAMP
+        RETURNING id
+        """,
+        [claim_max_attempts],
+    ) or []
+
+    return {"requeued_running": len(requeued), "blocked_exhausted": len(abandoned)}
+
+
+def reopen_jobs_waiting_for_credentials(*, limit: int = 100) -> int:
+    """Reabre los jobs que se bloquearon porque su usuario no tenía credenciales.
+
+    Faltar las credenciales personales de Bejerman no es un problema del job: es una
+    condición del entorno que se resuelve sola en cuanto la persona las carga. Pero
+    el job se bloqueaba al primer intento y ahí se quedaba, así que cargarlas no
+    servía de nada y el equipo nunca se movía de depósito.
+    """
+
+    rows = q(
+        """
+        SELECT id, actor_user_id
+          FROM bejerman_sync_jobs
+         WHERE status = 'blocked'
+           AND actor_user_id IS NOT NULL
+           AND last_error ILIKE %s
+         ORDER BY updated_at ASC, id ASC
+         LIMIT %s
+        """,
+        [f"%{BEJERMAN_CREDENTIALS_REQUIRED[:40]}%", max(1, int(limit or 1))],
+    ) or []
+    reopened = 0
+    for row in rows:
+        try:
+            get_user_bejerman_credentials(int(row["actor_user_id"]))
+        except BejermanUserCredentialsError:
+            continue
+        except Exception:
+            logger.exception("bejerman_sync_credential_recheck falló job=%s", row.get("id"))
+            continue
+        if _reopen_blocked_job_inline(int(row["id"])):
+            reopened += 1
+    return reopened
+
+
 def _reopen_blocked_job_inline(job_id: int, actor_user_id: int | None = None) -> bool:
     updated = q(
         """
@@ -1890,6 +2063,56 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
     raise BejermanBlockedError("Hay más de un artículo Bejerman posible para este modelo/variante")
 
 
+def _mapping_article_codes_for_job(job: dict[str, Any]) -> tuple[str, str]:
+    """Artículo del mapeo del equipo: (confirmado a mano, mapeado sea cual sea el origen).
+
+    El confirmado a mano es el único que puede vetar un movimiento; el mapeado
+    sirve para desempatar cuando la partida tiene stock en más de un artículo,
+    porque ahí sólo se elige entre códigos que Bejerman ya informó.
+    """
+    try:
+        context = _ingreso_context(int(job["ingreso_id"]))
+        mapping = _mapping_for_context(context, job.get("company_key")) or {}
+    except Exception:
+        logger.exception("No se pudo consultar el mapeo confirmado para job Bejerman %s", job.get("id"))
+        return "", ""
+    code = (mapping.get("article_code") or "").strip()
+    is_manual = (mapping.get("match_source") or "").strip().lower() == "manual"
+    return (code if is_manual else ""), code
+
+
+def _confirmed_article_code_for_job(job: dict[str, Any]) -> str:
+    """Devuelve únicamente un artículo confirmado manualmente para el equipo.
+
+    Una partida puede repetirse en artículos distintos (por ejemplo, una máscara
+    y un concentrador). El dato de stock define el artículo a mover, pero no se
+    debe mover si contradice una confirmación humana del modelo.
+    """
+    return _mapping_article_codes_for_job(job)[0]
+
+
+def _assert_source_article_matches_confirmed_mapping(
+    job: dict[str, Any],
+    *,
+    serial: str,
+    deposit: str,
+    source_article_code: str,
+    confirmed_article_code: str | None = None,
+) -> str:
+    if confirmed_article_code is None:
+        confirmed_article_code = _confirmed_article_code_for_job(job)
+    if (
+        confirmed_article_code
+        and _norm(confirmed_article_code) != _norm(source_article_code)
+    ):
+        raise BejermanBlockedError(
+            f"La partida {serial} figura como artículo {source_article_code} en {deposit}, "
+            f"pero el equipo tiene confirmado el artículo {confirmed_article_code}. "
+            "No se emitió ningún movimiento: revise la partida o el mapeo del equipo."
+        )
+    return confirmed_article_code
+
+
 def _stock_transfer_comprobante_number(job: dict[str, Any]) -> str:
     """El número base es determinístico (ingreso_id) para mantener idempotencia
     en el primer intento. Pero si Bejerman ya "aceptó fantasma" ese número en un
@@ -1927,8 +2150,14 @@ def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobant
     }
 
 
-def build_stock_transfer_out_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
-    source_deposit = job.get("source_deposit") or "STR"
+def build_stock_transfer_out_payload(
+    job: dict[str, Any],
+    article_code: str,
+    source_deposit: str | None = None,
+) -> list[dict[str, Any]]:
+    # `source_deposit` explícito para cuando la partida no está en el depósito
+    # esperado: se descuenta de donde Bejerman la tiene, no de donde debería estar.
+    source_deposit = str(source_deposit or "").strip() or job.get("source_deposit") or "STR"
     comprobante = str(_setting("BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE", "SAL") or "").strip()
     item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
     item["Comprobante_CantidadUM1"] = -1
@@ -2362,6 +2591,7 @@ def _verify_stock_transfer_target(
     *,
     target: str,
     serial: str,
+    article_code: str = "",
 ) -> dict[str, Any]:
     attempts = _positive_int_setting("BEJERMAN_SYNC_STOCK_VERIFY_ATTEMPTS", 3)
     try:
@@ -2372,7 +2602,9 @@ def _verify_stock_transfer_target(
     last_response: dict[str, Any] = {}
     for attempt in range(attempts):
         last_response = client.stock_by_deposit_partida(target, serial)
-        if _records_for_partida(last_response, serial, target):
+        if _records_for_equipment_article(
+            _records_for_partida(last_response, serial, target), article_code
+        ):
             return last_response
         if attempt < attempts - 1 and delay_ms:
             time.sleep(delay_ms / 1000)
@@ -2408,6 +2640,17 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
 
     source = job.get("source_deposit") or "STR"
     target = job.get("target_deposit") or "STL"
+    # Una misma partida puede tener stock en varios artículos del mismo
+    # depósito: el CPAP y su humidificador comparten el número de serie. El
+    # artículo que el equipo ya tiene resuelto desempata cuál hay que mover.
+    equipment_confirmed_article_code, equipment_mapped_article_code = _mapping_article_codes_for_job(job)
+    expected_article_codes = [
+        equipment_confirmed_article_code,
+        (job.get("article_code") or "").strip(),
+        str(request_payload.get("article_code") or "").strip(),
+        equipment_mapped_article_code,
+    ]
+    equipment_article_code = next((code for code in expected_article_codes if code), "")
     sal_done = bool(request_payload.get("sal_done")) or request_payload.get("transfer_phase") in {
         TRANSFER_PHASE_SAL_DONE,
         TRANSFER_PHASE_ENT_PENDING,
@@ -2416,14 +2659,20 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
     }
 
     target_response = client.stock_by_deposit_partida(target, serial)
-    target_all_records = _records_for_partida_any_quantity(target_response, serial)
-    stock_article_code = remember_article_mapping_from_stock_records(
-        job, target_all_records, source="stock_transfer_target_partida"
+    # La idempotencia se mide por artículo y no por partida: si el humidificador
+    # ya se movió, su gemelo el CPAP —misma partida, otro artículo— todavía no.
+    target_records = _records_for_equipment_article(
+        _records_for_partida(target_response, serial, target),
+        equipment_article_code,
     )
-    target_records = _records_for_partida(target_response, serial, target)
 
     if target_records:
-        article_code = _extract_article_code(target_records) or stock_article_code or (job.get("article_code") or "")
+        article_code = _article_code_for_partida_deposit(
+            target_records,
+            serial=serial,
+            deposit=target,
+            expected_article_codes=expected_article_codes,
+        )
         _finish_job(
             job["id"],
             JOB_STATUS_SUCCEEDED,
@@ -2440,56 +2689,155 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
         return JOB_STATUS_SUCCEEDED
 
     source_response = client.stock_by_deposit_partida(source, serial)
-    source_all_records = _records_for_partida_any_quantity(source_response, serial)
+    source_known_records = _records_for_partida_any_quantity(source_response, serial, source)
     source_records = _records_for_partida(source_response, serial, source)
-    stock_article_code = (
-        stock_article_code
-        or remember_article_mapping_from_stock_records(
-            job,
-            [*source_all_records, *target_all_records],
-            source="stock_transfer_partida",
-        )
-    )
 
     other_records = [
         record
-        for record in _other_positive_records(target_response, serial, target)
+        for record in _records_for_equipment_article(
+            _other_positive_records(target_response, serial, target),
+            equipment_article_code,
+        )
         if _norm(_deposit_from_record(record) or "") != _norm(source)
     ]
-    if other_records:
-        deposits = sorted({_deposit_from_record(record) or "-" for record in other_records})
-        _finish_job(
-            job["id"],
-            JOB_STATUS_BLOCKED,
-            response_payload={**response_payload, "source": source_response, "target": target_response},
-            article_code=stock_article_code,
-        )
-        raise BejermanBlockedError(
-            f"Partida {serial} encontrada en otro depósito ({', '.join(deposits)}); requiere conciliación"
-        )
-
-    article_code = (
-        (job.get("article_code") or "").strip()
-        or str(request_payload.get("article_code") or "").strip()
-        or _extract_article_code(source_records)
-        or _extract_article_code(source_all_records)
-        or stock_article_code
+    other_deposits = sorted(
+        {
+            (_deposit_from_record(record) or "").strip()
+            for record in other_records
+            if (_deposit_from_record(record) or "").strip()
+        }
     )
+    # El equipo está en el taller y hay que entregarlo: que Bejerman lo tenga
+    # anotado en otro depósito es una diferencia para conciliar después, no un
+    # motivo para frenar el remito. Si el origen tiene stock se descuenta de ahí;
+    # si no, se descuenta del depósito donde Bejerman realmente lo tiene, así el
+    # stock se mueve en vez de duplicarse. La diferencia queda registrada en el
+    # job para poder conciliarla más tarde.
+    conciliation: dict[str, Any] | None = None
+    if other_records:
+        conciliation = {
+            "serial": serial,
+            "expected_source_deposit": source,
+            "found_in": other_deposits,
+            "records": _stock_records_summary(other_records),
+        }
+
+    transfer_source = (
+        str(request_payload.get("source_stock_deposit") or source).strip() or source
+        if sal_done
+        else source
+    )
+    sal_records = source_records
+    if not sal_done and not source_records and other_records:
+        if len(other_deposits) != 1:
+            _finish_job(
+                job["id"],
+                JOB_STATUS_BLOCKED,
+                response_payload={**response_payload, "source": source_response, "target": target_response},
+                article_code=(job.get("article_code") or "").strip(),
+            )
+            raise BejermanBlockedError(
+                f"Partida {serial} con stock positivo en varios depósitos "
+                f"({', '.join(other_deposits) or '-'}); no se puede saber de cuál descontar"
+            )
+        transfer_source = other_deposits[0]
+        sal_records = other_records
+
+    article_resolution_source = "job_or_mapping"
+    if sal_done:
+        # La SAL ya fue confirmada: el reintento debe conservar exactamente el
+        # artículo con el que se descontó, aunque el stock posterior cambie.
+        article_code = (
+            str(request_payload.get("article_code") or "").strip()
+            or (job.get("article_code") or "").strip()
+        )
+        article_resolution_source = "confirmed_source_exit"
+    elif sal_records:
+        # La terna artículo + partida + depósito se valida en Bejerman. El
+        # artículo del stock real prevalece sobre cualquier mapeo del modelo.
+        article_code = _article_code_for_partida_deposit(
+            sal_records,
+            serial=serial,
+            deposit=transfer_source,
+            expected_article_codes=expected_article_codes,
+        )
+        article_resolution_source = "positive_source_stock"
+    elif source_known_records:
+        article_code = _article_code_for_partida_deposit(
+            source_known_records,
+            serial=serial,
+            deposit=source,
+            expected_article_codes=expected_article_codes,
+        )
+        article_resolution_source = "source_stock_without_positive_quantity"
+    else:
+        article_code = (
+            str(request_payload.get("article_code") or "").strip()
+            or (job.get("article_code") or "").strip()
+        )
     if not article_code:
         article_code = _resolve_article_for_job(job, client)
+        article_resolution_source = "resolved_mapping"
+
+    # La SAL puede haber quedado deshecha: cuando el ENT falla, el botón de
+    # recuperación devuelve la unidad al origen con un ENT de reposición, pero
+    # el payload sigue diciendo `sal_done`. Reintentar así saltea la SAL y el
+    # ENT del destino DUPLICA el stock (pasó el 27/08/2026 con 18 equipos). Si
+    # el origen todavía tiene el artículo, la salida hay que volver a emitirla.
+    repos_detected = False
+    if sal_done and _records_for_equipment_article(sal_records, article_code):
+        sal_done = False
+        repos_detected = True
+        article_resolution_source = "source_stock_after_repos"
+        logger.warning(
+            "Job Bejerman %s decía sal_done pero la partida %s sigue en %s con el artículo %s: "
+            "se vuelve a emitir la SAL para no duplicar stock",
+            job.get("id"),
+            serial,
+            transfer_source,
+            article_code,
+        )
+
+    confirmed_article_code = ""
+    if not sal_done and article_resolution_source in {
+        "positive_source_stock",
+        "source_stock_without_positive_quantity",
+    }:
+        confirmed_article_code = _assert_source_article_matches_confirmed_mapping(
+            job,
+            serial=serial,
+            deposit=transfer_source,
+            source_article_code=article_code,
+            confirmed_article_code=equipment_confirmed_article_code,
+        )
 
     next_request_payload = {
         **request_payload,
         "article_code": article_code,
+        "source_stock_deposit": transfer_source,
+        "stock_article_resolution": {
+            "source": article_resolution_source,
+            "source_deposit": transfer_source,
+            "article_code": article_code,
+            "confirmed_article_code": confirmed_article_code,
+        },
+        **({"stock_conciliation": conciliation} if conciliation else {}),
+        **({"sal_reemitida_tras_repos": True} if repos_detected else {}),
     }
     next_response_payload = {
         **response_payload,
         "source": source_response,
         "target": target_response,
     }
-    if source_records and not sal_done:
+    if sal_records and not sal_done:
         validate_bejerman_config(comprobante="BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE")
-        sal_payload = build_stock_transfer_out_payload(job, article_code)
+        sal_payload = build_stock_transfer_out_payload(job, article_code, source_deposit=transfer_source)
+        if repos_detected:
+            # Bejerman deduplica por IdOrigen: la SAL original ya usó el de la
+            # OS, así que la reemisión necesita el suyo o rebota con
+            # "el mismo ya existe... importación anterior".
+            for item in sal_payload:
+                item["Comprobante_IdOrigen"] = f"{item.get('Comprobante_IdOrigen', '')}-REPOS"[:50]
         sal_request_payload = {
             **next_request_payload,
             "transfer_phase": "sal_pending",
@@ -2538,6 +2886,7 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
         client,
         target=target,
         serial=serial,
+        article_code=article_code,
     )
     _finish_job(
         job["id"],
@@ -2576,7 +2925,16 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
             return _process_stock_transfer(job, client)
         raise BejermanBlockedError(f"Tipo de sincronización no soportado: {sync_type}")
     except BejermanConfigError as exc:
-        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=str(exc))
+        error = str(exc)
+        if BEJERMAN_CREDENTIALS_REQUIRED in error:
+            # Se reabre solo cuando la persona las carga (ver
+            # reopen_jobs_waiting_for_credentials); decirlo acá evita que alguien
+            # reintente a mano diez veces esperando que cambie algo.
+            error = (
+                f"{BEJERMAN_CREDENTIALS_REQUIRED} La operación se reanuda sola en cuanto el usuario "
+                "que la originó cargue sus credenciales en su perfil."
+            )
+        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=error)
         return JOB_STATUS_BLOCKED
     except BejermanBlockedError as exc:
         if _is_retryable_sync_message(str(exc)):
@@ -2683,7 +3041,10 @@ def reconcile_article_mapping_for_job(job: dict[str, Any], client: BejermanSDKCl
     checked_deposits = _job_deposits_for_article_reconcile(job)
     for deposit in checked_deposits:
         response = client.stock_by_deposit_partida(deposit, serial)
-        records.extend(_records_for_partida_any_quantity(response, serial))
+        # Algunos puentes devuelven registros de todos los depósitos aunque se
+        # consulte uno. Filtrar acá evita que VAL/STL cambie el mapeo de una
+        # transferencia cuya partida está realmente en STR.
+        records.extend(_records_for_partida_any_quantity(response, serial, deposit))
 
     article_code = remember_article_mapping_from_stock_records(
         job,
@@ -3042,7 +3403,11 @@ def run_bejerman_sync_loop(
     )
     sale_days = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_DAYS", 2) or 2)
     sale_max = int(getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_MAX_COMPROBANTES", 500) or 500)
-    sale_company = getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEY", "SEPID") or "SEPID"
+    sale_companies = [
+        str(key).strip().upper()
+        for key in (getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEYS", None) or [])
+        if str(key).strip()
+    ] or [getattr(settings, "BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEY", "SEPID") or "SEPID"]
     sale_startup_delay = max(
         0,
         int(getattr(settings, "BEJERMAN_SALE_ITEMS_STARTUP_DELAY_SECONDS", 300) or 0),
@@ -3069,6 +3434,21 @@ def run_bejerman_sync_loop(
                     )
             except Exception:
                 logger.exception("bejerman_sync_transient_reopen falló")
+            try:
+                stuck = recover_stuck_sync_jobs()
+                if stuck.get("requeued_running") or stuck.get("blocked_exhausted"):
+                    logger.info("bejerman_sync_stuck_jobs_recovered stats=%s", stuck)
+            except Exception:
+                logger.exception("bejerman_sync_stuck_recovery falló")
+            try:
+                with_credentials = reopen_jobs_waiting_for_credentials()
+                if with_credentials:
+                    logger.info(
+                        "bejerman_sync_credential_jobs_reopened count=%s",
+                        with_credentials,
+                    )
+            except Exception:
+                logger.exception("bejerman_sync_credential_reopen falló")
             finally:
                 next_transient_reopen_at = time.monotonic() + transient_reopen_interval
         try:
@@ -3089,25 +3469,35 @@ def run_bejerman_sync_loop(
             finally:
                 next_blocked_alert_at = time.monotonic() + blocked_alert_interval
         if sale_interval > 0 and time.monotonic() >= next_sale_sync_at:
-            sale_started_at = time.monotonic()
             try:
                 from .bejerman_sales import sync_bejerman_sale_items
                 from .bejerman_sdk import BejermanSDKClient as SalesBejermanSDKClient
 
-                client = SalesBejermanSDKClient(
-                    company_key=sale_company,
-                    allow_system_credentials=True,
-                )
-                sale_stats = sync_bejerman_sale_items(
-                    client,
-                    days=sale_days,
-                    max_comprobantes=sale_max,
-                )
-                logger.info(
-                    "bejerman_sale_items_sync duration_ms=%s stats=%s",
-                    int((time.monotonic() - sale_started_at) * 1000),
-                    sale_stats,
-                )
+                # Una empresa que falla no puede dejar a la otra sin sincronizar: si MG BIO
+                # se cae, SEPID igual tiene que actualizar su caché de ventas (y viceversa).
+                for sale_company in sale_companies:
+                    sale_started_at = time.monotonic()
+                    try:
+                        client = SalesBejermanSDKClient(
+                            company_key=sale_company,
+                            allow_system_credentials=True,
+                        )
+                        sale_stats = sync_bejerman_sale_items(
+                            client,
+                            days=sale_days,
+                            max_comprobantes=sale_max,
+                        )
+                        logger.info(
+                            "bejerman_sale_items_sync company_key=%s duration_ms=%s stats=%s",
+                            sale_company,
+                            int((time.monotonic() - sale_started_at) * 1000),
+                            sale_stats,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "bejerman_sale_items_sync falló para company_key=%s",
+                            sale_company,
+                        )
             except Exception:
                 logger.exception("bejerman_sale_items_sync falló")
             finally:

@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import q, exec_void, exec_returning, require_roles, money, _email_append_footer_text
-from ..notifications import emit_notification
+from ..notifications import emit_notification, filter_email_recipients_by_preference
 from ..repuestos import (
     get_repuestos_config,
     calc_precio_venta,
@@ -357,9 +357,12 @@ def _send_stock_min_alerts(items: list[dict]):
             entity_id=str(items[0].get("id") or items[0].get("codigo") or "stock"),
             dedupe_key=f"stock_minimo:{','.join(str(it.get('id') or it.get('codigo') or it.get('nombre') or '-') for it in items)}:{len(items)}",
             payload={"items": items},
+            push=True,
         )
     except Exception:
         pass
+    # El correo respeta el toggle "Mail"; la campana ya se resolvió arriba.
+    recipients = filter_email_recipients_by_preference("stock_minimo", recipients)
     if not recipients:
         return
     subject = f"Alerta stock minimo - {len(items)} repuesto(s)"

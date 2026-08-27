@@ -3,14 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { getTecnicos } from "../lib/api";
 import api from "../lib/api";
 import WorkQueueTable from "../components/WorkQueueTable.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
 import useQueryState from "../hooks/useQueryState";
-import {
-  catalogEquipmentLabel,
-  formatOS,
-  ingresoIdOf,
-  norm,
-  tipoEquipoOf,
-} from "../lib/ui-helpers";
+import useColumnFilters from "../hooks/useColumnFilters";
+import { ingresoIdOf } from "../lib/ui-helpers";
+import { matchesWorkQueueFilters } from "../lib/work-queue";
+import { workQueueFilterOptions } from "../lib/work-queue-filter-options";
 
 const UNASSIGNED_TECHNICIAN_FILTER = "sin_asignar";
 
@@ -22,6 +21,8 @@ export default function PendientesPorTecnico() {
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -50,25 +51,18 @@ export default function PendientesPorTecnico() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tecnicoId]);
 
-  const filtered = useMemo(() => {
-    const needle = norm(q);
-    if (!needle) return rows;
-    return rows.filter((row) => {
-      const campos = [
-        formatOS(row),
-        row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
-        row?.marca,
-        row?.modelo,
-        catalogEquipmentLabel(row),
-        tipoEquipoOf(row),
-        row?.numero_serie,
-        row?.numero_interno,
-        row?.estado,
-        row?.presupuesto_estado,
-      ];
-      return campos.some((campo) => norm(campo).includes(needle));
-    });
-  }, [rows, q]);
+  const filtered = useMemo(
+    () => rows.filter((row) => matchesWorkQueueFilters(row, { q, ...filters })),
+    [rows, q, filters]
+  );
+
+  // El técnico ya viene elegido arriba, salvo en la lista de los sin asignar.
+  const showTechnician = tecnicoId === UNASSIGNED_TECHNICIAN_FILTER;
+  const filterOptions = useMemo(() => {
+    const options = workQueueFilterOptions(rows);
+    if (!showTechnician) delete options.tecnico;
+    return options;
+  }, [rows, showTechnician]);
 
   const go = (row) => {
     const id = ingresoIdOf(row);
@@ -79,11 +73,11 @@ export default function PendientesPorTecnico() {
   return (
     <div className="card">
       <div className="h1 mb-3">Pendientes por técnico</div>
-      {err && <div className="bg-red-100 text-red-700 p-2 rounded mb-3">{err}</div>}
+      <AlertBanner tone="error">{err}</AlertBanner>
 
-      <div className="flex flex-col md:flex-row gap-2 mb-3 md:items-center">
+      <div className="mb-3">
         <select
-          className="border rounded p-2"
+          className="border rounded p-2 w-full max-w-xs"
           value={tecnicoId}
           onChange={(e) => setTecnicoId(e.target.value)}
           aria-label="Seleccionar técnico"
@@ -94,26 +88,38 @@ export default function PendientesPorTecnico() {
             <option key={t.id} value={t.id}>{t.nombre}</option>
           ))}
         </select>
-        <input
-          className="border rounded p-2 w-full max-w-md"
-          placeholder="Filtrar por OS, cliente, marca, equipo, serie"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          aria-label="Filtrar pendientes por técnico"
-        />
       </div>
+
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, cliente, marca, equipo, serie"
+        searchLabel="Filtrar pendientes por técnico"
+        onReload={load}
+        loading={loading}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+      />
 
       {!tecnicoId ? (
         <div className="text-sm text-gray-500">Elija un técnico o la opción sin asignar para ver los pendientes.</div>
       ) : (
         <WorkQueueTable
           rows={filtered}
+          totalCount={rows.length}
           loading={loading}
           emptyText="Sin pendientes."
           onOpen={go}
-          showTechnician={tecnicoId === UNASSIGNED_TECHNICIAN_FILTER}
+          showTechnician={showTechnician}
           sort={sort}
           onSortChange={setSort}
+          showFilters={filtersOpen}
+          filters={filters}
+          onFilterChange={setFilter}
+          filterOptions={filterOptions}
         />
       )}
     </div>

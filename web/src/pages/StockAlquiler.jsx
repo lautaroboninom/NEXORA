@@ -1,16 +1,20 @@
 //web\src\pages\StockAlquiler.jsx
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getDeliveryOrderRentalAvailableEquipment } from "../lib/api";
 import { ingresoIdOf, formatOS, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
 import { useAuth } from "../context/AuthContext";
 import useQueryState from "../hooks/useQueryState";
+import useColumnFilters from "../hooks/useColumnFilters";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
-import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
-import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
-import { sortRows } from "../lib/table-sort";
-import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
+import IngresoTable from "../components/IngresoTable.jsx";
+import {
+  columnFilterOptions,
+  matchesColumnFilters,
+} from "../lib/ingreso-list-filters";
 
 // Catálogo (DB):
 const ESTADOS_EXCLUIR = new Set(["entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado"]);
@@ -35,15 +39,75 @@ const rowFromRentalOption = (item) => ({
   razon_social: item?.ownerCustomerName,
 });
 
+const marcaOf = (row) => (row?.marca ?? row?.equipo?.marca ?? "-");
+const modeloOf = (row) => {
+  const candidates = [row?.modelo, row?.equipo?.modelo, row?.modelo_nombre, row?.equipo?.modelo_nombre, row?.modelo_serie, row?.serie_nombre];
+  for (const raw of candidates) {
+    if (typeof raw === "string") {
+      const v = raw.trim();
+      if (v) return v;
+    }
+  }
+  return "-";
+};
+const varianteOf = (row) => {
+  const candidates = [row?.equipo_variante, row?.modelo_variante, row?.variante, row?.variante_nombre];
+  for (const raw of candidates) {
+    if (typeof raw === "string") {
+      const v = raw.trim();
+      if (v) return v;
+    }
+  }
+  return "-";
+};
+
+const COLUMNS = [
+  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "tipo",
+    label: "Tipo de equipo",
+    render: (row) => tipoEquipoOf(row) || "-",
+    filter: "select",
+  },
+  { field: "marca", label: "Marca", render: marcaOf, filter: "select" },
+  { field: "modelo", label: "Modelo", render: modeloOf, filter: "select" },
+  { field: "variante", label: "Variante", render: varianteOf, filter: "select" },
+  {
+    field: "identificacion",
+    label: "Serie",
+    render: (row) => <DeviceIdentifier row={row} />,
+    filter: "text",
+  },
+];
+
 export default function StockAlquiler() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [warning, setWarning] = useState("");
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
   const nav = useNavigate();
 
   const { user, loading: authLoading } = useAuth();
+
+  const load = useCallback(async () => {
+    setErr("");
+    setWarning("");
+    setLoading(true);
+    try {
+      const data = await getDeliveryOrderRentalAvailableEquipment({ limit: 200 });
+      const safe = Array.isArray(data?.items) ? data.items : [];
+      setRows(safe.map(rowFromRentalOption).filter(estadoValido));
+      if (data?.warning) setWarning(data.warning);
+    } catch (e) {
+      setErr(e?.message || "Error cargando stock");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (authLoading) return;
@@ -51,151 +115,73 @@ export default function StockAlquiler() {
       setLoading(false);
       return;
     }
-
-    let active = true;
-    (async () => {
-      setErr("");
-      setLoading(true);
-      try {
-        const data = await getDeliveryOrderRentalAvailableEquipment({ limit: 200 });
-        if (!active) return;
-        const safe = Array.isArray(data?.items) ? data.items : [];
-        setRows(safe.map(rowFromRentalOption).filter(estadoValido));
-        if (data?.warning) setErr(data.warning);
-      } catch (e) {
-        if (!active) return;
-        setErr(e?.message || "Error cargando stock");
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [authLoading, user]);
+    load();
+  }, [authLoading, user, load]);
 
   const filtered = useMemo(() => {
     const needle = norm(q);
-    if (!needle) return rows;
-    return rows.filter(r => {
-      if (!estadoValido(r)) return false;
-      const campos = [formatOS(r), r?.marca, catalogEquipmentLabel(r), tipoEquipoOf(r), r?.numero_serie, r?.numero_interno, r?.razon_social];
-      return campos.some(c => norm(c).includes(needle));
+    return rows.filter((row) => {
+      if (!estadoValido(row)) return false;
+      if (!matchesColumnFilters(row, COLUMNS, filters)) return false;
+      if (!needle) return true;
+      const campos = [
+        formatOS(row),
+        row?.marca,
+        catalogEquipmentLabel(row),
+        tipoEquipoOf(row),
+        row?.numero_serie,
+        row?.numero_interno,
+        row?.razon_social,
+      ];
+      return campos.some((c) => norm(c).includes(needle));
     });
-  }, [rows, q]);
+  }, [rows, q, filters]);
 
-  const marcaOf = (row) => (row?.marca ?? row?.equipo?.marca ?? "-");
-  const modeloOf = (row) => {
-    const candidates = [row?.modelo, row?.equipo?.modelo, row?.modelo_nombre, row?.equipo?.modelo_nombre, row?.modelo_serie, row?.serie_nombre];
-    for (const raw of candidates) {
-      if (typeof raw === "string") {
-        const v = raw.trim();
-        if (v) return v;
-      }
-    }
-    return "-";
+  const filterOptions = useMemo(() => columnFilterOptions(rows, COLUMNS), [rows]);
+
+  const go = (row) => {
+    const id = ingresoIdOf(row);
+    if (!id) return;
+    nav(`/ingresos/${id}`);
   };
-  const varianteOf = (row) => {
-    const candidates = [row?.equipo_variante, row?.modelo_variante, row?.variante, row?.variante_nombre];
-    for (const raw of candidates) {
-      if (typeof raw === "string") {
-        const v = raw.trim();
-        if (v) return v;
-      }
-    }
-    return "-";
-  };
-  const displayRows = useMemo(
-    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
-    [filtered, sort]
-  );
-  const sortOptions = ingresoSortOptions([
-    "os",
-    "tipo",
-    "marca",
-    "modelo",
-    "variante",
-    "identificacion",
-  ]);
 
   return (
     <div className="card">
       <div className="h1 mb-3">Stock de alquiler</div>
-      {err && <div className="bg-red-100 text-red-700 p-2 rounded mb-3">{err}</div>}
 
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          className="border rounded p-2 w-full max-w-md"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Filtrar por OS, marca, equipo, serie"
-        />
-      </div>
+      <AlertBanner tone="error">{err}</AlertBanner>
+      <AlertBanner tone="warning">{warning}</AlertBanner>
 
-      {loading ? "Cargando..." :
-        displayRows.length === 0 ? (
-          <div className="text-sm text-gray-500">No hay equipos disponibles en Estantería de Alquiler con stock STL.</div>
-        ) : (
-          <div>
-            <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
-            <MobileDataList>
-              {displayRows.map((row) => (
-                <MobileDataCard
-                  key={ingresoIdOf(row)}
-                  as="button"
-                  type="button"
-                  className="hover:bg-gray-50"
-                  onClick={() => nav(`/ingresos/${ingresoIdOf(row)}`)}
-                >
-                  <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
-                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                    <MobileDataField label="Tipo de equipo" value={tipoEquipoOf(row)} />
-                    <MobileDataField label="Marca" value={marcaOf(row)} />
-                    <MobileDataField label="Modelo" value={modeloOf(row)} />
-                    <MobileDataField label="Variante" value={varianteOf(row)} />
-                    <MobileDataField label="Serie">
-                      <DeviceIdentifier row={row} />
-                    </MobileDataField>
-                  </div>
-                </MobileDataCard>
-              ))}
-            </MobileDataList>
-            <DesktopTableWrap>
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="text-left">
-                  <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
-                  <SortableTh field="tipo" sort={sort} onSortChange={setSort} className="p-2">Tipo de equipo</SortableTh>
-                  <SortableTh field="marca" sort={sort} onSortChange={setSort} className="p-2">Marca</SortableTh>
-                  <SortableTh field="modelo" sort={sort} onSortChange={setSort} className="p-2">Modelo</SortableTh>
-                  <SortableTh field="variante" sort={sort} onSortChange={setSort} className="p-2">Variante</SortableTh>
-                  <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
-                </tr>
-              </thead>
-              <tbody>
-                {displayRows.map((row) => (
-                  <tr
-                    key={ingresoIdOf(row)}
-                    className="border-t hover:bg-gray-50 cursor-pointer"
-                    onClick={() => nav(`/ingresos/${ingresoIdOf(row)}`)}
-                  >
-                    <td className="p-2 underline">{formatOS(row)}</td>
-                    <td className="p-2">{tipoEquipoOf(row)}</td>
-                    <td className="p-2">{marcaOf(row)}</td>
-                    <td className="p-2">{modeloOf(row)}</td>
-                    <td className="p-2">{varianteOf(row)}</td>
-                    <td className="p-2"><DeviceIdentifier row={row} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            </DesktopTableWrap>
-            <div className="text-xs text-gray-500 mt-2">Mostrando {displayRows.length} equipos.</div>
-          </div>
-        )}
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, marca, equipo, serie"
+        searchLabel="Filtrar stock de alquiler"
+        onReload={load}
+        loading={loading}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+      />
+
+      <IngresoTable
+        rows={filtered}
+        columns={COLUMNS}
+        sort={sort}
+        onSortChange={setSort}
+        onOpen={go}
+        openLabel={(row) => `Abrir hoja de servicio de ${formatOS(row)}`}
+        filters={filters}
+        onFilterChange={setFilter}
+        filterOptions={filterOptions}
+        showFilters={filtersOpen}
+        loading={loading}
+        emptyText="No hay equipos disponibles en Estantería de Alquiler con stock STL."
+        totalCount={rows.length}
+        countLabel="equipos"
+      />
     </div>
   );
 }
-
-

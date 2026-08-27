@@ -164,8 +164,12 @@ export default function Garantias() {
   const meta = out?.meta || {};
   const warrantyDays = out?.warranty_days || out?.days || meta.days || null;
   const hasSale = out?.found === true;
-  const statusClass =
-    out?.within_365_days === true
+  // La fecha salió de un remito: el equipo salió del depósito ese día, pero la venta al
+  // cliente final pudo ser bastante después. No se puede presentar como un dato firme.
+  const estimated = out?.estimated === true || meta.estimated === true;
+  const statusClass = estimated
+    ? "border-sky-200 bg-sky-50 text-sky-950"
+    : out?.within_365_days === true
       ? "border-emerald-200 bg-emerald-50 text-emerald-950"
       : out?.within_365_days === false
         ? "border-amber-200 bg-amber-50 text-amber-950"
@@ -256,10 +260,19 @@ export default function Garantias() {
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             <div>
               <div className="text-xs font-semibold uppercase opacity-80">Garantía de fábrica</div>
-              <div className="text-lg font-semibold">{yesNoUnknown(out.within_365_days)}</div>
+              <div className="text-lg font-semibold">
+                {yesNoUnknown(out.within_365_days)}
+                {estimated && (
+                  <span className="ml-2 rounded bg-sky-600 px-1.5 py-0.5 text-xs font-semibold uppercase text-white">
+                    Estimada
+                  </span>
+                )}
+              </div>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase opacity-80">Fecha de venta</div>
+              <div className="text-xs font-semibold uppercase opacity-80">
+                {estimated ? "Fecha de salida" : "Fecha de venta"}
+              </div>
               <div className="font-semibold">{out.fecha_venta || "-"}</div>
             </div>
             <div>
@@ -274,14 +287,23 @@ export default function Garantias() {
 
           {!hasSale && (
             <div className="mt-3 rounded border border-gray-300 bg-white/70 p-2 text-gray-700">
-              No se encontró una venta Bejerman para esta serie. La garantía queda no determinada.
+              No se encontró ninguna factura ni remito de Bejerman para esta serie. La garantía queda no determinada.
+            </div>
+          )}
+
+          {estimated && (
+            <div className="mt-3 rounded border border-sky-300 bg-white/70 p-2 text-sky-950">
+              Esta serie no tiene factura en Bejerman. La fecha sale del remito{" "}
+              <span className="font-semibold">{meta.documentLabel || "de salida"}</span>, que es cuando el equipo
+              salió del depósito: la venta al cliente final pudo ser después, así que la garantía real puede ser
+              mayor que la que se muestra. Confirmar antes de rechazar una garantía por esta fecha.
             </div>
           )}
 
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
             <div>
               <div className="text-xs font-semibold uppercase opacity-80">Fuente</div>
-              <div>{out.source === "bejerman_sale" ? "Venta Bejerman" : out.source || "-"}</div>
+              <div>{estimated ? "Remito Bejerman" : out.source === "bejerman_sale" ? "Venta Bejerman" : out.source || "-"}</div>
               <div className="text-xs opacity-80">{meta.companyKey ? `Empresa: ${meta.companyKey}` : ""}</div>
             </div>
             <div>

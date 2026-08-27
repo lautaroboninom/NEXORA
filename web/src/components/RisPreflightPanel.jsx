@@ -1,6 +1,10 @@
 import React, { useState } from "react";
 
-import { getBejermanArticles } from "@/lib/api";
+import {
+  getBejermanArticles,
+  postIngresoConflictoEvidencia,
+  postIngresoConflictoResolver,
+} from "@/lib/api";
 
 const severityClass = (severity) => {
   if (severity === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
@@ -172,10 +176,137 @@ function ArticleSearch({ issue, onApplyArticle }) {
   );
 }
 
-function IssueRow({ issue, onApplyCustomer, onApplyArticle, onEditItem }) {
+/**
+ * El equipo ya tiene una orden de servicio abierta.
+ *
+ * Casi siempre es que no se tildó la entrega anterior, no que el equipo esté dos veces en el
+ * taller. Por eso esto no frena el remito: informa, y ofrece el camino corto para arreglarlo
+ * —preguntarle a Bejerman si el equipo salió— sin obligar a nadie a salir de la pantalla con
+ * el cliente esperando.
+ */
+function OpenIngresoConflict({ issue, onResolved }) {
+  const fix = issue?.fix || {};
+  const [evidence, setEvidence] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [error, setError] = useState("");
+  const [resolved, setResolved] = useState("");
+
+  const payload = {
+    conflicting_ingreso_id: fix.conflicting_ingreso_id,
+    numero_serie: fix.numero_serie || "",
+    company_key: fix.company_key || "",
+  };
+
+  const buscar = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setEvidence(await postIngresoConflictoEvidencia(payload));
+    } catch (err) {
+      setEvidence(null);
+      setError(err?.data?.detail || err?.message || "No se pudo consultar Bejerman.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cerrar = async () => {
+    setResolving(true);
+    setError("");
+    try {
+      const result = await postIngresoConflictoResolver(payload);
+      setResolved(result?.detail || "La orden anterior quedó cerrada.");
+      onResolved?.();
+    } catch (err) {
+      setError(err?.data?.detail || err?.message || "No se pudo cerrar la orden anterior.");
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  if (!fix.conflicting_ingreso_id) return null;
+
+  const documents = Array.isArray(evidence?.documents) ? evidence.documents : [];
+  const found = evidence?.status === "found" && documents.length > 0;
+
+  return (
+    <div className="mt-3 rounded border border-amber-300 bg-white p-2">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-700">
+        <span>
+          Orden anterior: <b>OS {fix.conflicting_os || fix.conflicting_ingreso_id}</b>
+        </span>
+        {fix.conflicting_fecha_ingreso && <span>Ingresada el {fix.conflicting_fecha_ingreso}</span>}
+        {fix.conflicting_estado && <span>Estado: {fix.conflicting_estado}</span>}
+        {fix.conflicting_cliente && <span>Cliente: {fix.conflicting_cliente}</span>}
+      </div>
+
+      {resolved ? (
+        <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-800">
+          {resolved} Ya puede emitir el remito con el número de OS nuevo.
+        </div>
+      ) : (
+        <>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              disabled={loading || resolving}
+              onClick={buscar}
+            >
+              {loading ? "Consultando Bejerman..." : "Buscar la salida en Bejerman"}
+            </button>
+            {found && (
+              <button
+                type="button"
+                className="rounded border border-emerald-600 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                disabled={resolving}
+                onClick={cerrar}
+              >
+                {resolving ? "Cerrando..." : `Cerrar OS ${fix.conflicting_os || ""} con ese remito`}
+              </button>
+            )}
+          </div>
+
+          {found && (
+            <div className="mt-2 space-y-1">
+              <div className="text-xs font-semibold text-emerald-800">
+                Bejerman registra la salida del equipo después de ese ingreso:
+              </div>
+              {documents.slice(0, 3).map((document, index) => (
+                <div key={`${document.remitoNumber || index}`} className="text-xs text-gray-700">
+                  {document.remitoNumber} · {document.issueDate}
+                  {document.description ? ` · ${document.description}` : ""}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {evidence && !found && (
+            <div className="mt-2 text-xs text-gray-700">
+              {evidence.reason ||
+                "Bejerman no muestra ningún remito de salida posterior. El aviso le llega a jefatura para que lo resuelva."}
+            </div>
+          )}
+
+          {!evidence && !loading && (
+            <div className="mt-2 text-xs text-gray-600">
+              Puede emitir el remito igual: ese renglón sale sin número de OS y jefatura recibe el aviso.
+            </div>
+          )}
+        </>
+      )}
+
+      {error && <div className="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-800">{error}</div>}
+    </div>
+  );
+}
+
+function IssueRow({ issue, onApplyCustomer, onApplyArticle, onEditItem, onConflictResolved }) {
   const candidates = Array.isArray(issue?.candidates) ? issue.candidates : [];
-  const isCustomer = issue?.fix?.type === "customer" || issue?.scope === "cliente";
-  const isArticle = issue?.fix?.type === "article_mapping" || issue?.scope === "articulo";
+  const isConflict = issue?.fix?.type === "open_ingreso_conflict";
+  const isCustomer = !isConflict && (issue?.fix?.type === "customer" || issue?.scope === "cliente");
+  const isArticle = !isConflict && (issue?.fix?.type === "article_mapping" || issue?.scope === "articulo");
   return (
     <div className={`rounded border p-3 ${severityClass(issue?.severity)}`}>
       <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
@@ -226,6 +357,7 @@ function IssueRow({ issue, onApplyCustomer, onApplyArticle, onEditItem }) {
         </div>
       )}
       {isArticle && <ArticleSearch issue={issue} onApplyArticle={onApplyArticle} />}
+      {isConflict && <OpenIngresoConflict issue={issue} onResolved={onConflictResolved} />}
     </div>
   );
 }
@@ -238,6 +370,7 @@ export default function RisPreflightPanel({
   onApplyCustomer,
   onApplyArticle,
   onEditItem,
+  onConflictResolved,
   disabled = false,
   documentLabel = "RIS",
   actionLabel = "Emitir RIS",
@@ -248,6 +381,15 @@ export default function RisPreflightPanel({
   const profileType = String(profile?.type || "").trim().toUpperCase();
   const profileDeposit = String(profile?.deposit || "").trim();
   const updatesStock = Boolean(profile?.updateStock);
+  const documentCount = Number(preview?.documentCount || preview?.document_count || 1);
+  const documentLineCounts = Array.isArray(preview?.documentLineCounts)
+    ? preview.documentLineCounts.map(Number).filter((value) => Number.isFinite(value) && value > 0)
+    : Array.isArray(preview?.document_line_counts)
+      ? preview.document_line_counts.map(Number).filter((value) => Number.isFinite(value) && value > 0)
+      : [];
+  const printCapacityLabel = documentCount > 1
+    ? `se emitirán ${documentCount} remitos${documentLineCounts.length ? ` · ${documentLineCounts.join(" + ")} líneas` : ""}`
+    : `${preview.lineCount || 0} ${Number(preview.lineCount) === 1 ? "línea" : "líneas"}`;
   const partidaLabel = updatesStock && profileType === "RDA" ? "N° serie del equipo" : "identificador del equipo";
   const hasResult = !!result;
   const normalizedDocumentLabel = documentLabel || "RIS";
@@ -261,7 +403,7 @@ export default function RisPreflightPanel({
           <div className="mt-1 text-xs text-gray-600">
             {hasResult
               ? result?.can_emit
-                ? `${normalizedDocumentLabel} listo para ${actionText} · ${preview.lineCount || 0} ${Number(preview.lineCount) === 1 ? "línea" : "líneas"}`
+                ? `${normalizedDocumentLabel} listo para ${actionText} · ${printCapacityLabel}`
                 : result?.detail || "La validación encontró problemas."
               : `Valide los datos antes de crear o ${actionText}.`}
           </div>
@@ -304,6 +446,7 @@ export default function RisPreflightPanel({
               onApplyCustomer={onApplyCustomer}
               onApplyArticle={onApplyArticle}
               onEditItem={onEditItem}
+              onConflictResolved={onConflictResolved}
             />
           ))}
         </div>

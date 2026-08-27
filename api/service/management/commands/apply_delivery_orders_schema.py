@@ -788,8 +788,19 @@ class Command(BaseCommand):
                       response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
                       error_message     TEXT NULL,
                       recovery_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
-                      created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                      -- clock_timestamp() y no CURRENT_TIMESTAMP: este último devuelve
+                      -- el instante en que arrancó la transacción, así que con
+                      -- ATOMIC_REQUESTS las cuatro fases de una emisión (reserve,
+                      -- sending, sdk_response, generated) quedaban con la MISMA hora y
+                      -- cualquier medición de cuánto tardó cada tramo daba 0.
+                      created_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE bejerman_integration_attempts
+                    ALTER COLUMN created_at SET DEFAULT clock_timestamp()
                     """
                 )
                 cur.execute(

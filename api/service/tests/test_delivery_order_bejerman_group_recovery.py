@@ -7,6 +7,7 @@ from django.core.management import call_command
 from django.db import connection
 from django.test import TestCase
 
+from service import bejerman_catalog_cache
 from service.delivery_orders import (
     DeliveryOrderError,
     cancel_order,
@@ -126,6 +127,14 @@ class DeliveryOrderBejermanGroupRecoveryTests(TestCase):
                 "UPDATE delivery_orders SET bejerman_remito_group_id = %s WHERE id = ANY(%s)",
                 [group_id, order_ids],
             )
+
+    def setUp(self):
+        # El cache de catálogos vive a nivel de proceso: sin esto, el stock que
+        # dejó cacheado un test con su SDK stubeado se le sirve al siguiente.
+        bejerman_catalog_cache.invalidate_all()
+
+    def tearDown(self):
+        bejerman_catalog_cache.invalidate_all()
 
     def _group_status(self, group_id):
         with connection.cursor() as cur:

@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.db import connection
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -109,6 +111,9 @@ class RecepcionPermissionsAPITest(TestCase):
                     propietario_contacto TEXT,
                     propietario_doc TEXT,
                     variante TEXT,
+                    -- Parte de la identidad del equipo junto al número de serie: dos equipos
+                    -- distintos comparten la serie (el humidificador entra con la del CPAP).
+                    tipo_equipo TEXT,
                     alquilado {bool_type} DEFAULT {bool_false},
                     alquiler_a TEXT
                 ){engine_suffix}
@@ -345,6 +350,14 @@ class RecepcionPermissionsAPITest(TestCase):
             )
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (1, 1, 1, 1, 'NS-1', 'MG 0001')")
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (2, 1, 1, 1, 'NS-HIST', 'MG 0002')")
+            # El calentador humidificador del equipo 1: no trae serie propia, entra con la del
+            # CPAP con el que vino. Mismo número, otro equipo.
+            cur.execute(
+                """
+                INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
+                VALUES (5, 1, 1, 1, 'NS-1', 'MG 0005', 'Calentador humidificador')
+                """
+            )
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (3, 1, 1, 1, 'NS-ACT-OLDER', 'MG 0003')")
             cur.execute(
                 """
@@ -385,6 +398,19 @@ class RecepcionPermissionsAPITest(TestCase):
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
                 VALUES (5, 3, 'reparacion', 'entregado', 'no_aplica', 'reparado', '2026-05-15 12:00:00', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            # Salida del CPAP: es la que dispara su garantía de reparación. El humidificador
+            # que comparte la serie no tiene ninguna.
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    id, device_id, motivo, estado, presupuesto_estado, resolucion,
+                    fecha_ingreso, fecha_entrega, ubicacion_id, asignado_a, recibido_por
+                )
+                VALUES (7, 1, 'reparacion', 'entregado', 'no_aplica', 'reparado',
+                        '2026-02-01 09:00:00', '2026-02-20 15:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
@@ -452,6 +478,39 @@ class RecepcionPermissionsAPITest(TestCase):
         self.assertFalse(resp.data["ingreso"]["ingreso_en_curso"])
         self.assertIn("2026-04-01", str(resp.data["ingreso"]["fecha_ingreso"]))
 
+    def test_scan_lookup_avisa_cuando_el_numero_es_de_dos_equipos(self):
+        # Con dos equipos detrás del mismo número no se adivina: se devuelven los dos para que
+        # la pantalla pregunte cuál es el que está entrando.
+        resp = self._client().get("/api/scan/lookup/?code=NS-1")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["kind"], "device")
+        self.assertTrue(resp.data["ambiguous"])
+        tipos = sorted(c["tipo_equipo"] for c in resp.data["device_candidates"])
+        self.assertEqual(tipos, ["CPAP", "Calentador humidificador"])
+
+    def test_scan_lookup_respeta_el_equipo_elegido(self):
+        resp = self._client().get("/api/scan/lookup/?code=NS-1&device_id=5")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["device"]["id"], 5)
+        self.assertEqual(resp.data["device"]["tipo_equipo"], "Calentador humidificador")
+        self.assertFalse(resp.data["ambiguous"])
+
+    def test_garantia_reparacion_no_se_hereda_entre_equipos_con_la_misma_serie(self):
+        # El CPAP salió hace poco: su garantía de reparación es suya, no del humidificador que
+        # comparte la serie.
+        client = self._client()
+        con_tipo_cpap = client.get("/api/equipos/garantia-reparacion/?numero_serie=NS-1&tipo_equipo=cpap")
+        con_tipo_humi = client.get(
+            "/api/equipos/garantia-reparacion/?numero_serie=NS-1&tipo_equipo=calentador humidificador"
+        )
+
+        self.assertEqual(con_tipo_cpap.status_code, 200, con_tipo_cpap.data)
+        self.assertEqual(con_tipo_humi.status_code, 200, con_tipo_humi.data)
+        self.assertIsNotNone(con_tipo_cpap.data["last_ingreso"])
+        self.assertIsNone(con_tipo_humi.data["last_ingreso"])
+
     def test_scan_lookup_exposes_rental_customer_for_return(self):
         resp = self._client().get("/api/scan/lookup/?code=NS-ALQ-RETURN")
 
@@ -466,6 +525,33 @@ class RecepcionPermissionsAPITest(TestCase):
     def test_service_sheet_principal_default_allows_non_liberado_detail(self):
         resp = self._client().get("/api/ingresos/2/")
         self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_page_billing_override_unlocks_remitos_consultation(self):
+        client = self._client()
+
+        self.assertEqual(client.get("/api/cobranzas/remitos/").status_code, 403)
+        self.assertEqual(client.get("/api/cobranzas/facturacion/clientes/").status_code, 403)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_permission_overrides (user_id, permission_code, effect)
+                VALUES (%s, %s, %s)
+                """,
+                [self.recepcion_user.id, "page.billing", "allow"],
+            )
+
+        with patch(
+            "service.views.delivery_orders_views.list_remitos_from_bejerman",
+            return_value={"items": [], "pagination": {}},
+        ) as list_remitos:
+            remitos_resp = client.get("/api/cobranzas/remitos/")
+
+        self.assertEqual(remitos_resp.status_code, 200, remitos_resp.data)
+        self.assertTrue(list_remitos.called)
+        self.assertEqual(client.get("/api/cobranzas/facturacion/clientes/").status_code, 200)
+        # La consulta de facturación sigue reservada a quien tenga action.billing.view.
+        self.assertEqual(client.get("/api/cobranzas/facturacion/documentos/").status_code, 403)
 
     def test_service_sheet_principal_default_grants_detail_permission(self):
         permissions = resolve_effective_permissions(user_id=self.recepcion_user.id, role=self.recepcion_user.rol)

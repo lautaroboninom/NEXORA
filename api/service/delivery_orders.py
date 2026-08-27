@@ -19,6 +19,7 @@ from .bejerman_sdk import bejerman_customer_code_for, is_occasional_customer_nam
 from .bejerman_particular_customers import disable_particular_customer_if_idle
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
 from .notification_email_outbox import queue_notification_email
+from .permissions import resolve_effective_permissions
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,15 @@ PREPARABLE_STATUSES = {"pendiente_armado", "armado_pendiente_entrega"}
 PARTIDA_QUANTITY_TOLERANCE = Decimal("0.0001")
 RENTAL_STOCK_DEPOSIT = "STL"
 RENTAL_UNAVAILABLE_STATES = {"entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado"}
+# Cada motivo va en dos géneros porque el sujeto cambia: "la OS ..." cuando el equipo
+# pasó por taller, "el NS ..." cuando es un equipo dado de alta con su MG y sin OS.
+RENTAL_UNAVAILABLE_STATE_REASONS = {
+    "alquilado": ("ya figura alquilada", "ya figura alquilado"),
+    "entregado": ("ya figura entregada", "ya figura entregado"),
+    "baja": ("figura dada de baja", "figura dado de baja"),
+    "vendido_pendiente_entrega": ("figura vendida y pendiente de entrega", "figura vendido y pendiente de entrega"),
+    "vendido_entregado": ("figura vendida y entregada", "figura vendido y entregado"),
+}
 DELIVERY_TYPE_LABELS = {
     "sale": "Venta",
     "service_release": "Servicio técnico",
@@ -264,11 +274,13 @@ def _user_role(user_id: int | None) -> str:
     return _clean_text(row[0] if row else "").lower()
 
 
-def _require_supervisor(actor_user_id: int | None) -> None:
-    if _user_role(actor_user_id) != "supervisor":
+def _require_commercial_correction_permission(actor_user_id: int | None) -> None:
+    role = _user_role(actor_user_id)
+    permissions = resolve_effective_permissions(user_id=actor_user_id, role=role)
+    if not permissions.get("action.delivery_order.correct_commercial_terms", False):
         raise DeliveryOrderError(
-            "SUPERVISOR_REQUIRED",
-            "Solo el rol supervisor puede corregir precio o plazo de una orden entregada.",
+            "DELIVERY_ORDER_COMMERCIAL_CORRECTION_FORBIDDEN",
+            "No tenés permiso para corregir el precio o el plazo de una orden de entrega.",
             status_code=403,
         )
 
@@ -344,6 +356,13 @@ def _validate_order_partidas_ready(order: dict[str, Any], actor_user_id: int | N
                     status_code=409,
                 )
             if _item_can_omit_catalog_partida(order, item):
+                # El artículo no lleva partida, así que su stock nunca pasa por
+                # `_validate_delivery_partidas_stock` (valida por partida). Sin este chequeo
+                # el renglón llega sin stock hasta la emisión y el que avisa es Bejerman,
+                # con el remito rechazado entero y el cliente esperando: el 12/08/2026 el
+                # artículo 1208009 tenía 18 en VAL para un renglón de 19 y el RT recién
+                # falló al cargar el remito.
+                _validate_order_article_stock_ready(order, item, index, quantity, actor_user_id, stock_cache)
                 continue
             if (
                 delivery_type in {"sale", "demo"}
@@ -513,11 +532,19 @@ def _delivery_article_available_quantity(
     company_key: str,
     actor_user_id: int | None,
     cache: dict[str, Any],
+    *,
+    force_refresh: bool = False,
 ) -> Decimal:
     """Stock real disponible de un artículo en un depósito, sumado en crudo por
     articleCode (sin agrupar por partida) — a diferencia de `_delivery_partida_stock_lots`,
     sirve para artículos que no llevan partida (article_requires_partida=false), que
-    build_article_stock_lots descarta por no tener partida informada."""
+    build_article_stock_lots descarta por no tener partida informada.
+
+    `force_refresh` saltea el cache de stock (30 s, y uno por worker de gunicorn):
+    para *mostrar* números alcanza con el cache, pero para *bloquear* una emisión no,
+    porque el flujo normal del depósito es corregir el stock a mano en Bejerman y
+    volver enseguida a NEXORA. Se baja el depósito una sola vez por tanda: los demás
+    artículos del mismo depósito ya leen el volcado recién traído."""
     from .bejerman_sdk import BejermanSDKClient
     from . import bejerman_catalog_cache
 
@@ -526,9 +553,13 @@ def _delivery_article_available_quantity(
     if client is None:
         client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
         company_cache["client"] = client
+    refreshed_deposits = company_cache.setdefault("refreshed_deposits", set())
+    refresh_now = force_refresh and deposit_code not in refreshed_deposits
+    if refresh_now:
+        refreshed_deposits.add(deposit_code)
     target = article_code.casefold()
     total = Decimal("0")
-    for row in bejerman_catalog_cache.stock_rows(client, company_key, deposit_code):
+    for row in bejerman_catalog_cache.stock_rows(client, company_key, deposit_code, force_refresh=refresh_now):
         if str(row.get("articleCode") or "").casefold() != target:
             continue
         total += _decimal(row.get("availableQuantity"), "0")
@@ -2387,6 +2418,10 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
     try:
         order = get_delivery_order(order_id, include_events=False)
         totals = delivery_order_billing_totals(order)
+        # Una orden se crea una sola vez, pero puede quedar lista para facturar
+        # más de una vez (remito nuevo, reemisión). Sin discriminar por remito el
+        # ON CONFLICT del segundo aviso lo descartaba para siempre.
+        dedupe_suffix = ""
         if kind == "created":
             notification_key = "sales_order_created"
             roles = ["recepcion"]
@@ -2400,6 +2435,7 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
         elif kind == "remito_ready":
             notification_key = "sales_order_remito_ready"
             roles = ["cobranzas"]
+            dedupe_suffix = f":{str(order.get('remitoNumber') or '-').strip()}"
             title = f"Entrega lista para facturar {order.get('orderNumber') or order_id}"
             body = (
                 f"{order.get('customerName') or '-'} - remito {order.get('remitoNumber') or '-'}. "
@@ -2429,7 +2465,7 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
             href=href,
             entity_type="delivery_order",
             entity_id=order_id,
-            dedupe_key=f"{notification_key}:sales_order:{order_id}",
+            dedupe_key=f"{notification_key}:sales_order:{order_id}{dedupe_suffix}",
             payload={
                 "orderId": order_id,
                 "orderNumber": order.get("orderNumber"),
@@ -2442,7 +2478,7 @@ def _delivery_order_notification(order_id: str, actor_user_id: int | None, kind:
                 "billingUrl": delivery_order_billing_url(order),
                 "remitoPrintUrl": delivery_order_remito_print_url(order),
             },
-            push=kind == "created",
+            push=True,
         )
         email_queued = 0
         if kind == "remito_ready":
@@ -3902,7 +3938,7 @@ def _commercial_correction_metadata(
 
 @transaction.atomic
 def correct_delivery_order_commercial_terms(order_id: str, payload: dict[str, Any], actor_user_id: int | None) -> dict[str, Any]:
-    _require_supervisor(actor_user_id)
+    _require_commercial_correction_permission(actor_user_id)
     current = get_delivery_order(order_id, include_events=False, for_update=True)
     _assert_commercial_correction_state(current)
 
@@ -4891,19 +4927,29 @@ def _equipment_detail(row: dict[str, Any]) -> str:
     return " - ".join(part for part in parts if part) or "Equipo"
 
 
-def _article_mapping_for_equipment(row: dict[str, Any], company_key: str = "SEPID") -> dict[str, Any] | None:
-    model_id = row.get("model_id")
-    if not model_id:
-        return None
-    from .bejerman_companies import require_company
-    from .bejerman_sync import normalize_article_variant
-
-    variant = (
+def _equipment_mapping_variant(row: dict[str, Any]) -> str:
+    return (
         _optional_text(row.get("equipo_variante"))
         or _optional_text(row.get("device_variante"))
         or _optional_text(row.get("modelo_variante"))
         or ""
     )
+
+
+def article_mappings_for_equipment_rows(
+    rows: list[dict[str, Any]], company_key: str = "SEPID"
+) -> dict[tuple[Any, str], dict[str, Any]]:
+    """Mapeo modelo+variante -> artículo Bejerman para un lote de filas de equipo.
+
+    Resolverlos fila por fila era un N+1 en los listados de equipos, que trabajan
+    sobre cientos de candidatos. Se indexa por `(model_id, variante_norm)`;
+    `article_mapping_from_rows` resuelve cada fila contra el índice.
+    """
+    from .bejerman_companies import require_company
+
+    model_ids = sorted({row.get("model_id") for row in rows if row.get("model_id")})
+    if not model_ids:
+        return {}
     try:
         resolved_company = require_company(company_key or "SEPID").key
     except ValueError:
@@ -4912,21 +4958,40 @@ def _article_mapping_for_equipment(row: dict[str, Any], company_key: str = "SEPI
         with connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT article_code, article_description
+                SELECT DISTINCT ON (model_id, variante_norm)
+                       model_id, variante_norm, article_code, article_description
                   FROM bejerman_article_mappings
-                 WHERE model_id = %s
-                   AND variante_norm = %s
+                 WHERE model_id = ANY(%s)
                    AND company_key = %s
-                 ORDER BY CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END,
+                 ORDER BY model_id,
+                          variante_norm,
+                          CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END,
                           confirmed_at DESC NULLS LAST,
                           updated_at DESC
-                 LIMIT 1
                 """,
-                [model_id, normalize_article_variant(variant), resolved_company],
+                [list(model_ids), resolved_company],
             )
-            return _one(cur)
+            return {
+                (model_id, variante_norm): {
+                    "article_code": article_code,
+                    "article_description": article_description,
+                }
+                for model_id, variante_norm, article_code, article_description in cur.fetchall()
+            }
     except DatabaseError:
+        return {}
+
+
+def article_mapping_from_rows(
+    mappings: dict[tuple[Any, str], dict[str, Any]], row: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Mapeo de una fila de equipo dentro del índice de `article_mappings_for_equipment_rows`."""
+    from .bejerman_sync import normalize_article_variant
+
+    model_id = row.get("model_id")
+    if not model_id:
         return None
+    return mappings.get((model_id, normalize_article_variant(_equipment_mapping_variant(row))))
 
 
 def rental_equipment_context(ingreso_id: int) -> dict[str, Any] | None:
@@ -4976,7 +5041,8 @@ def rental_item_from_context(row: dict[str, Any], mapping: dict[str, Any], *, st
     return {
         "ingresoId": row.get("ingreso_id"),
         "deviceId": row.get("device_id"),
-        "sourceReference": service_order_reference(row.get("ingreso_id")),
+        # El equipo dado de alta con su MG y sin OS se nombra por el MG.
+        "sourceReference": service_order_reference(row.get("ingreso_id")) or _optional_text(row.get("equipment_internal_number")),
         "companyKey": normalize_company_key(row.get("company_key") or "SEPID"),
         "ownerCustomerId": row.get("owner_customer_id"),
         "ownerCustomerName": row.get("owner_customer_name") or "",
@@ -5048,29 +5114,213 @@ def _rental_equipment_contexts_by_serial(serial: str) -> list[dict[str, Any]]:
         return _rows(cur)
 
 
-def _rental_context_available(row: dict[str, Any]) -> bool:
+def _rental_device_context_sql(where_sql: str) -> str:
+    """Mismo shape que `rental_equipment_context` pero armado desde `devices`, sin OS.
+
+    Alquilar no exige ingreso: un equipo nuevo se da de alta en Equipos con su MG y se
+    marca alquilado ahí. Sólo se resuelven por acá los equipos que **no** tienen ningún
+    ingreso; el que ya pasó por taller sigue resolviéndose por su OS, que es la que lleva
+    el estado del circuito.
+    """
+    alquilado_expr = "COALESCE(d.alquilado, FALSE)" if _has_table_column("devices", "alquilado") else "FALSE"
+    mg_estado_expr = "COALESCE(d.mg_estado, 'activo')" if _has_table_column("devices", "mg_estado") else "'activo'"
+    has_location = _has_table_column("devices", "ubicacion_id")
+    location_select = "d.ubicacion_id, COALESCE(loc.nombre, '') AS ubicacion_nombre" if has_location else "NULL AS ubicacion_id, '' AS ubicacion_nombre"
+    location_join = "LEFT JOIN locations loc ON loc.id = d.ubicacion_id" if has_location else ""
+    return f"""
+        SELECT NULL::integer AS ingreso_id,
+               d.id AS device_id,
+               '' AS estado,
+               {alquilado_expr} AS alquilado,
+               {mg_estado_expr} AS mg_estado,
+               'SEPID' AS company_key,
+               {location_select},
+               COALESCE(d.variante, '') AS equipo_variante,
+               c.id AS owner_customer_id,
+               COALESCE(c.razon_social, '') AS owner_customer_name,
+               COALESCE(d.numero_serie, '') AS equipment_serial,
+               COALESCE(d.numero_interno, '') AS equipment_internal_number,
+               d.model_id,
+               COALESCE(d.variante, '') AS device_variante,
+               COALESCE(m.nombre, '') AS modelo,
+               COALESCE(m.tipo_equipo, '') AS tipo_equipo,
+               COALESCE(m.variante, '') AS modelo_variante,
+               COALESCE(b.nombre, '') AS marca
+          FROM devices d
+          LEFT JOIN customers c ON c.id = d.customer_id
+          LEFT JOIN models m ON m.id = d.model_id
+          LEFT JOIN marcas b ON b.id = d.marca_id
+          {location_join}
+         WHERE {where_sql}
+           AND NOT EXISTS (SELECT 1 FROM ingresos i WHERE i.device_id = d.id)
+    """
+
+
+def _rental_device_contexts_by_serial(serial: str) -> list[dict[str, Any]]:
+    serial_text = _optional_text(serial)
+    if not serial_text:
+        return []
+    with connection.cursor() as cur:
+        cur.execute(
+            _rental_device_context_sql("LOWER(TRIM(COALESCE(d.numero_serie, ''))) = LOWER(TRIM(%s))")
+            + " ORDER BY d.id DESC LIMIT 20",
+            [serial_text],
+        )
+        return _rows(cur)
+
+
+def rental_device_context(device_id: int) -> dict[str, Any] | None:
+    with connection.cursor() as cur:
+        cur.execute(_rental_device_context_sql("d.id = %s"), [device_id])
+        return _one(cur)
+
+
+def _rental_location_label(row: dict[str, Any]) -> str:
+    # La ubicación "-" (id 10) es la de los equipos que ya no están en la casa: nombrarla
+    # tal cual deja el mensaje diciendo "está en -".
+    name = _clean_text(row.get("ubicacion_nombre"))
+    return name if name and name != "-" else "sin ubicación"
+
+
+def _rental_context_blocker(row: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Por qué ese equipo no sirve para alquilar, o None si sirve.
+
+    Devuelve el código de error y el motivo ya redactado, en femenino (sujeto "la OS") y
+    en masculino (sujeto "el NS", para el equipo sin OS). Son cortes distintos —
+    alquilado, OS cerrada, otra ubicación, MG vendido— y hasta el 25/08/2026 todos
+    contestaban "NS no vinculado a una OS disponible", que no decía cuál era ni qué hacer.
+    """
+    if bool(row.get("alquilado")):
+        return ("RENTAL_EQUIPMENT_NOT_AVAILABLE", *RENTAL_UNAVAILABLE_STATE_REASONS["alquilado"])
+    mg_estado = _clean_text(row.get("mg_estado")).lower()
+    if mg_estado and mg_estado != "activo":
+        motivo = "figura dado de baja del parque MG por venta"
+        return "RENTAL_EQUIPMENT_MG_INACTIVE", motivo, motivo
     estado = _clean_text(row.get("estado")).lower()
-    return (
-        estado not in RENTAL_UNAVAILABLE_STATES
-        and not bool(row.get("alquilado"))
-        and is_rental_shelf_location_name(row.get("ubicacion_nombre"))
-    )
+    if estado in RENTAL_UNAVAILABLE_STATES:
+        generico = f"figura en estado {estado}"
+        return ("RENTAL_EQUIPMENT_NOT_AVAILABLE", *RENTAL_UNAVAILABLE_STATE_REASONS.get(estado, (generico, generico)))
+    if not is_rental_shelf_location_name(row.get("ubicacion_nombre")):
+        motivo = f"está en {_rental_location_label(row)}, no en Estantería de Alquiler"
+        return "RENTAL_EQUIPMENT_NOT_IN_SHELF", motivo, motivo
+    return None
+
+
+def _rental_context_available(row: dict[str, Any]) -> bool:
+    return _rental_context_blocker(row) is None
+
+
+def _rental_blocker_hint(code: str) -> str:
+    if code == "RENTAL_EQUIPMENT_NOT_IN_SHELF":
+        return "Movelo a Estantería de Alquiler o elegí otro equipo."
+    if code == "RENTAL_EQUIPMENT_MG_INACTIVE":
+        return "Reactivá el MG desde Equipos o elegí otro equipo."
+    return "Elegí un equipo disponible en Estantería de Alquiler."
+
+
+def _rental_equipment_label(row: dict[str, Any]) -> str:
+    """Cómo nombrar el equipo en un mensaje: por su OS si la tiene, si no por su MG o serie.
+
+    Devuelve la frase con artículo ("La OS-00011" / "El equipo MG 7283") porque el género
+    cambia según el caso; los mensajes que la usan están redactados para no depender de él.
+    """
+    order_label = service_order_reference(row.get("ingreso_id"))
+    if order_label:
+        return f"La {order_label}"
+    identifier = _optional_text(row.get("equipment_internal_number")) or _optional_text(row.get("equipment_serial"))
+    return f"El equipo {identifier}" if identifier else "El equipo"
+
+
+def _rental_context_blocker_error(row: dict[str, Any], serial: str | None = None, extra: str = "") -> DeliveryOrderError | None:
+    blocker = _rental_context_blocker(row)
+    if not blocker:
+        return None
+    code, reason_os, reason_equipo = blocker
+    order_label = service_order_reference(row.get("ingreso_id"))
+    if order_label:
+        subject = f"El NS {serial} está en la {order_label}, que {reason_os}" if serial else f"La {order_label} {reason_os}"
+    else:
+        subject = f"El NS {serial} {reason_equipo}" if serial else f"{_rental_equipment_label(row)} {reason_equipo}"
+    return DeliveryOrderError(code, f"{subject}.{extra} {_rental_blocker_hint(code)}", status_code=409)
 
 
 def _assert_rental_context_available(row: dict[str, Any], label: str) -> None:
-    estado = _clean_text(row.get("estado")).lower()
-    if estado in RENTAL_UNAVAILABLE_STATES or bool(row.get("alquilado")):
-        raise DeliveryOrderError(
-            "RENTAL_EQUIPMENT_NOT_AVAILABLE",
-            f"NS no vinculado a una OS disponible: {label}",
+    error = _rental_context_blocker_error(row, label)
+    if error:
+        raise error
+
+
+def _serial_for_internal_number(identifier: str) -> str:
+    """Traduce un MG a la serie. Bejerman sólo conoce la serie como partida, pero el
+    operador suele tener a mano el MG, que es lo que está pegado en el equipo."""
+    text = _optional_text(identifier)
+    if not text:
+        return ""
+    with connection.cursor() as cur:
+        cur.execute(
+            r"""
+            SELECT COALESCE(numero_serie, '')
+              FROM devices
+             WHERE UPPER(REGEXP_REPLACE(COALESCE(numero_interno, ''), '\s+', '', 'g'))
+                 = UPPER(REGEXP_REPLACE(%s, '\s+', '', 'g'))
+               AND COALESCE(numero_serie, '') <> ''
+             LIMIT 2
+            """,
+            [text],
+        )
+        rows = cur.fetchall()
+    # Con dos equipos bajo el mismo MG no se adivina: que el operador escriba la serie.
+    return _optional_text(rows[0][0]) if len(rows) == 1 else ""
+
+
+def _device_exists_by_serial(serial: str) -> bool:
+    """Sólo para redactar el error: separa "esa serie no existe en NEXORA" de
+    "existe como equipo pero nunca se le hizo un ingreso"."""
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM devices
+             WHERE LOWER(TRIM(COALESCE(numero_serie, ''))) = LOWER(TRIM(%s))
+             LIMIT 1
+            """,
+            [serial],
+        )
+        return cur.fetchone() is not None
+
+
+def _rental_serial_unlinked_error(serial: str) -> DeliveryOrderError:
+    # Los equipos sin OS ya se resuelven por `_rental_device_contexts_by_serial`, así que
+    # acá sólo cae el equipo que tiene OS pero que ninguna de las dos consultas puede
+    # armar: le falta el cliente, que es lo único que ambas necesitan.
+    if _device_exists_by_serial(serial):
+        return DeliveryOrderError(
+            "RENTAL_EQUIPMENT_WITHOUT_CUSTOMER",
+            f"El NS {serial} está dado de alta como equipo pero no tiene cliente cargado. Completalo en Equipos.",
             status_code=409,
         )
-    if not is_rental_shelf_location_name(row.get("ubicacion_nombre")):
-        raise DeliveryOrderError(
-            "RENTAL_EQUIPMENT_NOT_IN_SHELF",
-            f"El NS {label} no está en Estantería de Alquiler",
-            status_code=409,
-        )
+    # Se llega acá con el stock de Bejerman ya verificado (resolve_rental_item_partidas
+    # valida STL antes), así que el NS existe allá y no acá: el caso típico es el equipo
+    # nuevo que alguien pasó a STL por transferencia sin darlo de alta en Equipos.
+    return DeliveryOrderError(
+        "RENTAL_EQUIPMENT_NOT_REGISTERED",
+        (
+            f"El NS {serial} tiene stock en {RENTAL_STOCK_DEPOSIT} pero no está dado de alta como equipo en NEXORA. "
+            "Dalo de alta en Equipos con su MG."
+        ),
+        status_code=409,
+    )
+
+
+def _rental_serial_unavailable_error(serial: str, rows: list[dict[str, Any]]) -> DeliveryOrderError:
+    others = f" Las otras {len(rows) - 1} OS con ese NS tampoco están disponibles." if len(rows) > 1 else ""
+    # rows viene ordenado por OS descendente: el motivo que importa es el de la última.
+    error = _rental_context_blocker_error(rows[0], serial, others) if rows else None
+    return error or DeliveryOrderError(
+        "RENTAL_EQUIPMENT_NOT_AVAILABLE",
+        f"El NS {serial} no está disponible para alquilar.",
+        status_code=409,
+    )
 
 
 def _resolve_rental_context_for_partida(partida: str, ingreso_id: int | None, device_id: int | None) -> dict[str, Any]:
@@ -5091,53 +5341,153 @@ def _resolve_rental_context_for_partida(partida: str, ingreso_id: int | None, de
 
     rows = _rental_equipment_contexts_by_serial(partida_text)
     if not rows:
-        raise DeliveryOrderError(
-            "RENTAL_EQUIPMENT_NOT_FOUND",
-            f"NS no vinculado a una OS disponible: {partida_text}",
-            status_code=409,
-        )
+        # Equipo nuevo dado de alta con su MG y sin OS: alquilar no exige ingreso.
+        rows = _rental_device_contexts_by_serial(partida_text)
+    if not rows:
+        raise _rental_serial_unlinked_error(partida_text)
     available = next((row for row in rows if _rental_context_available(row)), None)
     if not available:
-        raise DeliveryOrderError(
-            "RENTAL_EQUIPMENT_NOT_AVAILABLE",
-            f"NS no vinculado a una OS disponible: {partida_text}",
-            status_code=409,
-        )
+        raise _rental_serial_unavailable_error(partida_text, rows)
     if device_id and int(available.get("device_id") or 0) != int(device_id):
         raise DeliveryOrderError("RENTAL_EQUIPMENT_MISMATCH", f"El NS {partida_text} no corresponde al equipo seleccionado", status_code=409)
     return available
 
 
-def _rental_duplicate_reservation(ingreso_id: int, order_id: str | None = None) -> str | None:
-    partida_column_exists = _has_table_column("delivery_order_item_partidas", "ingreso_id")
+def rental_partida_from_identifier(order_id: str, identifier: Any, actor_user_id: int | None) -> dict[str, Any]:
+    """Cuelga el equipo de un renglón de alquiler a partir de su NS o su MG.
+
+    Es para el remito que Bejerman **ya** emitió: el stock salió de STL en ese momento, así
+    que pedir stock ahora dejaría sin registrar justamente el caso para el que existe esta
+    pantalla. Por eso no pasa por `resolve_rental_item_partidas`, que valida STL.
+    """
+    text = _optional_text(identifier)
+    if not text:
+        raise DeliveryOrderError("RENTAL_SERIAL_REQUIRED", "Indicá el N/S o el MG del equipo que salió", status_code=409)
+    serial = text
+    rows = _rental_equipment_contexts_by_serial(serial)
+    if not rows:
+        rows = _rental_device_contexts_by_serial(serial)
+    if not rows:
+        alternative = _serial_for_internal_number(text)
+        if alternative:
+            serial = alternative
+            rows = _rental_equipment_contexts_by_serial(serial) or _rental_device_contexts_by_serial(serial)
+    if not rows:
+        raise _rental_serial_unlinked_error(serial)
+    # Se toma el contexto disponible si lo hay; si no, el más reciente. No se aplica el
+    # bloqueo de disponibilidad: el equipo ya salió, describimos un hecho pasado.
+    context = next((row for row in rows if _rental_context_available(row)), rows[0])
+
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id
+              FROM delivery_order_items
+             WHERE order_id = %s
+               AND NOT EXISTS (
+                 SELECT 1 FROM delivery_order_item_partidas p WHERE p.order_item_id = delivery_order_items.id
+               )
+             ORDER BY sort_order, id
+             LIMIT 1
+            """,
+            [order_id],
+        )
+        item_row = _one(cur)
+        if not item_row:
+            raise DeliveryOrderError(
+                "DELIVERY_ORDER_ITEM_NOT_FOUND",
+                "Todos los renglones de la orden ya tienen su equipo cargado.",
+                status_code=409,
+            )
+        item_id = item_row["id"]
+        insert_item_partidas(
+            cur,
+            item_id,
+            [
+                {
+                    "partida": _optional_text(context.get("equipment_serial")) or serial,
+                    "assignedQuantity": Decimal("1"),
+                    "stockDepositCode": RENTAL_STOCK_DEPOSIT,
+                    "ingresoId": _optional_int(context.get("ingreso_id")),
+                    "deviceId": _optional_int(context.get("device_id")),
+                    "sortOrder": 0,
+                }
+            ],
+        )
+    create_event(
+        order_id,
+        actor_user_id,
+        "delivery_order_item_partidas_updated",
+        metadata={
+            "itemId": item_id,
+            "count": 1,
+            "source": "manual_remito_lookup",
+            "partida": _optional_text(context.get("equipment_serial")) or serial,
+        },
+    )
+    return context
+
+
+def rental_items_missing_equipment(order: dict[str, Any]) -> list[int]:
+    """Renglones de alquiler sin equipo identificado, por número de renglón."""
+    faltantes: list[int] = []
+    for index, item in enumerate(order.get("items") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        partidas = [row for row in (item.get("partidas") or []) if isinstance(row, dict) and _optional_text(row.get("partida"))]
+        if not partidas and not _optional_text(item.get("partida")):
+            faltantes.append(index)
+    return faltantes
+
+
+def _rental_duplicate_reservation(
+    ingreso_id: int | None,
+    order_id: str | None = None,
+    *,
+    device_id: int | None = None,
+) -> str | None:
+    """Si el equipo ya está tomado por otra orden de alquiler, devuelve su número.
+
+    Se busca por OS cuando el equipo la tiene y por `device_id` cuando no (equipo dado de
+    alta con su MG y sin ingreso). Se mantienen separados a propósito: buscar siempre por
+    device haría saltar como "reservado" a equipos con varias OS que hoy conviven.
+    """
+    key_column = "ingreso_id" if ingreso_id else "device_id"
+    key_value = ingreso_id if ingreso_id else device_id
+    if not key_value:
+        return None
+    params: list[Any] = []
+    items_exists_sql = "FALSE"
+    if _has_table_column("delivery_order_items", key_column):
+        items_exists_sql = f"""
+        EXISTS (
+          SELECT 1
+            FROM delivery_order_items doi
+           WHERE doi.order_id = o.id
+             AND doi.{key_column} = %s
+        )
+        """
+        params.append(key_value)
+    partida_column_exists = _has_table_column("delivery_order_item_partidas", key_column)
     partida_exists_sql = "FALSE"
-    params: list[Any] = [ingreso_id]
     if partida_column_exists:
-        partida_exists_sql = """
+        partida_exists_sql = f"""
         EXISTS (
           SELECT 1
             FROM delivery_order_items doi_partida
             JOIN delivery_order_item_partidas doip ON doip.order_item_id = doi_partida.id
            WHERE doi_partida.order_id = o.id
-             AND doip.ingreso_id = %s
+             AND doip.{key_column} = %s
         )
         """
-        params.append(ingreso_id)
+        params.append(key_value)
     params.extend([order_id, order_id])
     with connection.cursor() as cur:
         cur.execute(
             f"""
             SELECT o.order_number
               FROM delivery_orders o
-             WHERE (
-                    EXISTS (
-                      SELECT 1
-                        FROM delivery_order_items doi
-                       WHERE doi.order_id = o.id
-                         AND doi.ingreso_id = %s
-                    )
-                    OR {partida_exists_sql}
-                   )
+             WHERE ({items_exists_sql} OR {partida_exists_sql})
                AND o.delivery_type = 'rental'
                AND o.status NOT IN ('facturado', 'cancelado')
                AND (%s IS NULL OR o.id <> %s)
@@ -5196,11 +5546,18 @@ def resolve_rental_item_partidas(
         if _optional_text(lot.get("partida"))
     }
     resolved: list[dict[str, Any]] = []
-    seen_ingresos: set[int] = set()
+    seen_equipment: set[tuple[str, int | None]] = set()
     checked_at = timezone.now().isoformat()
     for row in normalized_partidas:
         partida_text = _optional_text(row.get("partida"))
         lot = lots_by_partida.get((partida_text or "").casefold())
+        if not lot:
+            # Puede haber escrito el MG en vez de la serie: para Bejerman la partida es
+            # siempre la serie, así que se traduce antes de darlo por sin stock.
+            serial_from_mg = _serial_for_internal_number(partida_text or "")
+            if serial_from_mg:
+                partida_text = serial_from_mg
+                lot = lots_by_partida.get(serial_from_mg.casefold())
         if not lot:
             raise DeliveryOrderError(
                 "RENTAL_STL_STOCK_REQUIRED",
@@ -5221,15 +5578,19 @@ def resolve_rental_item_partidas(
             _optional_int(row.get("ingresoId") or row.get("ingreso_id")),
             _optional_int(row.get("deviceId") or row.get("device_id")),
         )
-        ingreso_id = int(context.get("ingreso_id"))
-        if ingreso_id in seen_ingresos:
+        ingreso_id = _optional_int(context.get("ingreso_id"))
+        context_device_id = _optional_int(context.get("device_id"))
+        # El equipo sin OS se identifica por su device: la clave de repetido y de reserva
+        # tiene que seguir al equipo físico, tenga OS o no.
+        equipment_key = ("ingreso", ingreso_id) if ingreso_id else ("device", context_device_id)
+        if equipment_key in seen_equipment:
             raise DeliveryOrderError(
                 "RENTAL_EQUIPMENT_DUPLICATED",
-                f"La OS {ingreso_id} está repetida en la orden",
+                f"{_rental_equipment_label(context)} aparece dos veces en la orden",
                 status_code=409,
             )
-        seen_ingresos.add(ingreso_id)
-        duplicate = _rental_duplicate_reservation(ingreso_id, order_id)
+        seen_equipment.add(equipment_key)
+        duplicate = _rental_duplicate_reservation(ingreso_id, order_id, device_id=None if ingreso_id else context_device_id)
         if duplicate:
             raise DeliveryOrderError(
                 "RENTAL_EQUIPMENT_RESERVED",
@@ -5241,7 +5602,7 @@ def resolve_rental_item_partidas(
             {
                 **row,
                 "ingresoId": ingreso_id,
-                "deviceId": int(context.get("device_id")),
+                "deviceId": context_device_id,
                 "partida": _optional_text(lot.get("partida")) or partida_text,
                 "partidaExpirationDate": lot.get("expirationDate") or row.get("partidaExpirationDate"),
                 "stockDepositCode": RENTAL_STOCK_DEPOSIT,
@@ -5284,7 +5645,13 @@ def validate_rental_delivery_items_ready(
             order_id=order_id,
         )
         for row in resolved_rows:
-            context = rental_equipment_context(int(row["ingresoId"]))
+            ingreso_id = _optional_int(row.get("ingresoId"))
+            device_id = _optional_int(row.get("deviceId"))
+            context = (
+                rental_equipment_context(int(ingreso_id))
+                if ingreso_id
+                else (rental_device_context(int(device_id)) if device_id else None)
+            )
             if context:
                 contexts.append(context)
     return contexts
@@ -5313,11 +5680,35 @@ def resolve_present_rental_item_partidas(
     return resolved_items
 
 
+def _rental_equipment_lines(item: dict[str, Any]) -> list[tuple[dict[str, Any], bool]]:
+    """Los datos del equipo pueden venir en el propio renglón (un NS por renglón, formato viejo)
+    o en sus filas de partida, que es lo que manda la UI desde que un renglón admite varios NS:
+    ahí el renglón viaja con partida/depósito/stock en null y hay que mirar fila por fila.
+    El booleano marca ese origen, porque una fila cargada a mano todavía no tiene OS asociada."""
+    rows = [row for row in (item.get("partidas") or []) if isinstance(row, dict)]
+    if not rows:
+        return [(item, False)]
+    return [
+        (
+            {
+                "ingresoId": row.get("ingresoId") or row.get("ingreso_id"),
+                "deviceId": row.get("deviceId") or row.get("device_id"),
+                "partida": row.get("partida"),
+                "quantity": row.get("assignedQuantity"),
+                "stockDepositCode": row.get("stockDepositCode"),
+                "stockAvailableQuantity": row.get("stockAvailableQuantity"),
+            },
+            True,
+        )
+        for row in rows
+    ]
+
+
 def validate_rental_delivery_items(items: list[dict[str, Any]], *, order_id: str | None = None) -> list[dict[str, Any]]:
     if not items:
         raise DeliveryOrderError("RENTAL_EQUIPMENT_REQUIRED", "La orden de alquiler necesita al menos un artículo")
 
-    seen_ingresos: set[int] = set()
+    seen_equipment: set[tuple[str, int]] = set()
     contexts: list[dict[str, Any]] = []
     for index, item in enumerate(items, start=1):
         if not _optional_text(item.get("articleCode") or item.get("article_code")):
@@ -5327,57 +5718,71 @@ def validate_rental_delivery_items(items: list[dict[str, Any]], *, order_id: str
                 status_code=409,
             )
 
-        ingreso_id = item.get("ingresoId")
-        device_id = item.get("deviceId")
-        partida = _optional_text(item.get("partida"))
-        if not ingreso_id and not device_id and not partida:
-            continue
-        if not ingreso_id or not device_id:
-            raise DeliveryOrderError(
-                "RENTAL_EQUIPMENT_REQUIRED",
-                f"El renglón {index} debe estar vinculado a un equipo de alquiler o quedar sin NS hasta preparación",
-                status_code=409,
+        for line, from_partida_row in _rental_equipment_lines(item):
+            ingreso_id = line.get("ingresoId")
+            device_id = line.get("deviceId")
+            partida = _optional_text(line.get("partida"))
+            if not ingreso_id and not device_id and not partida:
+                continue
+            # El equipo alcanza: un equipo nuevo dado de alta con su MG no tiene OS.
+            if not device_id:
+                if from_partida_row:
+                    # NS tipeado a mano: no trae equipo y lo resuelve por serie
+                    # resolve_rental_item_partidas, que corre inmediatamente después.
+                    continue
+                raise DeliveryOrderError(
+                    "RENTAL_EQUIPMENT_REQUIRED",
+                    f"El renglón {index} debe estar vinculado a un equipo de alquiler o quedar sin NS hasta preparación",
+                    status_code=409,
+                )
+            equipment_key = ("ingreso", int(ingreso_id)) if ingreso_id else ("device", int(device_id))
+            row = (
+                rental_equipment_context(int(ingreso_id))
+                if ingreso_id
+                else rental_device_context(int(device_id))
             )
-        if ingreso_id in seen_ingresos:
-            raise DeliveryOrderError("RENTAL_EQUIPMENT_DUPLICATED", f"La OS {ingreso_id} está repetida en la orden")
-        seen_ingresos.add(ingreso_id)
+            equipment_label = _rental_equipment_label(row or {"ingreso_id": ingreso_id}) or f"El renglón {index}"
+            if equipment_key in seen_equipment:
+                raise DeliveryOrderError("RENTAL_EQUIPMENT_DUPLICATED", f"{equipment_label} aparece dos veces en la orden")
+            seen_equipment.add(equipment_key)
 
-        if abs(_decimal(item.get("quantity"), "0") - Decimal("1")) > PARTIDA_QUANTITY_TOLERANCE:
-            raise DeliveryOrderError("RENTAL_QUANTITY_INVALID", f"El renglón {index} de alquiler debe tener cantidad 1")
-        if (_optional_text(item.get("stockDepositCode")) or "").upper() != RENTAL_STOCK_DEPOSIT:
-            raise DeliveryOrderError("RENTAL_STL_REQUIRED", f"El renglón {index} debe salir del depósito STL")
-        if (item.get("stockAvailableQuantity") is None) or item["stockAvailableQuantity"] <= 0:
-            raise DeliveryOrderError("RENTAL_STL_STOCK_REQUIRED", f"La OS {ingreso_id} no tiene stock disponible en STL", status_code=409)
+            if abs(_decimal(line.get("quantity"), "0") - Decimal("1")) > PARTIDA_QUANTITY_TOLERANCE:
+                raise DeliveryOrderError("RENTAL_QUANTITY_INVALID", f"El renglón {index} de alquiler debe tener cantidad 1")
+            if (_optional_text(line.get("stockDepositCode")) or "").upper() != RENTAL_STOCK_DEPOSIT:
+                raise DeliveryOrderError("RENTAL_STL_REQUIRED", f"El renglón {index} debe salir del depósito STL")
+            if (line.get("stockAvailableQuantity") is None) or line["stockAvailableQuantity"] <= 0:
+                raise DeliveryOrderError("RENTAL_STL_STOCK_REQUIRED", f"{equipment_label} no tiene stock disponible en STL", status_code=409)
 
-        row = rental_equipment_context(int(ingreso_id))
-        if not row:
-            raise DeliveryOrderError("RENTAL_EQUIPMENT_NOT_FOUND", f"No se encontró la OS {ingreso_id}", status_code=404)
-        if int(row.get("device_id") or 0) != int(device_id):
-            raise DeliveryOrderError("RENTAL_EQUIPMENT_MISMATCH", f"La OS {ingreso_id} no corresponde al equipo seleccionado", status_code=409)
-        estado = _clean_text(row.get("estado")).lower()
-        if estado in RENTAL_UNAVAILABLE_STATES or bool(row.get("alquilado")):
-            raise DeliveryOrderError("RENTAL_EQUIPMENT_NOT_AVAILABLE", f"La OS {ingreso_id} no está disponible para alquilar", status_code=409)
-        if not is_rental_shelf_location_name(row.get("ubicacion_nombre")):
-            raise DeliveryOrderError(
-                "RENTAL_EQUIPMENT_NOT_IN_SHELF",
-                f"La OS {ingreso_id} no está en Estantería de Alquiler",
-                status_code=409,
+            if not row:
+                raise DeliveryOrderError(
+                    "RENTAL_EQUIPMENT_NOT_FOUND",
+                    f"No se encontró la OS {ingreso_id}" if ingreso_id else f"No se encontró el equipo {device_id}",
+                    status_code=404,
+                )
+            if int(row.get("device_id") or 0) != int(device_id):
+                raise DeliveryOrderError("RENTAL_EQUIPMENT_MISMATCH", f"{equipment_label} no corresponde al equipo seleccionado", status_code=409)
+            blocker_error = _rental_context_blocker_error(row, partida or None)
+            if blocker_error:
+                raise blocker_error
+
+            serial = _optional_text(row.get("equipment_serial"))
+            if not serial:
+                raise DeliveryOrderError("RENTAL_SERIAL_REQUIRED", f"{equipment_label} no tiene número de serie para usar como partida", status_code=409)
+            if not partida or partida.casefold() != serial.casefold():
+                raise DeliveryOrderError("RENTAL_PARTIDA_MISMATCH", f"La partida del renglón {index} debe ser la serie del equipo", status_code=409)
+
+            duplicate = _rental_duplicate_reservation(
+                int(ingreso_id) if ingreso_id else None,
+                order_id,
+                device_id=None if ingreso_id else int(device_id),
             )
-
-        serial = _optional_text(row.get("equipment_serial"))
-        if not serial:
-            raise DeliveryOrderError("RENTAL_SERIAL_REQUIRED", f"La OS {ingreso_id} no tiene número de serie para usar como partida", status_code=409)
-        if not partida or partida.casefold() != serial.casefold():
-            raise DeliveryOrderError("RENTAL_PARTIDA_MISMATCH", f"La partida del renglón {index} debe ser la serie del equipo", status_code=409)
-
-        duplicate = _rental_duplicate_reservation(int(ingreso_id), order_id)
-        if duplicate:
-            raise DeliveryOrderError(
-                "RENTAL_EQUIPMENT_RESERVED",
-                f"La OS {ingreso_id} ya está reservada en la orden {duplicate}",
-                status_code=409,
-            )
-        contexts.append(row)
+            if duplicate:
+                raise DeliveryOrderError(
+                    "RENTAL_EQUIPMENT_RESERVED",
+                    f"{equipment_label} ya figura en la orden {duplicate}",
+                    status_code=409,
+                )
+            contexts.append(row)
     return contexts
 
 
@@ -5391,7 +5796,12 @@ def rental_header_from_contexts(contexts: list[dict[str, Any]]) -> dict[str, Any
         "equipmentModel": _equipment_label(first),
         "equipmentSerial": _optional_text(first.get("equipment_serial")),
         "equipmentInternalNumber": _optional_text(first.get("equipment_internal_number")),
-        "sourceReference": service_order_reference(first.get("ingreso_id")) if len(contexts) == 1 else f"Alquiler {len(contexts)} equipos",
+        "sourceReference": (
+            # El equipo sin OS no tiene número de orden de servicio: se lo nombra por su MG.
+            (service_order_reference(first.get("ingreso_id")) or _optional_text(first.get("equipment_internal_number")))
+            if len(contexts) == 1
+            else f"Alquiler {len(contexts)} equipos"
+        ),
     }
 
 

@@ -418,20 +418,17 @@ function RemitoDocuments({ order, showLinks = true }) {
             key={remito?.linkId || remito?.id || remito?.groupId || `${number}-${index}`}
             className="rounded border border-gray-200 bg-white px-2 py-1.5"
           >
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="font-mono text-xs font-semibold text-gray-900">{number}</span>
+              {/* El "Imprimir" va al lado del estado, no en un renglón aparte. */}
               <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${remitoStatusClass(remito)}`}>
                 {remitoStatusLabel(remito)}
               </span>
+              {showLinks && <RemitoDocumentLinks remito={remito} />}
             </div>
             {(modeLabel || allocationUnknown) && (
               <div className="mt-0.5 text-[10px] text-gray-500">
-                
-              </div>
-            )}
-            {showLinks && (
-              <div className="mt-1">
-                <RemitoDocumentLinks remito={remito} />
+
               </div>
             )}
           </div>
@@ -839,7 +836,9 @@ export default function DeliveryOrders() {
       try {
         saved = await patchDeliveryOrderItemPartidas(partidasOrder.id, items[index].itemId, items[index].partidas || []);
       } catch (err) {
-        const detail = err?.message || "no se pudieron guardar las partidas";
+        // `err.message` viene prefijado por el cliente HTTP ("409 : ..."): el operador
+        // sólo necesita el texto que explica qué pasa con ese NS.
+        const detail = err?.data?.detail || err?.message || "no se pudieron guardar las partidas";
         throw new Error(
           `Renglón ${index + 1}: ${detail}` +
             (index > 0 ? ` Los ${index} renglones anteriores sí se guardaron.` : "")
@@ -1757,7 +1756,7 @@ function DeliveryOrderDetailModal({
           </div>
 
           <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
-            <DetailField label="Detalle completo">
+            <DetailField label="Comentarios">
               <div className="whitespace-pre-wrap rounded border bg-white p-3 text-sm text-gray-800">{order.rawPedido || "-"}</div>
             </DetailField>
             <DetailField label="Eventos">
@@ -1920,13 +1919,13 @@ function NewDeliveryOrderModal({
     <ResponsiveModalOverlay role="dialog" aria-modal="true" align="center">
       <ResponsiveModalPanel
         scroll={false}
-        className="flex max-w-6xl flex-col"
+        className="flex max-w-7xl flex-col"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3 sm:px-5 sm:py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{title || (order?.id ? "Editar orden de entrega" : "Nueva orden de entrega")}</h2>
-            <p className="text-sm text-gray-600">{description || "Clientes, artículos, partidas y detalle completo como en Portal."}</p>
+            <p className="text-sm text-gray-600">{description || "Clientes, artículos, partidas y comentarios de la entrega."}</p>
           </div>
           <button type="button" className="text-sm text-gray-500 hover:text-gray-900" onClick={onClose}>
             Cerrar

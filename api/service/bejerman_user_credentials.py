@@ -251,10 +251,17 @@ def user_bejerman_credentials_status(user_id: int | None) -> dict[str, Any]:
     configured = bool(row and row.get("bejerman_username") and row.get("encrypted_password"))
     valid = bool(configured and row.get("is_valid"))
     configured_workstation = preferences["configured_workstation"]
+    # A un técnico no tiene sentido pedirle credenciales: opera con las del usuario
+    # delegado. Sin esto la app le insiste con un cartel que no puede resolver.
+    delegated = False
+    if not valid and _normalize_role(preferences["role"]) in DELEGATED_ROLES:
+        delegate_id, delegate_email = _delegate_user_id()
+        delegated = bool(delegate_email and delegate_id and _fetch_row(delegate_id))
     return {
         "configured": configured,
         "valid": valid,
-        "required": not valid,
+        "delegated": delegated,
+        "required": not valid and not delegated,
         "username": mask_bejerman_username(row.get("bejerman_username") if row else ""),
         "workstation": configured_workstation or bejerman_workstation_for_role(preferences["role"]),
         "workstationConfigured": bool(configured_workstation),
@@ -269,15 +276,72 @@ def has_valid_bejerman_credentials(user_id: int | None) -> bool:
     return bool(user_bejerman_credentials_status(user_id).get("valid"))
 
 
-def get_user_bejerman_credentials(user_id: int | None) -> tuple[str, str]:
-    row = _fetch_row(user_id)
+DELEGATED_ROLES = {"tecnico"}
+
+
+def _credentials_from_row(row: dict[str, Any] | None) -> tuple[str, str] | None:
     if not row or not row.get("is_valid"):
-        raise BejermanUserCredentialsRequired(BEJERMAN_CREDENTIALS_REQUIRED)
+        return None
     username = _clean(row.get("bejerman_username"))
     password = decrypt_bejerman_password(_clean(row.get("encrypted_password")))
     if not username or not password:
-        raise BejermanUserCredentialsRequired(BEJERMAN_CREDENTIALS_REQUIRED)
+        return None
     return username, password
+
+
+def _delegate_user_id() -> tuple[int | None, str]:
+    """El usuario de NEXORA cuya credencial usan los técnicos, por su email."""
+
+    email = _clean(getattr(settings, "BEJERMAN_TECHNICAL_DELEGATE_EMAIL", ""))
+    if not email:
+        return None, ""
+    with connection.cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1", [email])
+        row = cur.fetchone()
+    return (int(row[0]) if row else None), email
+
+
+def get_user_bejerman_credentials(user_id: int | None) -> tuple[str, str]:
+    """Las credenciales con las que este usuario opera contra Bejerman.
+
+    Los técnicos no tienen usuario propio en el ERP: sus movimientos entran con la
+    credencial del usuario delegado (`BEJERMAN_TECHNICAL_DELEGATE_EMAIL`). Sin esta
+    delegación, todo lo que dispara un técnico —las transferencias de depósito, que
+    son casi todas suyas— se bloqueaba pidiéndole unas credenciales que por diseño
+    nunca iba a tener, y el equipo se quedaba parado sin que nadie pudiera destrabarlo.
+
+    La estación de trabajo no se delega: la sigue resolviendo el rol de quien actúa
+    (`bejerman_workstation_for_role`), que es lo que el ERP usa para saber desde
+    dónde se hizo el movimiento.
+    """
+
+    own = _credentials_from_row(_fetch_row(user_id))
+    if own:
+        return own
+
+    role = _normalize_role(_user_bejerman_preferences(user_id)["role"])
+    if role not in DELEGATED_ROLES:
+        raise BejermanUserCredentialsRequired(BEJERMAN_CREDENTIALS_REQUIRED)
+
+    delegate_id, delegate_email = _delegate_user_id()
+    if not delegate_email:
+        raise BejermanUserCredentialsRequired(
+            "Los usuarios técnicos operan Bejerman con una credencial delegada y todavía no hay "
+            "ninguna configurada (BEJERMAN_TECHNICAL_DELEGATE_EMAIL)."
+        )
+    if not delegate_id:
+        raise BejermanUserCredentialsRequired(
+            f"El usuario delegado para Bejerman ({delegate_email}) no existe en NEXORA."
+        )
+    delegated = _credentials_from_row(_fetch_row(delegate_id))
+    if not delegated:
+        # Decir de quién son las credenciales que faltan: si no, el técnico recibe un
+        # pedido que no puede cumplir y no sabe a quién avisarle.
+        raise BejermanUserCredentialsRequired(
+            f"El usuario delegado para Bejerman ({delegate_email}) no tiene credenciales válidas "
+            "cargadas. Hasta que las cargue, los técnicos no pueden operar contra Bejerman."
+        )
+    return delegated
 
 
 def save_user_bejerman_credentials(

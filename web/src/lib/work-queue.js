@@ -159,24 +159,8 @@ export function matchesWorkQueueFilters(row, filters = {}) {
   return true;
 }
 
-export const WORK_QUEUE_SORT_OPTIONS = [
-  { value: "prioridad", label: "Prioridad" },
-  { value: "os", label: "OS" },
-  { value: "antiguedad", label: "Antigüedad" },
-  { value: "cliente", label: "Cliente" },
-  { value: "propiedad", label: "Propiedad" },
-  { value: "tipo", label: "Tipo" },
-  { value: "marca", label: "Marca" },
-  { value: "modelo", label: "Modelo" },
-  { value: "variante", label: "Variante" },
-  { value: "identificacion", label: "N/S o MG" },
-  { value: "tecnico", label: "Técnico" },
-  { value: "motivo", label: "Motivo" },
-  { value: "estado", label: "Estado" },
-  { value: "presupuesto", label: "Presupuesto" },
-  { value: "accion", label: "Próxima acción" },
-];
-
+// Las etiquetas del selector de orden salen ahora de la definición de columnas
+// de WorkQueueTable, que es la misma lista y no se puede desincronizar.
 export const WORK_QUEUE_SORT_COLUMNS = {
   prioridad: { accessor: (row) => workQueuePriority(row).rank, type: "number" },
   os: { accessor: (row) => ingresoIdOf(row), type: "number" },

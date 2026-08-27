@@ -28,6 +28,7 @@ from ..pdf import render_serial_barcode_pdf
 from ..permissions import require_any_permission
 from .helpers import _set_audit_user, os_label, q, require_roles
 from .pdf_wait_pages import render_bejerman_pdf_wait_page
+from .reportes_views import _merge_pdf_documents
 
 
 def _actor_id(request):
@@ -38,6 +39,44 @@ def _pdf_response(pdf_bytes: bytes, filename: str, content_type: str = "applicat
     response = HttpResponse(pdf_bytes, content_type=content_type or "application/pdf")
     response["Content-Disposition"] = f'inline; filename="{filename}"'
     return response
+
+
+def _parse_ris_lote_ingreso_ids(raw_ids, *, max_ids: int = 50) -> list[int]:
+    ingreso_ids: list[int] = []
+    for raw_id in str(raw_ids or "").split(","):
+        value = raw_id.strip()
+        if not value:
+            continue
+        try:
+            ingreso_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("El parámetro 'ids' debe contener identificadores numéricos.") from exc
+        if ingreso_id <= 0:
+            raise ValueError("El parámetro 'ids' debe contener identificadores positivos.")
+        if ingreso_id not in ingreso_ids:
+            ingreso_ids.append(ingreso_id)
+    if not ingreso_ids:
+        raise ValueError("El parámetro 'ids' es obligatorio.")
+    if len(ingreso_ids) > max_ids:
+        raise ValueError(f"Se pueden preparar como máximo {max_ids} remitos por lote.")
+    return ingreso_ids
+
+
+def _ris_lote_pdf_url(ingreso_ids: list[int]) -> str:
+    ids = ",".join(str(ingreso_id) for ingreso_id in ingreso_ids)
+    return f"/api/ingresos/ris/lote/pdf/?ids={ids}"
+
+
+def _ris_lote_document(ingreso_id: int, ris: dict | None = None, **extra) -> dict:
+    status = ris if isinstance(ris, dict) else get_ris_status_for_ingreso(ingreso_id)
+    return {
+        "ingreso_id": ingreso_id,
+        "remito_number": status.get("remito_number") or "",
+        "comprobante_tipo": status.get("comprobante_tipo") or "",
+        "pdf_status": status.get("pdf_status") or "pending",
+        **_ris_urls(ingreso_id),
+        **extra,
+    }
 
 
 def _ris_urls(ingreso_id: int) -> dict[str, str]:
@@ -210,6 +249,168 @@ class IngresoRisPdfView(APIView):
             return Response({"detail": str(exc), **_ris_payload(ingreso_id)}, status=409)
         filename = f"RIS-{row.get('remito_number') or os_label(ingreso_id)}.pdf".replace("/", "-")
         return _pdf_response(pdf_bytes, filename, content_type)
+
+
+class IngresoRisLotePdfView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        _require_ris_print_permissions(request)
+        try:
+            requested_ids = _parse_ris_lote_ingreso_ids(request.query_params.get("ids"))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        actor_id = _actor_id(request)
+        documents: list[bytes] = []
+        remitos: list[dict] = []
+        pending_remitos: list[dict] = []
+        failed_remitos: list[tuple[int, dict]] = []
+        seen_documents: set[tuple[str, str | int]] = set()
+        retry_after_ms = 2500
+
+        for ingreso_id in requested_ids:
+            try:
+                ris = get_ris_status_for_ingreso(ingreso_id)
+            except BejermanRisError as exc:
+                failed = _ris_lote_document(
+                    ingreso_id,
+                    {},
+                    state="failed",
+                    code=getattr(exc, "code", "BEJERMAN_RIS_PDF_ERROR"),
+                    detail=str(exc),
+                )
+                remitos.append(failed)
+                failed_remitos.append((409, failed))
+                continue
+
+            remito_number = str(ris.get("remito_number") or "").strip()
+            document_key: tuple[str, str | int] = (
+                ("remito", remito_number.upper()) if remito_number else ("ingreso", ingreso_id)
+            )
+            if document_key in seen_documents:
+                continue
+            seen_documents.add(document_key)
+
+            try:
+                pdf_bytes, _content_type, row = fetch_ris_pdf(ingreso_id, user_id=actor_id)
+            except BejermanRisPdfPendingError as exc:
+                retry_after_ms = max(retry_after_ms, int(getattr(exc, "retry_after_ms", 2500) or 2500))
+                pending_extra = dict(getattr(exc, "payload", None) or {})
+                pending_extra.update(
+                    {
+                        "state": "pending",
+                        "code": getattr(exc, "code", "BEJERMAN_PDF_PENDING"),
+                        "detail": str(exc),
+                    }
+                )
+                pending = _ris_lote_document(ingreso_id, ris, **pending_extra)
+                remitos.append(pending)
+                pending_remitos.append(pending)
+            except BejermanRisPdfError as exc:
+                failed_extra = dict(getattr(exc, "payload", None) or {})
+                failed_extra.update(
+                    {
+                        "state": "failed",
+                        "code": getattr(exc, "code", "BEJERMAN_RIS_PDF_ERROR"),
+                        "detail": str(exc),
+                    }
+                )
+                failed = _ris_lote_document(ingreso_id, ris, **failed_extra)
+                remitos.append(failed)
+                failed_remitos.append((int(getattr(exc, "status_code", 502) or 502), failed))
+            except (BejermanRisRegisteredNoPdfError, BejermanRisReviewRequiredError, BejermanRisError) as exc:
+                failed = _ris_lote_document(
+                    ingreso_id,
+                    ris,
+                    state="failed",
+                    code=getattr(exc, "code", "BEJERMAN_RIS_PDF_ERROR"),
+                    detail=str(exc),
+                )
+                remitos.append(failed)
+                failed_remitos.append((409, failed))
+            else:
+                ready_ris = serialize_ris_row(row)
+                ready = _ris_lote_document(ingreso_id, ready_ris, state="ready", pdf_status="ready")
+                remitos.append(ready)
+                documents.append(pdf_bytes)
+
+        if failed_remitos:
+            response_status, first_failure = failed_remitos[0]
+            return Response(
+                {
+                    "detail": first_failure.get("detail") or "No se pudo obtener uno de los PDFs del lote.",
+                    "code": "BEJERMAN_RIS_BATCH_PDF_ERROR",
+                    "total": len(remitos),
+                    "ready_count": sum(item.get("state") == "ready" for item in remitos),
+                    "failed_remitos": [item for _status, item in failed_remitos],
+                    "remitos": remitos,
+                },
+                status=response_status,
+            )
+
+        if pending_remitos:
+            ready_count = sum(item.get("state") == "ready" for item in remitos)
+            total = len(remitos)
+            pdf_word = "PDF listo" if total == 1 else "PDFs listos"
+            response = Response(
+                {
+                    "detail": "Los remitos ya están emitidos. NEXORA volverá a comprobar los PDFs pendientes.",
+                    "code": "BEJERMAN_RIS_BATCH_PDF_PENDING",
+                    "pdf_state": "pending_documents",
+                    "stage_label": f"{ready_count} de {total} {pdf_word}",
+                    "ready_count": ready_count,
+                    "pending_count": len(pending_remitos),
+                    "total": total,
+                    "pending_remitos": pending_remitos,
+                    "remitos": remitos,
+                    "retry_after_ms": retry_after_ms,
+                },
+                status=202,
+            )
+            response["Retry-After"] = retry_after_header_value(retry_after_ms)
+            return response
+
+        try:
+            merged_pdf = _merge_pdf_documents(documents)
+        except Exception:
+            return Response(
+                {
+                    "detail": "Los PDFs están disponibles, pero NEXORA no pudo fusionarlos.",
+                    "code": "BEJERMAN_RIS_BATCH_PDF_MERGE_ERROR",
+                    "remitos": remitos,
+                },
+                status=502,
+            )
+        filename = f"Remitos-ingreso-{len(documents)}.pdf"
+        response = _pdf_response(merged_pdf, filename)
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class IngresoRisLotePrintView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        _require_ris_print_permissions(request)
+        try:
+            ingreso_ids = _parse_ris_lote_ingreso_ids(request.query_params.get("ids"))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        count = len(ingreso_ids)
+        document_name = "remito de ingreso" if count == 1 else f"lote de {count} remitos de ingreso"
+        html = render_bejerman_pdf_wait_page(
+            pdf_url=_ris_lote_pdf_url(ingreso_ids),
+            document_name=document_name,
+            title="Remitos de ingreso",
+            fallback_detail="Puede reintentar o volver a Nuevo ingreso.",
+        )
+        return HttpResponse(
+            html,
+            content_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 def _ingreso_remito_document_type(ris: dict | None) -> str:

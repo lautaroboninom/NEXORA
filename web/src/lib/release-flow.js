@@ -1,5 +1,7 @@
-import { RESOLUCION, estadoLabel, resolutionLabel } from "./constants";
-import { ingresoIdOf } from "./ui-helpers";
+// Extensiones explícitas: así este módulo también se puede importar desde los
+// tests, que corren con `node --test` sin el resolutor de Vite.
+import { RESOLUCION, estadoLabel, resolutionLabel } from "./constants.js";
+import { ingresoIdOf } from "./ui-helpers.js";
 
 const CLOSED_STATES = new Set([
   "entregado",

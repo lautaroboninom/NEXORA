@@ -1,7 +1,11 @@
+from decimal import Decimal
+from unittest.mock import patch
+
 from django.core.management import call_command
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
+from service import delivery_orders
 from service.bejerman_rental_remito import (
     execute_rental_remito_action,
     get_rental_remito_state,
@@ -28,6 +32,258 @@ class RentalRemitoNumberTests(SimpleTestCase):
 
         self.assertEqual(parsed.remito_number, "RTA R 00007-00004587")
         self.assertEqual(parsed.company_key, "MGBIO")
+
+
+class RentalDeliveryItemValidationTests(SimpleTestCase):
+    """La UI manda el NS en las filas de partida y deja el renglón con partida/depósito/stock en
+    null: validar sólo el nivel renglón hacía fallar toda alta de alquiler con RENTAL_STL_REQUIRED."""
+
+    SHELF_CONTEXT = {
+        "ingreso_id": 11,
+        "device_id": 7,
+        "estado": "liberado",
+        "alquilado": False,
+        "ubicacion_nombre": "Estantería de Alquiler",
+        "equipment_serial": "MZJ5S121199",
+    }
+
+    def _validate(self, items):
+        with (
+            patch.object(delivery_orders, "rental_equipment_context", return_value=dict(self.SHELF_CONTEXT)),
+            patch.object(delivery_orders, "_rental_duplicate_reservation", return_value=None),
+        ):
+            return delivery_orders.validate_rental_delivery_items(items)
+
+    def _item(self, **overrides):
+        partida_row = {
+            "ingresoId": 11,
+            "deviceId": 7,
+            "partida": "MZJ5S121199",
+            "assignedQuantity": Decimal("1"),
+            "stockDepositCode": "STL",
+            "stockAvailableQuantity": Decimal("1"),
+        }
+        partida_row.update(overrides.pop("partida_row", {}))
+        item = {
+            "ingresoId": 11,
+            "deviceId": 7,
+            "articleCode": "1115003",
+            "quantity": Decimal("1"),
+            "partida": None,
+            "stockDepositCode": None,
+            "stockAvailableQuantity": None,
+            "partidas": [partida_row],
+        }
+        item.update(overrides)
+        return item
+
+    def test_acepta_el_ns_cargado_en_las_filas_de_partida(self):
+        contexts = self._validate([self._item()])
+
+        self.assertEqual([context["ingreso_id"] for context in contexts], [11])
+
+    def test_sigue_aceptando_el_formato_viejo_a_nivel_renglon(self):
+        legacy = self._item(
+            partidas=[],
+            partida="MZJ5S121199",
+            stockDepositCode="STL",
+            stockAvailableQuantity=Decimal("1"),
+        )
+
+        contexts = self._validate([legacy])
+
+        self.assertEqual([context["ingreso_id"] for context in contexts], [11])
+
+    def test_rechaza_una_fila_que_no_sale_de_stl(self):
+        with self.assertRaisesRegex(Exception, "depósito STL"):
+            self._validate([self._item(partida_row={"stockDepositCode": "VAL"})])
+
+    def test_acepta_un_equipo_con_mg_y_sin_os(self):
+        # Alquilar no exige ingreso: el equipo nuevo se da de alta con su MG y la orden
+        # lo toma por device, con ingreso_id en NULL.
+        device_context = {
+            **self.SHELF_CONTEXT,
+            "ingreso_id": None,
+            "estado": "",
+            "mg_estado": "activo",
+            "equipment_internal_number": "MG 9001",
+        }
+        item = self._item(ingresoId=None, partida_row={"ingresoId": None})
+
+        with (
+            patch.object(delivery_orders, "rental_device_context", return_value=dict(device_context)),
+            patch.object(delivery_orders, "_rental_duplicate_reservation", return_value=None),
+        ):
+            contexts = delivery_orders.validate_rental_delivery_items([item])
+
+        self.assertEqual([context["device_id"] for context in contexts], [7])
+        self.assertEqual([context["ingreso_id"] for context in contexts], [None])
+
+    def test_difiere_el_ns_tipeado_a_mano_sin_os(self):
+        # Sin ingreso ni device la fila se resuelve después por número de serie
+        # (resolve_rental_item_partidas), no acá.
+        contexts = self._validate(
+            [self._item(ingresoId=None, deviceId=None, partida_row={"ingresoId": None, "deviceId": None})]
+        )
+
+        self.assertEqual(contexts, [])
+
+
+class RentalSerialErrorMessageTests(SimpleTestCase):
+    """Cada motivo por el que un NS no se puede alquilar contestaba lo mismo
+    ("NS no vinculado a una OS disponible"), que no decía cuál era ni qué hacer.
+
+    Cubre además el equipo dado de alta con su MG y sin OS: alquilar no exige ingreso.
+    """
+
+    def _context(self, **overrides):
+        row = {
+            "ingreso_id": 11,
+            "device_id": 7,
+            "estado": "reparado",
+            "alquilado": False,
+            "ubicacion_nombre": "Estantería de Alquiler",
+            "equipment_serial": "B3CBE407167",
+            "equipment_internal_number": "MG 9001",
+        }
+        row.update(overrides)
+        return row
+
+    def _device_context(self, **overrides):
+        row = self._context(ingreso_id=None, estado="", mg_estado="activo")
+        row.update(overrides)
+        return row
+
+    def _resolve(self, rows, *, device_rows=None, device_exists=False):
+        with (
+            patch.object(delivery_orders, "_rental_equipment_contexts_by_serial", return_value=rows),
+            patch.object(delivery_orders, "_rental_device_contexts_by_serial", return_value=list(device_rows or [])),
+            patch.object(delivery_orders, "_device_exists_by_serial", return_value=device_exists),
+        ):
+            return delivery_orders._resolve_rental_context_for_partida("B3CBE407167", None, None)
+
+    def _error(self, rows, *, device_rows=None, device_exists=False):
+        with self.assertRaises(delivery_orders.DeliveryOrderError) as caught:
+            self._resolve(rows, device_rows=device_rows, device_exists=device_exists)
+        return caught.exception
+
+    def test_serie_que_no_existe_en_nexora(self):
+        error = self._error([])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_NOT_REGISTERED")
+        self.assertIn("no está dado de alta como equipo en NEXORA", str(error))
+        self.assertIn("Dalo de alta en Equipos con su MG", str(error))
+
+    def test_equipo_sin_cliente_cargado(self):
+        error = self._error([], device_exists=True)
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_WITHOUT_CUSTOMER")
+        self.assertIn("no tiene cliente cargado", str(error))
+
+    def test_os_alquilada_dice_que_esta_alquilada(self):
+        error = self._error([self._context(alquilado=True)])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_NOT_AVAILABLE")
+        self.assertIn("OS-00011, que ya figura alquilada", str(error))
+
+    def test_os_cerrada_nombra_el_estado(self):
+        error = self._error([self._context(estado="baja")])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_NOT_AVAILABLE")
+        self.assertIn("figura dada de baja", str(error))
+
+    def test_fuera_de_la_estanteria_dice_donde_esta(self):
+        error = self._error([self._context(ubicacion_nombre="Taller")])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_NOT_IN_SHELF")
+        self.assertIn("está en Taller, no en Estantería de Alquiler", str(error))
+        self.assertIn("Movelo a Estantería de Alquiler", str(error))
+
+    def test_ubicacion_vacia_no_se_imprime_como_guion(self):
+        error = self._error([self._context(ubicacion_nombre="-")])
+
+        self.assertIn("está en sin ubicación", str(error))
+
+    def test_avisa_cuando_hay_mas_de_una_os_con_el_mismo_ns(self):
+        rows = [self._context(alquilado=True), self._context(ingreso_id=9, estado="entregado")]
+
+        error = self._error(rows)
+
+        self.assertIn("OS-00011, que ya figura alquilada", str(error))
+        self.assertIn("Las otras 1 OS con ese NS tampoco están disponibles", str(error))
+
+    def test_devuelve_la_primera_os_disponible(self):
+        rows = [self._context(alquilado=True), self._context(ingreso_id=9)]
+
+        self.assertEqual(self._resolve(rows)["ingreso_id"], 9)
+
+    def test_toma_el_equipo_con_mg_aunque_no_tenga_os(self):
+        context = self._resolve([], device_rows=[self._device_context()])
+
+        self.assertIsNone(context["ingreso_id"])
+        self.assertEqual(context["device_id"], 7)
+
+    def test_equipo_sin_os_ya_alquilado_lo_dice_en_masculino(self):
+        error = self._error([], device_rows=[self._device_context(alquilado=True)])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_NOT_AVAILABLE")
+        self.assertIn("El NS B3CBE407167 ya figura alquilado.", str(error))
+        self.assertNotIn("OS-", str(error))
+
+    def test_equipo_sin_os_fuera_de_la_estanteria(self):
+        error = self._error([], device_rows=[self._device_context(ubicacion_nombre="Depósito SEPID")])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_NOT_IN_SHELF")
+        self.assertIn("está en Depósito SEPID, no en Estantería de Alquiler", str(error))
+
+    def test_mg_vendido_no_se_puede_alquilar(self):
+        error = self._error([], device_rows=[self._device_context(mg_estado="inactivo_venta")])
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_MG_INACTIVE")
+        self.assertIn("dado de baja del parque MG por venta", str(error))
+        self.assertIn("Reactivá el MG", str(error))
+
+    def test_la_os_manda_cuando_el_equipo_tiene_una(self):
+        # El equipo con historial sigue resolviéndose por su OS: el camino por equipo es
+        # sólo para el que no tiene ninguna.
+        context = self._resolve([self._context()], device_rows=[self._device_context()])
+
+        self.assertEqual(context["ingreso_id"], 11)
+
+    def test_ningun_mensaje_manda_a_hacer_un_ingreso_para_alquilar(self):
+        # Un equipo no necesita ingreso para estar alquilado: se da de alta en Equipos con
+        # su MG. Ningún mensaje debe mandar a hacer un ingreso.
+        textos = [
+            str(self._error([])),
+            str(self._error([], device_exists=True)),
+            str(self._error([self._context(alquilado=True)])),
+            str(self._error([self._context(ubicacion_nombre="Taller")])),
+            str(self._error([], device_rows=[self._device_context(alquilado=True)])),
+        ]
+
+        for texto in textos:
+            self.assertNotIn("ingreso", texto.lower())
+
+
+class RentalItemsMissingEquipmentTests(SimpleTestCase):
+    """Registrar el RTA a mano sin equipo dejaba la orden con número y sin alquiler."""
+
+    def test_marca_los_renglones_sin_equipo(self):
+        order = {
+            "items": [
+                {"partidas": [{"partida": "MZJ5S121220"}]},
+                {"partidas": []},
+                {"partida": "B3CBE407167", "partidas": []},
+                {"partidas": [{"partida": "   "}]},
+            ]
+        }
+
+        self.assertEqual(delivery_orders.rental_items_missing_equipment(order), [2, 4])
+
+    def test_una_orden_completa_no_tiene_faltantes(self):
+        order = {"items": [{"partidas": [{"partida": "MZJ5S121220"}]}]}
+
+        self.assertEqual(delivery_orders.rental_items_missing_equipment(order), [])
 
 
 class FakeRentalSalesClient:

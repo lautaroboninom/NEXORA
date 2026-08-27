@@ -4,13 +4,13 @@ import {
   resolveFechaCreacion,
   resolveFechaIngreso,
   tipoEquipoOf,
-} from "./ui-helpers";
+} from "./ui-helpers.js";
 import {
   workQueueIdentifier,
   workQueueProperty,
   workQueueTechnician,
-} from "./work-queue";
-import { resolutionLabel } from "./constants";
+} from "./work-queue.js";
+import { resolutionLabel } from "./constants.js";
 
 export const INGRESO_LIST_SORT_COLUMNS = {
   os: { accessor: ingresoIdOf, type: "number" },

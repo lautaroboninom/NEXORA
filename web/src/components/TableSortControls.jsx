@@ -1,6 +1,38 @@
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { nextSort, parseSort, sortForDirection } from "../lib/table-sort";
 
+/**
+ * Botón de orden suelto, para las celdas que apilan más de un criterio y no
+ * pueden anidar otro `<th>` adentro.
+ */
+export function SortButton({ field, sort, onSortChange, children, label, title }) {
+  const content = children ?? label;
+  if (typeof onSortChange !== "function") {
+    return <span>{content}</span>;
+  }
+
+  const parsed = parseSort(sort);
+  const active = parsed.field === field;
+  const Icon = !active ? ArrowUpDown : parsed.direction === "desc" ? ArrowDown : ArrowUp;
+  const description = typeof content === "string" ? content.toLowerCase() : field;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSortChange(nextSort(sort, field))}
+      className="inline-flex w-full items-center gap-1 text-left hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      aria-label={`Ordenar por ${description}`}
+      title={title || `Ordenar por ${description}`}
+    >
+      <span>{content}</span>
+      <Icon
+        aria-hidden="true"
+        className={`h-3.5 w-3.5 shrink-0 ${active ? "text-blue-700" : "text-gray-400"}`}
+      />
+    </button>
+  );
+}
+
 export function SortableTh({
   field,
   sort,
@@ -22,7 +54,6 @@ export function SortableTh({
   const parsed = parseSort(sort);
   const active = parsed.field === field;
   const ariaSort = active ? (parsed.direction === "desc" ? "descending" : "ascending") : "none";
-  const Icon = !active ? ArrowUpDown : parsed.direction === "desc" ? ArrowDown : ArrowUp;
 
   return (
     <th
@@ -32,18 +63,9 @@ export function SortableTh({
       title={title}
       colSpan={colSpan}
     >
-      <button
-        type="button"
-        onClick={() => onSortChange?.(nextSort(sort, field))}
-        className="inline-flex w-full items-center gap-1 text-left hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-        title={title || `Ordenar por ${typeof content === "string" ? content : field}`}
-      >
-        <span>{content}</span>
-        <Icon
-          aria-hidden="true"
-          className={`h-3.5 w-3.5 shrink-0 ${active ? "text-blue-700" : "text-gray-400"}`}
-        />
-      </button>
+      <SortButton field={field} sort={sort} onSortChange={onSortChange} title={title}>
+        {content}
+      </SortButton>
     </th>
   );
 }

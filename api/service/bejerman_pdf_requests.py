@@ -38,6 +38,8 @@ TABLE_NAME = "bejerman_pdf_requests"
 HEARTBEAT_TABLE = "bejerman_worker_heartbeats"
 PDF_WORKER_KEY = "bejerman_pdf_requests"
 GLOBAL_PDF_LOCK_NAME = "nexora:bejerman:pdf-generation"
+REMITO_PDF_MAX_PHYSICAL_ROWS = 22
+REMITO_PDF_LINE_LIMIT_ERROR_CODE = "BEJERMAN_REMITO_PDF_LINE_LIMIT_EXCEEDED"
 PROCESSABLE_STATES = (
     "queued",
     "requesting",
@@ -52,11 +54,11 @@ PROCESSABLE_STATES = (
 WORKER_OWNED_STATES = ("queued", "requesting", "waiting_sdk", "ready_direct")
 
 STAGE_LABELS = {
-    "queued": "En cola para generar el remito",
-    "requesting": "Generando el remito",
-    "waiting_sdk": "Consultando el PDF oficial en Bejerman",
-    "waiting_folder": "Esperando el archivo en la carpeta de Bejerman",
-    "ready_direct": "Copiando el PDF a la carpeta configurada",
+    "queued": "Preparando el PDF",
+    "requesting": "Solicitando el PDF de respaldo",
+    "waiting_sdk": "Recuperando el PDF de respaldo desde Bejerman",
+    "waiting_folder": "Comprobando el PDF de respaldo",
+    "ready_direct": "Guardando una copia para reimpresión",
     "ready_folder": "PDF disponible",
     "failed": "La generación no pudo completarse",
 }
@@ -87,9 +89,18 @@ class BejermanPdfNotPublishedError(BejermanSdkResponseError):
     pdf_state = "failed"
     generation_requested = True
 
-    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+        queue_error_code: str = "",
+    ):
         super().__init__(message)
-        self.pdf_details = details or {}
+        self.queue_error_code = _clean(queue_error_code)
+        self.pdf_details = dict(details or {})
+        if self.queue_error_code:
+            self.pdf_details["queue_error_code"] = self.queue_error_code
 
 
 class BejermanPdfWorkerStalledError(BejermanSdkResponseError):
@@ -217,21 +228,120 @@ def is_remito_type(tipo: Any) -> bool:
     return _clean(tipo).upper() in REMITO_COMPROBANTE_TYPES
 
 
-def _render_remito_pdf_bytes(comprobante: dict[str, Any], company_key: Any) -> bytes | None:
+def _remito_pdf_physical_span(comprobante: dict[str, Any]) -> int:
+    """Cantidad de renglones físicos que exigiría el comprobante."""
+
+    raw_items = comprobante.get("Comprobante_Items") if isinstance(comprobante, dict) else None
+    items = raw_items if isinstance(raw_items, list) else []
+    highest_row = 0
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            highest_row = max(highest_row, index)
+            continue
+        try:
+            row_number = int(item.get("Item_NumeroRenglon") or index)
+        except (TypeError, ValueError):
+            row_number = index
+        highest_row = max(highest_row, row_number)
+    return max(len(items), highest_row)
+
+
+def _remito_pdf_line_limit_detail(span: int) -> str:
+    return (
+        f"El remito ocupa {span} renglones y supera la capacidad física de "
+        f"{REMITO_PDF_MAX_PHYSICAL_ROWS}. NEXORA no generó un PDF truncado."
+    )
+
+
+def _is_remito_pdf_line_limit_failure(row: dict[str, Any]) -> bool:
+    return _clean(row.get("last_error_code")) == REMITO_PDF_LINE_LIMIT_ERROR_CODE
+
+
+def _render_remito_pdf_bytes(
+    comprobante: dict[str, Any],
+    company_key: Any,
+    *,
+    allow_remote_pm_lookup: bool = True,
+) -> bytes | None:
     """Renderiza el remito. Devuelve None ante cualquier problema, nunca levanta."""
+
+    span = _remito_pdf_physical_span(comprobante)
+    if span > REMITO_PDF_MAX_PHYSICAL_ROWS:
+        logger.error(
+            "bejerman_remito_pdf_line_limit_exceeded",
+            extra={"company_key": str(company_key), "line_span": span},
+        )
+        return None
 
     try:
         from .bejerman_remito_pdf import render_remito_pdf
         from .bejerman_remito_pdf_data import enrich_comprobante_for_pdf
 
         pdf = render_remito_pdf(
-            enrich_comprobante_for_pdf(comprobante, company_key=company_key),
+            enrich_comprobante_for_pdf(
+                comprobante,
+                company_key=company_key,
+                allow_remote_pm_lookup=allow_remote_pm_lookup,
+            ),
             company_key=company_key,
         )
     except Exception:
         logger.exception("bejerman_remito_pdf_render_failed", extra={"company_key": str(company_key)})
         return None
     return normalize_pdf_bytes(pdf) or None
+
+
+def _store_remito_pdf_line_limit_failure(
+    values: dict[str, str],
+    *,
+    span: int,
+    remote_path: str,
+    remito_group_id: str | None = None,
+    actor_user_id: int | None = None,
+) -> None:
+    detail = _remito_pdf_line_limit_detail(span)
+    with connection.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {TABLE_NAME} (
+              document_key, remito_group_id, actor_user_id, company_key, customer_code,
+              tipo, letra, pto_venta, numero, issue_date, state, remote_path,
+              last_error_code, last_error_detail
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, 'failed', %s, %s, %s)
+            ON CONFLICT (document_key) DO UPDATE
+               SET state='failed',
+                   ready_at=NULL,
+                   lease_expires_at=NULL,
+                   next_folder_check_at=CURRENT_TIMESTAMP,
+                   pdf_payload=NULL,
+                   payload_sha256=NULL,
+                   remito_group_id=COALESCE({TABLE_NAME}.remito_group_id, EXCLUDED.remito_group_id),
+                   actor_user_id=COALESCE(EXCLUDED.actor_user_id, {TABLE_NAME}.actor_user_id),
+                   remote_path=COALESCE(NULLIF(EXCLUDED.remote_path, ''), {TABLE_NAME}.remote_path),
+                   last_error_code=EXCLUDED.last_error_code,
+                   last_error_detail=EXCLUDED.last_error_detail
+            """,
+            [
+                values["document_key"],
+                _clean(remito_group_id) or None,
+                actor_user_id,
+                values["company_key"],
+                values["customer_code"],
+                values["tipo"],
+                values["letra"],
+                values["pto_venta"],
+                values["numero"],
+                values["issue_date"],
+                remote_path,
+                REMITO_PDF_LINE_LIMIT_ERROR_CODE,
+                detail,
+            ],
+        )
+    logger.error(
+        "bejerman_remito_pdf_line_limit_failed",
+        extra={"document_key": values["document_key"], "line_span": span},
+    )
 
 
 def store_rendered_remito_pdf(
@@ -281,7 +391,25 @@ def store_rendered_remito_pdf(
         if existente and _clean(existente.get("state")) in {"ready_direct", "ready_folder"}:
             return True
 
-        pdf = _render_remito_pdf_bytes(comprobante, company_key)
+        span = _remito_pdf_physical_span(comprobante)
+        if span > REMITO_PDF_MAX_PHYSICAL_ROWS:
+            _store_remito_pdf_line_limit_failure(
+                values,
+                span=span,
+                remote_path=comprobante_pdf_output_path(client, reference),
+                remito_group_id=remito_group_id,
+                actor_user_id=actor_user_id,
+            )
+            return False
+
+        # El PDF se entrega en el mismo gesto que emitió el remito. PM es una
+        # columna auxiliar: usar lo que ya esté en caché, pero no retener al
+        # operador hasta 25 segundos por una consulta remota al maestro.
+        pdf = _render_remito_pdf_bytes(
+            comprobante,
+            company_key,
+            allow_remote_pm_lookup=False,
+        )
         if not pdf:
             return False
 
@@ -378,7 +506,12 @@ def _load_request(document_key: str, *, for_update: bool = False) -> dict[str, A
         return _row_from_cursor(cur)
 
 
-def _mark_ready_folder(document_key: str, remote_path: str = "") -> None:
+def _mark_ready_folder(
+    document_key: str,
+    remote_path: str = "",
+    *,
+    preserve_direct_payload: bool = False,
+) -> None:
     with connection.cursor() as cur:
         cur.execute(
             f"""
@@ -386,15 +519,36 @@ def _mark_ready_folder(document_key: str, remote_path: str = "") -> None:
                SET state = 'ready_folder',
                    ready_at = CURRENT_TIMESTAMP,
                    remote_path = COALESCE(NULLIF(%s, ''), remote_path),
-                   pdf_payload = NULL,
-                   payload_sha256 = NULL,
+                   pdf_payload = CASE WHEN %s THEN pdf_payload ELSE NULL END,
+                   payload_sha256 = CASE WHEN %s THEN payload_sha256 ELSE NULL END,
                    lease_expires_at = NULL,
                    last_error_code = NULL,
                    last_error_detail = NULL
              WHERE document_key = %s
             """,
-            [remote_path, document_key],
+            [remote_path, preserve_direct_payload, preserve_direct_payload, document_key],
         )
+
+
+def _purge_expired_direct_payloads(*, now: Any | None = None) -> int:
+    """Libera el cache transitorio una vez que la copia de reimpresión está asentada."""
+
+    retention_seconds = _positive_int_setting("BEJERMAN_DIRECT_PDF_PAYLOAD_RETENTION_SECONDS", 300)
+    moment = now or timezone.now()
+    with connection.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE {TABLE_NAME}
+               SET pdf_payload = NULL,
+                   payload_sha256 = NULL
+             WHERE state = 'ready_folder'
+               AND pdf_payload IS NOT NULL
+               AND ready_at IS NOT NULL
+               AND ready_at <= %s - (%s * INTERVAL '1 second')
+            """,
+            [moment, retention_seconds],
+        )
+        return int(cur.rowcount or 0)
 
 
 def _seconds_since(value: Any, *, now: Any) -> int | None:
@@ -460,11 +614,7 @@ def _pending_for(
             else "El PDF oficial quedó en cola para solicitarse una sola vez a Bejerman."
         )
     elif state == "requesting":
-        detail = (
-            "NEXORA está generando el PDF del remito."
-            if genera_nexora
-            else "Bejerman está procesando la única solicitud de generación del PDF oficial."
-        )
+        detail = "NEXORA está usando la solicitud de PDF de respaldo de Bejerman."
     elif state == "waiting_sdk":
         detail = (
             "NEXORA está consultando el PDF oficial en Bejerman para guardarlo "
@@ -493,7 +643,11 @@ def _not_published_for(
             "Bejerman no devolvió el PDF oficial dentro de los 10 minutos posteriores a la solicitud. "
             "Se puede reintentar la generación desde el panel de Bejerman."
         )
-    error = BejermanPdfNotPublishedError(detail, details=_progress_metadata(row, worker=worker, now=now))
+    error = BejermanPdfNotPublishedError(
+        detail,
+        details=_progress_metadata(row, worker=worker, now=now),
+        queue_error_code=_clean(row.get("last_error_code")),
+    )
     error.generation_requested = int(row.get("generation_attempt_count") or 0) > 0
     return error
 
@@ -665,6 +819,19 @@ def _render_own_remito_pdf(row: dict[str, Any]) -> bool:
         logger.warning("bejerman_remito_pdf_sin_payload", extra={"document_key": document_key})
         return False
 
+    span = _remito_pdf_physical_span(comprobante)
+    if span > REMITO_PDF_MAX_PHYSICAL_ROWS:
+        _mark_failed(
+            document_key,
+            REMITO_PDF_LINE_LIMIT_ERROR_CODE,
+            _remito_pdf_line_limit_detail(span),
+        )
+        logger.error(
+            "bejerman_remito_pdf_line_limit_failed",
+            extra={"document_key": document_key, "line_span": span},
+        )
+        return False
+
     pdf = _render_remito_pdf_bytes(comprobante, row.get("company_key"))
     # `_render_remito_pdf_bytes` ya valida los bytes. Se comprueba acá y no en
     # `_store_direct_pdf`, que ante un PDF inválido marca la fila como fallada
@@ -692,6 +859,9 @@ def _fail_or_requeue(row: dict[str, Any], *, code: str, detail: str, reason: str
             return
     # Agotados los reintentos contra Bejerman, mejor un PDF nuestro que ninguno.
     if _render_own_remito_pdf(row):
+        return
+    current = _load_request(document_key) or row
+    if _is_remito_pdf_line_limit_failure(current):
         return
     _mark_failed(document_key, code, detail)
 
@@ -796,30 +966,45 @@ def fetch_or_enqueue_comprobante_pdf(
 
     state = _clean(row.get("state"))
     raw_payload = row.get("pdf_payload")
-    if state == "ready_direct" and raw_payload is not None:
+    if state in {"ready_direct", "ready_folder"} and raw_payload is not None:
         payload = bytes(raw_payload)
         pdf = normalize_pdf_bytes(payload)
         expected_checksum = _clean(row.get("payload_sha256"))
         checksum_matches = not expected_checksum or hashlib.sha256(pdf or b"").hexdigest() == expected_checksum
         if pdf and checksum_matches:
             return pdf, "application/pdf"
-        with connection.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {TABLE_NAME}
-                   SET state='failed', pdf_payload=NULL, payload_sha256=NULL,
-                       last_error_code='BEJERMAN_PDF_INVALID',
-                        last_error_detail='El PDF temporal de Bejerman es inválido o no coincide con su huella.'
-                 WHERE document_key=%s
-                """,
-                [document_key],
-            )
-        row = {
-            **row,
-            "state": "failed",
-            "last_error_detail": "El PDF temporal de Bejerman es inválido o no coincide con su huella.",
-        }
-        raise _not_published_for(row)
+        if state == "ready_folder":
+            # La carpeta ya contiene la copia de reimpresión. Si el cache local
+            # quedó dañado, se descarta y se deja que el camino habitual la lea.
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE {TABLE_NAME}
+                       SET pdf_payload = NULL,
+                           payload_sha256 = NULL
+                     WHERE document_key = %s
+                    """,
+                    [document_key],
+                )
+            row = {**row, "pdf_payload": None, "payload_sha256": None}
+        else:
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE {TABLE_NAME}
+                       SET state='failed', pdf_payload=NULL, payload_sha256=NULL,
+                           last_error_code='BEJERMAN_PDF_INVALID',
+                            last_error_detail='El PDF temporal de Bejerman es inválido o no coincide con su huella.'
+                     WHERE document_key=%s
+                    """,
+                    [document_key],
+                )
+            row = {
+                **row,
+                "state": "failed",
+                "last_error_detail": "El PDF temporal de Bejerman es inválido o no coincide con su huella.",
+            }
+            raise _not_published_for(row)
 
     if state in {"ready_folder", "failed"}:
         # Estados terminales admiten una comprobación manual tardía. Esto
@@ -841,7 +1026,10 @@ def fetch_or_enqueue_comprobante_pdf(
             # `failed` dejó de ser una lápida: si todavía quedan ciclos, se abre uno
             # nuevo en vez de devolver 504 para siempre.
             max_regenerations = _positive_int_setting("BEJERMAN_PDF_MAX_REGENERATIONS", 2)
-            if int(row.get("regeneration_count") or 0) < max_regenerations:
+            if (
+                not _is_remito_pdf_line_limit_failure(row)
+                and int(row.get("regeneration_count") or 0) < max_regenerations
+            ):
                 result = requeue_pdf_request(
                     document_key,
                     reason="http_request_failed_state",
@@ -1442,7 +1630,14 @@ def _process_direct_copy(row: dict[str, Any]) -> bool:
     client = _client_from_row(row)
     reference = _reference_from_row(row)
     if store_comprobante_pdf_copy(client, reference, pdf):
-        _mark_ready_folder(document_key, comprobante_pdf_output_path(client, reference))
+        # La copia es un resguardo, no la fuente de la respuesta interactiva. Se
+        # conserva el PDF que NEXORA ya compuso para que, si el worker copia antes
+        # del primer GET del navegador, ese GET no vuelva a tocar la carpeta.
+        _mark_ready_folder(
+            document_key,
+            comprobante_pdf_output_path(client, reference),
+            preserve_direct_payload=True,
+        )
         logger.info("bejerman_pdf_request_copy_saved", extra={"document_key": document_key})
         return True
     _set_next_check(document_key, _positive_int_setting("BEJERMAN_PDF_COPY_RETRY_SECONDS", 10))
@@ -1483,9 +1678,13 @@ def _process_queued(row: dict[str, Any]) -> bool:
         # PDF) no tienen la fila lista. Se reproducen acá en vez de pedirle a Bejerman
         # un PDF que no entrega desde el 20/07. Va antes del claim y del register: así
         # no consume el intento único ni paga la conexión al SDK.
-        if is_remito_type(current.get("tipo")) and _render_own_remito_pdf(current):
-            logger.info("bejerman_remito_pdf_generado_en_worker", extra={"document_key": document_key})
-            return True
+        if is_remito_type(current.get("tipo")):
+            if _render_own_remito_pdf(current):
+                logger.info("bejerman_remito_pdf_generado_en_worker", extra={"document_key": document_key})
+                return True
+            current = _load_request(document_key) or current
+            if _is_remito_pdf_line_limit_failure(current):
+                return True
 
         connect_timeout = _positive_int_setting("BEJERMAN_PDF_GENERATION_CONNECT_TIMEOUT", 10)
         read_timeout = _positive_int_setting("BEJERMAN_PDF_GENERATION_READ_TIMEOUT", 90)
@@ -1569,6 +1768,7 @@ def process_bejerman_pdf_requests_once(*, limit: int = 1, heartbeat: bool = Fals
     """Procesa solicitudes pendientes sin ejecutar más de una generación a la vez."""
 
     now = timezone.now()
+    _purge_expired_direct_payloads(now=now)
     with connection.cursor() as cur:
         cur.execute(
             f"""

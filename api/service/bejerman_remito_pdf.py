@@ -20,14 +20,24 @@ Conviven dos *productores* de PDF, que se distinguen por los metadatos:
 
 * `Crystal Reports` / `Powered By Crystal` — el que genera el SDK
   (`WS_GenerarComprobantePDF`), o sea **el camino que NEXORA reemplaza**. Cuerpos
-  9.65 / 9.35 / 7.5 y es el único que imprime el pie `VALOR DECLARADO:`.
+  9.65 / 9.35 / 7.5 y el único que imprimía el pie `VALOR DECLARADO:`.
 * `e-Flexware` / `novaPDF SDK` — la impresión desde el cliente de escritorio de
   Bejerman. Cuerpos 11.03 / 9.95 / 8.03 y sin pie.
 
 **Las columnas caen en la misma x en los dos** (42.35 vs 42.36, 144.40 vs 144.48,
 331.50 vs 331.56...), así que el calce sobre el papel no depende del productor: la
 diferencia es sólo el cuerpo de la tipografía. Reproducimos el de Crystal, que es el
-que NEXORA venía entregando y el único que trae el valor declarado.
+que NEXORA venía entregando.
+
+Hay dos divergencias deliberadas contra el original de Crystal, y el comparador
+`compare_bejerman_remito_pdf` las neutraliza para no reportarlas como diferencias:
+
+* **El valor declarado no se imprime**: no corresponde al remito (indicación del
+  usuario, 10/08/2026). Las posiciones del pie quedan en la plantilla sólo para que
+  el comparador sepa qué ignorar.
+* **La cantidad va siempre en positivo** (ver `_format_quantity`): el signo negativo
+  con el que viajan RDA/RD/RDN es la dirección del movimiento de stock, no una
+  cantidad, y en el papel del cliente se lee como un error.
 
 Lo que sí cambia de verdad es la **empresa**: el bloque de renglones de MGBIO está
 22.64 pt a la izquierda del de SEPID (el encabezado, en cambio, es idéntico). Son dos
@@ -123,7 +133,8 @@ class RemitoPdfTemplate:
     # CÓDIGO, DESCRIPCIÓN y PM van a la izquierda; CANT., LOTE/Nº SERIE y VTO.
     # van CENTRADAS. Verificado con valores de distinto largo en el mismo remito:
     # los seriales de 6 a 13 caracteres centran todos en 412.30, y la cantidad
-    # '-1,00' centra en el mismo punto que ' 1,00'.
+    # '-1,00' centra en el mismo punto que ' 1,00' (NEXORA imprime siempre la
+    # segunda forma, pero el lugar del signo se reserva igual).
     col_codigo_x: float = 42.35
     col_cantidad_center_x: float = 118.90
     col_descripcion_x: float = 144.40
@@ -139,7 +150,9 @@ class RemitoPdfTemplate:
     # largos antes de llegar acá; esto es la red de contención.
     max_rows: int = 22
 
-    # Pie: "VALOR DECLARADO:" con el importe alineado a la derecha.
+    # Pie "VALOR DECLARADO:" del original de Crystal. NEXORA **no lo imprime** — no
+    # va en el remito. Se conservan las posiciones para que `compare_bejerman_remito_pdf`
+    # descarte esos spans en vez de reportarlos como texto faltante.
     footer_label_x: float = 363.75
     footer_label_baseline: float = 623.10
     footer_amount_right_x: float = 569.40
@@ -233,28 +246,25 @@ def _parse_bejerman_date(value: Any) -> datetime | None:
 
 
 def _format_quantity(value: Any) -> str:
-    """Cantidad como la escribe Bejerman: dos decimales con coma, sin separador de miles."""
+    """Cantidad como la escribe Bejerman: dos decimales con coma, sin separador de miles.
+
+    **Siempre en positivo.** El signo de `Item_CantidadUM1` es cómo el SDK le indica a
+    Bejerman la dirección del movimiento de stock (negativo = entra al depósito), no una
+    cantidad: por eso las bajas de alquiler (RDA) y las devoluciones (RD/RDN) viajan
+    en -1. En el papel que recibe el cliente eso se lee como un error — es el reclamo
+    que llegó de cobranzas, el mismo que en junio/julio afectó a los RT/RTA/RSS cuando
+    el negativo estaba del otro lado. El remito informa **cuántas unidades se
+    entregan/retiran**; qué le hace eso al stock lo dice el tipo de comprobante.
+
+    Se conserva el espacio adelante donde iría el signo: la columna está centrada y
+    ' 1,00' cae exactamente donde caía '-1,00' en los remitos reales.
+    """
 
     try:
         number = float(value)
     except (TypeError, ValueError):
         return ""
-    texto = f"{number:.2f}".replace(".", ",")
-    # Bejerman reserva la posición del signo: los positivos llevan un espacio
-    # adelante, donde los negativos llevan el "-". Por eso ' 1,00' y '-1,00'
-    # centran exactamente en el mismo punto.
-    return texto if texto.startswith("-") else f" {texto}"
-
-
-def _format_amount(value: Any) -> str:
-    """Importe con separador de miles, como el pie de los remitos de Bejerman."""
-
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return ""
-    texto = f"{number:,.2f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
-    return texto if texto.startswith("-") else f" {texto}"
+    return f" {abs(number):.2f}".replace(".", ",")
 
 
 def _format_expiration(value: Any) -> str:
@@ -283,12 +293,6 @@ VTO_KEYS = (
     "Item_PartidaVencimiento",
     "Partida_FechaVencimiento",
     "partida_expiration_date",
-)
-VALOR_DECLARADO_KEYS = (
-    "Comprobante_ValorDeclarado",
-    "Comprobante_ImporteTotal",
-    "Comprobante_Total",
-    "ValorDeclarado",
 )
 
 
@@ -428,12 +432,6 @@ def render_remito_pdf(
         # (y lo que hace que ' 1,00' y '-1,00' caigan en el mismo lugar).
         pdf.drawString(center_x - len(text) * size * CHAR_WIDTH_EM / 2, PAGE_HEIGHT - baseline_from_top, text)
 
-    def draw_right(right_x: float, baseline_from_top: float, text: str, size: float) -> None:
-        if not text:
-            return
-        pdf.setFont(regular, size)
-        pdf.drawString(right_x - len(text) * size * CHAR_WIDTH_EM, PAGE_HEIGHT - baseline_from_top, text)
-
     # Fecha (arriba a la derecha, negrita, dd/mm/aa)
     emitted = _parse_bejerman_date(comprobante.get("Comprobante_FechaEmision"))
     if emitted:
@@ -480,11 +478,8 @@ def render_remito_pdf(
         for offset, trozo in enumerate(_wrap_descripcion(line.descripcion, tpl.descripcion_max_chars)):
             draw(tpl.col_descripcion_x, baseline + offset * tpl.items_wrap_pitch, trozo, tpl.items_size)
 
-    # Pie: valor declarado
-    valor = _format_amount(_first_value(comprobante, VALOR_DECLARADO_KEYS))
-    if valor:
-        draw(tpl.footer_label_x, tpl.footer_label_baseline, "VALOR DECLARADO:", tpl.footer_size)
-        draw_right(tpl.footer_amount_right_x, tpl.footer_amount_baseline, valor, tpl.footer_size)
+    # Sin pie: el valor declarado no va en el remito, aunque el PDF de Crystal lo
+    # traiga. Ver el encabezado del módulo.
 
     pdf.showPage()
     pdf.save()
@@ -532,10 +527,8 @@ def render_alignment_sheet(company_key: str = "SEPID") -> bytes:
         draw_centered(tpl.col_serie_center_x, y, "SERIE999999", tpl.items_size)
         draw_centered(tpl.col_vto_center_x, y, "99/99/9999", tpl.items_size)
 
-    draw(tpl.footer_label_x, tpl.footer_label_baseline, "VALOR DECLARADO:", tpl.footer_size)
-    monto = " 9.999.999,00"
-    draw(tpl.footer_amount_right_x - len(monto) * tpl.footer_size * CHAR_WIDTH_EM,
-         tpl.footer_amount_baseline, monto, tpl.footer_size)
+    # El pie del valor declarado no se dibuja: NEXORA no lo imprime, así que tampoco
+    # hay nada que calibrar ahí.
 
     pdf.showPage()
     pdf.save()

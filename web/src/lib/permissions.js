@@ -1,4 +1,5 @@
-import { normalizeRole } from "./authz";
+// Extensión explícita: sin ella `node --test` no resuelve el módulo.
+import { normalizeRole } from "./authz.js";
 
 export const PERMISSION_CODES = {
   PAGE_HOME_SEARCH: "page.home_search",
@@ -32,6 +33,7 @@ export const PERMISSION_CODES = {
   ACTION_INGRESO_MANAGE_DERIVATIONS: "action.ingreso.manage_derivations",
   ACTION_INGRESO_BAJA_ALTA: "action.ingreso.baja_alta",
   ACTION_INGRESO_FORCE_HISTORICAL: "action.ingreso.force_historical",
+  ACTION_INGRESO_RESOLVE_OPEN_CONFLICT: "action.ingreso.resolve_open_conflict",
   ACTION_INGRESO_PRINT_EXIT_ORDER: "action.ingreso.print_exit_order",
   ACTION_INGRESO_EMIT_INGRESS_ORDER: "action.ingreso.emit_ingress_order",
   ACTION_INGRESO_FIX_RIS_PREFLIGHT: "action.ingreso.fix_ris_preflight",

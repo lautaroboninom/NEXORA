@@ -49,7 +49,7 @@ export default function RisProgressModal({
   open,
   title = "Emitiendo RIS",
   status = "Emitiendo RIS en Bejerman",
-  detail = "NEXORA está trabajando. El PDF se abrirá cuando esté listo.",
+  detail = "NEXORA está preparando el PDF. Se abrirá automáticamente cuando esté listo.",
   // El remito ya confirmado en Bejerman: mientras esto tenga valor, lo importante
   // ya salió bien y lo único que falta es el papel.
   documentLabel = "",
@@ -88,7 +88,7 @@ export default function RisProgressModal({
                 <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <span>
                   <strong className="font-semibold">{documentLabel}</strong> ya emitido en Bejerman.
-                  Sólo falta el PDF para imprimir.
+                  NEXORA está preparando el PDF para imprimir.
                 </span>
               </p>
             )}

@@ -83,7 +83,10 @@ class Command(BaseCommand):
             return
 
         today = timezone.localdate().isoformat()
+        # El correo se sigue deduplicando por día (una copia diaria como
+        # máximo); la campana usa una clave estable y refresca el renglón.
         dedupe_key = f"{NOTIFICATION_KEY}:{today}"
+        bell_dedupe_key = NOTIFICATION_KEY
         queued_total = 0
         skipped = 0
         subject = f"Remitos pendientes de facturación: {total_pending}"
@@ -117,8 +120,10 @@ class Command(BaseCommand):
                 severity="warning",
                 entity_type="billing",
                 entity_id=today,
-                dedupe_key=dedupe_key,
+                dedupe_key=bell_dedupe_key,
                 payload={"totalPending": total_pending, "listed": len(items)},
+                push=True,
+                refresh=True,
             )
 
         self.stdout.write(f"Resumen de cobranzas procesado. encolados={queued_total} omitidos={skipped}")

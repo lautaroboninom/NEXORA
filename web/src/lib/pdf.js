@@ -1,5 +1,14 @@
 import { fetchWithAuth } from "./api";
+import {
+  buildPdfWaitPageHtml,
+  escapeHtml,
+  PDF_REPRINT_STEPS,
+  PDF_WAIT_STEPS,
+  waitPageUpdateFrom,
+} from "./pdf-wait-page";
 import { isRegisteredNoPdfCode, registeredNoPdfMessage } from "./remitos";
+
+export { PDF_REPRINT_STEPS, PDF_WAIT_STEPS };
 
 export function openPdfBlob(blob, reservedWindow = null) {
   const url = URL.createObjectURL(blob);
@@ -19,7 +28,6 @@ export function openPdfBlob(blob, reservedWindow = null) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
   return opened;
 }
-
 export function openDetachedWindow(url) {
   const href = String(url || "").trim();
   if (!href) return false;
@@ -34,15 +42,6 @@ export function openDetachedWindow(url) {
   } catch (_) {
     return false;
   }
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 function delay(ms, signal) {
@@ -173,6 +172,15 @@ function notifyProgress(onProgress, payload) {
   } catch (_) {}
 }
 
+/**
+ * La pestaña de impresión ya está abierta y en blanco desde el click: sin esto
+ * el operador ve un spinner mudo mientras NEXORA sí sabe en qué etapa está.
+ */
+function mirrorProgress(reservedWindow, payload) {
+  if (!reservedWindow || typeof reservedWindow.update !== "function") return;
+  reservedWindow.update(waitPageUpdateFrom(payload));
+}
+
 function responseErrorMessage(response, payload, label) {
   const detail = payload?.detail ? String(payload.detail) : "";
   const code = payload?.code ? String(payload.code) : "";
@@ -200,9 +208,15 @@ export async function waitForPdfBlob(pdfUrl, {
   deadlineMs = PDF_WAIT_DEADLINE_MS,
   signal,
   onProgress,
+  reservedWindow = null,
 } = {}) {
   const href = String(pdfUrl || "").trim();
   if (!href) throw new Error(`No se recibió la URL del PDF del ${label}.`);
+
+  const report = (payload) => {
+    notifyProgress(onProgress, payload);
+    mirrorProgress(reservedWindow, payload);
+  };
 
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
@@ -227,12 +241,12 @@ export async function waitForPdfBlob(pdfUrl, {
     if (deadlineMs > 0 && elapsed() >= deadlineMs) throw timedOut(documentKey);
 
     attempt += 1;
-    notifyProgress(onProgress, {
+    report({
       state: "fetching",
       attempt,
       elapsedMs: elapsed(),
       status: attempt === 1 ? `Buscando PDF del ${label}...` : `Esperando PDF del ${label}...`,
-      detail: "Consultando Bejerman sin abrir una nueva ventana.",
+      detail: "NEXORA está comprobando el PDF sin abrir una nueva ventana.",
     });
 
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -251,7 +265,7 @@ export async function waitForPdfBlob(pdfUrl, {
         const payload = await readResponsePayload(response);
         documentKey = payload?.document_key || documentKey;
         const waitMs = retryDelayFrom(response, payload, attempt);
-        notifyProgress(onProgress, {
+        report({
           state: "pending",
           attempt,
           delayMs: waitMs,
@@ -264,8 +278,8 @@ export async function waitForPdfBlob(pdfUrl, {
           documentKey,
           status: payload?.stage_label
             ? `${label} emitido. ${payload.stage_label}.`
-            : `${label} emitido. Bejerman todavía está preparando el PDF.`,
-          detail: payload?.detail || "NEXORA vuelve a consultar automáticamente.",
+            : `${label} emitido. NEXORA está preparando el PDF.`,
+          detail: payload?.detail || "NEXORA vuelve a comprobarlo automáticamente.",
         });
         await delay(waitMs, signal);
         continue;
@@ -279,7 +293,7 @@ export async function waitForPdfBlob(pdfUrl, {
           error.terminal = true;
           throw error;
         }
-        notifyProgress(onProgress, {
+        report({
           state: "ready",
           attempt,
           elapsedMs: elapsed(),
@@ -293,14 +307,14 @@ export async function waitForPdfBlob(pdfUrl, {
       documentKey = payload?.document_key || documentKey;
       if (isTransientPdfLookupMiss(response, payload)) {
         const waitMs = retryDelayFrom(response, payload, attempt);
-        notifyProgress(onProgress, {
+        report({
           state: "pending",
           attempt,
           delayMs: waitMs,
           elapsedMs: elapsed(),
           documentKey,
-          status: `${label} emitido. Bejerman todavía no lo devuelve en la consulta.`,
-          detail: payload?.detail || "NEXORA vuelve a consultar automáticamente.",
+          status: `${label} emitido. NEXORA todavía no tiene el PDF disponible.`,
+          detail: payload?.detail || "NEXORA vuelve a comprobarlo automáticamente.",
         });
         await delay(waitMs, signal);
         continue;
@@ -321,14 +335,14 @@ export async function waitForPdfBlob(pdfUrl, {
       }
       if (signal?.aborted) throw cancelled();
       const waitMs = Math.min(900 + attempt * 250, 2000);
-      notifyProgress(onProgress, {
+      report({
         state: "retrying",
         attempt,
         delayMs: waitMs,
         elapsedMs: elapsed(),
         documentKey,
         status: `La consulta del PDF del ${label} tardó demasiado.`,
-        detail: "NEXORA vuelve a consultar automáticamente.",
+        detail: "NEXORA vuelve a comprobarlo automáticamente.",
       });
       await delay(waitMs, signal);
     }
@@ -433,17 +447,29 @@ export function openPrintablePdf(blob, {
   }
 }
 
+/** "RT - NEXORA" es el nombre de la pestaña; el título del cartel es sólo el comprobante. */
+function headingFromTitle(title) {
+  const clean = String(title || "").replace(/\s*[-–]\s*NEXORA\s*$/i, "").trim();
+  return clean ? `Preparando ${clean}` : "Preparando la impresión";
+}
+
+/**
+ * Abre ya la pestaña donde va a salir el PDF y la deja contando en qué anda.
+ *
+ * `heading`/`message`/`detail` son los mismos textos que muestra el modal de
+ * progreso de NEXORA, y `update()` deja que el flujo que emite el comprobante
+ * los vaya corrigiendo con lo que realmente está pasando del otro lado.
+ */
 export function reservePdfWindow({
   title = "REMITO",
-  message = "Preparando PDF...",
+  heading = "",
+  message = "NEXORA está preparando el PDF.",
+  detail = "Esta pestaña muestra el PDF y abre la impresión cuando el archivo esté listo.",
   fallbackMessage = "La operación está tardando más de lo habitual. Puede cerrar esta pestaña y volver a intentar desde NEXORA.",
   fallbackAfterMs = 20000,
+  steps = PDF_WAIT_STEPS,
 } = {}) {
   let target = null;
-  const safeTitle = escapeHtml(title);
-  const safeMessage = escapeHtml(message);
-  const safeFallback = escapeHtml(fallbackMessage);
-  const safeFallbackAfterMs = Math.max(5000, Number(fallbackAfterMs) || 20000);
 
   try {
     target = window.open("", "_blank");
@@ -452,43 +478,17 @@ export function reservePdfWindow({
         target.opener = null;
       } catch (_) {}
       try {
-        target.document.write(`<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8" />
-  <title>${safeTitle}</title>
-  <style>
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; color: #111827; background: #f9fafb; }
-    main { width: min(520px, calc(100vw - 32px)); text-align: center; }
-    span { display: inline-block; width: 28px; height: 28px; margin-bottom: 12px; border: 3px solid #bae6fd; border-top-color: #0369a1; border-radius: 999px; animation: spin 0.8s linear infinite; }
-    p { margin: 0; font-size: 14px; }
-    .fallback { display: none; margin-top: 14px; color: #4b5563; line-height: 1.45; }
-    .actions { display: none; justify-content: center; gap: 10px; margin-top: 16px; }
-    .visible { display: flex; }
-    .fallback.visible { display: block; }
-    button { border: 1px solid #9ca3af; border-radius: 8px; background: #111827; color: white; padding: 8px 12px; font: inherit; cursor: pointer; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <main>
-    <span></span>
-    <p>${safeMessage}</p>
-    <p id="fallback" class="fallback">${safeFallback}</p>
-    <div id="actions" class="actions">
-      <button type="button" onclick="window.close()">Cerrar pestaña</button>
-    </div>
-  </main>
-  <script>
-    window.setTimeout(function () {
-      var fallback = document.getElementById("fallback");
-      var actions = document.getElementById("actions");
-      if (fallback) fallback.classList.add("visible");
-      if (actions) actions.classList.add("visible");
-    }, ${safeFallbackAfterMs});
-  </script>
-</body>
-</html>`);
+        target.document.write(
+          buildPdfWaitPageHtml({
+            title,
+            heading: heading || headingFromTitle(title),
+            status: message,
+            detail,
+            fallbackMessage,
+            fallbackAfterMs,
+            steps,
+          }),
+        );
         target.document.close();
       } catch (_) {}
     }
@@ -497,6 +497,16 @@ export function reservePdfWindow({
   }
 
   return {
+    /** Empuja el estado real a la pestaña; devuelve false si ya la cerraron. */
+    update(patch) {
+      try {
+        if (target && !target.closed && target.NEXORA_PDF_WAIT) {
+          target.NEXORA_PDF_WAIT.update(patch || {});
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    },
     open(blob) {
       return openPdfBlob(blob, target);
     },

@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  bejermanLookupErrorMessage,
   getDeliveryOrder,
   getDeliveryOrderBejermanArticleStock,
   getDeliveryOrderBejermanArticles,
   patchDeliveryOrderItemArticle,
   patchDeliveryOrderItemPartidas,
+  getDeliveryOrderBejermanRemitoJob,
   postDeliveryOrderBejermanRemito,
+  postDeliveryOrderBejermanRemitoPreflight,
 } from "../lib/api";
+import {
+  forgetRemitoJob,
+  rememberRemitoJob,
+  waitForRemitoJob,
+} from "../lib/delivery-remito-job";
 import {
   deliveryOrderBejermanCustomerLabel,
   deliveryOrderEquipmentContext,
@@ -21,7 +29,7 @@ import {
   deliveryOrderItemRequiresPartida,
   deliveryOrderSourceLabel,
 } from "../lib/delivery-orders";
-import { openPrintablePdf, waitForPdfBlob } from "../lib/pdf";
+import { openPrintablePdf, reservePdfWindow, waitForPdfBlob } from "../lib/pdf";
 import RisProgressModal, {
   waitForRisProgressMinimum,
   waitForRisProgressPaint,
@@ -29,6 +37,9 @@ import RisProgressModal, {
 import { ResponsiveModalOverlay, ResponsiveModalPanel } from "./Responsive.jsx";
 
 const clean = (value) => String(value || "").trim();
+
+const SYNC_CHECK_IDLE = { loading: false, retrying: false, blocked: false, title: "", message: "", jobs: [] };
+const SYNC_CHECK_DEFAULT_TITLE = "No se puede emitir todavía: falta sincronizar el stock.";
 
 const REMITO_DOCUMENT_BY_TYPE = {
   sale: "RT",
@@ -181,12 +192,19 @@ function remitoGroupIssue(order) {
   return `${label}: ya tiene una emisión Bejerman asociada${detail ? `: ${detail}` : "."}`;
 }
 
-// Espejo de bejerman_delivery._validate_remito_orders: sin código Bejerman la emisión sigue
-// el camino de cliente ocasional, que exige el mismo nombre y documento de propietario en todas
-// las órdenes (es lo que se manda como Cliente_* con el código especial @@@#@@).
-function occasionalCustomerIssue(orders) {
-  if (!orders.every((order) => deliveryOrderIsOccasionalCustomer(order))) {
-    return "Todas las órdenes deben tener el mismo cliente con código Bejerman.";
+// Espejo de bejerman_delivery._validate_remito_orders: sin código Bejerman la única emisión
+// posible es la de cliente ocasional (el código especial @@@#@@), que es exclusiva de los
+// particulares y exige el mismo nombre y documento de propietario en todas las órdenes.
+function missingCustomerCodeIssue(orders) {
+  // Un cliente con nombre propio y sin código no entra por el camino ocasional: hay que
+  // vincularlo con Bejerman. Nombrarlo evita el mensaje sobre "todas las órdenes" cuando hay una sola.
+  const unmapped = orders.filter((order) => !deliveryOrderIsOccasionalCustomer(order));
+  if (unmapped.length) {
+    const names = Array.from(new Set(unmapped.map((order) => clean(order.customerName)).filter(Boolean)));
+    if (!names.length) {
+      return "Hay órdenes cuyo cliente no tiene código Bejerman: vincúlelo con Bejerman antes de emitir el remito.";
+    }
+    return `${names.join(", ")}: el cliente no tiene código Bejerman. Vincúlelo con Bejerman antes de emitir el remito.`;
   }
   if (!orders.every((order) => deliveryOrderOccasionalCustomerReady(order))) {
     return "El particular se emite como cliente ocasional: cargue nombre y documento del propietario en el ingreso.";
@@ -206,10 +224,10 @@ function compatibilityIssues(orders) {
   const companyKeys = new Set(orders.map((order) => deliveryOrderCompanyKey(order)));
   const issues = [];
   if (customerCodes.size !== 1) {
-    issues.push("Todas las órdenes deben tener el mismo cliente con código Bejerman.");
+    issues.push("Las órdenes seleccionadas son de clientes distintos: emita un remito por cliente.");
   } else if (!Array.from(customerCodes)[0]) {
-    const occasionalIssue = occasionalCustomerIssue(orders);
-    if (occasionalIssue) issues.push(occasionalIssue);
+    const missingCodeIssue = missingCustomerCodeIssue(orders);
+    if (missingCodeIssue) issues.push(missingCodeIssue);
   }
   if (types.size !== 1) issues.push("Todas las órdenes deben tener el mismo tipo de remito.");
   if (companyKeys.size !== 1) issues.push("Todas las órdenes deben pertenecer a la misma empresa Bejerman.");
@@ -244,13 +262,17 @@ function remitoPdfUrlFromResult(result) {
   return "";
 }
 
-function openRemitoPrintablePdf(blob, result, documentLabel = "remito") {
+function remitoPrintableOptions(result, documentLabel = "remito") {
   const remito = clean(result?.remitoNumber);
   const label = clean(documentLabel) || "remito";
-  return openPrintablePdf(blob, {
+  return {
     title: remito ? `${label} ${remito}` : label,
     documentLabel: remito ? `${label} ${remito}` : label,
-  });
+  };
+}
+
+function openRemitoPrintablePdf(blob, result, documentLabel = "remito") {
+  return openPrintablePdf(blob, remitoPrintableOptions(result, documentLabel));
 }
 
 function ArticleEditor({ order, item, onUpdated, disabled }) {
@@ -298,7 +320,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
       } catch (err) {
         setResults([]);
         setEmpty(false);
-        setError(err?.message || "No se pudo consultar artículos.");
+        setError(bejermanLookupErrorMessage(err, "No se pudieron consultar los artículos de Bejerman."));
       } finally {
         setLoading(false);
       }
@@ -322,18 +344,21 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
         deliveryType: order.deliveryType,
         depositCode: itemStockDeposit(order, item),
       });
+      const unavailable = Boolean(data?.unavailable);
       setStock({
         loading: false,
         items: Array.isArray(data?.items) ? data.items : [],
-        warning: clean(data?.warning),
-        unavailable: Boolean(data?.unavailable),
+        warning: clean(data?.warning) || (
+          unavailable ? "No se pudieron consultar las partidas de Bejerman. Reintentá en unos minutos." : ""
+        ),
+        unavailable,
         depositCode: clean(data?.depositCode) || "VAL",
       });
     } catch (err) {
       setStock({
         loading: false,
         items: [],
-        warning: err?.message || "No se pudo verificar stock Bejerman.",
+        warning: bejermanLookupErrorMessage(err, "No se pudieron consultar las partidas de Bejerman."),
         unavailable: true,
         depositCode: "VAL",
       });
@@ -506,12 +531,25 @@ function ArticleStockBadge({ order, item }) {
     })
       .then((data) => {
         if (!active) return;
-        const available = numberOf(data?.totalAvailableQuantity ?? data?.items?.[0]?.stockAvailableQuantity, 0);
-        setStock({ loading: false, available, warning: clean(data?.warning) });
+        const unavailable = Boolean(data?.unavailable);
+        const available = unavailable
+          ? null
+          : numberOf(data?.totalAvailableQuantity ?? data?.items?.[0]?.stockAvailableQuantity, 0);
+        setStock({
+          loading: false,
+          available,
+          warning: clean(data?.warning) || (
+            unavailable ? "No se pudo verificar el stock de Bejerman. Reintentá en unos minutos." : ""
+          ),
+        });
       })
       .catch((err) => {
         if (!active) return;
-        setStock({ loading: false, available: null, warning: err?.message || "No se pudo verificar stock Bejerman." });
+        setStock({
+          loading: false,
+          available: null,
+          warning: bejermanLookupErrorMessage(err, "No se pudo verificar el stock de Bejerman."),
+        });
       });
     return () => {
       active = false;
@@ -570,6 +608,7 @@ function partidaRowsFingerprint(rows) {
 function PartidasEditor({ order, item, onUpdated, disabled }) {
   const [rows, setRows] = useState(() => savedPartidaRows(order, item));
   const [stock, setStock] = useState(null);
+  const [stockReloadKey, setStockReloadKey] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -590,11 +629,14 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
     })
       .then((data) => {
         if (!active) return;
+        const unavailable = Boolean(data?.unavailable);
         setStock({
           loading: false,
           items: Array.isArray(data?.items) ? data.items : [],
-          warning: clean(data?.warning),
-          unavailable: Boolean(data?.unavailable),
+          warning: clean(data?.warning) || (
+            unavailable ? "No se pudieron consultar las partidas de Bejerman. Reintentá en unos minutos." : ""
+          ),
+          unavailable,
           depositCode: clean(data?.depositCode) || "VAL",
         });
       })
@@ -603,7 +645,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
         setStock({
           loading: false,
           items: [],
-          warning: err?.message || "No se pudo verificar stock Bejerman.",
+          warning: bejermanLookupErrorMessage(err, "No se pudieron consultar las partidas de Bejerman."),
           unavailable: true,
           depositCode: "VAL",
         });
@@ -611,7 +653,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
     return () => {
       active = false;
     };
-  }, [item.articleCode, item.stockDepositCode, order.deliveryType, order.companyKey, order.operationCompanyLabel, order.sourceCompanyId]);
+  }, [item.articleCode, item.stockDepositCode, order.deliveryType, order.companyKey, order.operationCompanyLabel, order.sourceCompanyId, stockReloadKey]);
 
   const updateRow = (index, changes) => {
     setRows((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...changes } : row)));
@@ -756,7 +798,21 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
             <div className="text-xs text-sky-800">Depósito {stock?.depositCode || "VAL"}</div>
           </div>
           {stock?.loading && <div className="text-xs text-sky-800">Consultando stock...</div>}
-          {!stock?.loading && stock?.warning && <div className="text-xs text-sky-800">{stock.warning}</div>}
+          {!stock?.loading && stock?.warning && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-sky-800">
+              <span>{stock.warning}</span>
+              {stock.unavailable && (
+                <button
+                  type="button"
+                  onClick={() => setStockReloadKey((current) => current + 1)}
+                  className="rounded border border-sky-300 bg-white px-2 py-0.5 font-medium text-sky-800 hover:bg-sky-50"
+                  disabled={disabled || saving}
+                >
+                  Reintentar
+                </button>
+              )}
+            </div>
+          )}
           {!stock?.loading && visibleStockLots.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {visibleStockLots.map((lot) => (
@@ -832,6 +888,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
   const [progressDetail, setProgressDetail] = useState("NEXORA está trabajando. El PDF se abrirá cuando esté listo.");
   const [manualRemitoPrints, setManualRemitoPrints] = useState([]);
   const [pdfWait, setPdfWait] = useState({ startedAt: 0, remito: "" });
+  const [syncCheck, setSyncCheck] = useState(SYNC_CHECK_IDLE);
   const pdfWaitAbortRef = useRef(null);
   const orderSelectionKey = (orders || []).map((order) => order?.id).filter(Boolean).join("|");
 
@@ -845,6 +902,36 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
     setManualRemitoPrints([]);
   }, [open, orderSelectionKey]);
 
+  // El stock pendiente de sincronizar se avisa al abrir: enterarse recién al
+  // apretar "Generar remito", después de esperar el envío a Bejerman, era la
+  // peor forma posible de dar la noticia.
+  useEffect(() => {
+    if (!open) return undefined;
+    let cancelado = false;
+    setSyncCheck({ ...SYNC_CHECK_IDLE, loading: true });
+    postDeliveryOrderBejermanRemitoPreflight({
+      orderIds: (orders || []).map((order) => order?.id).filter(Boolean),
+    })
+      .then((res) => {
+        if (cancelado) return;
+        setSyncCheck({
+          ...SYNC_CHECK_IDLE,
+          blocked: res?.canEmit === false,
+          title: clean(res?.title),
+          message: clean(res?.message),
+          jobs: Array.isArray(res?.blockingSyncJobs) ? res.blockingSyncJobs : [],
+        });
+      })
+      .catch(() => {
+        // No poder consultar la cola no es motivo para trabar el modal: la
+        // emisión vuelve a controlarlo del lado del servidor.
+        if (!cancelado) setSyncCheck(SYNC_CHECK_IDLE);
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [open, orderSelectionKey]);
+
   useEffect(() => {
     if (!open) return undefined;
     const onKeyDown = (event) => {
@@ -855,7 +942,8 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
   }, [open, onClose]);
 
   const issues = useMemo(() => compatibilityIssues(localOrders), [localOrders]);
-  const canGenerate = issues.length === 0 && !saving;
+  const canGenerate =
+    issues.length === 0 && !saving && !syncCheck.loading && !syncCheck.retrying && !syncCheck.blocked;
 
   if (!open) return null;
 
@@ -863,24 +951,88 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
     setLocalOrders((current) => replaceOrder(current, updated));
   };
 
+  const reintentarSincronizacion = async () => {
+    setSyncCheck((current) => ({ ...current, retrying: true }));
+    try {
+      const res = await postDeliveryOrderBejermanRemitoPreflight({
+        orderIds: localOrders.map((order) => order.id),
+        retry: true,
+      });
+      setSyncCheck({
+        ...SYNC_CHECK_IDLE,
+        blocked: res?.canEmit === false,
+        title: clean(res?.title),
+        message: clean(res?.message),
+        jobs: Array.isArray(res?.blockingSyncJobs) ? res.blockingSyncJobs : [],
+      });
+    } catch (err) {
+      setSyncCheck((current) => ({
+        ...current,
+        retrying: false,
+        message: clean(err?.data?.detail) || err?.message || current.message,
+      }));
+    }
+  };
+
   const generate = async () => {
     const startedAt = Date.now();
     const documentLabel = remitoDocumentFromOrders(localOrders);
     const progressLabel = remitoProgressFromOrders(localOrders);
+    // Debe ocurrir dentro del click que confirma la emisión. Si se abre después
+    // de esperar el PDF, los navegadores lo interpretan como un popup no pedido.
+    const reservedPrintWindow = reservePdfWindow({
+      title: `${documentLabel} - NEXORA`,
+      heading: `Emitiendo ${documentLabel}`,
+      message: `Emitiendo ${progressLabel} en Bejerman`,
+      detail: "NEXORA está enviando el remito a Bejerman. Esta pestaña abre la impresión cuando el PDF esté listo.",
+      fallbackMessage:
+        `NEXORA sigue preparando el PDF del ${documentLabel}. Aguarde un poco mas. No se ansioso.`,
+    });
+    // El modal y la pestaña de impresión cuentan lo mismo: el operador mira una
+    // o la otra según dónde tenga el foco, y las dos tienen que decir la verdad.
+    const avisar = (status, detail, patch = {}) => {
+      setProgressStatus(status);
+      if (detail) setProgressDetail(detail);
+      reservedPrintWindow.update({ status, ...(detail ? { detail } : {}), ...patch });
+    };
+    let printWindowUsed = false;
+    // Se recuerda el motivo para poder contárselo también a la pestaña de
+    // impresión: cerrarla sin decir nada deja al operador sin ninguna noticia.
+    let failureText = "";
+    const fallar = (text) => {
+      failureText = clean(text);
+      setError(text);
+    };
     setSaving(true);
     setError("");
     setManualRemitoPrints([]);
     setProgressTitle(`Emitiendo ${documentLabel}`);
-    setProgressStatus(`Emitiendo ${progressLabel} en Bejerman`);
-    setProgressDetail("Enviando el remito a Bejerman.");
+    avisar(`Emitiendo ${progressLabel} en Bejerman`, "NEXORA está enviando el remito a Bejerman.", { step: "emit" });
     setProgressOpen(true);
     await waitForRisProgressPaint();
     let result = null;
     try {
-      result = await postDeliveryOrderBejermanRemito({
-        orderIds: localOrders.map((order) => order.id),
-        notes,
+      const orderIds = localOrders.map((order) => order.id);
+      // El POST ya no espera a Bejerman: deja anotado el pedido y vuelve. El trabajo
+      // corre en el servidor, así que si el navegador congela esta pestaña (pasa
+      // apenas el operador mira la ventana de impresión) la emisión sigue igual y el
+      // primer sondeo al volver trae el resultado.
+      const job = await postDeliveryOrderBejermanRemito({ orderIds, notes });
+      rememberRemitoJob(job?.jobId, orderIds);
+      result = await waitForRemitoJob(job?.jobId, {
+        fetchJob: getDeliveryOrderBejermanRemitoJob,
+        onProgress: (progress) => {
+          const segundos = Number(progress?.serverSeconds) || 0;
+          avisar(
+            `Emitiendo ${progressLabel} en Bejerman`,
+            segundos > 20
+              ? `NEXORA sigue emitiendo el remito en Bejerman (${segundos}s). Puede cambiar de pestaña: la emisión no se interrumpe.`
+              : "NEXORA está enviando el remito a Bejerman.",
+            { step: "emit" },
+          );
+        },
       });
+      forgetRemitoJob();
       let refreshedOrders = Array.isArray(result?.orders)
         ? result.orders.filter((order) => order?.id)
         : result?.order?.id
@@ -902,8 +1054,10 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         ? clean(typeof result?.error === "string" ? result.error : result?.error?.message) ||
           "Algunos remitos no se pudieron emitir. Reintente solamente los pendientes."
         : "";
-      setProgressStatus(`${documentLabel} emitido`);
-      setProgressDetail("Esperando el PDF publicado por Bejerman.");
+      avisar(`${documentLabel} emitido`, "NEXORA está preparando el PDF para imprimir.", {
+        step: "pdf",
+        documentLabel: clean(result?.remitoNumber) ? `Remito ${clean(result.remitoNumber)}` : "",
+      });
       // La emisión puede dividirse en varios remitos si no entran en una hoja.
       // En un reintento, el resumen conserva todo el conjunto, pero sólo deben
       // abrirse los documentos que se emitieron en esta llamada.
@@ -929,12 +1083,17 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           const controller = new AbortController();
           pdfWaitAbortRef.current = controller;
           setPdfWait({ startedAt: Date.now(), remito: clean(subResult?.remitoNumber) });
+          reservedPrintWindow.update({
+            step: "pdf",
+            documentLabel: clean(subResult?.remitoNumber) ? `Remito ${clean(subResult.remitoNumber)}` : "",
+          });
           const blob = await waitForPdfBlob(pdfUrl, {
             label: subLabel,
             signal: controller.signal,
+            reservedWindow: reservedPrintWindow,
             onProgress: (progress) => {
               setProgressStatus(progress?.status || `Preparando PDF del ${subLabel}...`);
-              setProgressDetail(progress?.detail || "Esperando el archivo de Bejerman.");
+              setProgressDetail(progress?.detail || "NEXORA está preparando el archivo.");
             },
           });
           printJobs.push({ blob, result: subResult, documentLabel: subLabel });
@@ -946,28 +1105,33 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         }
       }
       if (!subResults.length) {
-        setError(partialFailureMessage || "No se emitieron remitos nuevos en este intento.");
+        fallar(partialFailureMessage || "No se emitieron remitos nuevos en este intento.");
         onGenerated(result, { keepOpen: true });
         return;
       }
       if (!printJobs.length) {
-        setError(
+        fallar(
           partialFailureMessage ||
-            (`Remito ${result?.remitoNumber || ""} emitido, pero Bejerman no pudo devolver el PDF. ` +
-              "Reintente imprimirlo desde el historial de pedidos.")
+            (`Remito ${result?.remitoNumber || ""} emitido, pero NEXORA no pudo preparar el PDF. ` +
+               "Reintente imprimirlo desde el historial de pedidos.")
         );
         onGenerated(result, { keepOpen: true });
         return;
       }
-      setProgressStatus("Abriendo impresión");
-      setProgressDetail(
+      avisar(
+        "Abriendo impresión",
         printJobs.length > 1
           ? `Se emitieron ${subResults.length} remitos. Se abrirá el primero; imprima el resto desde los botones.`
-          : "El PDF está listo. Intentando abrir la ventana de impresión."
+          : "El PDF está listo. Intentando abrir la ventana de impresión.",
+        { step: "print", state: "ready" },
       );
       await waitForRisProgressMinimum(startedAt);
       const [firstJob, ...restJobs] = printJobs;
-      const opened = openRemitoPrintablePdf(firstJob.blob, firstJob.result, firstJob.documentLabel).opened;
+      const opened = reservedPrintWindow.openPrintable(
+        firstJob.blob,
+        remitoPrintableOptions(firstJob.result, firstJob.documentLabel),
+      ).opened;
+      printWindowUsed = opened;
       const pendingJobs = opened ? restJobs : printJobs;
       if (partialFailureMessage) {
         setManualRemitoPrints(pendingJobs);
@@ -975,7 +1139,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         if (!opened) parts.push("El navegador bloqueó el PDF del remito emitido. Use Abrir e imprimir.");
         if (opened && pendingJobs.length) parts.push(`Quedan ${pendingJobs.length} remito(s) emitidos por imprimir.`);
         if (missingPdfs.length) parts.push(`No se pudo obtener el PDF de: ${missingPdfs.join(" / ")}.`);
-        setError(parts.join(" "));
+        fallar(parts.join(" "));
         onGenerated(result, { keepOpen: true });
         return;
       }
@@ -992,16 +1156,36 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         if (missingPdfs.length) {
           parts.push(`No se pudo obtener el PDF de: ${missingPdfs.join(" / ")}. Reintente desde el historial de pedidos.`);
         }
-        setError(parts.join(" "));
+        fallar(parts.join(" "));
         onGenerated(result, { keepOpen: true });
       }
     } catch (err) {
-      setError(
+      fallar(
         result?.remitoNumber
           ? `Remito ${result.remitoNumber} emitido, pero ocurrió un error posterior. ${err?.message || ""}`.trim()
           : err?.message || "No se pudo generar el remito Bejerman."
       );
+      if (err?.data?.code === "BEJERMAN_REMITO_BLOCKED_BY_SYNC") {
+        setSyncCheck({
+          ...SYNC_CHECK_IDLE,
+          blocked: true,
+          message: clean(err.data.detail) || err?.message || "",
+          jobs: Array.isArray(err.data.blockingSyncJobs) ? err.data.blockingSyncJobs : [],
+        });
+      }
     } finally {
+      if (!printWindowUsed) {
+        // Si la emisión falló, la pestaña reservada muestra el motivo en vez de
+        // cerrarse sola y dejar al operador sin saber qué pasó.
+        const avisada = failureText
+          ? reservedPrintWindow.update({
+              state: "error",
+              status: "No se pudo completar la emisión",
+              detail: failureText,
+            })
+          : false;
+        if (!avisada) reservedPrintWindow.close();
+      }
       setProgressOpen(false);
       setSaving(false);
     }
@@ -1057,6 +1241,29 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
+          {syncCheck.loading && (
+            <div className="mb-4 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
+              Verificando que el stock esté sincronizado con Bejerman...
+            </div>
+          )}
+          {syncCheck.blocked && (
+            <div className="mb-4 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <div className="font-medium">{syncCheck.title || SYNC_CHECK_DEFAULT_TITLE}</div>
+              <div className="mt-1">{syncCheck.message}</div>
+              {/* Reintentar sólo tiene sentido si lo que bloquea es un job de
+                  sincronización: contra un faltante de stock no hace nada. */}
+              {syncCheck.jobs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={reintentarSincronizacion}
+                  disabled={syncCheck.retrying}
+                  className="mt-2 rounded bg-amber-700 px-3 py-1.5 font-medium text-white hover:bg-amber-800 disabled:opacity-60"
+                >
+                  {syncCheck.retrying ? "Sincronizando..." : "Reintentar sincronización"}
+                </button>
+              )}
+            </div>
+          )}
           {issues.length > 0 && (
             <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
               {issues.map((issue) => (
@@ -1157,7 +1364,13 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           <button type="button" className="rounded border px-4 py-2 text-sm hover:bg-gray-50" onClick={onClose} disabled={saving}>
             Cancelar
           </button>
-          <button type="button" className="btn disabled:opacity-50" onClick={generate} disabled={!canGenerate}>
+          <button
+            type="button"
+            className="btn disabled:opacity-50"
+            onClick={generate}
+            disabled={!canGenerate}
+            title={syncCheck.blocked ? syncCheck.message : undefined}
+          >
             {saving ? "Generando..." : "Generar remito"}
           </button>
         </div>

@@ -104,6 +104,16 @@ NOTIFICATION_CATALOG = [
         "allowed_roles": BILLING_NOTIFICATION_ROLES,
     },
     {
+        "key": "presupuesto_mg_aprobado",
+        "label": "Presupuesto de MG aprobado",
+        "description": "Presupuesto aprobado sobre un equipo propio de MG BIO, con el PDF adjunto.",
+        "group": "Cobranzas",
+        "default_roles": ["cobranzas"],
+        "allowed_roles": BILLING_NOTIFICATION_ROLES,
+        # Solo correo: el PDF del presupuesto es el aviso, la campana no aporta.
+        "channels": ("email",),
+    },
+    {
         "key": "solicitud_asignacion",
         "label": "Solicitud de asignación",
         "description": "Un técnico solicita que se le asigne un ingreso.",
@@ -120,17 +130,46 @@ NOTIFICATION_CATALOG = [
         "allowed_roles": TECHNICAL_NOTIFICATION_ROLES,
     },
     {
+        "key": "presupuesto_rechazado_reparado",
+        "label": "Rechazo con el equipo ya reparado",
+        "description": "Rechazaron el presupuesto cuando la reparación ya estaba hecha: hay que deshacerla.",
+        "group": "Presupuestos",
+        "default_roles": ["tecnico"],
+        "allowed_roles": TECHNICAL_NOTIFICATION_ROLES,
+    },
+    {
+        "key": "no_se_repara_listo_remito",
+        "label": "No se repara - listo para remito",
+        "description": "El técnico marcó \"no se repara\": el equipo ya puede salir con orden de salida.",
+        "group": "Ingresos",
+        # Misma audiencia que "Reparación lista para remito": el equipo está en
+        # condiciones de salir y sólo falta imprimir la orden.
+        "default_roles": ["recepcion", "jefe"],
+        "allowed_roles": (*MANAGEMENT_NOTIFICATION_ROLES, "recepcion", "tecnico"),
+    },
+    {
         "key": "reparacion_lista_remito",
         "label": "Reparación lista para remito",
         "description": "Equipo reparado que ya puede liberarse con orden de salida.",
         "group": "Ingresos",
-        "default_roles": ["jefe", "recepcion"],
-        "allowed_roles": (*MANAGEMENT_NOTIFICATION_ROLES, "recepcion"),
+        # Recepción imprime la orden de salida y el técnico asignado sigue su equipo.
+        # Jefatura también lo quiere: es el aviso de que el equipo ya se puede
+        # entregar y sólo falta la orden de salida.
+        "default_roles": ["recepcion", "tecnico", "jefe"],
+        "allowed_roles": (*MANAGEMENT_NOTIFICATION_ROLES, "recepcion", "tecnico"),
     },
     {
         "key": "solicitud_baja",
         "label": "Solicitud de baja",
         "description": "Solicitud pendiente para dar de baja un ingreso.",
+        "group": "Ingresos",
+        "default_roles": ["jefe"],
+        "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
+    },
+    {
+        "key": "ingreso_conflicto_abierto",
+        "label": "Conflicto de ingreso abierto",
+        "description": "Un equipo volvió a entrar con su orden anterior todavía abierta. El remito ya salió; falta decidir qué pasa con la orden vieja.",
         "group": "Ingresos",
         "default_roles": ["jefe"],
         "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
@@ -819,7 +858,96 @@ def _user_has_notification_email(user_row):
     return bool(notification_email_recipients_for_users([user_row]))
 
 
+def _owners_by_email(addresses):
+    """Mapea cada dirección al usuario activo que la tiene, principal o extra."""
+    owners = {}
+    if not addresses:
+        return owners
+    for row in _load_active_users(emails=addresses):
+        email = str(row.get("email") or "").strip().lower()
+        if email:
+            owners.setdefault(email, row)
+    if not notification_email_schema_ready():
+        return owners
+    pending = [value for value in addresses if value not in owners]
+    if not pending:
+        return owners
+    rows = q(
+        """
+        SELECT u.id, u.nombre, u.email, u.rol,
+               LOWER(TRIM(a.email)) AS extra_email
+          FROM notification_email_addresses a
+          JOIN users u ON u.id = a.user_id
+         WHERE COALESCE(a.active, TRUE) = TRUE
+           AND COALESCE(u.activo, TRUE) = TRUE
+           AND LOWER(TRIM(a.email)) = ANY(%s)
+        """,
+        [sorted(pending)],
+    ) or []
+    for row in rows:
+        owners.setdefault(row.pop("extra_email"), row)
+    return owners
+
+
+def filter_email_recipients_by_preference(notification_key, recipients):
+    """Saca de una lista de correo a los usuarios que apagaron el canal Mail.
+
+    Los avisos más viejos mandan el correo con ``send_mail`` a una lista fija
+    (variables de entorno o una consulta SQL de roles) sin pasar nunca por el
+    centro de notificaciones, así que el toggle "Mail" de la campana no tenía
+    ningún efecto sobre ellos.
+
+    Sólo saca a quien apagó "Mail" **explícitamente** para esa notificación. No
+    se toca a quien nunca abrió la configuración: la lista de entorno sigue
+    siendo la que manda por defecto, así que activar el filtro no deja a nadie
+    sin avisos de golpe. Las direcciones que no pertenecen a ningún usuario de
+    NEXORA (casillas externas o compartidas) se dejan pasar siempre porque no
+    hay dónde configurarlas.
+    """
+    clean = []
+    seen = set()
+    for raw in recipients or []:
+        value = str(raw or "").strip()
+        key = value.lower()
+        if value and key not in seen:
+            seen.add(key)
+            clean.append(value)
+    if not clean or notification_key not in CATALOG_BY_KEY or not notifications_schema_ready():
+        return clean
+
+    owners = _owners_by_email([value.lower() for value in clean])
+    if not owners:
+        return clean
+    overrides = _load_overrides(notification_key, [row.get("id") for row in owners.values()])
+
+    allowed = []
+    for value in clean:
+        owner = owners.get(value.lower())
+        if owner is None or not _role_allowed_for_notification(notification_key, owner.get("rol")):
+            allowed.append(value)
+            continue
+        override = overrides.get(int(owner.get("id"))) or {}
+        explicit = override.get("email")
+        if explicit is None:
+            # Fila vieja, sin columnas por canal: `enabled` valía para todo.
+            explicit = override.get("legacy")
+        if explicit is False:
+            continue
+        allowed.append(value)
+    return allowed
+
+
 def _candidate_users(notification_key, user_ids=None, roles=None, emails=None):
+    """Resuelve la audiencia interna (campana/push) de una notificación.
+
+    Ojo con ``emails``: NO envía correo, sólo busca el usuario dueño de cada
+    dirección y lo suma a la audiencia interna. Si se le pasa una lista de
+    destinatarios de correo configurada por entorno (p. ej.
+    ``ASSIGNMENT_REQUEST_RECIPIENTS``) y esa casilla pertenece a un usuario de
+    NEXORA, ese usuario empieza a recibir la campana aunque nunca la haya
+    pedido. Para avisos que sólo son correo, mandar el mail por
+    ``queue_notification_email``/``send_mail`` y no pasar ``emails`` acá.
+    """
     users = OrderedDict()
     if user_ids:
         for row in _load_active_users(user_ids=user_ids):
@@ -828,6 +956,32 @@ def _candidate_users(notification_key, user_ids=None, roles=None, emails=None):
         for row in _load_active_users(emails=emails):
             users[int(row["id"])] = row
     return list(users.values())
+
+
+def user_ids_subscribed_to(notification_key, roles):
+    """Usuarios activos de esos roles que hoy tienen prendido el aviso.
+
+    ``emit_notification`` sólo le escribe a la audiencia que le pasan, así que
+    para los avisos con destinatarios calculados a mano (recepción, el técnico
+    asignado) el toggle del centro de notificaciones no tenía ningún efecto
+    sobre el resto de los roles permitidos: quien lo prendía seguía sin recibir
+    nada. Con esto, prenderlo alcanza.
+    """
+    if notification_key not in CATALOG_BY_KEY:
+        return []
+    candidates = [
+        row
+        for row in _load_active_users(roles=roles)
+        if _role_allowed_for_notification(notification_key, row.get("rol"))
+    ]
+    if not candidates:
+        return []
+    overrides = _load_overrides(notification_key, [row.get("id") for row in candidates])
+    return [
+        int(row["id"])
+        for row in candidates
+        if _effective_any_enabled(row, notification_key, overrides)
+    ]
 
 
 def active_user_ids_for_roles(roles):
@@ -892,7 +1046,16 @@ def emit_notification(
     roles=None,
     emails=None,
     push=False,
+    refresh=False,
 ):
+    """Crea (o refresca) la notificación interna para la audiencia indicada.
+
+    ``refresh=True`` es para los avisos que un cron repite mientras la
+    situación siga abierta: en vez de dejar una fila nueva por corrida, se
+    reusa la del ``dedupe_key`` estable, se actualiza el texto y vuelve a
+    quedar sin leer. Así la campana muestra un renglón por caso y no una pila
+    del mismo aviso repetido día por día.
+    """
     if notification_key not in CATALOG_BY_KEY:
         return 0
     if not notifications_schema_ready():
@@ -914,6 +1077,44 @@ def emit_notification(
     severity_value = severity if severity in {"info", "warning", "critical"} else "info"
     payload_text = json.dumps(payload or {}, ensure_ascii=False, default=str)
     has_bell_enabled_column = _table_has_column("notifications", "bell_enabled")
+    conflict_target = "ON CONFLICT (user_id, notification_key, dedupe_key)"
+    if refresh:
+        # Vuelve a mostrarla sin leer y con el texto de esta corrida (los días
+        # sin aprobación, el conteo del resumen, etc.) **sólo si el aviso
+        # cambió**. Sin el WHERE de abajo, cada corrida del cron pisaba la fila
+        # con los mismos datos, la volvía a marcar sin leer y le ponía
+        # `created_at` de hoy: el mismo aviso reaparecía todos los días arriba
+        # de todo y empujaba fuera de la campana a los avisos de hechos reales.
+        refresh_sets = [
+            "title = EXCLUDED.title",
+            "body = EXCLUDED.body",
+            "href = EXCLUDED.href",
+            "severity = EXCLUDED.severity",
+            "payload = EXCLUDED.payload",
+            "created_at = CURRENT_TIMESTAMP",
+            "updated_at = CURRENT_TIMESTAMP",
+            "read_at = NULL",
+            "clicked_at = NULL",
+        ]
+        if has_bell_enabled_column:
+            refresh_sets.append("bell_enabled = EXCLUDED.bell_enabled")
+        # Con este WHERE, una repetición idéntica no actualiza nada y el
+        # `RETURNING` no devuelve fila: no se cuenta como emitida y tampoco
+        # dispara el push al teléfono.
+        refresh_where = (
+            "WHERE notifications.title IS DISTINCT FROM EXCLUDED.title"
+            "   OR notifications.body IS DISTINCT FROM EXCLUDED.body"
+            "   OR notifications.severity IS DISTINCT FROM EXCLUDED.severity"
+        )
+        conflict_sql = (
+            f"{conflict_target} DO UPDATE SET "
+            + ", ".join(refresh_sets)
+            + " "
+            + refresh_where
+        )
+    else:
+        conflict_sql = f"{conflict_target} DO NOTHING"
+
     inserted = 0
     push_targets = []
     for user in recipients:
@@ -928,9 +1129,9 @@ def emit_notification(
                           user_id, notification_key, dedupe_key, title, body, href,
                           severity, entity_type, entity_id, payload, bell_enabled
                         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
-                        ON CONFLICT (user_id, notification_key, dedupe_key) DO NOTHING
+{conflict_sql}
                         RETURNING id
-                        """,
+                        """.format(conflict_sql=conflict_sql),
                         [
                             user.get("id"),
                             notification_key,
@@ -952,9 +1153,9 @@ def emit_notification(
                           user_id, notification_key, dedupe_key, title, body, href,
                           severity, entity_type, entity_id, payload
                         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
-                        ON CONFLICT (user_id, notification_key, dedupe_key) DO NOTHING
+{conflict_sql}
                         RETURNING id
-                        """,
+                        """.format(conflict_sql=conflict_sql),
                         [
                             user.get("id"),
                             notification_key,
@@ -1006,8 +1207,13 @@ def emit_notification(
 
 
 def _ingreso_context(ingreso_id):
+    mg_estado_sql = (
+        "COALESCE(d.mg_estado,'activo') AS mg_estado,"
+        if "mg_estado" in _table_columns("devices")
+        else "'activo' AS mg_estado,"
+    )
     return q(
-        """
+        f"""
         SELECT c.razon_social AS cliente,
                COALESCE(m.tipo_equipo,'') AS tipo_equipo,
                COALESCE(b.nombre,'') AS marca,
@@ -1015,6 +1221,7 @@ def _ingreso_context(ingreso_id):
                COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,''), '') AS equipo_variante,
                COALESCE(d.numero_serie,'') AS numero_serie,
                COALESCE(d.numero_interno,'') AS numero_interno,
+               {mg_estado_sql}
                COALESCE(u.nombre,'') AS tecnico_nombre,
                t.asignado_a
           FROM ingresos t
@@ -1036,7 +1243,12 @@ def _equipo_label(row):
 
 
 def _ns_label(row):
-    return (row.get("numero_interno") or "").strip() or (row.get("numero_serie") or "").strip() or "-"
+    interno = (row.get("numero_interno") or "").strip()
+    serie = (row.get("numero_serie") or "").strip()
+    # Un MG vendido es histórico: el equipo ya se identifica por su N/S.
+    if str(row.get("mg_estado") or "").strip().lower() == "inactivo_venta":
+        return serie or "-"
+    return interno or serie or "-"
 
 
 def _ingreso_body(row):
@@ -1062,8 +1274,9 @@ def notify_ingreso_liberado(ingreso_id):
         severity="info",
         entity_type="ingreso",
         entity_id=ingreso_id,
-        dedupe_key=f"ingreso:{ingreso_id}:liberado",
+        dedupe_key=f"ingreso:{ingreso_id}:liberado:{timezone.localdate().isoformat()}",
         payload={"ingreso_id": ingreso_id},
+        push=True,
     )
 
 
@@ -1081,6 +1294,7 @@ def notify_ingreso_asignado(ingreso_id, tecnico_id):
         entity_id=ingreso_id,
         dedupe_key=f"ingreso:{ingreso_id}:asignado:{tecnico_id}",
         payload={"ingreso_id": ingreso_id, "tecnico_id": tecnico_id},
+        push=True,
     )
 
 
@@ -1098,8 +1312,12 @@ def notify_solicitud_asignacion(ingreso_id, tecnico_id, tecnico_nombre="", user_
         severity="warning",
         entity_type="ingreso",
         entity_id=ingreso_id,
-        dedupe_key=f"ingreso:{ingreso_id}:solicitud_asignacion:{tecnico_id}",
+        dedupe_key=(
+            f"ingreso:{ingreso_id}:solicitud_asignacion:{tecnico_id}"
+            f":{timezone.localdate().isoformat()}"
+        ),
         payload={"ingreso_id": ingreso_id, "tecnico_id": tecnico_id},
+        push=True,
     )
 
 
@@ -1115,8 +1333,9 @@ def notify_presupuesto_aprobado(ingreso_id, tecnico_id):
         severity="info",
         entity_type="ingreso",
         entity_id=ingreso_id,
-        dedupe_key=f"ingreso:{ingreso_id}:presupuesto_aprobado",
+        dedupe_key=f"ingreso:{ingreso_id}:presupuesto_aprobado:{timezone.localdate().isoformat()}",
         payload={"ingreso_id": ingreso_id, "tecnico_id": tecnico_id},
+        push=True,
     )
 
 
@@ -1133,8 +1352,68 @@ def notify_reparacion_lista_remito(ingreso_id, user_ids=None, emails=None):
         severity="warning",
         entity_type="ingreso",
         entity_id=ingreso_id,
-        dedupe_key=f"ingreso:{ingreso_id}:reparacion_lista_remito",
+        dedupe_key=f"ingreso:{ingreso_id}:reparacion_lista_remito:{timezone.localdate().isoformat()}",
         payload={"ingreso_id": ingreso_id},
+        push=True,
+    )
+
+
+def notify_presupuesto_rechazado_reparado(ingreso_id, tecnico_id=None):
+    """El presupuesto se rechazó con la reparación ya hecha: hay que deshacerla.
+
+    Es el único aviso del circuito que pide *desandar* trabajo, así que va al
+    técnico asignado y no a Recepción: nadie más puede volver el equipo a como
+    entró ni marcarlo "No se repara".
+    """
+    row = _ingreso_context(ingreso_id)
+    target = tecnico_id or row.get("asignado_a")
+    if not target:
+        return 0
+    os_txt = os_label(ingreso_id)
+    body = "\n".join(
+        [
+            _ingreso_body(row),
+            "",
+            'Hay que deshacer la reparación y marcar el equipo como "No se repara".',
+        ]
+    )
+    return emit_notification(
+        "presupuesto_rechazado_reparado",
+        user_ids=[target],
+        title=f"Presupuesto rechazado con el equipo reparado - OS {os_txt}",
+        body=body,
+        href=f"/ingresos/{ingreso_id}?tab=principal",
+        severity="warning",
+        entity_type="ingreso",
+        entity_id=ingreso_id,
+        dedupe_key=f"ingreso:{ingreso_id}:presupuesto_rechazado_reparado",
+        payload={"ingreso_id": ingreso_id, "tecnico_id": target},
+        push=True,
+    )
+
+
+def notify_no_se_repara_listo_remito(ingreso_id, user_ids=None):
+    row = _ingreso_context(ingreso_id)
+    os_txt = os_label(ingreso_id)
+    body = "\n".join(
+        [
+            _ingreso_body(row),
+            "",
+            "El equipo sale sin reparar: sólo falta imprimir la orden de salida.",
+        ]
+    )
+    return emit_notification(
+        "no_se_repara_listo_remito",
+        user_ids=user_ids,
+        title=f"No se repara - listo para remito - OS {os_txt}",
+        body=body,
+        href=f"/ingresos/{ingreso_id}?tab=principal",
+        severity="warning",
+        entity_type="ingreso",
+        entity_id=ingreso_id,
+        dedupe_key=f"ingreso:{ingreso_id}:no_se_repara_listo_remito",
+        payload={"ingreso_id": ingreso_id},
+        push=True,
     )
 
 
@@ -1151,9 +1430,125 @@ def notify_solicitud_baja(ingreso_id, solicitante_id=None, motivo="", user_ids=N
         severity="critical",
         entity_type="ingreso",
         entity_id=ingreso_id,
-        dedupe_key=f"ingreso:{ingreso_id}:solicitud_baja",
+        dedupe_key=f"ingreso:{ingreso_id}:solicitud_baja:{timezone.localdate().isoformat()}",
         payload={"ingreso_id": ingreso_id, "solicitante_id": solicitante_id, "motivo": motivo},
+        push=True,
     )
+
+
+CONFLICTO_ABIERTO_PANEL_PATH = "/bejerman?process_type=remito&source=ingreso_conflicto"
+
+
+def _frontend_link(path):
+    base = (
+        str(getattr(settings, "PUBLIC_WEB_URL", "") or "").strip()
+        or str(getattr(settings, "FRONTEND_ORIGIN", "") or "").strip()
+    )
+    return f"{base.rstrip('/')}{path}" if base else path
+
+
+def notify_ingreso_conflicto_abierto(ingreso_id, conflicting_ingreso_id, user_ids=None, emails=None):
+    """Avisa que un equipo volvió a entrar con su orden anterior todavía abierta.
+
+    El remito ya salió y el cliente ya se fue con su comprobante: esto no es una alarma para
+    frenar nada, es el pendiente administrativo de decidir qué pasa con la orden vieja.
+
+    Manda campana **y** mail: `emit_notification` sólo crea la campana, el correo hay que
+    encolarlo aparte (es el mismo reparto que usan los avisos de Cobranzas).
+    """
+
+    row = _ingreso_context(ingreso_id)
+    os_txt = os_label(ingreso_id)
+    os_previa = os_label(conflicting_ingreso_id)
+    previa = q(
+        """
+        SELECT COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
+               COALESCE(t.estado::text, '') AS estado
+          FROM ingresos t
+         WHERE t.id = %s
+        """,
+        [conflicting_ingreso_id],
+        one=True,
+    ) or {}
+    fecha_previa = previa.get("fecha_ingreso")
+    try:
+        fecha_previa = fecha_previa.date().isoformat()
+    except Exception:
+        fecha_previa = str(fecha_previa or "-")
+
+    detalle = [
+        _ingreso_body(row),
+        f"Orden anterior: OS {os_previa} (ingresada el {fecha_previa}, estado {previa.get('estado') or '-'})",
+        f"Nueva orden: OS {os_txt}",
+        "El remito de ingreso ya se emitió, con ese renglón sin número de OS.",
+        "Falta resolver si la orden anterior se cierra (el equipo ya había salido) o si corresponde unificarlas.",
+    ]
+    title = f"Ingreso con orden anterior abierta - OS {os_txt}"
+    dedupe_key = f"ingreso:{ingreso_id}:conflicto_abierto:{conflicting_ingreso_id}"
+
+    # Sin destinatario explícito, la audiencia es jefatura: son quienes pueden decidir qué
+    # pasa con la orden vieja. Hay que resolver los usuarios acá porque `emit_notification`
+    # ignora `roles=` (sólo arma audiencia a partir de user_ids/emails).
+    roles = notification_allowed_roles("ingreso_conflicto_abierto")
+    if not user_ids and not emails:
+        user_ids = [
+            int(row["id"])
+            for row in active_users_for_notification("ingreso_conflicto_abierto", roles=roles, channel="any")
+        ]
+
+    inserted = emit_notification(
+        "ingreso_conflicto_abierto",
+        user_ids=user_ids,
+        emails=emails,
+        title=title,
+        body="\n".join(detalle),
+        href=CONFLICTO_ABIERTO_PANEL_PATH,
+        severity="warning",
+        entity_type="ingreso",
+        entity_id=ingreso_id,
+        dedupe_key=dedupe_key,
+        payload={"ingreso_id": ingreso_id, "conflicting_ingreso_id": conflicting_ingreso_id},
+        push=True,
+    )
+
+    try:
+        from .notification_email_outbox import queue_notification_email
+
+        destinatarios = notification_email_recipients_for_users(
+            active_users_for_notification(
+                "ingreso_conflicto_abierto",
+                user_ids=user_ids,
+                emails=emails,
+                roles=None if (user_ids or emails) else roles,
+                channel="email",
+                require_email=True,
+            )
+        )
+        if destinatarios:
+            cuerpo = "\n".join(
+                [
+                    "Un equipo volvió a entrar al taller con su orden de servicio anterior todavía abierta.",
+                    "",
+                    *detalle,
+                    "",
+                    f"Resolver en NEXORA: {_frontend_link(CONFLICTO_ABIERTO_PANEL_PATH)}",
+                ]
+            )
+            footer = str(getattr(settings, "EMAIL_LEGAL_FOOTER", "") or "").strip()
+            if footer:
+                cuerpo = f"{cuerpo.rstrip()}\n\n{footer}"
+            queue_notification_email(
+                notification_key="ingreso_conflicto_abierto",
+                dedupe_key=dedupe_key,
+                recipients=destinatarios,
+                subject=title,
+                body=cuerpo,
+            )
+    except Exception:
+        # El aviso es importante pero no es el remito: si el correo falla, la campana ya quedó.
+        logger.exception("ingreso_conflicto_abierto_email_failed", extra={"ingreso_id": ingreso_id})
+
+    return inserted
 
 
 def notify_estado_patrimonial(ingreso_id, evento, emails=None):
@@ -1176,6 +1571,7 @@ def notify_estado_patrimonial(ingreso_id, evento, emails=None):
         entity_id=ingreso_id,
         dedupe_key=f"ingreso:{ingreso_id}:{key}:{timezone.localdate().isoformat()}",
         payload={"ingreso_id": ingreso_id, "evento": evento},
+        push=True,
     )
 
 
@@ -1196,6 +1592,7 @@ def notify_derivacion_devuelta(ingreso_id, tecnico_id=None):
         entity_id=ingreso_id,
         dedupe_key=f"ingreso:{ingreso_id}:derivacion_devuelta:{timezone.localdate().isoformat()}",
         payload={"ingreso_id": ingreso_id, "tecnico_id": target},
+        push=True,
     )
 
 
@@ -1246,7 +1643,7 @@ def list_notifications_for_user(user_id, limit=DEFAULT_LIMIT):
          WHERE user_id = %s
            AND notification_key = ANY(%s)
            {bell_filter}
-         ORDER BY created_at DESC, id DESC
+         ORDER BY (read_at IS NULL) DESC, created_at DESC, id DESC
          LIMIT %s
         """,
         [user_id, visible_keys, limit_value],
@@ -1293,6 +1690,54 @@ def mark_all_notifications_read(user_id):
         [user_id],
         one=True,
     ) or {}
+    return int(row.get("total") or 0)
+
+
+def resolve_notifications(notification_key, *, entity_type=None, entity_id=None, user_ids=None):
+    """Cierra sola la campana de un hecho que ya se resolvió.
+
+    Los avisos de "todavía falta hacer X" nacían sin leer y ahí se quedaban
+    aunque X se hiciera treinta segundos después: nadie marcaba la fila, así
+    que la campana acumulaba pendientes de trabajo ya terminado. Se llama desde
+    el punto donde el hecho deja de estar abierto (imprimir la orden de salida,
+    por ejemplo) y devuelve cuántas filas quedaron marcadas leídas.
+    """
+    if not _table_exists("notifications"):
+        return 0
+    where = ["notification_key = %s", "read_at IS NULL"]
+    params = [notification_key]
+    if entity_type is not None:
+        where.append("entity_type = %s")
+        params.append(str(entity_type))
+    if entity_id is not None:
+        where.append("entity_id = %s")
+        params.append(str(entity_id))
+    ids = [int(uid) for uid in (user_ids or []) if uid is not None]
+    if ids:
+        where.append("user_id = ANY(%s)")
+        params.append(ids)
+    try:
+        row = q(
+            f"""
+            WITH updated AS (
+                UPDATE notifications
+                   SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE {" AND ".join(where)}
+                 RETURNING id
+            )
+            SELECT COUNT(*) AS total FROM updated
+            """,
+            params,
+            one=True,
+        ) or {}
+    except Exception:
+        logger.exception(
+            "No se pudieron cerrar las notificaciones resueltas",
+            extra={"notification_key": notification_key, "entity_id": entity_id},
+        )
+        _safe_set_rollback_false()
+        return 0
     return int(row.get("total") or 0)
 
 

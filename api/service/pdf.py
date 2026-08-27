@@ -178,6 +178,12 @@ def _customer_alias_select(alias: str = "cliente_alias_interno") -> str:
     return f"'' AS {alias}"
 
 
+def _warranty_expiry_select(alias: str = "garantia_vence") -> str:
+    if _has_table_column("devices", "garantia_vence"):
+        return f"d.garantia_vence AS {alias}"
+    return f"NULL::date AS {alias}"
+
+
 def _latest_quote_row(ingreso_id: int):
     return _q(
         """
@@ -197,6 +203,7 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
         latest = _latest_quote_row(ingreso_id) or {}
         quote_id = latest.get("id")
     customer_alias_select = _customer_alias_select()
+    warranty_expiry_select = _warranty_expiry_select()
     head = _q(f"""
         SELECT
             t.id AS ingreso_id,
@@ -227,6 +234,8 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
             ev_dates.fecha_liberacion,
             ev_dates.fecha_venta,
             COALESCE(t.garantia_fabrica, false) AS garantia,
+            COALESCE(t.garantia_reparacion, false) AS garantia_reparacion,
+            {warranty_expiry_select},
             COALESCE(t.etiq_garantia_ok, true) AS etiq_ok,
             COALESCE(b.nombre,'') AS marca,
             m.tipo_equipo as equipo,
@@ -842,13 +851,58 @@ def _draw_block(c, x, y, title, value, width, font="Helvetica", fsize=9, leading
         y -= leading
     return y
 
-def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_interno=None, equipo=None, remito=None, etiq_ok=None):
+def _warranty_expiry_date(value):
+    """Normaliza `devices.garantia_vence` a date."""
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            resolved = timezone.localtime(value) if timezone.is_aware(value) else value
+            return resolved.date()
+        return value if hasattr(value, "year") else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _equipment_warranty_text(head: dict) -> str:
+    """Estado de garantía del equipo, tal como lo ve el operador en la ficha.
+
+    Se respeta el mismo binario Sí/No que muestra y edita la pantalla: el
+    cálculo automático puede no encontrar la venta, pero quien recibe el equipo
+    confirma o corrige la casilla, y el presupuesto no puede decir algo distinto
+    de lo que se ve en el sistema.
+
+    La fecha se imprime sólo cuando acompaña a la casilla. La casilla se sella
+    al recibir el equipo y la fecha no se mueve: un ingreso que se presupuesta
+    meses después puede cruzar el vencimiento, y "En garantía de fábrica (vence
+    12/03/2025)" en un papel de 2026 se lee como un error del sistema. El año
+    completo va porque acá es justamente el dato que define la cobertura.
+    """
+    vence = _warranty_expiry_date(head.get("garantia_vence"))
+    vigente = vence is not None and vence >= timezone.localdate()
+    if head.get("garantia"):
+        return f"En garantía de fábrica (vence {vence:%d/%m/%Y})" if vigente else "En garantía de fábrica"
+    if head.get("garantia_reparacion"):
+        return "En garantía de reparación"
+    if vence is not None and not vigente:
+        return f"Fuera de garantía (venció {vence:%d/%m/%Y})"
+    return "Fuera de garantía"
+
+
+def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_interno=None, equipo=None, remito=None, etiq_ok=None, garantia_txt=None):
     # Mostrar "Fajas de garantía: Abiertas" solo si las fajas NO están OK
     try:
         show_faja = not bool(etiq_ok)
     except Exception:
         show_faja = False
-    h = (34 * mm) if show_faja else (24 * mm)
+    # Renglones extra debajo de marca/modelo/serie. La garantía va primero porque es
+    # lo que define si el trabajo se cobra.
+    extra_rows = []
+    if garantia_txt:
+        extra_rows.append(("Garantía del equipo:", garantia_txt))
+    if show_faja:
+        extra_rows.append(("Fajas de garantía:", "Abiertas"))
+    h = (24 * mm) + (len(extra_rows) * 6 * mm + 4 * mm if extra_rows else 0)
     c.setFillColor(colors.whitesmoke)
     c.roundRect(x, y - h, w, h, 4, stroke=0, fill=1)
     c.setFillColor(colors.black)
@@ -882,13 +936,16 @@ def _draw_equipment_panel(c, x, y, w, marca, modelo, numero_serie, numero_intern
     col(0, "Marca", (marca or "").upper())
     col(1, "Modelo", (modelo or "").upper())
     col(2, "Número Serie | Número interno", (serial_txt or "").upper(), label_fsz=8)
-    # Línea adicional solo si fajas abiertas
-    if show_faja:
+    row_y = y - 28*mm
+    for label, value in extra_rows:
         c.setFont("Helvetica", 9)
         c.setFillColor(colors.grey)
-        c.drawString(x + 5*mm, y - 28*mm, "Fajas de garantía:")
+        c.drawString(x + 5*mm, row_y, label)
+        value_x = x + 5*mm + c.stringWidth(label, "Helvetica", 9) + 2*mm
         c.setFillColor(colors.black)
-        c.drawString(x + 42*mm, y - 28*mm, "Abiertas")
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(value_x, row_y, _truncate_text_to_width(value, "Helvetica-Bold", 9, x + w - 5*mm - value_x))
+        row_y -= 6*mm
     return y - h - 8
 
 def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
@@ -1028,6 +1085,7 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
         c, ml, y, W - 2*ml,
         head.get("marca"), _compose_modelo_variante(head) or head.get("modelo"), head.get("numero_serie"), head.get("numero_interno"),
         equipo=head.get("equipo"), remito=head.get("remito_ingreso"), etiq_ok=head.get("etiq_ok"),
+        garantia_txt=_equipment_warranty_text(head),
     )
     y -= 5
     motivo_txt = (head.get("motivo") or "").strip()
@@ -1208,6 +1266,35 @@ def _fetchone_dict(cur):
 # =========================
 # ORDEN DE SALIDA / REMITO
 # =========================
+def _exit_order_net_charge(head, rejected_budget_context):
+    """Neto que se cobra, para la caja "Costo neto" de la orden de salida.
+
+    Con el presupuesto rechazado, el neto del presupuesto es justo lo que NO se
+    cobra: lo que va en la caja es el cobro pactado por la revision. El rechazo
+    y la resolucion se cargan por caminos distintos (un equipo que pasa por "No
+    se repara" sale con resolucion `no_reparado` aunque su presupuesto figure
+    rechazado), asi que mirar solo la resolucion dejaba salir el importe del
+    presupuesto.
+
+    Devuelve None cuando el presupuesto esta rechazado y nadie cargo el cobro:
+    la caja sale en blanco para completarla a mano, nunca con el presupuesto.
+    """
+    resolucion = str(head.get("resolucion") or "").strip().lower()
+    quote_estado = str(head.get("quote_estado") or "").strip().lower()
+    if resolucion != "presupuesto_rechazado" and quote_estado != "rechazado":
+        try:
+            return Decimal(head.get("subtotal") or 0)
+        except Exception:
+            return Decimal(0)
+    cobro = rejected_budget_context.get("presupuesto_rechazado_cobro_neto")
+    if cobro is None:
+        return None
+    try:
+        return Decimal(str(cobro))
+    except Exception:
+        return None
+
+
 def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     """
     Orden de salida en 3 franjas (proporción 2-2-1).
@@ -1218,7 +1305,6 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         return b"", f"Remito_{ingreso_id}.pdf"
     rejected_budget_context = get_rejected_budget_context(ingreso_id)
     rejected_quote = rejected_budget_context.get("rejected_quote")
-    effective_charge_neto = rejected_budget_context.get("presupuesto_rechazado_cobro_neto")
 
     # Recalculate totals from items to avoid stale quote data
     try:
@@ -1240,14 +1326,15 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     except Exception:
         # Si falla el calculo, continuamos con los valores existentes
         pass
-    if (head.get("resolucion") or "").strip().lower() == "presupuesto_rechazado" and effective_charge_neto is not None:
-        try:
-            subtotal_calc = Decimal(str(effective_charge_neto))
-            iva_21_calc = subtotal_calc * Decimal("0.21")
-            total_calc = subtotal_calc + iva_21_calc
-            head["subtotal"], head["iva_21"], head["total"] = subtotal_calc, iva_21_calc, total_calc
-        except Exception:
-            pass
+    costo_neto = _exit_order_net_charge(head, rejected_budget_context)
+    if costo_neto is None:
+        head["subtotal"] = head["iva_21"] = head["total"] = None
+        costo_neto_txt = ""
+    else:
+        head["subtotal"] = costo_neto
+        head["iva_21"] = costo_neto * Decimal("0.21")
+        head["total"] = costo_neto + head["iva_21"]
+        costo_neto_txt = f"$ {money_es(costo_neto)}"
     head["presupuesto_rechazado_summary"] = rejected_quote
 
         # Ajustes de cliente/propietario para visualizacion (MGBIO y Particular)
@@ -1537,12 +1624,8 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         y_box = y - (SIGN_H/2)
         c.setFillColor(colors.black)
         box(x_box, y_box, w_box, SIGN_H)
-        try:
-            neto_val = Decimal(head.get("subtotal") or 0)
-        except Exception:
-            neto_val = Decimal(0)
         c.setFont("Helvetica-Bold", F_FIELD)
-        c.drawRightString(x_box + w_box - 1.4 * mm, y_box + 1.2 * mm, f"$ {money_es(neto_val)}")
+        c.drawRightString(x_box + w_box - 1.4 * mm, y_box + 1.2 * mm, costo_neto_txt)
 
     def draw_form(y_top, height, leyenda):
         c.rect(margin, y_top - height, W - 2 * margin, height, stroke=1, fill=0)
@@ -1584,12 +1667,8 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         y_box = y - (SIGN_H/2)
         c.setFillColor(colors.black)
         box(x_box, y_box, w_box, SIGN_H)
-        try:
-            neto_val = Decimal(head.get("subtotal") or 0)
-        except Exception:
-            neto_val = Decimal(0)
         c.setFont("Helvetica-Bold", F_FIELD)
-        c.drawRightString(x_box + w_box - 1.4 * mm, y_box + 1.2 * mm, f"$ {money_es(neto_val)}")
+        c.drawRightString(x_box + w_box - 1.4 * mm, y_box + 1.2 * mm, costo_neto_txt)
 
         base = getattr(settings, 'PUBLIC_WEB_URL', '').rstrip('/')
         url = f"{base}/ingresos/{head['ingreso_id']}"

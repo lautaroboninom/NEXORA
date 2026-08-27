@@ -20,6 +20,7 @@ Las entradas se toman como de sólo lectura: los consumidores (`build_articles_r
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Callable
@@ -27,11 +28,15 @@ from typing import Any, Callable
 from django.conf import settings
 
 from .bejerman_sdk import (
+    PartidaIndex,
     article_search_blob,
+    build_article_description_map,
     build_partida_rows,
     build_stock_rows,
     map_article_items,
 )
+
+logger = logging.getLogger(__name__)
 
 # TTLs por defecto. El catálogo de artículos cambia poco (alta de artículos
 # nuevos), así que tolera una ventana amplia. Stock y partidas mandan la
@@ -187,6 +192,29 @@ def article_catalog(client: Any, company_key: Any = None, *, force_refresh: bool
     )
 
 
+def article_descriptions(client: Any, article_codes: Any, company_key: Any = None) -> dict[str, str]:
+    """Descripciones del maestro de Bejerman para esos códigos, del catálogo cacheado.
+
+    Es el dato con el que se imprimen los renglones del remito (ver
+    `build_article_description_map`). **Nunca levanta**: si el catálogo no se puede
+    bajar se devuelve vacío y cada renglón se queda con el texto que tenía, que es lo
+    que se venía imprimiendo; un problema de red no puede frenar una emisión.
+    """
+
+    codes = [code for code in (article_codes or []) if str(code or "").strip()]
+    if not codes:
+        return {}
+    try:
+        return build_article_description_map(article_response(client, company_key), codes)
+    except Exception:
+        logger.warning(
+            "bejerman_article_descriptions_unavailable",
+            extra={"company_key": str(_client_company(client, company_key))},
+            exc_info=True,
+        )
+        return {}
+
+
 def article_catalog_if_cached(company_key: Any) -> ArticleCatalog | None:
     """El catálogo sólo si ya está en memoria y vigente; nunca sale a la red.
 
@@ -201,14 +229,52 @@ def article_catalog_if_cached(company_key: Any) -> ArticleCatalog | None:
     return value if hit else None
 
 
-def partida_rows(client: Any, company_key: Any = None, *, force_refresh: bool = False) -> list[dict[str, Any]]:
-    """Todas las partidas de la empresa, ya mapeadas."""
+class PartidaCatalog:
+    """Volcado de partidas más su índice de búsqueda, precalculado.
+
+    El índice se arma junto con la descarga y no bajo demanda para que ambos
+    salgan siempre de la misma entrada de cache: cachearlos por separado los
+    dejaría vencer en momentos distintos y duplicaría las descargas."""
+
+    __slots__ = ("rows", "index")
+
+    def __init__(self, rows: list[dict[str, Any]]):
+        self.rows = rows
+        self.index = PartidaIndex(rows)
+
+
+def _partida_catalog(client: Any, company_key: Any = None, *, force_refresh: bool = False) -> PartidaCatalog:
     return _partidas_cache.get_or_set(
         _client_company(client, company_key),
         _ttl("BEJERMAN_PARTIDAS_CACHE_SECONDS", DEFAULT_PARTIDAS_TTL),
-        lambda: build_partida_rows(client.obtener_partidas()),
+        lambda: PartidaCatalog(build_partida_rows(client.obtener_partidas())),
         force_refresh=force_refresh,
     )
+
+
+def partida_rows(client: Any, company_key: Any = None, *, force_refresh: bool = False) -> list[dict[str, Any]]:
+    """Todas las partidas de la empresa, ya mapeadas."""
+    return _partida_catalog(client, company_key, force_refresh=force_refresh).rows
+
+
+def partida_index(client: Any, company_key: Any = None, *, force_refresh: bool = False) -> PartidaIndex:
+    """Las mismas partidas, indexadas por depósito y número de partida."""
+    return _partida_catalog(client, company_key, force_refresh=force_refresh).index
+
+
+def partida_index_if_cached(company_key: Any) -> PartidaIndex | None:
+    """Índice de partidas vigente, sin iniciar una consulta remota.
+
+    La selección interactiva de partidas necesita primero saber qué stock hay.
+    La fecha de vencimiento es enriquecimiento opcional: si la caché de partidas
+    está fría, descargar toda la tabla para completarla no debe demorar ni
+    bloquear esa consulta.
+    """
+    hit, catalog = _partidas_cache._fresh(  # noqa: SLF001 - mismo módulo
+        _company(company_key),
+        _ttl("BEJERMAN_PARTIDAS_CACHE_SECONDS", DEFAULT_PARTIDAS_TTL),
+    )
+    return catalog.index if hit else None
 
 
 def stock_rows(client: Any, company_key: Any, deposit_code: Any, *, force_refresh: bool = False) -> list[dict[str, Any]]:

@@ -44,6 +44,14 @@ from .warranty import compute_warranty_from_sale_date
 
 SALE_ITEM_TABLE = "bejerman_sale_items"
 
+# La cache guarda comprobantes de venta de varios tipos y no todos dicen lo mismo sobre
+# la garantia: solo la factura fija una fecha de venta real. El remito prueba que el
+# equipo salio del deposito, que es lo unico que queda cuando la venta al cliente final
+# la facturo la otra empresa sin cargar la partida. Se consultan por separado para que
+# el lookup de venta nunca devuelva un remito por accidente.
+WARRANTY_INVOICE_TYPES_DEFAULT = "FC,FCF,FCC,FCE"
+WARRANTY_REMITO_TYPES_DEFAULT = "RT"
+
 CUSTOMER_CUIT_ALIASES = (
     "Cliente_NroDocumento",
     "Cliente_CUIT",
@@ -133,10 +141,24 @@ def _table_exists(table_name: str) -> bool:
         return False
 
 
-def _cached_comprobante_ids(company_key: str, comprobante_ids: list[str]) -> set[str]:
+def _cached_comprobante_ids(
+    company_key: str,
+    comprobante_ids: list[str],
+    *,
+    document_type: str = "",
+) -> set[str]:
     ids = sorted({as_string(value) for value in comprobante_ids if as_string(value)})
     if not ids or not _table_exists(SALE_ITEM_TABLE):
         return set()
+    # El id de comprobante del SDK y el `scv_ID` del SQL directo son numeraciones
+    # distintas que se pisan (la FC A 00002-00007340 es 7230 para el SDK y 10919 en la
+    # base). Sin acotar por tipo, un remito cacheado podria hacer que el sync del SDK
+    # saltee una factura real que todavia no bajo.
+    type_filter = ""
+    extra: list[Any] = []
+    if clean(document_type):
+        type_filter = "   AND UPPER(COALESCE(document_type, '')) = UPPER(%s)\n"
+        extra.append(clean(document_type))
     cached: set[str] = set()
     for offset in range(0, len(ids), 500):
         batch = ids[offset : offset + 500]
@@ -148,8 +170,8 @@ def _cached_comprobante_ids(company_key: str, comprobante_ids: list[str]) -> set
                   FROM {SALE_ITEM_TABLE}
                  WHERE UPPER(company_key) = UPPER(%s)
                    AND comprobante_id IN ({placeholders})
-                """,
-                [company_key, *batch],
+                {type_filter}""",
+                [company_key, *batch, *extra],
             )
             cached.update(as_string(row[0]) for row in cur.fetchall() if as_string(row[0]))
     return cached
@@ -389,15 +411,26 @@ def sale_payload_from_row(row: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def find_latest_sale_by_serial(serial: str, *, company_key: str | None = None) -> dict[str, Any]:
-    normalized = normalize_serial_for_lookup(serial)
-    if not normalized:
-        return {"found": False, "source": "bejerman_sale_cache", "serial": serial, "normalizedSerial": normalized}
-    if not _table_exists(SALE_ITEM_TABLE):
-        return {"found": False, "source": "bejerman_sale_cache", "serial": serial, "normalizedSerial": normalized}
+def _document_types(setting_name: str, default: str) -> list[str]:
+    raw = as_string(_setting(setting_name, default)) or default
+    return [item.strip().upper() for item in raw.split(",") if item.strip()]
 
-    where = ["normalized_serial = %s"]
-    params: list[Any] = [normalized]
+
+def _find_latest_cached_item(
+    serial: str,
+    *,
+    company_key: str | None,
+    types: list[str],
+    source: str,
+) -> dict[str, Any]:
+    normalized = normalize_serial_for_lookup(serial)
+    empty = {"found": False, "source": source, "serial": serial, "normalizedSerial": normalized}
+    if not normalized or not types or not _table_exists(SALE_ITEM_TABLE):
+        return empty
+
+    type_placeholders = ",".join(["%s"] * len(types))
+    where = ["normalized_serial = %s", f"UPPER(COALESCE(document_type, '')) IN ({type_placeholders})"]
+    params: list[Any] = [normalized, *types]
     if clean(company_key):
         where.append("UPPER(company_key) = UPPER(%s)")
         params.append(clean(company_key))
@@ -419,14 +452,52 @@ def find_latest_sale_by_serial(serial: str, *, company_key: str | None = None) -
         )
         row = cur.fetchone()
         if not row:
-            return {
-                "found": False,
-                "source": "bejerman_sale_cache",
-                "serial": serial,
-                "normalizedSerial": normalized,
-            }
+            return empty
         names = [col[0] for col in cur.description]
-    return sale_payload_from_row(dict(zip(names, row)))
+    payload = sale_payload_from_row(dict(zip(names, row)))
+    payload["source"] = source
+    return payload
+
+
+def find_latest_sale_by_serial(serial: str, *, company_key: str | None = None) -> dict[str, Any]:
+    """Ultima factura que cita la partida: la unica fecha de venta real."""
+    return _find_latest_cached_item(
+        serial,
+        company_key=company_key,
+        types=_document_types("BEJERMAN_WARRANTY_INVOICE_TYPES", WARRANTY_INVOICE_TYPES_DEFAULT),
+        source="bejerman_sale_cache",
+    )
+
+
+def find_latest_remito_by_serial(serial: str, *, company_key: str | None = None) -> dict[str, Any]:
+    """Ultimo remito de salida que cita la partida.
+
+    Es el respaldo para el equipo que nunca se facturo con la partida cargada: salio del
+    deposito por remito (tipico del circuito SEPID -> MG BIO -> cliente final, donde la
+    factura al cliente la emite la otra empresa y no menciona la serie). La fecha que
+    devuelve es la de **salida del deposito**, no la de venta, asi que siempre se muestra
+    como estimada; ver `_compute_factory_warranty_from_bejerman_sale`.
+    """
+    return _find_latest_cached_item(
+        serial,
+        company_key=company_key,
+        types=_document_types("BEJERMAN_WARRANTY_REMITO_TYPES", WARRANTY_REMITO_TYPES_DEFAULT),
+        source="bejerman_remito_cache",
+    )
+
+
+def find_latest_sale_by_serial_any_company(serial: str, *, preferred_company_key: str | None = None) -> dict[str, Any]:
+    """Busca la venta en la empresa preferida y, si no aparece, en todas las demás.
+
+    El grupo vende el mismo equipo por SEPID o por MG BIO indistintamente (incluso
+    SEPID -> MG BIO -> cliente final), así que restringir la búsqueda a una sola
+    empresa deja ventas reales sin encontrar.
+    """
+    if clean(preferred_company_key):
+        scoped = find_latest_sale_by_serial(serial, company_key=preferred_company_key)
+        if scoped.get("found"):
+            return scoped
+    return find_latest_sale_by_serial(serial)
 
 
 def lookup_and_cache_sale_by_serial(client: BejermanSDKClient, serial: str) -> dict[str, Any]:
@@ -815,6 +886,7 @@ def sync_bejerman_sale_items(
             cached_ids = _cached_comprobante_ids(
                 company_key,
                 [comprobante_id_of(header) for header in headers],
+                document_type=tipo,
             )
             for header in headers:
                 detail_id = comprobante_id_of(header)

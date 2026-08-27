@@ -16,6 +16,7 @@ import {
   getMarcasPorTipo,
   getVariantesPorModelo,
   lookupScan,
+  bejermanLookupErrorMessage,
   getBejermanIngressCompanies,
   postRisPreflight,
   postRisPreflightCustomerFix,
@@ -24,12 +25,16 @@ import {
   postBejermanPdfQueueRetry,
   getSerialBarcodeBlob,
 } from "@/lib/api";
-import { isPendingPdfError, openPdfBlob } from "@/lib/pdf";
+import { isPendingPdfError, openPdfBlob, PDF_REPRINT_STEPS } from "@/lib/pdf";
 import { MOTIVO } from "@/lib/constants";
+import { findDuplicateEquipmentIndex, findStagedEquipmentIndex } from "@/lib/ingreso-equipos";
 import {
   openRisPrintablePdf,
+  openReservedRisPrintablePdf,
+  reserveRisPrintWindow,
   risPrintUrlFor,
   risRemitoFrom,
+  risRemitoNumbersFrom,
   waitForRisPdfBlob,
 } from "@/lib/ris-print";
 import { useAuth } from "@/context/AuthContext";
@@ -171,6 +176,17 @@ function hasDocumentProfileMismatch(result) {
   return Array.isArray(result?.issues) && result.issues.some((issue) => issue?.code === "INGRESO_DOCUMENT_PROFILE_MISMATCH");
 }
 
+function remitoNumbersLabel(source) {
+  const numbers = risRemitoNumbersFrom(source);
+  return numbers.length > 1 ? numbers.join(" · ") : numbers[0] || "";
+}
+
+function remitoDocumentLabel(source) {
+  const numbers = risRemitoNumbersFrom(source);
+  if (numbers.length > 1) return `${numbers.length} remitos`;
+  return numbers[0] ? `Remito ${numbers[0]}` : "";
+}
+
 export default function NuevoIngreso() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -281,6 +297,12 @@ export default function NuevoIngreso() {
   const [accItems, setAccItems] = useState([]);
   const [batchItems, setBatchItems] = useState([]);
   const [editingBatchItemId, setEditingBatchItemId] = useState(null);
+  useEffect(() => {
+    batchItemsRef.current = batchItems;
+  }, [batchItems]);
+  useEffect(() => {
+    editingBatchItemIdRef.current = editingBatchItemId;
+  }, [editingBatchItemId]);
 
   // Propietario y técnico
   const [propietario, setPropietario] = useState(PROPIETARIO_VACIO);
@@ -320,15 +342,39 @@ export default function NuevoIngreso() {
   const [garRepError, setGarRepError] = useState(false);
   const [autofillBy, setAutofillBy] = useState("serie");
   const [lookupRequest, setLookupRequest] = useState({ nonce: 0, source: "serie", code: "" });
+  // Dos equipos con el mismo N/S (el CPAP y su calentador humidificador, que no trae serie
+  // propia). Antes el backend elegía uno en silencio y el formulario se llenaba con el
+  // equipo equivocado; ahora se pregunta.
+  const [deviceChoice, setDeviceChoice] = useState({
+    open: false,
+    candidates: [],
+    code: "",
+    source: "serie",
+    reason: "ambiguous",
+    stagedIndex: -1,
+  });
   const [mgLookup, setMgLookup] = useState({ loading: false, notFound: false, checkedNs: "" });
   const [mgInactiveInfo, setMgInactiveInfo] = useState(null);
   const [nsAutofillInfo, setNsAutofillInfo] = useState("");
   const [nsAutofillClienteWarning, setNsAutofillClienteWarning] = useState("");
+  // Aviso de "esto es otro equipo con el mismo número": qué equipo tenía la base con ese
+  // número y qué le queda por completar al operador.
+  const [otroEquipoMismoNs, setOtroEquipoMismoNs] = useState(null);
   const mgLookupSeqRef = useRef(0);
   const lookupRequestSeqRef = useRef(0);
   const nsAutofillSnapshotRef = useRef(null);
   const nsAutoDesiredBrandRef = useRef(null);
   const nsAutoDesiredModelRef = useRef(null);
+  // El último código ya resuelto y el código para el que el operador declaró carga manual.
+  // Sin esto, cada vez que el foco pasaba por el campo de N/S se repetía la búsqueda y el
+  // autocompletado volvía a pisar lo que el operador acababa de corregir: era imposible
+  // cargar el humidificador que comparte serie con su CPAP.
+  const lastLookupRef = useRef({ key: "" });
+  const manualEntryRef = useRef({ key: "" });
+  // La lista de equipos ya cargados y el renglón en edición se leen dentro del efecto de
+  // lookup, que no puede depender de ellos (cambiarlos volvería a disparar la búsqueda).
+  const batchItemsRef = useRef([]);
+  const editingBatchItemIdRef = useRef(null);
   const [expandedSections, setExpandedSections] = useState({
     cliente: false,
     equipo: false,
@@ -494,6 +540,16 @@ export default function NuevoIngreso() {
 
   const isInternalLookupReady = (value) => /^(MG|NM|NV|CE)\s*\d{4}$/i.test(String(value || "").trim());
 
+  // Clave con la que se recuerda una búsqueda: el mismo número escrito con o sin espacios y
+  // guiones es el mismo número.
+  const lookupKey = (source, code) =>
+    `${source}|${String(code || "").replace(/[\s-]/g, "").toUpperCase()}`;
+
+  const forgetLookupMemory = () => {
+    lastLookupRef.current = { key: "" };
+    manualEntryRef.current = { key: "" };
+  };
+
   const clearNsAutofillFields = () => {
     const snap = nsAutofillSnapshotRef.current;
     if (!snap) {
@@ -551,13 +607,15 @@ export default function NuevoIngreso() {
     setEsEquipoPropioMg(false);
   };
 
-  const triggerLookupRequest = (source, rawValue) => {
+  const triggerLookupRequest = (source, rawValue, { force = false } = {}) => {
     if (source !== autofillBy) return;
     const code = String(rawValue || "").trim();
     if (!code) {
       setMgLookup({ loading: false, notFound: false, checkedNs: "" });
       setMgInactiveInfo(null);
       clearNsAutofillFields();
+      setOtroEquipoMismoNs(null);
+      forgetLookupMemory();
       return;
     }
     if (source === "interno" && !isInternalLookupReady(code)) {
@@ -565,6 +623,16 @@ export default function NuevoIngreso() {
       setMgInactiveInfo(null);
       return;
     }
+    const key = lookupKey(source, code);
+    if (!force) {
+      // El operador ya dijo que éste es otro equipo con el mismo número (el humidificador del
+      // CPAP): traer de nuevo el equipo de la base sería pisarle todo lo que cargó a mano.
+      if (manualEntryRef.current.key === key) return;
+      // Mismo número que la última búsqueda: el campo pierde el foco muchas veces mientras se
+      // completa el resto de la pantalla, y repetir la búsqueda revierte lo editado.
+      if (lastLookupRef.current.key === key) return;
+    }
+    lastLookupRef.current = { key };
     const nonce = ++lookupRequestSeqRef.current;
     setLookupRequest({
       nonce,
@@ -572,6 +640,127 @@ export default function NuevoIngreso() {
       code,
       company_key: (empresaBejerman || "SEPID").toUpperCase(),
     });
+  };
+
+  const closeDeviceChoice = () =>
+    setDeviceChoice({
+      open: false,
+      candidates: [],
+      code: "",
+      source: "serie",
+      reason: "ambiguous",
+      stagedIndex: -1,
+    });
+
+  const pickDeviceCandidate = (candidate) => {
+    if (!candidate?.id) return;
+    const { code, source } = deviceChoice;
+    closeDeviceChoice();
+    lastLookupRef.current = { key: lookupKey(source, code) };
+    manualEntryRef.current = { key: "" };
+    setOtroEquipoMismoNs(null);
+    const nonce = ++lookupRequestSeqRef.current;
+    // Se repite el lookup completo con el equipo elegido: así el autocompletado trae también
+    // su cliente, su ingreso en curso y su venta en Bejerman, no sólo marca y modelo.
+    setLookupRequest({
+      nonce,
+      source,
+      code,
+      company_key: (empresaBejerman || "SEPID").toUpperCase(),
+      device_id: candidate.id,
+    });
+  };
+
+  const cancelDeviceChoice = () => {
+    const { code, source } = deviceChoice;
+    closeDeviceChoice();
+    setMgLookup({ loading: false, notFound: false, checkedNs: "" });
+    // "Ninguno de estos": es un equipo que la base todavía no conoce. Queda en carga manual
+    // para que el próximo blur del campo no vuelva a abrir el mismo modal.
+    declararOtroEquipoMismoNs({ source, code, equipoPrevio: describeDeviceChoice() });
+  };
+
+  const describeDeviceChoice = () => {
+    const candidates = deviceChoice.candidates || [];
+    if (candidates.length === 1) return describeDeviceCandidate(candidates[0]);
+    if (candidates.length > 1) return `${candidates.length} equipos ya cargados con ese número`;
+    return "";
+  };
+
+  const describeDeviceCandidate = (candidate) =>
+    [candidate?.tipo_equipo, candidate?.marca, candidate?.modelo, candidate?.variante]
+      .filter(Boolean)
+      .join(" - ");
+
+  /**
+   * "Es otro equipo con el mismo número": el CPAP ya está en la base y ahora entra su
+   * calentador humidificador, que no trae serie propia y se carga con la del CPAP.
+   *
+   * Se conservan el número y el cliente —son los mismos— y se borra todo lo que identifica al
+   * equipo anterior: tipo, marca, modelo, variante, técnico, número interno (el MG es de una
+   * sola máquina) y los estados de alquiler/propiedad, que también son de la otra. Y el
+   * autocompletado queda desactivado para ese número: si no, el próximo blur del campo volvía
+   * a traer el equipo de la base y no había manera de cargar el segundo.
+   */
+  const declararOtroEquipoMismoNs = ({ source, code, tipo = "", equipoPrevio = "" } = {}) => {
+    const lookupSource = source || autofillBy;
+    const rawCode = String(
+      code || (lookupSource === "interno" ? form.equipo.numero_interno : form.equipo.numero_serie) || ""
+    ).trim();
+    // Cortar cualquier búsqueda en vuelo: su respuesta llegaría después de limpiar y volvería
+    // a llenar los campos con el equipo que acabamos de descartar.
+    mgLookupSeqRef.current += 1;
+    lookupRequestSeqRef.current += 1;
+    setLookupRequest({ nonce: 0, source: lookupSource, code: "" });
+    manualEntryRef.current = { key: lookupKey(lookupSource, rawCode) };
+    lastLookupRef.current = { key: lookupKey(lookupSource, rawCode) };
+    closeDeviceChoice();
+
+    setForm((prev) => {
+      const next = clone(prev);
+      next.equipo.marca_id = "";
+      next.equipo.modelo_id = "";
+      next.equipo.garantia = false;
+      if (lookupSource === "interno") {
+        next.equipo.numero_serie = "";
+      } else {
+        next.equipo.numero_interno = "";
+      }
+      return next;
+    });
+    prefillSkipTipoResetRef.current = false;
+    setTipoSel(tipo || "");
+    setMarcaId(null);
+    setMarcaTxt("");
+    setModelos([]);
+    setVarianteTxt("");
+    setVarianteSugeridas([]);
+    setTecnicoId(null);
+    setMgLookup({ loading: false, notFound: false, checkedNs: "" });
+    setMgInactiveInfo(null);
+    setBejermanSuggestion(null);
+    setAppliedBejermanSale(null);
+    setEquipoAlquiladoOrigen(false);
+    setEsEquipoPropioMg(false);
+    nsAutofillSnapshotRef.current = null;
+    nsAutoDesiredBrandRef.current = null;
+    nsAutoDesiredModelRef.current = null;
+    setNsAutofillInfo("");
+    setNsAutofillClienteWarning("");
+    setOtroEquipoMismoNs({
+      code: rawCode,
+      source: lookupSource,
+      equipoPrevio,
+    });
+    expandSection("equipo");
+  };
+
+  const volverAlEquipoDeLaBase = () => {
+    const source = otroEquipoMismoNs?.source || autofillBy;
+    const code = otroEquipoMismoNs?.code || "";
+    setOtroEquipoMismoNs(null);
+    forgetLookupMemory();
+    if (code) triggerLookupRequest(source, code, { force: true });
   };
 
   const formatFechaIngreso = (val) => {
@@ -626,9 +815,11 @@ export default function NuevoIngreso() {
     setManualRemitoNumber("");
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
+    setOtroEquipoMismoNs(null);
     nsAutofillSnapshotRef.current = null;
     nsAutoDesiredBrandRef.current = null;
     nsAutoDesiredModelRef.current = null;
+    forgetLookupMemory();
     setEquipoAlquiladoOrigen(false);
     collapseDataSections();
   };
@@ -721,6 +912,17 @@ export default function NuevoIngreso() {
     } else if (prefill.numero_serie || prefill.numero_interno) {
       setNotice("Serie cargada desde lectura de código.");
     }
+
+    // El prefill que llega con equipo (del lector de códigos) ya es un equipo elegido: el
+    // primer blur del campo no tiene que salir a buscarlo de nuevo y reemplazarlo por el otro
+    // que comparte el número. El prefill que trae sólo la serie sí se busca, que es para lo
+    // que está.
+    const prefillCode = prefill.numero_serie || prefill.numero_interno || "";
+    if (prefillCode && (prefill.marca_id || prefill.model_id || prefill.tipo_equipo)) {
+      lastLookupRef.current = {
+        key: lookupKey(prefill.numero_serie ? "serie" : "interno", prefillCode),
+      };
+    }
   }, [location, searchParams]);
 
   useEffect(() => {
@@ -766,8 +968,48 @@ export default function NuevoIngreso() {
     (async () => {
       setMgLookup((s) => ({ ...s, loading: true, notFound: false, checkedNs: lookupCode }));
       try {
-        const res = await lookupScan(lookupCode, { company_key: lookupCompanyKey });
+        const res = await lookupScan(lookupCode, {
+          company_key: lookupCompanyKey,
+          device_id: lookupRequest.device_id || "",
+        });
         if (mgLookupSeqRef.current !== seq) return;
+
+        // Si el código responde a más de un equipo, no se adivina: se corta acá y se
+        // pregunta cuál. Autocompletar con el equivocado es peor que no autocompletar.
+        if (res?.ambiguous && Array.isArray(res?.device_candidates) && res.device_candidates.length > 1) {
+          setDeviceChoice({
+            open: true,
+            candidates: res.device_candidates,
+            code: lookupCode,
+            source: lookupRequest.source,
+            reason: "ambiguous",
+            stagedIndex: -1,
+          });
+          setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
+          return;
+        }
+
+        // El equipo que trae la base ya está en la lista de este remito: el operador está
+        // cargando el segundo equipo que comparte el número (el humidificador del CPAP que
+        // acaba de agregar). Autocompletar acá le llenaría la pantalla con el equipo que ya
+        // cargó, y el choque recién saltaría al querer agregarlo. Se pregunta antes.
+        if (res?.kind === "device" && res?.device) {
+          const stagedIndex = findStagedEquipmentIndex(batchItemsRef.current, res.device, {
+            skipItemId: editingBatchItemIdRef.current,
+          });
+          if (stagedIndex >= 0 && !lookupRequest.device_id) {
+            setDeviceChoice({
+              open: true,
+              candidates: res.device_candidates?.length ? res.device_candidates : [res.device],
+              code: lookupCode,
+              source: lookupRequest.source,
+              reason: "already_staged",
+              stagedIndex,
+            });
+            setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
+            return;
+          }
+        }
 
         if (res?.kind === "bejerman_sale" && res?.suggestion) {
           clearNsAutofillFields();
@@ -796,7 +1038,10 @@ export default function NuevoIngreso() {
           setAppliedBejermanSale(null);
           setNsAutofillInfo(
             res?.bejerman_lookup_error
-              ? `No se encontró el equipo local. Bejerman no pudo responder: ${res.bejerman_lookup_error}`
+              ? bejermanLookupErrorMessage(
+                  { message: res.bejerman_lookup_error },
+                  "No se encontró el equipo en NEXORA",
+                )
               : ""
           );
           setMgLookup({ loading: false, notFound: true, checkedNs: lookupCode });
@@ -806,6 +1051,7 @@ export default function NuevoIngreso() {
         const device = res.device || {};
         const ingreso = res.ingreso || {};
         const flags = res.flags || {};
+        setOtroEquipoMismoNs(null);
         setBejermanSuggestion(res?.bejerman_sale ? { ...res.bejerman_sale, existingDeviceContext: true } : null);
         setAppliedBejermanSale(null);
 
@@ -976,7 +1222,11 @@ export default function NuevoIngreso() {
         if (hasAutofillData) {
           expandAllSections();
         }
-        setNsAutofillInfo(hasAutofillData ? `Datos autocompletados desde Equipos por ${lookupLabel}. Puede editarlos.` : "");
+        setNsAutofillInfo(
+          hasAutofillData
+            ? `Datos autocompletados desde Equipos por ${lookupLabel}. Puede editarlos.`
+            : ""
+        );
         setNsAutofillClienteWarning(clienteWarning);
         setMgLookup({ loading: false, notFound: false, checkedNs: lookupCode });
       } catch {
@@ -1023,7 +1273,7 @@ export default function NuevoIngreso() {
       try {
         setGarRepLoading(true);
         setGarRepError(false);
-        const r = await checkGarantiaReparacion(ns, mg);
+        const r = await checkGarantiaReparacion(ns, mg, tipoEquipoActual());
         setForm((f) => ({ ...f, garantia_reparacion: !!r?.within_90_days }));
         setGarRepLoading(false);
       } catch {
@@ -1032,7 +1282,9 @@ export default function NuevoIngreso() {
       }
     }, 400);
     return () => clearTimeout(h);
-  }, [form.equipo.numero_serie, form.equipo.numero_interno]);
+    // El tipo entra en el chequeo: sin él, el humidificador hereda la garantía de reparación
+    // del CPAP con el que comparte la serie.
+  }, [form.equipo.numero_serie, form.equipo.numero_interno, form.equipo.modelo_id, tipoSel]);
 
   // Garantía de fábrica por N/S (debounce 400ms)
   useEffect(() => {
@@ -1056,6 +1308,9 @@ export default function NuevoIngreso() {
           setForm((f) => ({ ...f, equipo: { ...f.equipo, garantia: false } }));
           return;
         }
+        // Con fecha estimada (sale de un remito, no de una factura) la casilla no se
+        // marca sola: la garantía la decide quien recibe el equipo, no una inferencia.
+        if (r?.estimated === true) return;
         const enGarantia = r.within_365_days;
         setForm((f) => ({ ...f, equipo: { ...f.equipo, garantia: enGarantia } }));
       } catch {
@@ -1258,7 +1513,16 @@ export default function NuevoIngreso() {
     });
   };
 
+  // Si el número cambia, el aviso de "otro equipo con el mismo número" deja de aplicar: es
+  // otro número y el autocompletado tiene que volver a funcionar normalmente.
+  const forgetOtroEquipoIfCodeChanged = (source, value) => {
+    if (!otroEquipoMismoNs) return;
+    if (manualEntryRef.current.key === lookupKey(source, value)) return;
+    setOtroEquipoMismoNs(null);
+  };
+
   const onNumeroSerieChange = (e) => {
+    forgetOtroEquipoIfCodeChanged("serie", e.target.value);
     setMgLookup((s) => (s.notFound || s.loading ? { ...s, notFound: false, loading: false } : s));
     setBejermanSuggestion(null);
     setAppliedBejermanSale(null);
@@ -1268,6 +1532,7 @@ export default function NuevoIngreso() {
   };
 
   const onNumeroInternoChange = (e) => {
+    forgetOtroEquipoIfCodeChanged("interno", e.target.value);
     setMgInactiveInfo(null);
     setMgLookup((s) => (s.notFound ? { ...s, notFound: false } : s));
     setAppliedBejermanSale(null);
@@ -1284,6 +1549,38 @@ export default function NuevoIngreso() {
     if (e.key !== "Enter") return;
     e.preventDefault();
     triggerLookupRequest(source, e.currentTarget.value);
+  };
+
+  // Cambiar el tipo sobre datos autocompletados sólo puede significar una cosa: el equipo que
+  // el operador tiene enfrente no es el que la base tiene con ese número. Antes esto no se
+  // podía hacer: quedaba pendiente el modelo del equipo autocompletado y volvía a aplicarse
+  // solo en cuanto se elegía la marca, así que el CPAP se recargaba una y otra vez.
+  const onTipoSelChange = (value) => {
+    const next = value || "";
+    if (next === tipoSel) return;
+    if (nsAutofillSnapshotRef.current && next) {
+      declararOtroEquipoMismoNs({ tipo: next, equipoPrevio: equipoDescripcionActual() });
+      return;
+    }
+    nsAutoDesiredBrandRef.current = null;
+    nsAutoDesiredModelRef.current = null;
+    setTipoSel(next);
+  };
+
+  // El tipo con el que este equipo va a quedar identificado. El backend lo toma del modelo
+  // elegido —es el que estampa en el equipo y el que entra en el índice único junto al N/S—,
+  // así que acá se usa el mismo y el selector queda sólo como respaldo para los modelos del
+  // catálogo que todavía no tienen tipo cargado.
+  const tipoEquipoActual = () => {
+    const modelo = (modelos || []).find((m) => String(m.id) === String(form.equipo.modelo_id));
+    return String(modelo?.tipo_equipo || tipoSel || "").trim();
+  };
+
+  // Cómo se lee el equipo que está cargado en la pantalla. Sirve para el renglón de la lista
+  // y para poder decirle al operador de qué equipo se limpiaron los datos.
+  const equipoDescripcionActual = () => {
+    const modelo = (modelos || []).find((m) => String(m.id) === String(form.equipo.modelo_id));
+    return [tipoSel, marcaTxt, modelo?.nombre, varianteTxt].filter(Boolean).join(" - ");
   };
 
   function onMarcaInput(val) {
@@ -1527,6 +1824,11 @@ export default function NuevoIngreso() {
         numero_serie: (form.equipo.numero_serie || "").trim(),
         garantia: !!form.equipo.garantia,
         numero_interno: (form.equipo.numero_interno || "").trim(),
+        tipo_equipo: tipoEquipoActual(),
+        // El operador declaró que este equipo comparte el número con otro que ya está en la
+        // base (el humidificador que entra con la serie del CPAP): que el backend cree uno
+        // nuevo en vez de adoptar el que ya existe con ese número.
+        ...(otroEquipoMismoNs ? { otro_equipo_mismo_ns: true } : {}),
       },
       equipo_variante: (varianteTxt || "").trim() || null,
       motivo: form.motivo,
@@ -1650,13 +1952,12 @@ export default function NuevoIngreso() {
   };
 
   const currentEquipmentDisplay = () => {
-    const modelo = (modelos || []).find((m) => String(m.id) === String(form.equipo.modelo_id));
     const motivo = (motivos || []).find((m) => String(m.value) === String(form.motivo));
     const serial = (form.equipo.numero_serie || "").trim();
     const interno = (form.equipo.numero_interno || "").trim();
     return {
       serial: serial || interno || "Sin identificador",
-      equipo: [tipoSel, marcaTxt, modelo?.nombre, varianteTxt].filter(Boolean).join(" - ") || "Equipo",
+      equipo: equipoDescripcionActual() || "Equipo",
       motivo: motivo?.label || form.motivo || "-",
       accesorios: accItems.map((it) => it.accesorio_nombre + (it.referencia ? ` (ref: ${it.referencia})` : "")),
     };
@@ -1670,6 +1971,8 @@ export default function NuevoIngreso() {
     setModelos([]);
     setVarianteSugeridas([]);
     setLookupRequest({ nonce: 0, source: autofillBy, code: "" });
+    closeDeviceChoice();
+    forgetLookupMemory();
     setForm((prev) => ({
       ...prev,
       etiq_garantia_ok: false,
@@ -1690,6 +1993,7 @@ export default function NuevoIngreso() {
     setAppliedBejermanSale(null);
     setNsAutofillInfo("");
     setNsAutofillClienteWarning("");
+    setOtroEquipoMismoNs(null);
     nsAutofillSnapshotRef.current = null;
     nsAutoDesiredBrandRef.current = null;
     nsAutoDesiredModelRef.current = null;
@@ -1768,8 +2072,24 @@ export default function NuevoIngreso() {
         tecnicoId,
         bejermanSuggestion,
         appliedBejermanSale,
+        otroEquipoMismoNs,
       },
     };
+    // Éste es el chequeo que evita cargar dos veces el mismo equipo, que era lo que el
+    // control de "ingreso abierto" intentaba cubrir desde el backend y terminaba frenando
+    // remitos enteros. Acá es barato, inmediato y dice exactamente cuál choca con cuál.
+    const clashIndex = findDuplicateEquipmentIndex(batchItems, nextItem);
+    if (clashIndex >= 0) {
+      const clash = batchItems[clashIndex];
+      const error =
+        `Este equipo ya está en la lista como #${clashIndex + 1} ` +
+        `(${clash.display?.equipo || "equipo"} - ${clash.display?.serial || "sin identificador"}). ` +
+        "Si son dos equipos distintos, revise el tipo de equipo o el número de serie.";
+      setErr(error);
+      expandSection("equipo");
+      return { ok: false, error, items: batchItems, preflight: null };
+    }
+
     const nextItems = editingItem
       ? batchItems.map((item) => (item.id === editingItem.id ? nextItem : item))
       : [...batchItems, nextItem];
@@ -1827,6 +2147,17 @@ export default function NuevoIngreso() {
     const item = batchItems.find((entry) => entry.id === itemId);
     if (!item) return;
     const editor = item.editor || {};
+    const editorEquipo = editor.form?.equipo || {};
+    const editorMarcaId = toIntOrNull(editor.marcaId ?? editorEquipo.marca_id);
+    const editorModeloId = toIntOrNull(editorEquipo.modelo_id);
+    const editorTipoSel = editor.tipoSel || "";
+    // Reponer el equipo dispara los efectos de "cambio de tipo" y "cambio de
+    // marca", que limpian marca y modelo recien restaurados. Se reusa el mismo
+    // mecanismo del prefill: saltear el reset por tipo y dejar anotado el modelo
+    // deseado para reaplicarlo cuando termine de cargar la lista de modelos.
+    if (editorTipoSel !== tipoSel) prefillSkipTipoResetRef.current = true;
+    nsAutoDesiredBrandRef.current = editorMarcaId;
+    nsAutoDesiredModelRef.current = editorModeloId;
     setForm((prev) => ({
       ...prev,
       ...(editor.form || {}),
@@ -1835,8 +2166,8 @@ export default function NuevoIngreso() {
       fecha_ingreso: prev.fecha_ingreso,
     }));
     setMarcaTxt(editor.marcaTxt || "");
-    setMarcaId(editor.marcaId || null);
-    setTipoSel(editor.tipoSel || "");
+    setMarcaId(editorMarcaId);
+    setTipoSel(editorTipoSel);
     setVarianteTxt(editor.varianteTxt || "");
     setAccItems((editor.accItems || []).map((it) => ({ ...it })));
     setTecnicoId(editor.tecnicoId || null);
@@ -1844,6 +2175,18 @@ export default function NuevoIngreso() {
     setAppliedBejermanSale(editor.appliedBejermanSale || null);
     setEquipoAlquiladoOrigen(!!editor.equipoAlquiladoOrigen);
     setEsEquipoPropioMg(!!editor.esEquipoPropioMg);
+    // Si este renglón se cargó como "otro equipo con el mismo número", el autocompletado
+    // tiene que seguir apagado mientras se lo edita: volver a traer el equipo de la base le
+    // pisaría los datos apenas el foco pase por el campo del número.
+    setOtroEquipoMismoNs(editor.otroEquipoMismoNs || null);
+    if (editor.otroEquipoMismoNs?.code) {
+      const key = lookupKey(
+        editor.otroEquipoMismoNs.source || autofillBy,
+        editor.otroEquipoMismoNs.code
+      );
+      manualEntryRef.current = { key };
+      lastLookupRef.current = { key };
+    }
     setEditingBatchItemId(itemId);
     setRisPreflight(null);
     setRisPreflightError("");
@@ -1880,24 +2223,42 @@ export default function NuevoIngreso() {
 
   const retryPendingPdf = async () => {
     if (!pendingPdfRetry || pdfRetryBusy) return;
-    const { documentKey, ingresoId, source, remito } = pendingPdfRetry;
+    const { documentKey, ingresoId, source, remito, remitoNumbers = [] } = pendingPdfRetry;
+    const documentLabel = remitoNumbers.length > 1 ? `${remitoNumbers.length} remitos` : remito ? `Remito ${remito}` : "";
+    const reservedPrintWindow = reserveRisPrintWindow({
+      title: "Remito - NEXORA",
+      heading: "Reintentando el PDF del remito",
+      message: "NEXORA está volviendo a pedir el PDF",
+      detail: "El remito ya está emitido en Bejerman; sólo falta el archivo para imprimir.",
+      steps: PDF_REPRINT_STEPS,
+    });
+    let printWindowUsed = false;
     setPdfRetryBusy(true);
     setErr("");
     try {
       if (documentKey) await postBejermanPdfQueueRetry(documentKey);
-      const controller = beginPdfWait(remito);
+      const controller = beginPdfWait(documentLabel || remito);
       setLoading(true);
       setSubmitStage("Reintentando el PDF del remito...");
+      reservedPrintWindow.update({ step: "pdf", documentLabel });
       const blob = await waitForRisPdfBlob(ingresoId, source || {}, {
         signal: controller.signal,
+        reservedWindow: reservedPrintWindow,
         onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
       });
-      const opened = openRisPrintablePdf(blob, source || {}).opened;
+      const opened = openReservedRisPrintablePdf(reservedPrintWindow, blob, source || {}).opened;
+      printWindowUsed = opened;
       if (opened) {
         setPendingPdfRetry(null);
-        setNotice(remito ? `Remito ${remito} listo para imprimir.` : "Remito listo para imprimir.");
+        setNotice(
+          remitoNumbers.length > 1
+            ? `${remitoNumbers.length} remitos listos para imprimir.`
+            : remito
+              ? `Remito ${remito} listo para imprimir.`
+              : "Remito listo para imprimir.",
+        );
       } else {
-        setManualRisPrint({ blob, source: source || {}, remito });
+        setManualRisPrint({ blob, source: source || {}, remito, remitoNumbers });
         setPendingPdfRetry(null);
         setNotice("El PDF está listo, pero el navegador bloqueó la ventana. Use Abrir e imprimir.");
       }
@@ -1908,6 +2269,7 @@ export default function NuevoIngreso() {
           : `No se pudo obtener el PDF: ${error?.message || "error desconocido"}.`,
       );
     } finally {
+      if (!printWindowUsed) reservedPrintWindow.close();
       endPdfWait();
       setLoading(false);
       setSubmitStage("");
@@ -1919,11 +2281,13 @@ export default function NuevoIngreso() {
     if (!isPendingPdfError(error)) {
       return `No se pudo abrir el PDF del remito: ${error?.message || "error desconocido"}. Se puede reimprimir desde la hoja de servicio.`;
     }
+    const remitoNumbers = risRemitoNumbersFrom(source || {});
     setPendingPdfRetry({
       documentKey: error?.documentKey || "",
       ingresoId: ingresoId || null,
       source: source || null,
       remito: risRemitoFrom(source || {}),
+      remitoNumbers,
     });
     return `${error?.message || "Bejerman todavía no devolvió el PDF."} El remito ya quedó registrado.`;
   };
@@ -1985,33 +2349,68 @@ export default function NuevoIngreso() {
       return;
     }
 
+    // Se reserva antes de cualquier espera (preflight incluido), todavía dentro
+    // del gesto de emitir. Así el navegador no bloquea la impresión final.
+    const reservedPrintWindow = isRegisterMode
+      ? null
+      : reserveRisPrintWindow({
+          title: "Remito - NEXORA",
+          heading: "Emitiendo el remito de ingreso",
+          message: "Creando el ingreso en NEXORA",
+          detail: "Esta pestaña abre la impresión del remito cuando el PDF esté listo.",
+        });
+    // El modal de progreso y la pestaña de impresión van sincronizados: el
+    // operador mira una o la otra según dónde tenga el foco.
+    const avisarEtapa = (status, patch = {}) => {
+      setSubmitStage(status);
+      reservedPrintWindow?.update({ status, ...patch });
+    };
+    let printWindowUsed = false;
+
     let effectiveBatchItems = batchItems;
-    if (hasDraft) {
-      setSubmitStage("Agregando equipo pendiente...");
-      const staged = await stageCurrentEquipment({
-        silent: true,
-        commitOnPreflightIssues: false,
-        successNotice: null,
+    try {
+      if (hasDraft) {
+        avisarEtapa("Agregando equipo pendiente...", {
+          step: "emit",
+          detail: "NEXORA está sumando el equipo cargado a la lista antes de emitir.",
+        });
+        const staged = await stageCurrentEquipment({
+          silent: true,
+          commitOnPreflightIssues: false,
+          successNotice: null,
+        });
+        if (!staged.ok) {
+          reservedPrintWindow?.close();
+          setLoading(false);
+          setSubmitStage("");
+          return;
+        }
+        effectiveBatchItems = staged.items;
+      }
+      if (!effectiveBatchItems.length) {
+        reservedPrintWindow?.close();
+        setLoading(false);
+        setSubmitStage("");
+        setErr(isRegisterMode ? "Agregue el equipo a la lista antes de registrar el remito." : "Agregue el equipo a la lista antes de emitir el remito.");
+        return;
+      }
+
+      avisarEtapa("Validando remito...", {
+        step: "emit",
+        detail: "NEXORA está revisando cliente, artículos y partidas antes de emitir.",
       });
-      if (!staged.ok) {
+      const preflight = await runRisPreflight({ silent: true, items: effectiveBatchItems });
+      if (!preflight?.can_emit) {
+        reservedPrintWindow?.close();
         setLoading(false);
         setSubmitStage("");
         return;
       }
-      effectiveBatchItems = staged.items;
-    }
-    if (!effectiveBatchItems.length) {
+    } catch (preflightError) {
+      reservedPrintWindow?.close();
       setLoading(false);
       setSubmitStage("");
-      setErr(isRegisterMode ? "Agregue el equipo a la lista antes de registrar el remito." : "Agregue el equipo a la lista antes de emitir el remito.");
-      return;
-    }
-
-    setSubmitStage("Validando remito...");
-    const preflight = await runRisPreflight({ silent: true, items: effectiveBatchItems });
-    if (!preflight?.can_emit) {
-      setLoading(false);
-      setSubmitStage("");
+      setErr(preflightError?.message || "No se pudo validar el remito antes de emitirlo.");
       return;
     }
 
@@ -2029,11 +2428,17 @@ export default function NuevoIngreso() {
           items: effectiveBatchItems.map((item) => item.payload),
         };
         const risProgressStartedAt = Date.now();
-        setSubmitStage(isRegisterMode ? "Creando ingresos y registrando remito..." : "Creando ingresos...");
+        avisarEtapa(isRegisterMode ? "Creando ingresos y registrando remito..." : "Creando ingresos...", {
+          step: "emit",
+          detail: "NEXORA está creando los ingresos y emitiendo el remito en Bejerman.",
+        });
         await waitForRisProgressPaint();
         const r = await postNuevoIngresoLote(lotePayload);
-        setSubmitStage(isRegisterMode ? "Registrando remito..." : "Preparando PDF...");
+        avisarEtapa(isRegisterMode ? "Registrando remito..." : "Preparando PDF...", { step: "pdf" });
         const remito = risRemitoFrom(r);
+        const remitoNumbers = risRemitoNumbersFrom(r);
+        const remitoLabel = remitoNumbersLabel(r);
+        const documentLabel = remitoDocumentLabel(r);
         const responseMode = r?.document_mode || r?.ris?.document_mode || risMode;
         const isRegisteredResponse = responseMode === "register";
         const count = Array.isArray(r?.ingresos) ? r.ingresos.length : effectiveBatchItems.length;
@@ -2045,23 +2450,30 @@ export default function NuevoIngreso() {
                 : r?.detail || `Ingresos creados y remito registrado en Bejerman para ${count} ${count === 1 ? "equipo" : "equipos"}.`
             )
           : (
-              remito
-                ? `Ingresos creados y remito ${remito} emitido para ${count} ${count === 1 ? "equipo" : "equipos"}.`
+              remitoNumbers.length > 1
+                ? `Ingresos creados y ${remitoNumbers.length} remitos emitidos para ${count} equipos: ${remitoLabel}.`
+                : remito
+                  ? `Ingresos creados y remito ${remito} emitido para ${count} ${count === 1 ? "equipo" : "equipos"}.`
                 : r?.detail || `Ingresos creados para ${count} ${count === 1 ? "equipo" : "equipos"}. Remito pendiente de reintento.`
             );
-        if (!isRegisteredResponse && remito && firstIngresoId) {
-          const controller = beginPdfWait(remito);
+        if (!isRegisteredResponse && remitoNumbers.length > 0 && firstIngresoId) {
+          const controller = beginPdfWait(remitoLabel);
+          reservedPrintWindow?.update({ step: "pdf", documentLabel });
           try {
             const blob = await waitForRisPdfBlob(firstIngresoId, r, {
               signal: controller.signal,
+              reservedWindow: reservedPrintWindow,
               onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
             });
-            setSubmitStage("Abriendo impresión...");
-            const opened = openRisPrintablePdf(blob, r).opened;
+            avisarEtapa("Abriendo impresión...", { step: "print", state: "ready" });
+            const opened = reservedPrintWindow
+              ? openReservedRisPrintablePdf(reservedPrintWindow, blob, r).opened
+              : openRisPrintablePdf(blob, r).opened;
+            printWindowUsed = opened;
             if (opened) {
-              risNotice += " PDF listo para imprimir.";
+              risNotice += remitoNumbers.length > 1 ? " PDF conjunto listo para imprimir." : " PDF listo para imprimir.";
             } else {
-              setManualRisPrint({ blob, source: r, remito });
+              setManualRisPrint({ blob, source: r, remito, remitoNumbers });
               risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
             }
           } catch (pdfError) {
@@ -2077,6 +2489,8 @@ export default function NuevoIngreso() {
           ingresos: r?.ingresos || [],
           ingreso_ids: r?.ingreso_ids || [],
           remito_number: remito,
+          remito_numbers: remitoNumbers,
+          remitos: r?.remitos || [],
           document_mode: responseMode,
         });
         setNotice(risNotice);
@@ -2128,21 +2542,29 @@ export default function NuevoIngreso() {
         const risProgressStartedAt = Date.now();
         let risResult = null;
         try {
-          setSubmitStage("Emitiendo remito en Bejerman...");
+          avisarEtapa("Emitiendo remito en Bejerman...", {
+            step: "emit",
+            detail: "NEXORA está enviando el remito de ingreso a Bejerman.",
+          });
           await waitForRisProgressPaint();
           risResult = await postIngresoRisEmitir(r.ingreso_id);
-          setSubmitStage("Preparando PDF...");
+          avisarEtapa("Preparando PDF...", { step: "pdf" });
           const remito = risRemitoFrom(risResult);
           risNotice = remito
             ? `Ingreso creado y remito ${remito} emitido.`
             : "Ingreso creado y remito emitido.";
           const controller = beginPdfWait(remito);
+          reservedPrintWindow?.update({ step: "pdf", documentLabel: remito ? `Remito ${remito}` : "" });
           const blob = await waitForRisPdfBlob(r.ingreso_id, risResult, {
             signal: controller.signal,
+            reservedWindow: reservedPrintWindow,
             onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
           });
-          setSubmitStage("Abriendo impresión...");
-          const opened = openRisPrintablePdf(blob, risResult).opened;
+          avisarEtapa("Abriendo impresión...", { step: "print", state: "ready" });
+          const opened = reservedPrintWindow
+            ? openReservedRisPrintablePdf(reservedPrintWindow, blob, risResult).opened
+            : openRisPrintablePdf(blob, risResult).opened;
+          printWindowUsed = opened;
           if (opened) {
             risNotice += " PDF listo para imprimir.";
           } else {
@@ -2165,7 +2587,7 @@ export default function NuevoIngreso() {
     } catch (e2) {
       if (e2?.data?.conflict_type === "MG_INACTIVO_VENTA") {
         setMgInactiveInfo({
-          numero_interno: e2?.data?.payload?.numero_interno || mgInput,
+          numero_interno: e2?.data?.payload?.numero_interno || (form.equipo.numero_interno || "").trim(),
           msg: "MG histórico inactivo por venta; no operativo para nuevos ingresos.",
         });
         setErr("MG histórico inactivo por venta; no operativo para nuevos ingresos.");
@@ -2177,12 +2599,20 @@ export default function NuevoIngreso() {
         return;
       }
       if (Number.isInteger(e2?.data?.item_index)) {
+        // "Equipo #2" no le dice nada a quien está en el mostrador con seis equipos sobre la
+        // mesa: hay que nombrar el que falló con su tipo y su número de serie.
         const itemNumber = e2.data.item_index + 1;
-        setErr(`Equipo #${itemNumber}: ${e2?.data?.detail || e2?.message || "Error creando ingreso"}`);
+        const fallado = effectiveBatchItems?.[e2.data.item_index];
+        const etiqueta = fallado?.display
+          ? `${fallado.display.equipo || "Equipo"} - ${fallado.display.serial || "sin identificador"}`
+          : "";
+        const encabezado = etiqueta ? `Equipo #${itemNumber} (${etiqueta})` : `Equipo #${itemNumber}`;
+        setErr(`${encabezado}: ${e2?.data?.detail || e2?.message || "Error creando ingreso"}`);
         return;
       }
       setErr(e2?.message || "Error creando ingreso");
     } finally {
+      if (!printWindowUsed) reservedPrintWindow?.close();
       setLoading(false);
       setSubmitStage("");
     }
@@ -2194,7 +2624,14 @@ export default function NuevoIngreso() {
     if (opened) {
       setManualRisPrint(null);
       setErr("");
-      setNotice(manualRisPrint.remito ? `Remito ${manualRisPrint.remito} listo para imprimir.` : "Remito listo para imprimir.");
+      const count = manualRisPrint.remitoNumbers?.length || 0;
+      setNotice(
+        count > 1
+          ? `${count} remitos listos para imprimir.`
+          : manualRisPrint.remito
+            ? `Remito ${manualRisPrint.remito} listo para imprimir.`
+            : "Remito listo para imprimir.",
+      );
     } else {
       setErr("El navegador volvió a bloquear la ventana. Habilite ventanas emergentes para NEXORA y reintente.");
     }
@@ -2271,6 +2708,7 @@ export default function NuevoIngreso() {
   const outFirstIngresoId = out?.lote
     ? out?.ingreso_ids?.[0] || out?.ingresos?.[0]?.ingreso_id || out?.ingresos?.[0]?.id
     : out?.ingreso_id;
+  const outRemitoNumbers = out?.lote ? risRemitoNumbersFrom(out) : [];
   const updateRisMode = (nextMode) => {
     setRisMode(nextMode);
     setRisPreflight(null);
@@ -2367,6 +2805,65 @@ export default function NuevoIngreso() {
       {ingresoTab === "equipos" && canCreateEquipmentIngreso ? (
         <>
 
+      {deviceChoice.open && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded shadow-lg p-5 w-full max-w-lg">
+            <div className="text-lg font-semibold mb-1">
+              {deviceChoice.reason === "already_staged"
+                ? "Ese equipo ya está en la lista"
+                : "Hay dos equipos con ese número"}
+            </div>
+            <p className="text-sm text-gray-700 mb-4">
+              {deviceChoice.reason === "already_staged" ? (
+                <>
+                  El número <b>{deviceChoice.code}</b> ya está cargado en este remito
+                  {deviceChoice.stagedIndex >= 0 ? ` como #${deviceChoice.stagedIndex + 1}` : ""}. Si
+                  está ingresando el accesorio que comparte la serie (el humidificador que viene con
+                  el CPAP), cárguelo a mano: es otro equipo.
+                </>
+              ) : (
+                <>
+                  El número <b>{deviceChoice.code}</b> corresponde a más de un equipo. Suele pasar con
+                  los accesorios que no traen serie propia y se cargan con la del equipo principal.
+                  Elija cuál está ingresando.
+                </>
+              )}
+            </p>
+            <div className="space-y-2">
+              {deviceChoice.candidates.map((candidate) => {
+                const equipo = describeDeviceCandidate(candidate);
+                return (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    className="w-full rounded border border-gray-300 bg-white p-3 text-left hover:border-blue-500 hover:bg-blue-50"
+                    onClick={() => pickDeviceCandidate(candidate)}
+                  >
+                    <div className="text-sm font-semibold text-gray-900">{equipo || "Equipo sin descripción"}</div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-600">
+                      {candidate.numero_serie && <span>N/S: {candidate.numero_serie}</span>}
+                      {candidate.numero_interno && <span>Interno: {candidate.numero_interno}</span>}
+                      {candidate.customer_nombre && <span>Cliente: {candidate.customer_nombre}</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 pt-4">
+              <button
+                type="button"
+                className="px-3 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
+                onClick={cancelDeviceChoice}
+              >
+                {deviceChoice.reason === "already_staged"
+                  ? "Es otro equipo, cargo los datos a mano"
+                  : "Ninguno, cargo los datos a mano"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {dupPrompt.open && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded shadow-lg p-5 w-full max-w-md">
@@ -2405,13 +2902,18 @@ export default function NuevoIngreso() {
       )}
       {manualRisPrint?.blob && (
         <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900">
-          <div className="text-sm">El PDF del remito está listo. Si no se abrió automáticamente, imprímalo desde este botón.</div>
+          <div className="text-sm">
+            {manualRisPrint.remitoNumbers?.length > 1 ? "El PDF conjunto de los remitos está listo." : "El PDF del remito está listo."}
+            {" Si no se abrió automáticamente, imprímalo desde este botón."}
+          </div>
           <button
             type="button"
             onClick={abrirRisManualPendiente}
             className="mt-2 rounded bg-amber-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-800"
           >
-            Abrir e imprimir remito
+            {manualRisPrint.remitoNumbers?.length > 1
+              ? `Abrir e imprimir los ${manualRisPrint.remitoNumbers.length} remitos`
+              : "Abrir e imprimir remito"}
           </button>
         </div>
       )}
@@ -2420,7 +2922,11 @@ export default function NuevoIngreso() {
           {out.lote ? (
             <span>
               {outIngresoCount} {outIngresoCount === 1 ? "ingreso creado" : "ingresos creados"}
-              {out.remito_number ? <> con remito <b>{out.remito_number}</b></> : null}
+              {outRemitoNumbers.length > 1 ? (
+                <> con {outRemitoNumbers.length} remitos: <b>{outRemitoNumbers.join(" · ")}</b></>
+              ) : out.remito_number ? (
+                <> con remito <b>{out.remito_number}</b></>
+              ) : null}
             </span>
           ) : (
             <span>
@@ -2442,7 +2948,37 @@ export default function NuevoIngreso() {
         <div className="min-w-0 space-y-6">
         {nsAutofillInfo && (
           <div className="bg-indigo-50 border border-indigo-200 text-indigo-800 p-2 rounded text-sm">
-            {nsAutofillInfo}
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <span>{nsAutofillInfo}</span>
+              {/* Con dos equipos ya cargados el modal pregunta cuál es. Cuando la base
+                  conoce sólo uno —el CPAP, y el que entra es su humidificador— no hay nada
+                  que preguntar: este botón es la forma de decir que es el otro. */}
+              <button
+                type="button"
+                className="shrink-0 rounded border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                onClick={() => declararOtroEquipoMismoNs({ equipoPrevio: equipoDescripcionActual() })}
+              >
+                Es otro equipo con el mismo número
+              </button>
+            </div>
+          </div>
+        )}
+        {otroEquipoMismoNs && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 p-2 rounded text-sm">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <span>
+                Cargando otro equipo con el número <b>{otroEquipoMismoNs.code}</b>
+                {otroEquipoMismoNs.equipoPrevio ? ` (en la base ese número es ${otroEquipoMismoNs.equipoPrevio})` : ""}.
+                Complete tipo, marca y modelo: no se va a autocompletar solo.
+              </span>
+              <button
+                type="button"
+                className="shrink-0 rounded border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+                onClick={volverAlEquipoDeLaBase}
+              >
+                Volver a autocompletar
+              </button>
+            </div>
           </div>
         )}
         {nsAutofillClienteWarning && (
@@ -2762,7 +3298,7 @@ export default function NuevoIngreso() {
             {/* Tipo de equipo */}
             <div className="md:col-span-3">
               <label className={FIELD_LABEL_CLASS}>Tipo de equipo</label>
-              <Select value={tipoSel} onChange={(e) => setTipoSel(e.target.value || "")}> 
+              <Select value={tipoSel} onChange={(e) => onTipoSelChange(e.target.value)}>
                 <option value="">-- Seleccionar --</option>
                 {(Array.isArray(tiposEquipo) ? tiposEquipo : []).map((t, i) => (
                   <option key={i} value={t}>
@@ -3071,6 +3607,7 @@ export default function NuevoIngreso() {
             onApplyCustomer={handleApplyRisCustomer}
             onApplyArticle={handleApplyRisArticle}
             onEditItem={handleEditPreflightItem}
+            onConflictResolved={() => runRisPreflight({ silent: true })}
             disabled={loading || batchItems.length === 0}
             documentLabel={documentLabel}
             actionLabel={documentActionLabel}
@@ -3096,6 +3633,3 @@ export default function NuevoIngreso() {
     </div>
   );
 }
-
-
-

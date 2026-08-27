@@ -785,7 +785,7 @@ def _render_test_pdf_response(ingreso_id, customer_id=None):
     report = {
         "ingreso_id": ingreso_id,
         "os": ingreso_id,
-        "fecha_ejecucion": row.get("fecha_ejecucion") or timezone.now(),
+        "fecha_ejecucion": row.get("fecha_ejecucion") or row.get("updated_at"),
         "cliente": ingreso.get("cliente") or summary_row.get("razon_social") or "",
         "tipo_equipo": ingreso.get("tipo_equipo") or summary_row.get("tipo_equipo") or "",
         "marca": ingreso.get("marca") or summary_row.get("marca") or "",
@@ -1113,6 +1113,7 @@ def _notify_budget_decision(row, decision, actor, reason=""):
         entity_id=ingreso_id,
         dedupe_key=f"ingreso:{ingreso_id}:portal_budget_decision:{decision}:{timezone.now().isoformat()}",
         payload={"ingreso_id": ingreso_id, "decision": decision, "actor": actor, "reason": reason},
+        push=True,
     )
 
 
@@ -1136,6 +1137,9 @@ def _save_budget_pdf_copy(ingreso_id, quote_id=None):
 
 
 def _approve_budget_from_portal(row):
+    # A propósito, este camino no dispara los avisos de la aprobación interna
+    # (mail al técnico, campana, y el PDF de presupuesto de MG a Cobranzas):
+    # el alcance decidido para esos avisos es sólo la aprobación desde NEXORA.
     ingreso_id = row.get("id")
     qid = row.get("quote_id")
     alert_items = []

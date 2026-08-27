@@ -279,6 +279,30 @@ def exec_returning(sql, params=None):
         return row[0] if row else None
 
 
+def mg_estado_select_sql(alias: str = "d") -> str:
+    """Fragmento SELECT del estado del MG, tolerante a bases sin la columna.
+
+    `devices.mg_estado` no existe en esquemas viejos ni en algunos fixtures de
+    test, así que ahí se devuelve el literal 'activo' en vez de romper la query.
+    """
+    try:
+        row = q(
+            """
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_name='devices'
+               AND column_name='mg_estado'
+             LIMIT 1
+            """,
+            one=True,
+        )
+    except Exception:
+        row = None
+    if row:
+        return f"COALESCE({alias}.mg_estado,'activo') AS mg_estado,"
+    return "'activo' AS mg_estado,"
+
+
 def last_insert_id():
     if connection.vendor == "postgresql":
         row = q("SELECT LASTVAL() AS id", one=True)

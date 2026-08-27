@@ -112,9 +112,22 @@ class Command(BaseCommand):
                       CONSTRAINT chk_notification_email_outbox_dedupe CHECK (NULLIF(TRIM(dedupe_key), '') IS NOT NULL),
                       CONSTRAINT chk_notification_email_outbox_recipient CHECK (NULLIF(TRIM(recipient), '') IS NOT NULL),
                       CONSTRAINT chk_notification_email_outbox_status CHECK (status IN ('pending','retry','sending','sent','failed')),
-                      CONSTRAINT chk_notification_email_outbox_attachment CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing')),
+                      CONSTRAINT chk_notification_email_outbox_attachment CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing','quote_pdf')),
                       CONSTRAINT chk_notification_email_outbox_attempts CHECK (attempt_count >= 0 AND max_attempts > 0)
                     )
+                    """
+                )
+                # El CREATE TABLE IF NOT EXISTS de arriba no toca las bases que ya
+                # existen, así que los tipos de adjunto nuevos se agregan acá.
+                cur.execute(
+                    "ALTER TABLE notification_email_outbox "
+                    "DROP CONSTRAINT IF EXISTS chk_notification_email_outbox_attachment"
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE notification_email_outbox
+                      ADD CONSTRAINT chk_notification_email_outbox_attachment
+                      CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing','quote_pdf'))
                     """
                 )
                 for _column, statement in (

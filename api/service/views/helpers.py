@@ -24,6 +24,7 @@ from .helpers_impl import (
     exec_void,
     exec_returning,
     last_insert_id,
+    mg_estado_select_sql,
     _set_audit_user,
 
     # Encoding/text helpers
@@ -78,7 +79,7 @@ __all__ = [
     # auth/login throttling
     '_login_rate_key','_is_login_locked','_register_login_failure','_reset_login_failure','_validate_password_strength',
     # db
-    'q','exec_void','exec_returning','last_insert_id','_set_audit_user',
+    'q','exec_void','exec_returning','last_insert_id','mg_estado_select_sql','_set_audit_user',
     # text
     '_fix_text_value','_fix_row','_norm_txt',
     # motivo

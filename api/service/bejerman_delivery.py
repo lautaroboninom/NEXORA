@@ -27,6 +27,7 @@ from .bejerman_sdk import (
     BejermanSdkConfigError,
     BejermanSdkResponseError,
     BejermanSdkUnavailable,
+    PartidaIndex,
     as_number,
     as_nullable_bool,
     as_string,
@@ -43,6 +44,7 @@ from .bejerman_sdk import (
     decode_document_id,
     delivery_remito_config,
     first_value,
+    bejerman_customer_missing_master_field,
     is_bejerman_customer_resolution_message,
     is_bejerman_duplicate_candidate_message,
     is_bejerman_partida_inexistente_message,
@@ -56,10 +58,7 @@ from .bejerman_sdk import (
     normalize_search,
     parse_remito_response,
     records_from_response,
-    REMITO_ITEM_SEPARATOR,
     resolve_customer_document_fields_cached,
-    service_release_equipment_line,
-    service_release_item_legend,
     sort_document_items,
     _temporary_request_timeout,
     filter_article_items,
@@ -92,9 +91,10 @@ from .delivery_orders import (
     DeliveryOrderError,
     PREPARABLE_STATUSES,
     RENTAL_STOCK_DEPOSIT,
-    _article_mapping_for_equipment,
     _json_param,
     _optional_text,
+    article_mapping_from_rows,
+    article_mappings_for_equipment_rows,
     create_event,
     delivery_source_reference,
     ensure_service_release_order_for_ingreso,
@@ -113,6 +113,8 @@ from .delivery_orders import (
     sync_delivery_order_remito_projection,
     service_release_ingreso_ids_from_order,
     service_order_reference,
+    rental_items_missing_equipment,
+    rental_partida_from_identifier,
     service_release_max_items_per_order,
     validate_rental_delivery_items_ready,
 )
@@ -247,6 +249,15 @@ def _sdk_error(exc: Exception) -> BillingError | DeliveryOrderError:
                 "(mismo tipo de bloqueo que la carrera de vistas temporales). Es transitorio: reintente en unos minutos.",
                 status_code=502,
             )
+        missing_customer_field = bejerman_customer_missing_master_field(message)
+        if missing_customer_field:
+            return BillingError(
+                "BEJERMAN_CUSTOMER_MASTER_DATA_INCOMPLETE",
+                f"La ficha del cliente en Bejerman no tiene cargada {missing_customer_field}, y sin ese dato "
+                "Bejerman rechaza el comprobante. Reintentar desde NEXORA no lo resuelve: hay que completar "
+                "la ficha del cliente en Bejerman y recién ahí volver a emitir.",
+                status_code=409,
+            )
         if is_bejerman_customer_resolution_message(message):
             return BillingError(
                 "BEJERMAN_CUSTOMER_RESOLUTION_FAILED",
@@ -338,6 +349,22 @@ def _interactive_request_timeout() -> int:
         return max(1, int(getattr(settings, "BEJERMAN_INTERACTIVE_REQUEST_TIMEOUT", 20)))
     except (TypeError, ValueError):
         return 20
+
+
+def _delivery_order_stock_request_timeout() -> int:
+    """Límite por llamada SOAP del selector de stock de órdenes de entrega.
+
+    Un selector frío primero registra la sesión SDK y luego recibe un volcado
+    completo de stock. No puede esperar el timeout general por cada operación:
+    debe devolver el estado estructurado de indisponibilidad antes de que venza
+    el proxy. Nunca se amplía por encima del timeout interactivo general.
+    """
+    interactive_timeout = _interactive_request_timeout()
+    try:
+        configured = int(getattr(settings, "BEJERMAN_DELIVERY_ORDER_STOCK_REQUEST_TIMEOUT", 8))
+    except (TypeError, ValueError):
+        configured = 8
+    return min(interactive_timeout, max(1, configured))
 
 
 def list_bejerman_articles(
@@ -481,12 +508,20 @@ def list_bejerman_depositos(company_key: str | None = None, actor_user_id: int |
             "unavailable": False,
             "warning": "",
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("list_bejerman_depositos_unavailable company=%s", normalized_company, exc_info=True)
+        detail = str(exc).strip()
+        if isinstance(exc, BejermanSdkConfigError):
+            warning = f"Configuración de Bejerman incompleta ({detail}). Se muestran depósitos estándar."
+        elif isinstance(exc, BejermanSdkUnavailable):
+            warning = f"No se pudo conectar con Bejerman ({detail}). Se muestran depósitos estándar."
+        else:
+            warning = "No fue posible consultar depósitos Bejerman. Se muestran depósitos estándar."
         return {
             "items": _fallback_deposit_items(),
             "companyKey": normalized_company,
             "unavailable": True,
-            "warning": "No fue posible consultar depósitos Bejerman. Se muestran depósitos estándar.",
+            "warning": warning,
         }
 
 
@@ -512,14 +547,17 @@ def list_bejerman_article_stock(
             actor_user_id=actor_user_id,
             allow_system_credentials=True,
         )
-        # Ambas operaciones devuelven la tabla completa (todo el stock del depósito
-        # y todas las partidas de la empresa), no lo del artículo pedido: sin cache
-        # esto se baja entero en cada click sobre una partida.
-        with _temporary_request_timeout(client, _interactive_request_timeout()):
+        # ObtenerStockDeposito devuelve el volcado completo del depósito. La partida
+        # y la cantidad ya están en esas filas; ObtenerPartidas solo agrega la fecha
+        # de vencimiento. En una caché fría no se descarga toda la tabla de partidas
+        # durante un click del operador: si ya está vigente se usa para enriquecer,
+        # y si no la partida sigue siendo seleccionable sin fecha de vencimiento.
+        partida_index = bejerman_catalog_cache.partida_index_if_cached(normalized_company)
+        with _temporary_request_timeout(client, _delivery_order_stock_request_timeout()):
             raw_stock_rows = bejerman_catalog_cache.stock_rows(client, normalized_company, normalized_deposit)
             lots = build_article_stock_lots(
                 raw_stock_rows,
-                bejerman_catalog_cache.partida_rows(client, normalized_company),
+                partida_index or PartidaIndex([]),
                 code,
                 normalized_deposit,
             )
@@ -600,50 +638,69 @@ def _matching_lot_for_partida(lots: list[dict[str, Any]], partida: str) -> dict[
     return None
 
 
-def _partida_expiration(partida_rows: list[dict[str, Any]], deposit_code: str, partida: str) -> str:
-    wanted_deposit = (_optional_text(deposit_code) or "").upper()
-    wanted_partida = (_optional_text(partida) or "").casefold()
-    fallback = ""
-    if not wanted_partida:
+def _partida_expiration(partida_index: PartidaIndex, deposit_code: str, partida: str) -> str:
+    if not (_optional_text(partida) or ""):
         return ""
-    for row in partida_rows:
-        if (_optional_text(row.get("partida")) or "").casefold() != wanted_partida:
-            continue
-        expiration = _optional_text(row.get("expirationDate")) or ""
-        if (_optional_text(row.get("depositCode")) or "").upper() == wanted_deposit:
-            return expiration
-        if not fallback:
-            fallback = expiration
-    return fallback
+    row = partida_index.lookup(deposit_code, partida)
+    return _optional_text((row or {}).get("expirationDate")) or ""
+
+
+class _StockPartidaIndex:
+    """Filas de stock agrupadas por (depósito, partida).
+
+    El listado de equipos de alquiler busca una fila de stock por cada equipo
+    candidato; recorrer el volcado entero por equipo lo volvía cuadrático."""
+
+    __slots__ = ("_by_key",)
+
+    def __init__(self, stock_rows: list[dict[str, Any]]):
+        by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in stock_rows:
+            key = (
+                (_optional_text(row.get("depositCode")) or "").upper(),
+                (_optional_text(row.get("partida")) or "").casefold(),
+            )
+            by_key.setdefault(key, []).append(row)
+        self._by_key = by_key
+
+    def rows(self, deposit_code: str, partida: str) -> list[dict[str, Any]]:
+        key = (
+            (_optional_text(deposit_code) or "").upper(),
+            (_optional_text(partida) or "").casefold(),
+        )
+        return self._by_key.get(key, [])
 
 
 def _stock_lot_for_partida(
-    stock_rows: list[dict[str, Any]],
-    partida_rows: list[dict[str, Any]],
+    stock_index: _StockPartidaIndex,
+    partida_index: PartidaIndex,
     partida: str,
     deposit_code: str,
 ) -> dict[str, Any] | None:
-    wanted_partida = (_optional_text(partida) or "").casefold()
-    wanted_deposit = (_optional_text(deposit_code) or "").upper()
-    if not wanted_partida or not wanted_deposit:
+    if not (_optional_text(partida) or "") or not (_optional_text(deposit_code) or ""):
         return None
-    for row in stock_rows:
-        if (_optional_text(row.get("depositCode")) or "").upper() != wanted_deposit:
-            continue
-        if (_optional_text(row.get("partida")) or "").casefold() != wanted_partida:
-            continue
+    for row in stock_index.rows(deposit_code, partida):
         if _effective_available_quantity(row) <= 0:
             continue
         return {
             "articleCode": row.get("articleCode") or "",
             "depositCode": row.get("depositCode") or deposit_code,
             "partida": row.get("partida") or partida,
-            "expirationDate": _partida_expiration(partida_rows, row.get("depositCode") or deposit_code, row.get("partida") or partida),
+            "expirationDate": _partida_expiration(partida_index, row.get("depositCode") or deposit_code, row.get("partida") or partida),
             "realQuantity": row.get("realQuantity"),
             "committedQuantity": row.get("committedQuantity"),
             "availableQuantity": row.get("availableQuantity"),
         }
     return None
+
+
+# Tope de equipos de la estantería que se traen para evaluar. No es el tamaño de
+# la respuesta (eso lo fija `limit`): el filtro por texto y el de stock en STL se
+# resuelven acá, con el mismo plegado de acentos que el resto del SDK, así que el
+# LIMIT del SQL no puede recortar por relevancia — recorta por antigüedad. Con los
+# 300/2000 anteriores, una estantería más grande que ese corte dejaba equipos
+# disponibles invisibles en el atajo. Es una válvula de seguridad, no un filtro.
+RENTAL_EQUIPMENT_SCAN_LIMIT = 5000
 
 
 def list_rental_available_equipment(
@@ -658,7 +715,6 @@ def list_rental_available_equipment(
     except (TypeError, ValueError):
         clean_limit = 80
     q = normalize_search(search)
-    fetch_limit = 2000 if q else min(300, max(clean_limit * 4, 80))
     ingreso_columns = _table_columns("ingresos", {"empresa_bejerman", "alquilado", "ubicacion_id"})
     company_expr = "COALESCE(t.empresa_bejerman, 'SEPID')" if "empresa_bejerman" in ingreso_columns else "'SEPID'"
     alquilado_expr = "COALESCE(t.alquilado, FALSE)" if "alquilado" in ingreso_columns else "FALSE"
@@ -670,9 +726,52 @@ def list_rental_available_equipment(
         else "AND FALSE"
     )
     location_params = ["%estanter%", "%alquiler%"] if "ubicacion_id" in ingreso_columns else []
+    # El equipo nuevo se da de alta en Equipos con su MG y sin OS: alquilar no exige
+    # ingreso, así que el atajo también tiene que ofrecerlo. Se listan aparte porque su
+    # estado (alquilado, ubicación, MG vendido) vive en `devices`, no en un ingreso.
+    device_columns = _table_columns("devices", {"alquilado", "ubicacion_id", "mg_estado"})
+    device_alquilado_expr = "COALESCE(d.alquilado, FALSE)" if "alquilado" in device_columns else "FALSE"
+    device_mg_filter = "AND COALESCE(d.mg_estado, 'activo') = 'activo'" if "mg_estado" in device_columns else ""
+    device_branch_enabled = "ubicacion_id" in device_columns
+    device_params: list[Any] = []
+    if device_branch_enabled:
+        device_params = [_normalize_delivery_company_key(company_key), "%estanter%", "%alquiler%"]
+        device_branch = f"""
+            UNION ALL
+            SELECT NULL::integer AS ingreso_id,
+                   d.id AS device_id,
+                   '' AS estado,
+                   {device_alquilado_expr} AS alquilado,
+                   %s AS company_key,
+                   d.ubicacion_id, COALESCE(dloc.nombre, '') AS ubicacion_nombre,
+                   COALESCE(d.variante, '') AS equipo_variante,
+                   c.id AS owner_customer_id,
+                   COALESCE(c.razon_social, '') AS owner_customer_name,
+                   COALESCE(d.numero_serie, '') AS equipment_serial,
+                   COALESCE(d.numero_interno, '') AS equipment_internal_number,
+                   d.model_id,
+                   COALESCE(d.variante, '') AS device_variante,
+                   COALESCE(m.nombre, '') AS modelo,
+                   COALESCE(m.tipo_equipo, '') AS tipo_equipo,
+                   COALESCE(m.variante, '') AS modelo_variante,
+                   COALESCE(b.nombre, '') AS marca
+              FROM devices d
+              LEFT JOIN customers c ON c.id = d.customer_id
+              LEFT JOIN models m ON m.id = d.model_id
+              LEFT JOIN marcas b ON b.id = d.marca_id
+              LEFT JOIN locations dloc ON dloc.id = d.ubicacion_id
+             WHERE NOT EXISTS (SELECT 1 FROM ingresos i WHERE i.device_id = d.id)
+               AND {device_alquilado_expr} = FALSE
+               {device_mg_filter}
+               AND LOWER(COALESCE(dloc.nombre, '')) LIKE %s
+               AND LOWER(COALESCE(dloc.nombre, '')) LIKE %s
+        """
+    else:
+        device_branch = ""
     with connection.cursor() as cur:
         cur.execute(
             f"""
+            SELECT * FROM (
             SELECT t.id AS ingreso_id,
                    t.device_id,
                    COALESCE(t.estado::text, '') AS estado,
@@ -699,10 +798,12 @@ def list_rental_available_equipment(
              WHERE {alquilado_expr} = FALSE
                AND LOWER(COALESCE(t.estado::text, '')) NOT IN ('entregado', 'alquilado', 'baja', 'vendido_pendiente_entrega', 'vendido_entregado')
                {location_filter}
-             ORDER BY t.id DESC
+            {device_branch}
+            ) rental_candidates
+             ORDER BY ingreso_id DESC NULLS FIRST, device_id DESC
              LIMIT %s
             """,
-            [*location_params, fetch_limit],
+            [*location_params, *device_params, RENTAL_EQUIPMENT_SCAN_LIMIT],
         )
         cols = [col[0] for col in cur.description]
         local_rows = [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -712,9 +813,15 @@ def list_rental_available_equipment(
         client = BejermanSDKClient(company_key=normalized_company, actor_user_id=actor_user_id)
         with _temporary_request_timeout(client, _interactive_request_timeout()):
             stock_rows = bejerman_catalog_cache.stock_rows(client, normalized_company, RENTAL_STOCK_DEPOSIT)
-            partida_rows = bejerman_catalog_cache.partida_rows(client, normalized_company)
+            partida_index = bejerman_catalog_cache.partida_index(client, normalized_company)
     except Exception as exc:
         raise _sdk_error(exc) from exc
+
+    # Todo lo que se consulta por equipo se indexa una sola vez: con ~40k partidas
+    # y cientos de candidatos, resolver cada equipo recorriendo los volcados (o
+    # con una query por fila) era lo que hacía lento este listado.
+    stock_index = _StockPartidaIndex(stock_rows)
+    mappings = article_mappings_for_equipment_rows(local_rows, normalized_company)
 
     lots_by_article: dict[str, list[dict[str, Any]]] = {}
     items: list[dict[str, Any]] = []
@@ -722,23 +829,23 @@ def list_rental_available_equipment(
         serial = _optional_text(row.get("equipment_serial"))
         if not serial:
             continue
-        mapping = _article_mapping_for_equipment(row, normalized_company) or {}
+        mapping = article_mapping_from_rows(mappings, row) or {}
         article_code = _optional_text((mapping or {}).get("article_code"))
         lot = None
         if not article_code:
-            lot = _stock_lot_for_partida(stock_rows, partida_rows, serial, RENTAL_STOCK_DEPOSIT)
+            lot = _stock_lot_for_partida(stock_index, partida_index, serial, RENTAL_STOCK_DEPOSIT)
             article_code = _optional_text((lot or {}).get("articleCode"))
         if article_code and not lot and article_code not in lots_by_article:
             lots_by_article[article_code] = build_article_stock_lots(
                 stock_rows,
-                partida_rows,
+                partida_index,
                 article_code,
                 RENTAL_STOCK_DEPOSIT,
             )
         if article_code and not lot:
             lot = _matching_lot_for_partida(lots_by_article[article_code], serial)
         if not lot:
-            lot = _stock_lot_for_partida(stock_rows, partida_rows, serial, RENTAL_STOCK_DEPOSIT)
+            lot = _stock_lot_for_partida(stock_index, partida_index, serial, RENTAL_STOCK_DEPOSIT)
             article_code = _optional_text((lot or {}).get("articleCode")) or article_code
         if not lot or not article_code:
             continue
@@ -1849,6 +1956,28 @@ def _delivery_article_sales_vat_map(
     return article_tax_by_code
 
 
+def _delivery_article_descriptions(
+    client: BejermanSDKClient,
+    bridge_request: dict[str, Any],
+) -> dict[str, str]:
+    """Descripciones de Bejerman para todos los artículos del remito.
+
+    A diferencia del IVA, esto se resuelve para cualquier tipo de comprobante —
+    facturable o no — porque lo que se imprime en el papel no depende de eso. El
+    catálogo es el mismo que ya usa `_delivery_article_sales_vat_map` y viene
+    cacheado por empresa, así que en el caso normal no agrega ninguna llamada.
+    """
+
+    codes: set[str] = set()
+    for order in bridge_request.get("orders") or []:
+        if not isinstance(order, dict):
+            continue
+        for item in order.get("items") or []:
+            if isinstance(item, dict) and _optional_text(item.get("articleCode")):
+                codes.add(_optional_text(item.get("articleCode")))
+    return bejerman_catalog_cache.article_descriptions(client, sorted(codes))
+
+
 def _delivery_status_for_remito_profile(profile: dict[str, Any]) -> str:
     return "entregado_pendiente_facturacion" if _remito_requires_billing(profile) else "entregado_no_facturable"
 
@@ -2329,7 +2458,10 @@ def _insert_manual_delivery_remito_group(
               correlation_key = EXCLUDED.correlation_key,
               last_error = NULL,
               next_retry_at = NULL,
-              generated_at = CURRENT_TIMESTAMP
+              -- clock_timestamp(): CURRENT_TIMESTAMP congela la hora de inicio de la
+              -- transacción, con lo que generated_at - created_at siempre daba 0 y no
+              -- se podía saber cuánto tardó la emisión.
+              generated_at = clock_timestamp()
             """,
             [
                 group_id,
@@ -2444,10 +2576,12 @@ def _register_manual_delivery_order_stock_movement(
             delivery_remito_config(profile),
             customer_fields,
             article_tax_by_code,
+            _delivery_article_descriptions(client, bridge_request),
         )
         comprobante = built["comprobante"]
         comprobante["Comprobante_PtoVenta"] = document["point"]
         comprobante["Comprobante_Numero"] = document["number"]
+        _assert_sale_remito_payload_limits(compatibility["deliveryType"], comprobante)
         raw_response = client.ingresar_comprobante_ventas_json(
             comprobante,
             circuito=_env_text("BEJERMAN_REMITO_CIRCUIT", "VENTAS"),
@@ -2622,10 +2756,15 @@ def _manual_remito_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
             raw = {"remitoNumber": raw}
         if not isinstance(raw, dict):
             raise DeliveryOrderError("INVALID_REMITOS", "Cada remito debe ser un objeto.", status_code=400)
+        equipment = raw.get("equipmentSerials") or raw.get("equipmentSerial") or []
+        if isinstance(equipment, str):
+            equipment = [equipment]
         entries.append(
             {
                 "remitoNumber": raw.get("remitoNumber") or raw.get("number"),
                 "allocations": raw.get("allocations") or [],
+                # N/S o MG del equipo que salió, tal como lo eligió el buscador.
+                "equipmentSerials": [item for item in equipment if _optional_text(item)],
             }
         )
     return entries
@@ -2930,6 +3069,24 @@ def register_delivery_order_remitos(
         raise DeliveryOrderError("DELIVERY_ORDER_CLOSED", "La orden ya está cerrada", status_code=409)
 
     entries = _manual_remito_entries(payload)
+    if normalize_delivery_type(order.get("deliveryType")) == "rental":
+        # Sin el equipo, el remito queda registrado y el alquiler no existe para NEXORA:
+        # así quedaron 19 órdenes con número y sin ningún equipo colgado.
+        for entry in entries:
+            for identifier in entry.get("equipmentSerials") or []:
+                rental_partida_from_identifier(order_id, identifier, actor_user_id)
+        order = get_delivery_order(order_id, include_events=False)
+        faltantes = rental_items_missing_equipment(order)
+        if faltantes:
+            renglones = ", ".join(str(index) for index in faltantes)
+            raise DeliveryOrderError(
+                "RENTAL_EQUIPMENT_REQUIRED",
+                (
+                    f"Indicá el N/S o el MG del equipo que salió en el renglón {renglones}. "
+                    "Podés buscarlo por equipo desde esta misma pantalla."
+                ),
+                status_code=409,
+            )
     documents = [normalize_delivery_order_manual_remito_number(order, entry.get("remitoNumber")) for entry in entries]
     normalized_numbers = [document["remitoNumber"] for document in documents]
     if len(set(normalized_numbers)) != len(normalized_numbers):
@@ -3097,6 +3254,16 @@ def register_delivery_order_remitos(
                 return _manual_remito_partial_response(order_id, exc, new_group_ids=new_group_ids)
             raise
 
+    if normalize_delivery_type(order.get("deliveryType")) == "rental":
+        # El sync de alquiler vivía sólo en la emisión en línea: registrando a mano el
+        # equipo nunca quedaba marcado como alquilado ni entraba en la carpeta.
+        for registered in completed_results:
+            registered_group = _optional_text(registered.get("groupId"))
+            registered_number = _optional_text(registered.get("remitoNumber"))
+            if not registered_group or not registered_number:
+                continue
+            _sync_rental_ingresos_after_remito([order_id], registered_group, actor_user_id, registered_number, None)
+            _sync_rental_devices_after_remito([order_id], registered_group, actor_user_id, registered_number)
     sync_delivery_order_remito_projection([order_id], actor_user_id)
     updated = get_delivery_order(order_id)
     if updated.get("remitoSetStatus") == "complete" and not completed_before:
@@ -3132,22 +3299,46 @@ def _validate_remito_orders(orders: list[dict[str, Any]], *, allow_existing_grou
         raise DeliveryOrderError("DELIVERY_ORDER_NOT_FOUND", "No se encontraron órdenes", status_code=404)
     customer_codes = {(_optional_text(order.get("bejermanCustomerCode")) or "") for order in orders}
     if len(customer_codes) != 1:
-        raise DeliveryOrderError("CUSTOMER_MAPPING_REQUIRED", "Las órdenes necesitan el mismo código Bejerman", status_code=409)
+        raise DeliveryOrderError(
+            "CUSTOMER_MAPPING_REQUIRED",
+            "Las órdenes seleccionadas son de clientes distintos: emita un remito por cliente",
+            status_code=409,
+        )
     customer_code = next(iter(customer_codes))
     propietario_nombre = ""
     propietario_doc = ""
     if not customer_code:
+        # Sin código el único camino es el de cliente ocasional (@@@#@@), exclusivo de los
+        # particulares: cualquier otro cliente tiene que quedar vinculado con Bejerman primero.
+        unmapped = [order for order in orders if not is_occasional_customer_order(order)]
+        if unmapped:
+            names = sorted({_optional_text(order.get("customerName")) or "" for order in unmapped} - {""})
+            detalle = (
+                f"{', '.join(names)}: el cliente no tiene código Bejerman"
+                if names
+                else "Hay órdenes cuyo cliente no tiene código Bejerman"
+            )
+            raise DeliveryOrderError(
+                "CUSTOMER_MAPPING_REQUIRED",
+                f"{detalle}. Vincúlelo con Bejerman antes de emitir el remito",
+                status_code=409,
+            )
         propietario_names = {(_optional_text(o.get("propietarioNombre")) or "") for o in orders}
         propietario_docs = {(_optional_text(o.get("propietarioDoc")) or "") for o in orders}
-        if (
-            len(propietario_docs) != 1
-            or not next(iter(propietario_docs))
-            or len(propietario_names) != 1
-            or not next(iter(propietario_names))
-        ):
-            raise DeliveryOrderError("CUSTOMER_MAPPING_REQUIRED", "Las órdenes necesitan el mismo código Bejerman", status_code=409)
+        if len(propietario_docs) != 1 or len(propietario_names) != 1:
+            raise DeliveryOrderError(
+                "CUSTOMER_MAPPING_REQUIRED",
+                "Las órdenes de particulares deben corresponder al mismo propietario (mismo nombre y documento)",
+                status_code=409,
+            )
         propietario_nombre = next(iter(propietario_names))
         propietario_doc = next(iter(propietario_docs))
+        if not propietario_nombre or not propietario_doc:
+            raise DeliveryOrderError(
+                "CUSTOMER_MAPPING_REQUIRED",
+                "El particular se emite como cliente ocasional: cargue nombre y documento del propietario en el ingreso",
+                status_code=409,
+            )
     delivery_types = {normalize_delivery_type(order.get("deliveryType")) for order in orders}
     if len(delivery_types) != 1:
         raise DeliveryOrderError(
@@ -3593,16 +3784,6 @@ def _remito_print_line_limit(delivery_type: str) -> int:
     return max(4, min(22, max_lines))
 
 
-def _sale_max_article_lines() -> int:
-    try:
-        value = int(getattr(settings, "BEJERMAN_SALE_MAX_ARTICLE_LINES", 10))
-    except (TypeError, ValueError):
-        value = 10
-    # Diez es el máximo físico validado para los RT; una configuración no puede
-    # ampliar accidentalmente ese contrato.
-    return max(1, min(10, value))
-
-
 def _to_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -3613,6 +3794,9 @@ def _to_int(value: Any) -> int | None:
 def _print_lines_per_partida(delivery_type: str) -> int:
     if delivery_type != "service_release":
         return 1
+    # RSS ya no agrega una línea de guiones, pero se conserva el margen físico
+    # de tres renglones por equipo: la leyenda y la descripción pueden ocupar
+    # una línea adicional al envolver texto en el formulario de 22 renglones.
     try:
         item_print_lines = int(getattr(settings, "BEJERMAN_RSS_PRINT_LINES_PER_ITEM", 3))
     except (TypeError, ValueError):
@@ -3621,28 +3805,21 @@ def _print_lines_per_partida(delivery_type: str) -> int:
 
 
 def _order_print_header_line_count(delivery_type: str) -> int:
-    # build_delivery_remito_comprobante antepone separador + leyenda de orden
-    # para los tipos que no son service_release.
-    return 0 if delivery_type == "service_release" else 2
+    # build_delivery_remito_comprobante antepone una sola leyenda de orden para
+    # los tipos que no son service_release. Antes anteponía también una línea de
+    # guiones y acá se reservaban 2; al sacar el separador esta cuenta quedó una
+    # línea por encima de lo que se emite, así que cada remito se dividía un
+    # renglón antes de lo necesario y gastaba comprobantes de más.
+    # En RT la referencia de la orden ya viaja en `Comprobante_Mensaje`. No se
+    # imprime como un ítem porque le quitaría al formulario uno de sus 22
+    # renglones de artículos. RTA y RTN conservan su leyenda visible.
+    return 0 if delivery_type in {"service_release", "sale"} else 1
 
 
 def _item_print_line_count(item: dict[str, Any], lines_per_partida: int) -> int:
     partida_lines = len([partida for partida in (item.get("partidas") or []) if isinstance(partida, dict)]) or 1
     discount = as_number(item.get("discountPercent")) or 0
     return partida_lines * (max(1, lines_per_partida) + (1 if discount > 0 else 0))
-
-
-def _item_article_line_count(item: dict[str, Any]) -> int:
-    partidas = [partida for partida in (item.get("partidas") or []) if isinstance(partida, dict)]
-    return len(partidas) or 1
-
-
-def _order_article_line_count(order: dict[str, Any]) -> int:
-    return sum(
-        _item_article_line_count(item)
-        for item in (order.get("items") or [])
-        if isinstance(item, dict)
-    )
 
 
 def _partida_assigned_quantity(partida: dict[str, Any]) -> Decimal:
@@ -3709,29 +3886,23 @@ def _remito_print_item_chunks(order: dict[str, Any]) -> list[list[dict[str, Any]
         return [items]
     lines_per_partida = _print_lines_per_partida(delivery_type)
     limit = max(1, _remito_print_line_limit(delivery_type) - _order_print_header_line_count(delivery_type))
-    article_limit = _sale_max_article_lines() if delivery_type == "sale" else None
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_lines = 0
-    current_articles = 0
     for item in items:
         atoms = _sale_item_atoms(item) if delivery_type == "sale" else [item]
         for atom in atoms:
             item_lines = _item_print_line_count(atom, lines_per_partida)
-            item_articles = _item_article_line_count(atom)
             exceeds_lines = current_lines + item_lines > limit
-            exceeds_articles = article_limit is not None and current_articles + item_articles > article_limit
-            if current and (exceeds_lines or exceeds_articles):
+            if current and exceeds_lines:
                 chunks.append(current)
                 current = []
                 current_lines = 0
-                current_articles = 0
             if delivery_type == "sale":
                 _append_sale_atom(current, atom)
             else:
                 current.append(atom)
             current_lines += item_lines
-            current_articles += item_articles
     if current:
         chunks.append(current)
     return chunks
@@ -3773,24 +3944,18 @@ def _partition_remito_orders_for_printing(orders: list[dict[str, Any]]) -> list[
         return [orders]
     delivery_type = next(iter(delivery_types))
     limit = _remito_print_line_limit(delivery_type)
-    article_limit = _sale_max_article_lines() if delivery_type == "sale" else None
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_lines = 0
-    current_articles = 0
     for order in orders:
         order_lines = max(1, _order_print_line_count(order))
-        order_articles = _order_article_line_count(order)
         exceeds_lines = current_lines + order_lines > limit
-        exceeds_articles = article_limit is not None and current_articles + order_articles > article_limit
-        if current and (exceeds_lines or exceeds_articles):
+        if current and exceeds_lines:
             batches.append(current)
             current = []
             current_lines = 0
-            current_articles = 0
         current.append(order)
         current_lines += order_lines
-        current_articles += order_articles
     if current:
         batches.append(current)
     return batches or [orders]
@@ -3808,15 +3973,16 @@ def _assert_sale_remito_payload_limits(delivery_type: str, comprobante: dict[str
         return
     items = [item for item in (comprobante.get("Comprobante_Items") or []) if isinstance(item, dict)]
     article_lines = sum(1 for item in items if (_optional_text(item.get("Item_Tipo")) or "").upper() == "A")
-    max_article_lines = _sale_max_article_lines()
     max_print_lines = _remito_print_line_limit("sale")
-    if article_lines <= max_article_lines and len(items) <= max_print_lines:
+    item_positions = [_to_int(item.get("Item_NumeroRenglon")) for item in items]
+    last_position = max((position for position in item_positions if position is not None), default=len(items))
+    if len(items) <= max_print_lines and last_position <= max_print_lines:
         return
     raise DeliveryOrderError(
         BEJERMAN_RT_PRINT_LIMIT_EXCEEDED_CODE,
         "NEXORA detuvo el RT antes de enviarlo a Bejerman porque supera "
-        f"el máximo de {max_article_lines} artículos o {max_print_lines} renglones "
-        f"({article_lines} artículos, {len(items)} renglones).",
+        f"los {max_print_lines} renglones físicos del formulario "
+        f"({article_lines} artículos, {len(items)} ítems, último renglón {last_position}).",
         status_code=409,
     )
 
@@ -4741,6 +4907,186 @@ def _remito_blocking_stock_sync_jobs(order_ids: list[str]) -> list[dict[str, Any
         ) from exc
 
 
+def _blocking_sync_job_message(job: dict[str, Any], *, retried: bool, fallback_error: str = "") -> str:
+    job_id = job.get("jobId") or "?"
+    sync_type = _optional_text(job.get("syncType")) or "sin tipo"
+    target = _optional_text(job.get("targetDeposit")) or "destino pendiente"
+    last_error = _optional_text(job.get("lastError")) or fallback_error or "el job todavía no terminó"
+    if retried:
+        return (
+            f"El stock de este equipo todavía no se sincronizó al depósito {target} "
+            f"(job #{job_id}, {sync_type}). Se intentó resolverlo automáticamente pero "
+            f"sigue pendiente: {last_error}. Reintentá en unos minutos o avisá a soporte."
+        )
+    return (
+        f"El stock de este equipo todavía no se sincronizó al depósito {target} "
+        f"(job #{job_id}, {sync_type}): {last_error}. Reintentá la sincronización antes "
+        "de emitir el remito, o avisá a soporte."
+    )
+
+
+def _stock_quantity_text(value: Decimal) -> str:
+    return format(value.normalize(), "f") if value else "0"
+
+
+def _remito_article_stock_shortages(order_ids: list[str], actor_user_id: int | None) -> list[dict[str, Any]]:
+    """Artículos cuyo stock en Bejerman no alcanza para las órdenes seleccionadas.
+
+    El faltante lo detectaba Bejerman recién al importar el comprobante, y lo decía
+    con el código pelado ("No hay stock suficiente para el artículo 1208009"): el
+    operador no sabía de qué artículo hablaba, cuánto faltaba, ni si era un error de
+    NEXORA, y el remito ya había fallado con el cliente enfrente (12/08/2026, faltaba
+    1 unidad de 19). Se compara contra el total del artículo en el depósito y no por
+    partida: un total corto es un faltante seguro, así que no inventa bloqueos.
+
+    Va con `force_refresh`: el flujo real del depósito es ver el faltante mientras
+    arman, corregir el stock a mano en Bejerman y volver enseguida a emitir. Leer el
+    cache de 30 s acá bloquearía con un número que ya no existe, que es peor que no
+    avisar nada. Es una consulta por depósito, una sola vez, al abrir el modal.
+    """
+    from .delivery_orders import _delivery_article_available_quantity
+
+    requested: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for order_id in order_ids:
+        try:
+            order = get_delivery_order(order_id, include_events=False)
+        except Exception:
+            continue
+        delivery_type = normalize_delivery_type(order.get("deliveryType"))
+        if delivery_type not in {"sale", "demo"}:
+            continue
+        company_key = _company_key_for_order(order)
+        default_deposit = remito_profile_for_type(delivery_type).deposit_code
+        for item in order.get("items") or []:
+            article_code = _optional_text(item.get("articleCode"))
+            quantity = Decimal(str(_item_quantity(item)))
+            if not article_code or quantity <= 0:
+                continue
+            deposit = (_optional_text(item.get("stockDepositCode")) or default_deposit).upper()
+            entry = requested.setdefault(
+                (company_key, deposit, article_code.casefold()),
+                {
+                    "articleCode": article_code,
+                    "articleName": _optional_text(item.get("articleName")) or _optional_text(item.get("description")),
+                    "depositCode": deposit,
+                    "companyKey": company_key,
+                    "requestedQuantity": Decimal("0"),
+                },
+            )
+            entry["requestedQuantity"] += quantity
+
+    if not requested:
+        return []
+    cache: dict[str, Any] = {}
+    shortages: list[dict[str, Any]] = []
+    for entry in requested.values():
+        try:
+            available = _delivery_article_available_quantity(
+                entry["articleCode"],
+                entry["depositCode"],
+                entry["companyKey"],
+                actor_user_id,
+                cache,
+                force_refresh=True,
+            )
+        except Exception:
+            # No poder consultar el stock no es motivo para trabar el modal: el
+            # control duro lo sigue haciendo Bejerman al importar el comprobante.
+            logger.warning("delivery_remito_preflight_stock_unavailable", exc_info=True)
+            return []
+        if entry["requestedQuantity"] - available <= Decimal("0.0001"):
+            continue
+        shortages.append(
+            {
+                "articleCode": entry["articleCode"],
+                "articleName": entry["articleName"],
+                "depositCode": entry["depositCode"],
+                "availableQuantity": _stock_quantity_text(available),
+                "requestedQuantity": _stock_quantity_text(entry["requestedQuantity"]),
+            }
+        )
+    return shortages
+
+
+def _article_stock_shortage_message(shortages: list[dict[str, Any]]) -> str:
+    def linea(shortage: dict[str, Any]) -> str:
+        nombre = _optional_text(shortage.get("articleName"))
+        articulo = f"{shortage['articleCode']} ({nombre})" if nombre else str(shortage["articleCode"])
+        return (
+            f"{articulo}: hay {shortage['availableQuantity']} en {shortage['depositCode']} "
+            f"y el remito pide {shortage['requestedQuantity']}."
+        )
+
+    return " ".join(linea(shortage) for shortage in shortages)
+
+
+def _delivery_remito_preflight_result(
+    order_ids: list[str],
+    actor_user_id: int | None,
+    *,
+    retried: bool,
+) -> dict[str, Any]:
+    """Respuesta del preflight cuando la cola de stock ya no bloquea."""
+    shortages = _remito_article_stock_shortages(order_ids, actor_user_id)
+    if not shortages:
+        return {"canEmit": True, "blockingSyncJobs": [], "retried": retried}
+    return {
+        "canEmit": False,
+        "blockingSyncJobs": [],
+        "articleStockShortages": shortages,
+        "title": "No se puede emitir todavía: falta stock en Bejerman.",
+        "message": _article_stock_shortage_message(shortages),
+        "code": "DELIVERY_REMITO_ARTICLE_STOCK_INSUFFICIENT",
+        "retried": retried,
+    }
+
+
+def check_delivery_remito_stock_sync(
+    order_ids: list[str],
+    actor_user_id: int | None,
+    *,
+    retry: bool = False,
+) -> dict[str, Any]:
+    """Qué impide emitir el remito de estas órdenes, sin emitir nada.
+
+    Es el mismo control que corta la emisión, expuesto aparte para que el
+    operador lo vea al abrir el modal y no después de esperar el envío a
+    Bejerman. Sin `retry` es una consulta a la base y responde al instante; con
+    `retry` reintenta los jobs bloqueados en línea, que es lo que tarda.
+
+    Mira dos cosas, en orden: la cola de sincronización de stock y —cuando la
+    cola está limpia— que el stock de cada artículo en Bejerman alcance para lo
+    que pide el remito (ver `_remito_article_stock_shortages`).
+    """
+    ids = [str(item).strip() for item in (order_ids or []) if str(item).strip()]
+    if not ids:
+        return {"canEmit": True, "blockingSyncJobs": [], "retried": retry}
+    if retry:
+        try:
+            _ensure_blocking_stock_sync_jobs_resolved(ids, actor_user_id)
+        except BillingError as exc:
+            if exc.code != "BEJERMAN_REMITO_BLOCKED_BY_SYNC":
+                raise
+            return {
+                "canEmit": False,
+                "blockingSyncJobs": (exc.payload or {}).get("blockingSyncJobs") or [],
+                "message": str(exc),
+                "code": exc.code,
+                "retried": True,
+            }
+        return _delivery_remito_preflight_result(ids, actor_user_id, retried=True)
+    blocking_jobs = _remito_blocking_stock_sync_jobs(ids)
+    if not blocking_jobs:
+        return _delivery_remito_preflight_result(ids, actor_user_id, retried=False)
+    return {
+        "canEmit": False,
+        "blockingSyncJobs": blocking_jobs,
+        "message": _blocking_sync_job_message(blocking_jobs[0], retried=False),
+        "code": "BEJERMAN_REMITO_BLOCKED_BY_SYNC",
+        "retried": False,
+    }
+
+
 def _ensure_blocking_stock_sync_jobs_resolved(order_ids: list[str], actor_user_id: int | None) -> None:
     """Resuelve una vez los jobs bloqueados antes de intentar emitir el remito.
 
@@ -4788,19 +5134,13 @@ def _ensure_blocking_stock_sync_jobs_resolved(order_ids: list[str], actor_user_i
         return
 
     first = remaining[0]
-    job_id = first.get("jobId") or "?"
-    sync_type = _optional_text(first.get("syncType")) or "sin tipo"
-    target = _optional_text(first.get("targetDeposit")) or "destino pendiente"
-    last_error = (
-        _optional_text(first.get("lastError"))
-        or inline_errors.get(int(first.get("jobId") or 0))
-        or "el job todavía no terminó"
-    )
     raise BillingError(
         "BEJERMAN_REMITO_BLOCKED_BY_SYNC",
-        f"El stock de este equipo todavía no se sincronizó al depósito {target} "
-        f"(job #{job_id}, {sync_type}). Se intentó resolverlo automáticamente pero "
-        f"sigue pendiente: {last_error}. Reintentá en unos minutos o avisá a soporte.",
+        _blocking_sync_job_message(
+            first,
+            retried=True,
+            fallback_error=inline_errors.get(int(first.get("jobId") or 0)) or "",
+        ),
         status_code=409,
         payload={"blockingSyncJobs": remaining},
     )
@@ -5444,6 +5784,69 @@ def _sync_rental_ingresos_after_remito(
     return synced
 
 
+def _sync_rental_devices_after_remito(
+    order_ids: list[str],
+    group_id: str,
+    actor_user_id: int | None,
+    remito_number: str,
+) -> list[int]:
+    """Marca alquilados los equipos del remito que no tienen OS.
+
+    Espejo de `_sync_rental_ingresos_after_remito` para el equipo nuevo dado de alta con su
+    MG: no hay ingreso donde anotar el alquiler, así que se escribe directo en `devices`.
+    Son las mismas tres columnas que el trigger `trg_sync_device_snapshot_*` mantiene como
+    snapshot del último ingreso, y ese trigger no puede pisarlas porque sólo dispara con
+    cambios en `ingresos` y estos equipos no tienen ninguno.
+    """
+    remito = _optional_text(remito_number)
+    if not remito or not order_ids:
+        return []
+    columns = _table_columns("devices", {"id", "alquilado", "alquiler_a", "ubicacion_id"})
+    if not {"id", "alquilado", "alquiler_a"}.issubset(columns):
+        return []
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT doip.device_id,
+                   COALESCE(NULLIF(o.customer_name, ''), '-') AS customer_name
+              FROM delivery_order_item_partidas doip
+              JOIN delivery_order_items doi ON doi.id = doip.order_item_id
+              JOIN delivery_orders o ON o.id = doi.order_id
+             WHERE o.id = ANY(%s)
+               AND (
+                 o.bejerman_remito_group_id = %s
+                 OR EXISTS (
+                   SELECT 1 FROM delivery_order_remito_links l
+                    WHERE l.order_id = o.id AND l.remito_group_id = %s
+                 )
+               )
+               AND o.delivery_type = 'rental'
+               AND doip.ingreso_id IS NULL
+               AND doip.device_id IS NOT NULL
+             ORDER BY doip.device_id
+            """,
+            [order_ids, group_id, group_id],
+        )
+        rows = [{"device_id": int(row[0]), "customer_name": row[1] or "-"} for row in cur.fetchall()]
+    if not rows:
+        return []
+
+    dash_id = _dash_location_id() if "ubicacion_id" in columns else None
+    synced: list[int] = []
+    with connection.cursor() as cur:
+        for row in rows:
+            sets = ["alquilado = TRUE", "alquiler_a = %s"]
+            params: list[Any] = [row["customer_name"]]
+            if dash_id is not None:
+                sets.append("ubicacion_id = %s")
+                params.append(dash_id)
+            params.append(row["device_id"])
+            cur.execute(f"UPDATE devices SET {', '.join(sets)} WHERE id = %s", params)
+            if cur.rowcount:
+                synced.append(row["device_id"])
+    return synced
+
+
 def _delivery_remito_pdf_email_details(
     orders: list[dict[str, Any]],
     profile: dict[str, Any],
@@ -5467,10 +5870,8 @@ def _delivery_remito_pdf_email_details(
         internal_number = _optional_text(order.get("equipmentInternalNumber"))
         if source:
             lines.append(f"Referencia: {source}")
-        if serial:
-            lines.append(f"N/S: {serial}")
         if internal_number:
-            lines.append(f"Número interno: {internal_number}")
+            lines.append(f"Interno: {internal_number}")
     return lines
 
 
@@ -5492,6 +5893,53 @@ def _recovery_record_text(record: dict[str, Any]) -> str:
     except Exception:
         raw = str(record)
     return normalize_search(raw)
+
+
+# Cada emisión estampa `NEXORA <groupId>` en el mensaje del comprobante, y Bejerman
+# lo recorta a 40 caracteres: del id sólo sobreviven los primeros 33. Alcanza igual,
+# porque es la única marca que dice qué intento creó el documento.
+_RECOVERY_GROUP_STAMP_PATTERN = re.compile(r"brg-[0-9a-f][0-9a-f-]{7,}")
+
+
+def _recovery_record_group_stamps(record: dict[str, Any]) -> set[str]:
+    """Los ids de grupo que el comprobante lleva escritos encima."""
+
+    return set(_RECOVERY_GROUP_STAMP_PATTERN.findall(_recovery_record_text(record)))
+
+
+def _recovery_candidate_public(record: dict[str, Any], recovered: dict[str, Any]) -> dict[str, Any]:
+    """La ficha del candidato que se le muestra al operador.
+
+    Es lo mínimo para reconocer el comprobante en la pantalla de Bejerman y decidir:
+    número, fecha, y de qué emisión salió. El registro completo queda en el historial
+    de intentos; acá no entra porque este resumen se guarda en el grupo.
+    """
+
+    return {
+        "comprobanteId": as_string(first_value(record, ("Comprobante_ID", "ID", "IdComprobante"))),
+        "comprobanteTipo": _optional_text(recovered.get("comprobanteTipo"))
+        or as_string(first_value(record, ("Comprobante_Tipo", "Tipo"))),
+        "comprobanteLetra": _optional_text(recovered.get("comprobanteLetra"))
+        or as_string(first_value(record, ("Comprobante_Letra", "Letra"))),
+        "comprobantePtoVenta": _optional_text(recovered.get("comprobantePtoVenta"))
+        or as_string(first_value(record, ("Comprobante_PtoVenta", "PuntoVenta", "PtoVenta"))),
+        "comprobanteNumero": _optional_text(recovered.get("comprobanteNumero"))
+        or as_string(first_value(record, ("Comprobante_Numero", "Numero", "NroComprobante"))),
+        "remitoNumber": _optional_text(recovered.get("remitoNumber")),
+        "fechaEmision": normalize_date(
+            first_value(record, ("Comprobante_FechaEmision", "Comprobante_FEmision", "FechaEmision"))
+        )
+        or "",
+        "mensaje": as_string(first_value(record, ("Comprobante_Mensaje", "Mensaje"))),
+        "groupStamps": sorted(_recovery_record_group_stamps(record)),
+    }
+
+
+def _recovery_stamp_belongs_to_group(stamp: str, group_id: str) -> bool:
+    normalized = normalize_search(group_id)
+    if not stamp or not normalized:
+        return False
+    return normalized.startswith(stamp) or stamp.startswith(normalized)
 
 
 def _recovery_expected_article_codes(bridge_request: dict[str, Any]) -> set[str]:
@@ -6151,14 +6599,34 @@ def _recover_delivery_remito_after_emit_error(
         error_message=str(original_error),
     )
     matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    stamped_matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    foreign_stamped = 0
     for header in candidates:
         record = header if source.startswith("bejerman_sql_") else _sales_recovery_record_detail(client, header)
+        stamps = _recovery_record_group_stamps(record)
+        own_stamp = any(_recovery_stamp_belongs_to_group(stamp, group_id) for stamp in stamps)
+        if stamps and not own_stamp:
+            # El comprobante dice de qué emisión salió, y no es ésta. Sin este corte
+            # los duplicados que dejan los reintentos (mismo cliente, misma OS, misma
+            # partida) se cuentan como candidatos de todos los grupos a la vez y la
+            # reconciliación termina siempre "ambigua", que es el callejón sin salida.
+            foreign_stamped += 1
+            continue
         if not _recovery_record_matches_delivery_request(record, bridge_request, group_id):
             continue
         recovered = parse_remito_response({"DatosJSON": record})
         if not _optional_text(recovered.get("remitoNumber")):
             continue
         matches.append((record, recovered))
+        if own_stamp:
+            stamped_matches.append((record, recovered))
+
+    # El sello propio gana: si Bejerman devolvió el comprobante que esta emisión
+    # firmó, no hay nada que desempatar aunque haya otros parecidos.
+    resolved_by = "recovery_text"
+    if stamped_matches:
+        resolved_by = "group_stamp"
+        matches = stamped_matches
 
     if lookup_outcome is not None:
         lookup_outcome.update(
@@ -6167,6 +6635,14 @@ def _recover_delivery_remito_after_emit_error(
                 "source": source,
                 "candidateCount": len(candidates),
                 "matchCount": len(matches),
+                "resolvedBy": resolved_by,
+                "foreignStampedCandidates": foreign_stamped,
+                # Sin esto el operador ve "hay más de un candidato" y ninguno de los
+                # candidatos: la información para desempatar existía y no salía nunca
+                # del historial de intentos.
+                "matchSummaries": [
+                    _recovery_candidate_public(record, recovered) for record, recovered in matches
+                ],
             }
         )
 
@@ -6206,12 +6682,19 @@ def _finalize_delivery_remito_group(
     bridge_data: dict[str, Any],
     seller_code: str,
     payment_term_code: str,
+    *,
+    emitted_comprobante: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     remito_number = _optional_text(bridge_data.get("remitoNumber"))
     if not remito_number:
         raise DeliveryOrderError("BEJERMAN_REMITO_RESPONSE_INCOMPLETE", "Bejerman no devolvió número de remito", status_code=502)
 
     response = bridge_data.get("response") or {}
+    response_raw = _json_object(response.get("raw"))
+    effective_customer_code = (
+        _optional_text(_bejerman_customer_code(response_raw))
+        or _optional_text(compatibility.get("customerCode"))
+    )
     profile = bridge_data.get("profile") or compatibility["profile"]
     billing_profile = {**profile, "type": response.get("comprobanteTipo") or profile.get("type")}
     billing_required = _remito_requires_billing(billing_profile)
@@ -6234,6 +6717,7 @@ def _finalize_delivery_remito_group(
                 UPDATE bejerman_remito_groups
                 SET status = %s,
                     company_key = %s,
+                    customer_code = NULLIF(%s, ''),
                     comprobante_tipo = %s,
                     comprobante_letra = %s,
                     comprobante_pto_venta = %s,
@@ -6245,12 +6729,14 @@ def _finalize_delivery_remito_group(
                     last_error = NULL,
                     next_retry_at = NULL,
                     response_summary = %s::jsonb,
-                    generated_at = CURRENT_TIMESTAMP
+                    -- Ver la nota de clock_timestamp() en _mark_group_generated.
+                    generated_at = clock_timestamp()
                 WHERE id = %s
                 """,
                 [
                     group_status,
                     compatibility["companyKey"],
+                    effective_customer_code,
                     response.get("comprobanteTipo") or profile.get("type") or compatibility["profile"]["type"],
                     response.get("comprobanteLetra") or "R",
                     response.get("comprobantePtoVenta") or profile.get("pointOfSale"),
@@ -6281,6 +6767,7 @@ def _finalize_delivery_remito_group(
                     full_number,
                     bridge_request["issueDate"],
                 )
+                _sync_rental_devices_after_remito([completed_id], group_id, actor_user_id, full_number)
         _record_bejerman_integration_attempt(
             group_id,
             ids,
@@ -6292,7 +6779,12 @@ def _finalize_delivery_remito_group(
         # Bejerman ya confirmó el número: con eso NEXORA arma el papel acá mismo, en
         # vez de pedirle un PDF que el ERP no entrega. Va antes del aviso por mail,
         # que adjunta el PDF con `get_remito_group_pdf`.
-        comprobante = comprobante_from_emission(response, bridge_data, bridge_request)
+        comprobante = comprobante_from_emission(
+            response,
+            bridge_data,
+            bridge_request,
+            emitted_comprobante,
+        )
         if comprobante:
             store_rendered_remito_pdf(
                 comprobante,
@@ -6558,6 +7050,7 @@ def _reconcile_existing_uncertain_remito_group(
             "reviewState": REMITO_REVIEW_STATE_BLOCKED,
             "blockedReason": "No fue posible consultar Bejerman ni confirmar que el comprobante no exista.",
             "diagnosticCode": REMITO_REVIEW_LOOKUP_UNAVAILABLE_CODE,
+            "reviewResolvable": True,
         }
         _patch_remito_review_summary(group_id, patch)
         raise DeliveryOrderError(
@@ -6575,6 +7068,8 @@ def _reconcile_existing_uncertain_remito_group(
             "diagnosticCode": REMITO_REVIEW_LOOKUP_AMBIGUOUS_CODE,
             "candidateCount": lookup_outcome.get("candidateCount"),
             "matchCount": lookup_outcome.get("matchCount"),
+            "reviewCandidates": lookup_outcome.get("matchSummaries") or [],
+            "reviewResolvable": True,
         }
         _patch_remito_review_summary(group_id, patch)
         raise DeliveryOrderError(
@@ -6739,6 +7234,7 @@ def _current_review_comprobante(
             delivery_remito_config(profile),
             customer_fields,
             article_tax_by_code,
+            _delivery_article_descriptions(client, bridge_request),
         )
     except Exception as exc:
         converted = _sdk_error(exc)
@@ -6766,6 +7262,341 @@ def verify_bejerman_remito_review(group_id: str, actor_user_id: int | None) -> d
         review_action="verify",
     )
     return result or {"success": True, "groupId": group_id, "reviewState": REMITO_REVIEW_STATE_BLOCKED}
+
+
+REMITO_REVIEW_RESOLUTION_ADOPT = "adopt"
+REMITO_REVIEW_RESOLUTION_NOT_EMITTED = "not_emitted"
+REMITO_REVIEW_RESOLUTION_DUPLICATE = "duplicate"
+REMITO_REVIEW_RESOLUTIONS = (
+    REMITO_REVIEW_RESOLUTION_ADOPT,
+    REMITO_REVIEW_RESOLUTION_NOT_EMITTED,
+    REMITO_REVIEW_RESOLUTION_DUPLICATE,
+)
+
+
+def _group_order_ids(group: dict[str, Any]) -> list[str]:
+    raw = group.get("order_ids")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    return [str(value).strip() for value in (raw or []) if str(value).strip()]
+
+
+def review_candidates_for_group(group: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = _json_object(group.get("response_summary"))
+    raw = summary.get("reviewCandidates")
+    if not isinstance(raw, list):
+        return []
+    return [candidate for candidate in raw if isinstance(candidate, dict)]
+
+
+def _same_comprobante_number(left: Any, right: Any) -> bool:
+    """Compara números de comprobante sin pelearse con los ceros a la izquierda."""
+
+    left_digits = _normalized_digits(left).lstrip("0")
+    right_digits = _normalized_digits(right).lstrip("0")
+    return bool(left_digits) and left_digits == right_digits
+
+
+def _find_review_candidate(
+    candidates: list[dict[str, Any]],
+    numero: Any,
+    pto_venta: Any,
+) -> dict[str, Any] | None:
+    for candidate in candidates:
+        if not _same_comprobante_number(candidate.get("comprobanteNumero"), numero):
+            continue
+        if _optional_text(pto_venta) and not _same_comprobante_number(
+            candidate.get("comprobantePtoVenta"), pto_venta
+        ):
+            continue
+        return candidate
+    return None
+
+
+def _adopted_comprobante_record(
+    candidate: dict[str, Any] | None,
+    payload: dict[str, Any],
+    group: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """El comprobante que el operador dice que salió, con la forma de Bejerman."""
+
+    source = candidate or {}
+    return {
+        "Comprobante_ID": _optional_text(source.get("comprobanteId")),
+        "Comprobante_Tipo": _optional_text(source.get("comprobanteTipo"))
+        or _optional_text(group.get("comprobante_tipo"))
+        or _optional_text(profile.get("type")),
+        "Comprobante_Letra": _optional_text(source.get("comprobanteLetra"))
+        or _optional_text(group.get("comprobante_letra"))
+        or "R",
+        "Comprobante_PtoVenta": _optional_text(source.get("comprobantePtoVenta"))
+        or _optional_text(payload.get("comprobantePtoVenta"))
+        or _optional_text(group.get("comprobante_pto_venta"))
+        or _optional_text(profile.get("pointOfSale")),
+        "Comprobante_Numero": _normalized_digits(
+            source.get("comprobanteNumero") or payload.get("comprobanteNumero")
+        ).zfill(8),
+        "Comprobante_FechaEmision": _optional_text(source.get("fechaEmision")),
+        "Comprobante_Mensaje": _optional_text(source.get("mensaje")),
+    }
+
+
+def resolve_bejerman_remito_review(
+    group_id: str,
+    actor_user_id: int | None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """El desempate humano para una revisión que NEXORA no puede cerrar sola.
+
+    Cuando la consulta a Bejerman vuelve ambigua (varios comprobantes candidatos) o
+    no vuelve, NEXORA se niega —con razón— a elegir: adoptar el comprobante
+    equivocado duplica stock y facturación. Pero hasta acá esa negativa no tenía
+    salida: verificar fallaba siempre, y corregir y reemitir estaban trabados detrás
+    de una verificación que nunca iba a pasar. El proceso quedaba clavado con el
+    cliente esperando y sólo se destrababá a mano, por SQL.
+
+    Esto le da al operador las dos únicas respuestas posibles después de mirar
+    Bejerman, y deja asentado quién decidió y por qué:
+
+    - `adopt`: "el remito salió, es éste" → se adopta el comprobante y el proceso se
+      cierra como reconciliado, igual que si lo hubiera encontrado la recuperación
+      automática.
+    - `not_emitted`: "lo miré y no está" → el proceso pasa a corrección, que habilita
+      editar la orden y reemitir.
+    """
+
+    payload = payload or {}
+    decision = (_optional_text(payload.get("decision")) or "").lower()
+    reason = _optional_text(payload.get("reason")) or ""
+    if decision not in REMITO_REVIEW_RESOLUTIONS:
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_DECISION_REQUIRED",
+            "Indique si el remito existe en Bejerman ('adopt'), si no se emitió ('not_emitted') "
+            "o si este proceso es un duplicado de otro que ya quedó bien ('duplicate').",
+            status_code=400,
+        )
+    if payload.get("confirm") is not True:
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_CONFIRMATION_REQUIRED",
+            "Debe confirmar la resolución manual de la revisión.",
+            status_code=400,
+        )
+    # La resolución pisa lo que Bejerman no pudo confirmar: sin el motivo escrito, en
+    # una semana nadie puede reconstruir por qué este remito se cerró a mano.
+    if not reason:
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_REASON_REQUIRED",
+            "Escriba qué verificó en Bejerman antes de resolver la revisión.",
+            status_code=400,
+        )
+
+    group = _load_remito_group_row(_optional_text(group_id))
+    if not group or _optional_text(group.get("status")) != "failed_review":
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_NOT_FOUND",
+            "No se encontró un proceso pendiente de revisión.",
+            status_code=404,
+        )
+    summary = _json_object(group.get("response_summary"))
+    if _optional_text(summary.get("reviewState")) == REMITO_REVIEW_STATE_SUPERSEDED:
+        raise DeliveryOrderError(
+            REMITO_REVIEW_REQUIRED_CODE,
+            "Este proceso ya fue reemplazado por otro remito.",
+            status_code=409,
+        )
+
+    resolution = {
+        "decision": decision,
+        "reason": reason,
+        "actorUserId": actor_user_id,
+        "at": timezone.now().isoformat(),
+    }
+
+    if decision == REMITO_REVIEW_RESOLUTION_DUPLICATE:
+        # Un reintento que sí emitió deja procesos hermanos que ya no representan
+        # nada: la orden quedó con el remito de otro grupo. No se pueden verificar
+        # (la orden pertenece a otro proceso) ni reemitir, así que sin esto quedan
+        # pidiendo revisión para siempre. Cerrarlos no toca la orden ni el stock;
+        # el comprobante de más, si existe, se anula en Bejerman.
+        order_ids = _group_order_ids(group)
+        _patch_remito_review_summary(
+            _optional_text(group_id),
+            {
+                "reviewState": REMITO_REVIEW_STATE_SUPERSEDED,
+                "reviewRequired": False,
+                "reconciliationRequired": False,
+                "reviewResolvable": False,
+                "operatorResolution": resolution,
+                "blockedReason": (
+                    "Cerrado como duplicado por un operador. Si Bejerman tiene un comprobante de más "
+                    "para esta entrega, hay que anularlo en Bejerman."
+                ),
+            },
+        )
+        _record_bejerman_integration_attempt(
+            _optional_text(group_id),
+            order_ids,
+            actor_user_id,
+            "review_resolved",
+            status="operator_closed_duplicate",
+            response_payload=resolution,
+            error_message=group.get("last_error"),
+        )
+        for order_id in order_ids:
+            create_event(
+                order_id,
+                actor_user_id,
+                "bejerman_remito_review_resolved",
+                metadata={"groupId": group_id, **resolution},
+            )
+        return {
+            "success": True,
+            "groupId": group_id,
+            "reviewState": REMITO_REVIEW_STATE_SUPERSEDED,
+            "operatorResolution": resolution,
+        }
+
+    orders = _orders_for_review_group(group, actor_user_id)
+    ids = [order["id"] for order in orders]
+
+    if decision == REMITO_REVIEW_RESOLUTION_NOT_EMITTED:
+        result = _prepare_remito_group_for_correction(group, ids, actor_user_id)
+        _patch_remito_review_summary(
+            _optional_text(group_id),
+            {
+                "operatorResolution": resolution,
+                "blockedReason": "",
+                "reviewResolvable": False,
+            },
+        )
+        _record_bejerman_integration_attempt(
+            _optional_text(group_id),
+            ids,
+            actor_user_id,
+            "review_resolved",
+            status="operator_confirmed_not_imported",
+            response_payload=resolution,
+            error_message=group.get("last_error"),
+        )
+        for order_id in ids:
+            create_event(
+                order_id,
+                actor_user_id,
+                "bejerman_remito_review_resolved",
+                metadata={"groupId": group_id, **resolution},
+            )
+        return {**result, "operatorResolution": resolution}
+
+    candidates = review_candidates_for_group(group)
+    numero = payload.get("comprobanteNumero") or payload.get("remitoNumber")
+    if not _optional_text(numero):
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_NUMBER_REQUIRED",
+            "Indique el número de comprobante que Bejerman tiene emitido.",
+            status_code=400,
+        )
+    candidate = _find_review_candidate(candidates, numero, payload.get("comprobantePtoVenta"))
+    if candidates and candidate is None and payload.get("allowUnlistedNumber") is not True:
+        listed = ", ".join(
+            _optional_text(item.get("comprobanteNumero")) for item in candidates if item.get("comprobanteNumero")
+        )
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_NUMBER_NOT_LISTED",
+            f"El comprobante indicado no está entre los que Bejerman devolvió ({listed}). "
+            "Verifique el número; si aun así corresponde, confirme que quiere adoptar uno no listado.",
+            status_code=409,
+        )
+
+    compatibility = _validate_remito_orders(orders, allow_existing_group_id=_optional_text(group_id))
+    profile = _profile_for_order(compatibility["deliveryType"], compatibility["companyKey"])
+    orders = _align_service_release_items_with_stock_article(orders, actor_user_id, compatibility, profile)
+    seller_code = _optional_text(group.get("seller_code")) or _env_text("BEJERMAN_REMITO_SELLER", "ADM")
+    payment_term_code = _optional_text(group.get("payment_term_code")) or _env_text(
+        "BEJERMAN_REMITO_PAYMENT_TERM",
+        _env_text("BEJERMAN_RIS_PAYMENT_TERM", "30"),
+    )
+    saved_bridge_request = summary.get("bridgeRequest") if isinstance(summary.get("bridgeRequest"), dict) else {}
+    bridge_request = {
+        "groupId": _optional_text(group_id),
+        "companyKey": compatibility["companyKey"],
+        "issueDate": _optional_text(saved_bridge_request.get("issueDate")) or timezone.localdate().isoformat(),
+        "customerCode": compatibility["customerCode"],
+        "customerName": compatibility["customerName"],
+        "priceCurrency": compatibility["priceCurrency"],
+        "exchangeRate": compatibility["exchangeRate"],
+        "sellerCode": seller_code,
+        "paymentTermCode": payment_term_code,
+        "notes": _optional_text(saved_bridge_request.get("notes")),
+        "orders": [_bridge_order(order) for order in orders],
+    }
+    record = _adopted_comprobante_record(candidate, payload, group, profile)
+    recovered = parse_remito_response({"DatosJSON": record})
+    if not _optional_text(recovered.get("remitoNumber")):
+        raise DeliveryOrderError(
+            "BEJERMAN_REMITO_REVIEW_NUMBER_INVALID",
+            "No se pudo armar el número de remito con los datos indicados.",
+            status_code=400,
+        )
+    bridge_data = {
+        "remitoNumber": recovered.get("remitoNumber"),
+        "response": {
+            **recovered,
+            "recoveredAfterError": True,
+            "recoverySource": "operator_review_resolution",
+            "operatorResolution": resolution,
+            "originalEmitError": _optional_text(group.get("last_error")) or _optional_text(summary.get("error")),
+        },
+        "profile": profile,
+        "lineCount": summary.get("lineCount"),
+        "stockWarnings": [],
+        "raw": {"operatorAdoptedCandidate": candidate or record, "recoverySource": "operator_review_resolution"},
+        "recoveredAfterError": True,
+    }
+    _record_bejerman_integration_attempt(
+        _optional_text(group_id),
+        ids,
+        actor_user_id,
+        "review_resolved",
+        status="operator_adopted_comprobante",
+        request_payload={"bridgeRequest": bridge_request},
+        response_payload={**resolution, "adopted": recovered},
+        error_message=group.get("last_error"),
+        recovery_payload={"candidate": candidate, "record": record},
+    )
+    result = _finalize_delivery_remito_group(
+        _optional_text(group_id),
+        ids,
+        orders,
+        actor_user_id,
+        {**compatibility, "profile": profile},
+        bridge_request,
+        bridge_data,
+        seller_code,
+        payment_term_code,
+    )
+    for order_id in ids:
+        create_event(
+            order_id,
+            actor_user_id,
+            "bejerman_remito_review_resolved",
+            metadata={"groupId": group_id, **resolution, "remitoNumber": recovered.get("remitoNumber")},
+        )
+    # Los demás candidatos siguen existiendo en Bejerman. Adoptar uno no anula los
+    # otros: eso es trabajo manual en el ERP y el operador tiene que saberlo.
+    leftovers = [
+        _optional_text(item.get("comprobanteNumero"))
+        for item in candidates
+        if not _same_comprobante_number(item.get("comprobanteNumero"), recovered.get("comprobanteNumero"))
+    ]
+    return {
+        **result,
+        "operatorResolution": resolution,
+        "pendingBejermanCleanup": [number for number in leftovers if number],
+    }
 
 
 def _claim_review_reissue(group_id: str) -> None:
@@ -6853,7 +7684,6 @@ def reissue_corrected_bejerman_remito_review(
                 "hasPayloadChanges": True,
                 "currentPayloadSignature": current["signature"],
                 "printSplitRequired": sale_print_split_required,
-                "maxArticleLines": _sale_max_article_lines() if sale_print_split_required else None,
                 "maxPrintLines": _remito_print_line_limit("sale") if sale_print_split_required else None,
             },
         )
@@ -6931,15 +7761,20 @@ def _delivery_stock_entry_number(partida: str, index: int, used: set[str]) -> st
     return number
 
 
-def _ensure_delivery_stock_entries_for_partidas(client: BejermanSDKClient, comprobante: dict[str, Any]) -> None:
+def _ensure_delivery_stock_entries_for_partidas(
+    client: BejermanSDKClient, comprobante: dict[str, Any]
+) -> list[dict[str, Any]]:
     """Da de alta por circuito STOCK las partidas de línea que Bejerman rechazó como
     inexistentes al emitir el remito, y verifica que el importador las haya reflejado
-    antes de reintentar el comprobante (que va con ActualizaStock=N y partida
-    informada). Puerto de bejerman_ris._ensure_register_stock_entries al circuito de
-    remitos de entrega/OS, que no tenía este fallback."""
+    antes de reintentar el comprobante. Puerto de
+    bejerman_ris._ensure_register_stock_entries al circuito de remitos de entrega/OS.
+
+    Devuelve los ENT emitidos: cada uno deja la partida en +1, y esa unidad de más es
+    la que obliga a reintentar con `ActualizaStock=N` — el motivo por el que el
+    comprobante queda sin movimiento de stock y fuera de los reportes por cliente."""
     lines = _delivery_partida_stock_lines(comprobante)
     if not lines:
-        return
+        return []
     issue_date = _optional_text(comprobante.get("Comprobante_FechaEmision")) or timezone.localdate().isoformat()
     entries: list[dict[str, Any]] = []
     pending: list[tuple[str, str]] = []
@@ -6970,7 +7805,7 @@ def _ensure_delivery_stock_entries_for_partidas(client: BejermanSDKClient, compr
         )
         pending.append((partida, deposit))
     if not entries:
-        return
+        return []
     numera_flex = _env_text("BEJERMAN_STOCK_NUMERA_FLEX", "N")
     response = client.ingresar_lista_comprobantes_stock_json(entries, numera_flex=numera_flex)
     if not is_ok_response(response):
@@ -6982,11 +7817,89 @@ def _ensure_delivery_stock_entries_for_partidas(client: BejermanSDKClient, compr
     for attempt in range(attempts):
         remaining = [(p, d) for (p, d) in remaining if not _delivery_stock_partida_present(client, p, d)]
         if not remaining:
-            return
+            return entries
         if attempt < attempts - 1 and delay_ms:
             time.sleep(delay_ms / 1000)
     names = ", ".join(p for p, _d in remaining)
     raise BejermanSdkResponseError(f"No se pudo confirmar el alta de stock de {names} antes de reintentar el remito.")
+
+
+def _recovery_keeps_stock_movement() -> bool:
+    return bool(getattr(settings, "BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT", True))
+
+
+def _counter_delivery_stock_entries(
+    entries: list[dict[str, Any]], tipo: str, prefijo: str, *, signo: int = 1
+) -> list[dict[str, Any]]:
+    """Los mismos renglones del ENT, con otro tipo de comprobante y otro origen.
+
+    `signo` importa: el importador de stock guarda la cantidad tal como se la mandan
+    y no la deduce del tipo, asi que la compensacion tiene que ir en negativo (ver
+    `bejerman_ris._counter_stock_entries`)."""
+
+    salidas: list[dict[str, Any]] = []
+    for entry in entries:
+        salida = {
+            **entry,
+            "Comprobante_Tipo": tipo,
+            "Comprobante_IdOrigen": f"{prefijo}-{_optional_text(entry.get('Comprobante_Numero'))}"[:50],
+        }
+        for campo in ("Comprobante_CantidadUM1", "Comprobante_CantidadUM2"):
+            valor = entry.get(campo)
+            if isinstance(valor, (int, float)) and valor:
+                salida[campo] = signo * abs(valor)
+        salidas.append(salida)
+    return salidas
+
+
+def _neutralize_delivery_stock_entries(client: BejermanSDKClient, entries: list[dict[str, Any]]) -> None:
+    """Deja en cero las partidas que acaba de crear el ENT, sin borrarlas.
+
+    Gemela de `bejerman_ris._neutralize_register_stock_entries`; ver ahí el porqué.
+    En dos palabras: el ENT sólo tiene que hacer *existir* la partida, y la unidad de
+    más que deja es la que obligaba a mandar el comprobante sin movimiento de stock.
+    """
+
+    if not entries:
+        return
+    response = client.ingresar_lista_comprobantes_stock_json(
+        _counter_delivery_stock_entries(
+            entries, _env_text("BEJERMAN_STOCK_EXIT_COMPROBANTE", "SAL"), "NEXORA-NEU", signo=-1
+        ),
+        numera_flex=_env_text("BEJERMAN_STOCK_NUMERA_FLEX", "N"),
+    )
+    if not is_ok_response(response):
+        detail = _optional_text(response.get("ErrorMsg")) or _optional_text(response.get("Resultado")) or "sin detalle"
+        raise BejermanSdkResponseError(f"Bejerman rechazó la salida que compensa el alta de partida. {detail}")
+    faltantes = [
+        _optional_text(entry.get("Comprobante_ArtPartida"))
+        for entry in entries
+        if not _delivery_stock_partida_present(
+            client,
+            _optional_text(entry.get("Comprobante_ArtPartida")),
+            _optional_text(entry.get("Comprobante_ArtDeposito")),
+        )
+    ]
+    if faltantes:
+        raise BejermanSdkResponseError(
+            "La partida no quedó en el depósito después de compensarla: " + ", ".join(faltantes)
+        )
+
+
+def _restore_delivery_stock_entries(client: BejermanSDKClient, entries: list[dict[str, Any]]) -> None:
+    """Repone la unidad que sacó la salida, para retomar el reintento de siempre."""
+
+    if not entries:
+        return
+    response = client.ingresar_lista_comprobantes_stock_json(
+        _counter_delivery_stock_entries(entries, _env_text("BEJERMAN_STOCK_ENTRY_COMPROBANTE", "ENT"), "NEXORA-RST"),
+        numera_flex=_env_text("BEJERMAN_STOCK_NUMERA_FLEX", "N"),
+    )
+    if not is_ok_response(response):
+        detail = _optional_text(response.get("ErrorMsg")) or _optional_text(response.get("Resultado")) or "sin detalle"
+        raise BejermanSdkResponseError(
+            "Quedó stock sin reponer después de compensar el alta de partida. " + detail
+        )
 
 
 def _comprobante_import_with_positive_partidas(comprobante: dict[str, Any]) -> dict[str, Any]:
@@ -7017,12 +7930,42 @@ def _recover_delivery_partida_rejection(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fallback cuando Bejerman procesa la 'emisión' del remito de entrega como
     importador y rechaza la partida (mismo comportamiento ya resuelto para RIS en
-    bejerman_ris._recover_emit_partida_rejection): da de alta la partida por ENT en
-    el circuito STOCK y reintenta el mismo comprobante con ActualizaStock=N, partida
-    informada y cantidad positiva."""
+    bejerman_ris._recover_emit_partida_rejection).
+
+    El ENT da de alta la partida, que el importador de VENTAS no crea, pero la deja
+    en +1: por eso el reintento iba con `ActualizaStock=N`, y un comprobante así **no
+    genera movimiento de stock**, con lo cual la entrega no queda atada al cliente en
+    los reportes. Ahora se compensa el ENT con una salida para dejar la partida
+    existiendo en cero y se reintenta el comprobante original, que hace su propio
+    movimiento. Si ese camino falla se repone el ENT y se usa el reintento anterior.
+    """
+    # Antes que nada y antes de tocar el SDK: si el remito no entra en el formulario,
+    # este reintento no puede salir y no hay que dejar altas de stock a medio camino.
+    _assert_sale_remito_payload_limits(delivery_type, comprobante)
+
+    created_entries = _ensure_delivery_stock_entries_for_partidas(client, comprobante)
+
+    if created_entries and _recovery_keeps_stock_movement():
+        try:
+            _neutralize_delivery_stock_entries(client, created_entries)
+        except Exception:
+            logger.warning("bejerman_delivery_partida_neutralize_failed", exc_info=True)
+        else:
+            try:
+                raw_response = client.ingresar_comprobante_ventas_json(
+                    comprobante,
+                    circuito=circuito,
+                    operacion=operacion,
+                    numera_flex=numera_flex,
+                    emite_reg=emite_reg,
+                )
+            except Exception:
+                logger.warning("bejerman_delivery_partida_stock_retry_failed", exc_info=True)
+                _restore_delivery_stock_entries(client, created_entries)
+            else:
+                return comprobante, raw_response
+
     recovered_comprobante = _comprobante_import_with_positive_partidas(comprobante)
-    _assert_sale_remito_payload_limits(delivery_type, recovered_comprobante)
-    _ensure_delivery_stock_entries_for_partidas(client, comprobante)
     raw_response = client.ingresar_comprobante_ventas_json(
         recovered_comprobante,
         circuito=circuito,
@@ -7279,6 +8222,7 @@ def generate_bejerman_remito(
             delivery_remito_config(compatibility["profile"]),
             customer_fields,
             article_tax_by_code,
+            _delivery_article_descriptions(client, bridge_request),
         )
         _assert_sale_remito_payload_limits(compatibility["deliveryType"], built["comprobante"])
         attempt_number = _mark_group_sending(
@@ -7500,6 +8444,7 @@ def generate_bejerman_remito(
         bridge_data,
         seller_code,
         payment_term_code,
+        emitted_comprobante=built.get("comprobante") if built else None,
     )
     profile = result["profile"]
     logger.info(
@@ -7661,77 +8606,38 @@ def _remito_group_fallback_lines(row: dict[str, Any], summary: dict[str, Any]) -
     return lines
 
 
-def _remito_group_service_release_print_lines(row: dict[str, Any], summary: dict[str, Any]) -> list[str]:
-    profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
-    document_type = _optional_text(profile.get("type") or row.get("comprobante_tipo")).upper()
-    operation = _optional_text(profile.get("operation") or row.get("operation_code")).upper()
-    if document_type != "RSS" or operation != "REP":
-        return []
-
-    raw_order_ids = row.get("order_ids")
-    if isinstance(raw_order_ids, str):
-        try:
-            raw_order_ids = json.loads(raw_order_ids)
-        except Exception:
-            raw_order_ids = []
-    order_ids = [
-        _optional_text(order_id)
-        for order_id in (raw_order_ids if isinstance(raw_order_ids, list) else [])
-        if _optional_text(order_id)
-    ]
-
-    item_by_ingreso: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
-    ordered_items: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for order_id in order_ids:
-        try:
-            order = get_delivery_order(order_id, include_events=False)
-        except Exception:
-            continue
-        if normalize_delivery_type(order.get("deliveryType")) != "service_release":
-            continue
-        for item in order.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            pair = (order, item)
-            ordered_items.append(pair)
-            try:
-                ingreso_id = int(item.get("ingresoId") or 0)
-            except (TypeError, ValueError):
-                ingreso_id = 0
-            if ingreso_id > 0:
-                item_by_ingreso[ingreso_id] = pair
-
-    raw_os_ids = summary.get("osIds") if isinstance(summary.get("osIds"), list) else []
-    ordered_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for raw_os_id in raw_os_ids:
-        try:
-            ingreso_id = int(raw_os_id)
-        except (TypeError, ValueError):
-            continue
-        pair = item_by_ingreso.get(ingreso_id)
-        if pair:
-            ordered_pairs.append(pair)
-    if not ordered_pairs:
-        ordered_pairs = ordered_items
-
-    lines: list[str] = []
-    seen: set[int] = set()
-    for order, item in ordered_pairs:
-        try:
-            ingreso_id = int(item.get("ingresoId") or 0)
-        except (TypeError, ValueError):
-            ingreso_id = 0
-        if ingreso_id and ingreso_id in seen:
-            continue
-        if ingreso_id:
-            seen.add(ingreso_id)
-        legend = service_release_item_legend(order, item)
-        equipment = service_release_equipment_line(
-            item.get("articleName") or item.get("description"),
-            item.get("sourceText") or item.get("articleCode"),
+def _remito_pdf_request_customer_code(group_id: str) -> str:
+    normalized_group_id = _optional_text(group_id)
+    if not normalized_group_id or not _table_exists("bejerman_pdf_requests"):
+        return ""
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT customer_code
+              FROM bejerman_pdf_requests
+             WHERE remito_group_id = %s
+               AND NULLIF(BTRIM(COALESCE(customer_code, '')), '') IS NOT NULL
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            [normalized_group_id],
         )
-        lines.extend([legend, equipment, REMITO_ITEM_SEPARATOR])
-    return [line for line in lines if _optional_text(line)]
+        row = cur.fetchone()
+    return _optional_text(row[0]) if row else ""
+
+
+def _effective_remito_pdf_customer_code(
+    group_id: str,
+    row: dict[str, Any],
+    raw_summary: dict[str, Any],
+) -> str:
+    # En clientes ocasionales el grupo se reserva sin código. Bejerman devuelve el
+    # código real recién al emitir (por ejemplo, `1`) y el PDF se guarda con él.
+    return (
+        _optional_text(_bejerman_customer_code(raw_summary))
+        or _optional_text(row.get("customer_code"))
+        or _remito_pdf_request_customer_code(group_id)
+    )
 
 
 def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tuple[bytes, str, str]:
@@ -7770,7 +8676,8 @@ def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tup
             payload={"pdf_state": "pending_document", "generation_requested": False},
         )
     company_key = _company_key_for_remito_group(group_id, row.get("response_summary"), row.get("company_key"))
-    raw_summary = summary.get("raw") if isinstance(summary.get("raw"), dict) else {}
+    raw_summary = _json_object(summary.get("raw"))
+    customer_code = _effective_remito_pdf_customer_code(group_id, row, raw_summary)
     doc_id = _document_id(
         {
             "t": row.get("comprobante_tipo"),
@@ -7778,12 +8685,12 @@ def get_remito_group_pdf(group_id: str, actor_user_id: int | None = None) -> tup
             "l": row.get("comprobante_letra") or "R",
             "p": row.get("comprobante_pto_venta"),
             "f": _local_remito_issue_date(row, raw_summary),
-            "c": row.get("customer_code"),
+            "c": customer_code,
         }
     )
     try:
         bytes_, content_type = get_facturacion_pdf(
-            row["customer_code"],
+            customer_code,
             doc_id,
             interactive=True,
             actor_user_id=actor_user_id,

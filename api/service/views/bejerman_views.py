@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import timedelta
 
 from django.db import connection
@@ -10,6 +11,8 @@ from rest_framework.views import APIView
 from ..bejerman_delivery import (
     generate_bejerman_remito,
     reissue_corrected_bejerman_remito_review,
+    resolve_bejerman_remito_review,
+    review_candidates_for_group,
     verify_bejerman_remito_review,
 )
 from ..bejerman_ris import (
@@ -49,7 +52,10 @@ from ..bejerman_pdf_settings import (
 )
 from ..delivery_orders import DeliveryOrderError
 from ..permissions import require_any_permission, require_permission, user_has_permission
-from .helpers import q
+from .helpers import os_label, q
+
+
+logger = logging.getLogger(__name__)
 
 
 def _actor_id(request):
@@ -284,6 +290,13 @@ def _company_payload(company_key, company_label="", bejerman_company=""):
     }
 
 
+def _is_bare_error_code(value):
+    """Un token tipo BEJERMAN_CUSTOMER_VAT_MISSING, sin nada legible alrededor."""
+
+    text = _clean_filter(value)
+    return bool(text) and " " not in text and text == text.upper() and "_" in text
+
+
 def _remito_error_message(payload, fallback=""):
     payload = _json_value(payload, {})
     if not isinstance(payload, dict):
@@ -292,6 +305,12 @@ def _remito_error_message(payload, fallback=""):
     for key in ("error", "bridgeError", "detail", "message"):
         value = _clean_filter(payload.get(key))
         if value and value != "BEJERMAN_BRIDGE_RESPONSE_ERROR":
+            # Cuando Bejerman devuelve un código pelado, mostrarlo tal cual no le
+            # dice nada a nadie. La traducción ya está guardada al lado.
+            if _is_bare_error_code(value):
+                explained = _clean_filter(payload.get("errorCategoryMessage"))
+                if explained and not _is_bare_error_code(explained):
+                    return explained
             return value
     message = _clean_filter(payload.get("message"))
     if message == "BEJERMAN_BRIDGE_RESPONSE_ERROR":
@@ -415,18 +434,75 @@ def _delivery_review_diagnostic(row, response_summary):
                 "Reemitir con el cálculo fiscal corregido y confirmación humana.",
             ],
         }
+    candidates = review_candidates_for_group(row)
+    candidate_labels = [
+        " ".join(
+            part
+            for part in (
+                _clean_filter(candidate.get("comprobanteTipo")),
+                _clean_filter(candidate.get("comprobanteLetra")),
+                "-".join(
+                    part
+                    for part in (
+                        _clean_filter(candidate.get("comprobantePtoVenta")),
+                        _clean_filter(candidate.get("comprobanteNumero")),
+                    )
+                    if part
+                ),
+                f"({_clean_filter(candidate.get('fechaEmision'))})" if candidate.get("fechaEmision") else "",
+            )
+            if part
+        )
+        for candidate in candidates
+    ]
+    if code == "BEJERMAN_REMITO_LOOKUP_AMBIGUOUS":
+        return {
+            "code": code,
+            "explanation": (
+                "Bejerman tiene más de un comprobante que podría ser el de esta entrega, casi siempre "
+                "porque un intento anterior llegó a emitir aunque devolviera error. NEXORA no adopta "
+                "ninguno por su cuenta: si eligiera mal, duplicaría el stock y la facturación."
+            ),
+            "technicalDetail": error,
+            "candidates": candidates,
+            "solutions": [
+                "Abrir Bejerman y mirar los comprobantes listados acá: "
+                + (", ".join(candidate_labels) if candidate_labels else "(la lista quedó vacía, use la verificación)"),
+                "Anular en Bejerman los que estén de más; queda uno solo válido para esta entrega.",
+                "Volver acá y usar «Resolver revisión» → «El remito existe» con ese número.",
+                "Si ninguno corresponde a esta entrega, usar «No se emitió» para habilitar la corrección y reemitir.",
+            ],
+        }
+    if code == "BEJERMAN_REMITO_LOOKUP_UNAVAILABLE":
+        return {
+            "code": code,
+            "explanation": (
+                "NEXORA no pudo consultar Bejerman, así que no sabe si el remito llegó a emitirse. "
+                "Reemitir a ciegas puede duplicarlo."
+            ),
+            "technicalDetail": error,
+            "candidates": candidates,
+            "solutions": [
+                "Reintentar la verificación: si Bejerman ya responde, el proceso se destraba solo.",
+                "Si sigue sin responder, buscar el comprobante en Bejerman por cliente y fecha.",
+                "Si está emitido, usar «Resolver revisión» → «El remito existe» con ese número.",
+                "Si no está, usar «No se emitió» para habilitar la corrección y reemitir.",
+            ],
+        }
     explanations = {
-        "BEJERMAN_REMITO_LOOKUP_UNAVAILABLE": "No se pudo completar una consulta confiable en Bejerman.",
-        "BEJERMAN_REMITO_LOOKUP_AMBIGUOUS": "Se encontraron varios comprobantes posibles y ninguno puede adoptarse automáticamente.",
         "BEJERMAN_REMITO_PAYLOAD_UNCHANGED": "El comprobante actual no presenta cambios frente al intento rechazado.",
     }
     return {
         "code": code or "BEJERMAN_REMITO_REQUIRES_REVIEW",
-        "explanation": explanations.get(code) or "La emisión necesita una verificación segura antes de continuar.",
+        "explanation": explanations.get(code) or (
+            "La emisión quedó sin confirmación de Bejerman. Antes de reemitir hay que asegurarse de que "
+            "el remito no haya salido igual, para no duplicarlo."
+        ),
         "technicalDetail": error,
+        "candidates": candidates,
         "solutions": [
-            "Ejecutar la verificación contra Bejerman.",
-            "No reemitir mientras el resultado sea ambiguo o la consulta falle.",
+            "Ejecutar la verificación contra Bejerman: resuelve sola la mayoría de los casos.",
+            "Si la verificación no puede decidir, resolver a mano indicando si el remito existe o no.",
         ],
     }
 
@@ -523,7 +599,12 @@ def _delivery_remito_processes(action_permissions=None):
                 "blockedReason": (
                     closed_order_reason
                     or (
-                        "Primero debe verificarse que el comprobante no se importó."
+                        # Decirle "verifique primero" a alguien cuya verificación ya
+                        # falló es mandarlo contra la misma pared: cuando el proceso
+                        # está trabado, el camino es resolverlo a mano.
+                        "La verificación no pudo decidir sola. Use «Resolver revisión» indicando si el remito existe en Bejerman."
+                        if review_state == "blocked"
+                        else "Primero debe verificarse que el comprobante no se importó."
                         if review_state not in {"ready_for_correction", "ready_to_reissue"}
                         else "No tiene permiso para modificar los artículos de la orden."
                         if not can_edit
@@ -531,13 +612,28 @@ def _delivery_remito_processes(action_permissions=None):
                     )
                 ),
             },
+            # La verificación automática no siempre puede decidir (Bejerman devuelve
+            # varios candidatos o no responde). Sin esta acción esos procesos quedaban
+            # sin ningún camino disponible: el operador veía "necesita revisión", los
+            # otros dos botones deshabilitados, y el de verificar fallando siempre.
+            "resolve": {
+                "visible": status == "failed_review" and not superseded,
+                "allowed": status == "failed_review" and not superseded and can_manage and not closed_order,
+                "blockedReason": (
+                    closed_order_reason
+                    or ("No tiene permiso para resolver revisiones de Bejerman." if not can_manage else "")
+                ),
+                "candidates": review_candidates_for_group(row),
+            },
             "reissue": {
                 "visible": status == "failed_review" and not superseded,
                 "allowed": review_state == "ready_to_reissue" and can_manage and can_generate and not closed_order,
                 "blockedReason": (
                     closed_order_reason
                     or (
-                        "Debe abrir, revisar y guardar la orden antes de reemitir."
+                        "La verificación no pudo decidir sola. Use «Resolver revisión» indicando si el remito existe en Bejerman."
+                        if review_state == "blocked"
+                        else "Debe abrir, revisar y guardar la orden antes de reemitir."
                         if review_state != "ready_to_reissue"
                         else "No tiene todos los permisos necesarios para reemitir el RT."
                         if not (can_manage and can_generate)
@@ -593,6 +689,100 @@ def _delivery_remito_processes(action_permissions=None):
     return out
 
 
+def _ingreso_conflict_processes(action_permissions=None):
+    """Equipos que entraron con su orden anterior todavía abierta.
+
+    No es un proceso de Bejerman fallado, pero es lo mismo desde el lado de quien mira este
+    panel: algo quedó a medio resolver y hay que decidirlo. Entra como "Revisión requerida"
+    para que aparezca arriba de todo junto con el resto de lo trabado.
+    """
+
+    try:
+        from ..bejerman_ingreso_conflicts import list_pending_conflicts
+    except Exception:
+        return []
+    try:
+        conflicts = list_pending_conflicts()
+    except Exception:
+        logger.warning("ingreso_open_conflicts_list_failed", exc_info=True)
+        return []
+
+    permissions_for_actions = action_permissions or {}
+    can_resolve = bool(permissions_for_actions.get("resolve_conflict", True))
+    can_force = bool(permissions_for_actions.get("force_close", False))
+    out = []
+    for row in conflicts:
+        company = _company_payload(row.get("empresa_bejerman"))
+        equipment_label = " ".join(
+            value for value in (row.get("tipo_equipo"), row.get("marca"), row.get("modelo")) if value
+        )
+        os_actual = os_label(row.get("ingreso_id"))
+        os_previa = os_label(row.get("conflicting_ingreso_id"))
+        fecha_previa = row.get("conflicting_fecha_ingreso")
+        out.append(
+            {
+                **company,
+                "id": row.get("id"),
+                "conflict_id": row.get("id"),
+                "source": "ingreso_conflicto",
+                "source_label": "Conflicto de ingreso",
+                "process_id": f"ingreso_conflicto:{row.get('id')}",
+                "status": "failed_review",
+                "pdf_status": "",
+                "document_mode": "emit",
+                "ingreso_id": row.get("ingreso_id"),
+                "conflicting_ingreso_id": row.get("conflicting_ingreso_id"),
+                "conflicting_os": os_previa,
+                "conflicting_fecha_ingreso": fecha_previa,
+                "conflicting_estado": row.get("conflicting_estado") or "",
+                "display_id": f"OS-{row.get('ingreso_id')}",
+                "numero_serie": row.get("numero_serie") or "",
+                "numero_interno": row.get("numero_interno") or "",
+                "tipo_equipo": row.get("tipo_equipo") or "",
+                "equipment_label": equipment_label,
+                "cliente": row.get("cliente") or "",
+                "customer_name": row.get("cliente") or "",
+                "remito_number": row.get("remito_number") or "",
+                "title": row.get("remito_number") or "Remito de ingreso",
+                "operation_label": "Resolver orden anterior",
+                "retryable": False,
+                "attempts": 0,
+                "last_error": (
+                    f"El equipo ya tenía la OS {os_previa} abierta al emitirse este remito. "
+                    f"El renglón de {os_actual} salió sin número de OS hasta que se decida "
+                    "si la orden anterior se cierra o si corresponde unificarlas."
+                ),
+                "attempted_at": row.get("updated_at") or row.get("created_at"),
+                "updated_at": row.get("updated_at") or row.get("created_at"),
+                "created_at": row.get("created_at"),
+                "request_payload": {},
+                "response_payload": {},
+                "evidence": row.get("evidence") or {},
+                "actions": {
+                    "resolve_conflict": {
+                        "visible": True,
+                        "allowed": bool(can_resolve),
+                        "blockedReason": (
+                            "" if can_resolve else "No tiene permiso para resolver ingresos con orden anterior abierta."
+                        ),
+                    },
+                    # Cerrar sin ningún comprobante que lo respalde es la decisión, no el
+                    # trámite: la toma jefatura y por eso va con su propio permiso.
+                    "force_close": {
+                        "visible": bool(can_force),
+                        "allowed": bool(can_force),
+                        "blockedReason": (
+                            "" if can_force else "Sólo jefatura puede cerrar la orden sin comprobante de salida."
+                        ),
+                    },
+                },
+                "pdf_url": None,
+                "print_url": None,
+            }
+        )
+    return out
+
+
 def _list_remito_processes(params, *, include_status=True, action_permissions=None):
     source = _clean_filter(params.get("source") or params.get("origen")).lower()
     rows = []
@@ -600,6 +790,8 @@ def _list_remito_processes(params, *, include_status=True, action_permissions=No
         rows.extend(_ingreso_remito_processes())
     if source in {"", "orden_entrega"}:
         rows.extend(_delivery_remito_processes(action_permissions=action_permissions))
+    if source in {"", "ingreso_conflicto"}:
+        rows.extend(_ingreso_conflict_processes(action_permissions=action_permissions))
     return _sort_remito_processes(_filter_remito_processes(rows, params, include_status=include_status))
 
 
@@ -855,6 +1047,8 @@ class BejermanRemitoProcessesView(APIView):
             "manage": user_has_permission(request, "action.bejerman_sync.manage"),
             "edit": user_has_permission(request, "action.delivery_order.assign_articles"),
             "generate": user_has_permission(request, "action.delivery_order.generate_bejerman_remito"),
+            "resolve_conflict": user_has_permission(request, "action.ingreso.resolve_open_conflict"),
+            "force_close": user_has_permission(request, "action.ingreso.force_historical"),
         }
         rows = _list_remito_processes(request.GET, include_status=True, action_permissions=action_permissions)[:250]
         counter_rows = _list_remito_processes(request.GET, include_status=False, action_permissions=action_permissions)
@@ -933,9 +1127,13 @@ class BejermanRemitoProcessRetryView(APIView):
                                 status=400,
                             )
                         result = reissue_corrected_bejerman_remito_review(process_id, actor_id, retry_payload)
+                    elif action == "resolve":
+                        # La salida manual del callejón: la usa el operador que ya
+                        # miró Bejerman y sabe algo que NEXORA no puede averiguar.
+                        result = resolve_bejerman_remito_review(process_id, actor_id, retry_payload)
                     else:
                         return Response(
-                            {"detail": "Indique action=verify o action=reissue_corrected para un proceso en revisión."},
+                            {"detail": "Indique action=verify, action=resolve o action=reissue_corrected para un proceso en revisión."},
                             status=400,
                         )
                 elif row.get("status") == "failed":

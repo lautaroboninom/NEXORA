@@ -31,9 +31,24 @@ Operativa de remitos y presupuestos
     - Nota: por diseño de UI, Recepción no ve el botón en Aprobados. Si se desea, puede agregarse visibilidad también para Recepción.
   - Aprobación de presupuesto: accesible para jefatura (Hoja de Servicio y lista de Presupuestados).
 
+- Versiones del presupuesto (`quotes.version_num`)
+  - **Anular no pisa la versión**: la deja como histórica en estado `anulado` -conserva fecha de emisión, fecha de aprobación, PDF e ítems- y crea una copia en `pendiente` (con `origen_quote_id` apuntando a la anulada) que es la que se edita y se reemite. El PDF sale titulado `OS 000NN-<versión>`.
+  - Si la versión anulada estaba aprobada, además se devuelve el stock de los repuestos y el ingreso vuelve de `reparar` a `diagnosticado`.
+  - El otro camino a una versión nueva es **rechazar** y después "Nuevo presupuesto" (`POST /api/quotes/<id>/versiones/`).
+  - `anulado` es un valor del enum `quote_estado`. Lo agrega `apply_quote_anulacion_schema`, que corre solo en el arranque del contenedor vía `prepare_production_schema`: tiene que estar commiteado antes de que la app lo escriba, porque con `ATOMIC_REQUESTS` PostgreSQL no deja usar un valor de enum recién agregado en la misma transacción.
+  - Pendiente: editar una versión **ya emitida** la sigue modificando en el lugar (no abre una versión nueva), así que cambian los importes del presupuesto que el cliente ya recibió.
+
 - Sincronización de estado por trigger (sql/schema.sql)
   - Cuando la `quote` cambia de estado a `aprobado`, el trigger `sync_quote_with_ingreso` actualiza `presupuesto_estado` y, si el estado actual del ingreso es uno de `ingresado/diagnosticado/presupuestado`, pasa a `reparar`.
   - Si el equipo ya estaba `reparado`, el trigger conserva el estado actual (no lo retrocede).
+
+- Aviso a Cobranzas cuando el equipo es un MG propio
+  - Al aprobar el presupuesto de un equipo propio de MG BIO, Cobranzas recibe un correo con el **PDF del presupuesto adjunto** y un resumen (OS, versión, N° interno MG, N/S, marca/modelo, cliente de la orden, neto/IVA/total y quién aprobó).
+  - Sólo aplica a los **MG vigentes del patrimonio**. Los MG históricos (vendidos: `mg_estado='inactivo_venta'` o con datos de venta cargados) no disparan el aviso. El corte lo decide `ingreso_is_internal_equipment` (`api/service/bejerman_sync.py`), el mismo gate que usa la transferencia de stock STR→STL.
+  - Es un aviso **sólo de correo**: no genera campana. Tipo `presupuesto_mg_aprobado`, grupo "Cobranzas" del centro de notificaciones; por defecto lo reciben los usuarios con rol `cobranzas` y se apaga desde ahí con el toggle "Mail".
+  - Sale por la cola de correos (`notification_email_outbox`), así que el PDF se genera en el worker `email-outbox` y no dentro del request de aprobación. Si el PDF fallara, el correo igual sale con el resumen y el link.
+  - Sólo lo dispara la aprobación interna (Hoja de Servicio y lista de Presupuestados). La aprobación desde el Portal Cliente no lo emite.
+  - Implementación: `api/service/quote_mg_notifications.py`, enganchado al final de `AprobarPresupuestoView` (`api/service/views/quotes_views.py`).
 
 - Consideraciones de UX/errores
   - Si la apertura del PDF falla, se muestra un error y el usuario puede intentar imprimir luego desde la hoja de servicio o desde Aprobados.

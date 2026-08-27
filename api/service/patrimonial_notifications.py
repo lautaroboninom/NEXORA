@@ -20,7 +20,7 @@ from .notification_email_outbox import (
     queue_notification_email,
     summarize_email_deliveries,
 )
-from .notifications import notify_estado_patrimonial
+from .notifications import filter_email_recipients_by_preference, notify_estado_patrimonial
 
 logger = logging.getLogger(__name__)
 
@@ -382,16 +382,20 @@ def notify_patrimonial_email(
 
     label = EVENT_LABELS.get(evento_norm, evento_norm)
     notification_key = NOTIFICATION_KEY_BY_EVENT[evento_norm]
-    recipients = patrimonial_recipients()
+    configured = patrimonial_recipients()
 
     if ingreso_id:
         try:
-            notify_estado_patrimonial(ingreso_id, evento_norm, emails=recipients)
+            notify_estado_patrimonial(ingreso_id, evento_norm, emails=configured)
         except Exception:
             logger.exception(
                 "patrimonial_bell_failed",
                 extra={"ingreso_id": ingreso_id, "evento": evento_norm},
             )
+
+    # El correo respeta el toggle "Mail" del centro de notificaciones; las
+    # casillas externas que no son usuarios de NEXORA siguen recibiéndolo.
+    recipients = filter_email_recipients_by_preference(notification_key, configured)
 
     if not recipients:
         logger.warning(

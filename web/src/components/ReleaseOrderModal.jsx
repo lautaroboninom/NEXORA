@@ -40,10 +40,6 @@ export default function ReleaseOrderModal({
   onClose,
   onReleased,
 }) {
-  const flow = useMemo(
-    () => getReleaseFlow(row, { canManageResolution }),
-    [row, canManageResolution],
-  );
   const ingresoId = ingresoIdOf(row);
 
   const [resolution, setResolution] = useState("");
@@ -52,6 +48,16 @@ export default function ReleaseOrderModal({
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState("");
   const [manualPrint, setManualPrint] = useState(null);
+
+  const flow = useMemo(() => {
+    // Si puede gestionar la resolución, la que elija en el combo cuenta ya
+    // mismo para habilitar el botón: se persiste antes de pedir el remito
+    // (ver shouldPersistResolution), así que el gate no puede esperar a que
+    // vuelva a guardarse en `row` primero.
+    const pendingResolution = canManageResolution ? normalizeReleaseValue(resolution) : "";
+    const effectiveRow = pendingResolution ? { ...row, resolucion: pendingResolution } : row;
+    return getReleaseFlow(effectiveRow, { canManageResolution });
+  }, [row, canManageResolution, resolution]);
 
   useEffect(() => {
     if (!open) return;
@@ -246,7 +252,7 @@ export default function ReleaseOrderModal({
                     className="w-full rounded border p-2 text-right"
                     value={charge}
                     onChange={(event) => setCharge(event.target.value)}
-                    disabled={saving || (!canManageResolution && !row?.presupuesto_rechazado_cobro_neto)}
+                    disabled={saving || (!canManageResolution && row?.presupuesto_rechazado_cobro_neto == null)}
                     placeholder="0.00"
                   />
                 </label>

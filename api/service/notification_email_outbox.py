@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 OUTBOX_TABLE = "notification_email_outbox"
 OUTBOX_STATUSES = ("pending", "retry", "sending", "sent", "failed")
-ATTACHMENT_KINDS = ("", "delivery_remito_group", "ingress_remito", "service_order_billing")
+ATTACHMENT_KINDS = ("", "delivery_remito_group", "ingress_remito", "service_order_billing", "quote_pdf")
 RETRY_DELAYS_SECONDS = (15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 28800, 43200)
 
 
@@ -354,6 +354,20 @@ def _attachment_for_delivery(delivery: dict[str, Any]) -> tuple[bytes, str, str]
             from .service_order_billing import render_service_order_billing_pdf
 
             pdf_bytes, filename = render_service_order_billing_pdf(int(reference))
+            return pdf_bytes, "application/pdf", filename
+        if kind == "quote_pdf":
+            from .pdf import render_quote_pdf
+
+            # La referencia es "<ingreso_id>:<quote_id>": la versión importa, porque
+            # un mismo ingreso puede tener varias versiones de presupuesto.
+            ingreso_raw, _, quote_raw = reference.partition(":")
+            # Ojo: render_quote_pdf devuelve (filename, pdf), al revés que las otras.
+            filename, pdf_bytes = render_quote_pdf(
+                int(ingreso_raw),
+                quote_id=int(quote_raw) if quote_raw.strip() else None,
+            )
+            if not pdf_bytes:
+                raise ValueError(f"Sin presupuesto para adjuntar: {reference}")
             return pdf_bytes, "application/pdf", filename
     except Exception:
         if bool(context.get("optional")):

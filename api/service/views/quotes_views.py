@@ -1,3 +1,4 @@
+import logging
 import os
 import unicodedata
 from django.conf import settings
@@ -12,10 +13,16 @@ from rest_framework.views import APIView
 
 from ..pdf import render_quote_pdf
 from ..email_delivery import dispatch_email_delivery
-from ..notifications import emit_notification, notify_presupuesto_aprobado
+from ..notifications import (
+    emit_notification,
+    filter_email_recipients_by_preference,
+    notify_presupuesto_aprobado,
+    notify_presupuesto_rechazado_reparado,
+)
+from ..quote_mg_notifications import notify_quote_mg_approved
 from ..repair_ready_notifications import notify_repair_ready_for_remito
 from ..permissions import user_has_permission
-from ..rejected_budget import has_rejected_budget_charge_schema
+from ..rejected_budget import ensure_rejected_budget_charge_schema
 from ..serializers import (
     QuoteDetailSerializer,
 )
@@ -32,6 +39,8 @@ from .helpers import (
     _email_append_footer_text,
 )
 from ..repuestos import get_repuestos_config, calc_costo_ars, calc_precio_venta
+
+logger = logging.getLogger(__name__)
 
 
 def _can_view_costs(user) -> bool:
@@ -53,6 +62,10 @@ DEFAULT_PLAZO_ENTREGA_TXT = "< 5 D\u00cdAS H\u00c1BILES"
 DEFAULT_GARANTIA_TXT = "90 D\u00cdAS"
 DEFAULT_MANT_OFERTA_TXT = "7 D\u00cdAS"
 EMITTED_QUOTE_STATES = {"presupuestado", "emitido"}
+# Estado de la version que se anula: queda como historica y en su lugar nace una
+# version nueva editable. Antes se pisaba la fila (estado='pendiente', fechas y
+# pdf_url en NULL) y el historial perdia todo rastro de lo que se habia emitido.
+ANNULLED_QUOTE_STATE = "anulado"
 
 
 def _quote_estado_str(value) -> str:
@@ -61,6 +74,53 @@ def _quote_estado_str(value) -> str:
 
 def _is_emitted_quote_state(value) -> bool:
     return _quote_estado_str(value) in EMITTED_QUOTE_STATES
+
+
+def _annulled_quote_state_available() -> bool:
+    """El enum quote_estado tiene que conocer 'anulado' antes de usarlo.
+
+    Con ATOMIC_REQUESTS no se puede agregar el valor y usarlo en el mismo
+    request, asi que el valor lo agrega `apply_quote_anulacion_schema` (corre en
+    el arranque del contenedor via `prepare_production_schema`) y aca solo se
+    verifica.
+    """
+    if connection.vendor != "postgresql":
+        return True
+    try:
+        columna = q(
+            """
+            SELECT t.typname AS typname
+              FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              JOIN pg_type t ON t.oid = a.atttypid
+             WHERE c.relname = 'quotes'
+               AND a.attname = 'estado'
+               AND a.attnum > 0
+               AND NOT a.attisdropped
+               AND pg_table_is_visible(c.oid)
+             LIMIT 1
+            """,
+            one=True,
+        )
+        # Bases donde quotes.estado no es el enum (tests, esquemas viejos con TEXT):
+        # cualquier valor entra sin restricción.
+        if (columna or {}).get("typname") != "quote_estado":
+            return True
+        row = q(
+            """
+            SELECT 1
+              FROM pg_enum e
+              JOIN pg_type t ON t.oid = e.enumtypid
+             WHERE t.typname = 'quote_estado'
+               AND e.enumlabel = %s
+             LIMIT 1
+            """,
+            [ANNULLED_QUOTE_STATE],
+            one=True,
+        )
+        return bool(row)
+    except Exception:
+        return False
 
 
 def _quote_estado_for_response(value) -> str:
@@ -129,13 +189,16 @@ def _send_stock_min_alerts(items: list[dict]):
             entity_id=str(items[0].get("id") or items[0].get("codigo") or "stock"),
             dedupe_key=f"stock_minimo:{','.join(str(it.get('id') or it.get('codigo') or it.get('nombre') or '-') for it in items)}:{len(items)}",
             payload={"items": items},
+            push=True,
         )
     except Exception:
         try:
             transaction.set_rollback(False)
         except Exception:
             pass
-        pass
+        logger.exception("No se pudo crear la notificación de stock mínimo")
+    # El correo respeta el toggle "Mail"; la campana ya se resolvió arriba.
+    recipients = filter_email_recipients_by_preference("stock_minimo", recipients)
     if not recipients:
         return
     subject = f"Alerta stock minimo - {len(items)} repuesto(s)"
@@ -799,79 +862,89 @@ def _clone_current_quote_version_from_rejected(ingreso_id: int) -> int:
         if (current.get("estado") or "").strip() != "rechazado":
             raise ValidationError("Solo se puede crear una nueva versión cuando la vigente está rechazada.")
 
-        new_id = exec_returning(
-            """
-            INSERT INTO quotes(
-              ingreso_id,
-              version_num,
-              origen_quote_id,
-              estado,
-              moneda,
-              subtotal,
-              autorizado_por,
-              forma_pago,
-              plazo_entrega_txt,
-              garantia_txt,
-              mant_oferta_txt,
-              fecha_emitido,
-              fecha_aprobado,
-              fecha_rechazado,
-              rechazo_comentario,
-              pdf_url
-            )
-            SELECT
-              ingreso_id,
-              COALESCE(version_num, 1) + 1,
-              id,
-              'pendiente',
-              COALESCE(moneda, 'ARS'),
-              0,
-              autorizado_por,
-              forma_pago,
-              plazo_entrega_txt,
-              garantia_txt,
-              mant_oferta_txt,
-              NULL,
-              NULL,
-              NULL,
-              NULL,
-              NULL
-            FROM quotes
-            WHERE id=%s
-            RETURNING id
-            """,
-            [current["id"]],
-        )
-        exec_void(
-            """
-            INSERT INTO quote_items(
-              quote_id,
-              tipo,
-              descripcion,
-              qty,
-              precio_u,
-              repuesto_id,
-              repuesto_codigo,
-              costo_u_neto
-            )
-            SELECT
-              %s,
-              tipo,
-              descripcion,
-              qty,
-              precio_u,
-              repuesto_id,
-              repuesto_codigo,
-              costo_u_neto
-            FROM quote_items
-            WHERE quote_id=%s
-            ORDER BY id
-            """,
-            [new_id, current["id"]],
-        )
-        _refresh_quote_totals(new_id)
+        new_id = _clone_quote_version(current["id"])
         exec_void("UPDATE ingresos SET presupuesto_estado='pendiente' WHERE id=%s", [ingreso_id])
         return new_id
+
+
+def _clone_quote_version(source_quote_id: int) -> int:
+    """Copia una versión de presupuesto en una nueva versión pendiente.
+
+    La versión de origen queda intacta (con su estado, sus fechas, su PDF y sus
+    ítems): lo que se edita de ahí en más es la copia.
+    """
+    new_id = exec_returning(
+        """
+        INSERT INTO quotes(
+          ingreso_id,
+          version_num,
+          origen_quote_id,
+          estado,
+          moneda,
+          subtotal,
+          autorizado_por,
+          forma_pago,
+          plazo_entrega_txt,
+          garantia_txt,
+          mant_oferta_txt,
+          fecha_emitido,
+          fecha_aprobado,
+          fecha_rechazado,
+          rechazo_comentario,
+          pdf_url
+        )
+        SELECT
+          ingreso_id,
+          COALESCE(version_num, 1) + 1,
+          id,
+          'pendiente',
+          COALESCE(moneda, 'ARS'),
+          0,
+          autorizado_por,
+          forma_pago,
+          plazo_entrega_txt,
+          garantia_txt,
+          mant_oferta_txt,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          NULL
+        FROM quotes
+        WHERE id=%s
+        RETURNING id
+        """,
+        [source_quote_id],
+    )
+    exec_void(
+        """
+        INSERT INTO quote_items(
+          quote_id,
+          tipo,
+          descripcion,
+          qty,
+          precio_u,
+          repuesto_id,
+          repuesto_codigo,
+          costo_u_neto
+        )
+        SELECT
+          %s,
+          tipo,
+          descripcion,
+          qty,
+          precio_u,
+          repuesto_id,
+          repuesto_codigo,
+          costo_u_neto
+        FROM quote_items
+        WHERE quote_id=%s
+        ORDER BY id
+        """,
+        [new_id, source_quote_id],
+    )
+    _refresh_quote_totals(new_id)
+    return new_id
 
 
 def _quote_response(request, ingreso_id: int, *, quote_id: int | None = None, status_code: int = 200):
@@ -1166,13 +1239,17 @@ class RechazarPresupuestoView(APIView):
 
     def post(self, request, ingreso_id: int):
         require_roles_strict(request, ["jefe", "admin"])
-        if not has_rejected_budget_charge_schema():
-            raise ValidationError("Falta aplicar el esquema de cobro para presupuesto rechazado.")
+        if not ensure_rejected_budget_charge_schema():
+            raise ValidationError(
+                "No se pudo preparar el esquema de cobro para presupuesto rechazado. "
+                "Ejecutá 'python manage.py apply_rejected_budget_charge_schema'."
+            )
         rechazo_comentario = _clean_optional_note((request.data or {}).get("rechazo_comentario"))
         cobro_neto = _parse_rejected_budget_charge_or_raise(
             (request.data or {}).get("presupuesto_rechazado_cobro_neto"),
             required=True,
         )
+        tecnico_a_avisar = None
         with transaction.atomic():
             current = _get_current_quote_row(ingreso_id, for_update=True)
             if not current:
@@ -1180,6 +1257,16 @@ class RechazarPresupuestoView(APIView):
             if not _is_emitted_quote_state(current.get("estado")):
                 raise ValidationError("Solo se puede rechazar un presupuesto emitido.")
             _set_audit_user(request)
+            # Rechazar con la reparación ya hecha deja al técnico con trabajo
+            # que hay que desandar, y nadie se lo estaba avisando: el equipo se
+            # quedaba en 'reparado' con el presupuesto rechazado.
+            ingreso_row = q(
+                "SELECT estado, asignado_a FROM ingresos WHERE id=%s",
+                [ingreso_id],
+                one=True,
+            ) or {}
+            if _quote_estado_str(ingreso_row.get("estado")).lower() == "reparado":
+                tecnico_a_avisar = ingreso_row.get("asignado_a")
             exec_void(
                 """
                 UPDATE quotes
@@ -1200,6 +1287,19 @@ class RechazarPresupuestoView(APIView):
                 """,
                 [cobro_neto, current["id"], ingreso_id],
             )
+
+        if tecnico_a_avisar:
+            actor_id = getattr(getattr(request, "user", None), "id", None)
+            # Si el que rechaza es el propio técnico asignado ya sabe lo que hizo.
+            if int(tecnico_a_avisar) != int(actor_id or 0):
+                try:
+                    notify_presupuesto_rechazado_reparado(ingreso_id, tecnico_a_avisar)
+                except Exception:
+                    _clear_transaction_rollback()
+                    logger.exception(
+                        "No se pudo avisar al técnico que hay que deshacer la reparación",
+                        extra={"ingreso_id": ingreso_id, "tecnico_id": tecnico_a_avisar},
+                    )
         return _quote_response(request, ingreso_id)
 
 
@@ -1443,8 +1543,20 @@ class AprobarPresupuestoView(APIView):
                     notify_presupuesto_aprobado(ingreso_id, row.get("tecnico_id"))
                 except Exception:
                     _clear_transaction_rollback()
-                    pass
-            to_email = (row.get("email") or "").strip()
+                    logger.exception(
+                        "No se pudo crear la notificación de presupuesto aprobado",
+                        extra={"ingreso_id": ingreso_id, "tecnico_id": row.get("tecnico_id")},
+                    )
+            # El aviso al técnico también pasa por su toggle "Mail".
+            to_email = next(
+                iter(
+                    filter_email_recipients_by_preference(
+                        "presupuesto_aprobado",
+                        [(row.get("email") or "").strip()],
+                    )
+                ),
+                "",
+            )
             if to_email:
                 os_label = f"OS {str(ingreso_id).zfill(6)}"
                 link = _frontend_url(request, f"/ingresos/{ingreso_id}")
@@ -1489,7 +1601,10 @@ class AprobarPresupuestoView(APIView):
                 )
             except Exception:
                 _clear_transaction_rollback()
-                pass
+                logger.exception(
+                    "No se pudo avisar que la reparación quedó lista para remito",
+                    extra={"ingreso_id": ingreso_id},
+                )
 
         if alert_items:
             try:
@@ -1511,6 +1626,21 @@ class AprobarPresupuestoView(APIView):
             _clear_transaction_rollback()
             pass
 
+        # Si el equipo es un MG propio, Cobranzas recibe el PDF del presupuesto.
+        try:
+            notify_quote_mg_approved(
+                ingreso_id,
+                qid,
+                request=request,
+                actor_name=getattr(request.user, "nombre", ""),
+            )
+        except Exception:
+            _clear_transaction_rollback()
+            logger.exception(
+                "No se pudo avisar a Cobranzas del presupuesto de MG aprobado",
+                extra={"ingreso_id": ingreso_id, "quote_id": qid},
+            )
+
         _clear_transaction_rollback()
         return _quote_response(request, ingreso_id)
 
@@ -1520,6 +1650,12 @@ class AnularPresupuestoView(APIView):
 
     def post(self, request, ingreso_id: int):
         require_roles_strict(request, ["jefe", "admin"])
+        if not _annulled_quote_state_available():
+            raise ValidationError(
+                "La base todavía no conoce el estado 'anulado'. Reiniciá el contenedor "
+                "(prepare_production_schema lo aplica solo) o corré "
+                "'python manage.py apply_quote_anulacion_schema'."
+            )
         with transaction.atomic():
             row = q(
                 """
@@ -1612,19 +1748,20 @@ class AnularPresupuestoView(APIView):
                         ],
                     )
 
+            # La versión anulada se conserva como histórica -con su fecha de
+            # emisión, la de aprobación, su PDF y sus ítems- y lo que se edita a
+            # partir de acá es una copia nueva. Antes se pisaba esta misma fila y
+            # el historial se quedaba sin rastro de lo que se le había mandado al
+            # cliente.
             exec_void(
                 """
                 UPDATE quotes
-                   SET estado='pendiente',
-                       fecha_emitido=NULL,
-                       fecha_aprobado=NULL,
-                       fecha_rechazado=NULL,
-                       rechazo_comentario=NULL,
-                       pdf_url=NULL
+                   SET estado='anulado'
                  WHERE id=%s
                 """,
                 [qid],
             )
+            _clone_quote_version(qid)
             if current_estado == "aprobado":
                 exec_void(
                     """

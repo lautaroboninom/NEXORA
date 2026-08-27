@@ -1055,7 +1055,8 @@ function Copy-DiagnosticSummary {
 
 function Open-RebuildAssistant {
   try {
-    $arguments = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebuildGuiScript`""
+    $anchor = "{0},{1},{2},{3}" -f $form.Left, $form.Top, $form.Width, $form.Height
+    $arguments = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebuildGuiScript`" -AnchorBounds `"$anchor`""
     Start-Process -FilePath $PowerShellPath -ArgumentList $arguments -WorkingDirectory $WindowsRepo -WindowStyle Hidden
     $rebuildStateLabel.Text = "Asistente abierto. Esta consola seguirá mostrando el estado de producción."
     $rebuildStateLabel.ForeColor = $colorSuccess

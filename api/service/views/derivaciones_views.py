@@ -178,7 +178,10 @@ class DevolverDerivacionView(APIView):
             try:
                 notify_derivacion_devuelta(ingreso_id)
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo crear la notificación de derivación devuelta",
+                    extra={"ingreso_id": ingreso_id},
+                )
         except Exception:
             pass
 

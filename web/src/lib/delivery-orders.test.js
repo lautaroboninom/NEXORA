@@ -6,6 +6,7 @@ import {
   deliveryOrderOccasionalCustomerDocument,
   deliveryOrderOccasionalCustomerReady,
   isOccasionalCustomerName,
+  deliveryOrderUsedPartidaKeys,
 } from "./delivery-orders.js";
 
 test("reconoce los nombres locales que marcan un cliente ocasional", () => {
@@ -66,4 +67,24 @@ test("el rótulo de cliente Bejerman muestra el propietario del ocasional", () =
   );
   assert.equal(deliveryOrderBejermanCustomerLabel({ customerName: "Particular" }), "Cliente ocasional");
   assert.equal(deliveryOrderBejermanCustomerLabel({ customerName: "SEDESA S.A." }), "");
+});
+
+test("excluye de las sugerencias las partidas usadas arriba para el mismo articulo y deposito", () => {
+  const items = [
+    {
+      articleCode: "1101003",
+      stockDepositCode: "VAL",
+      partidas: [{ partida: "D1-1489", stockDepositCode: "VAL" }],
+    },
+    {
+      articleCode: "1101003",
+      stockDepositCode: "VAL",
+      partidas: [{ partida: "", stockDepositCode: "VAL" }],
+    },
+  ];
+
+  assert.deepEqual(
+    [...deliveryOrderUsedPartidaKeys(items, 1, 0, "VAL")],
+    ["d1-1489"],
+  );
 });

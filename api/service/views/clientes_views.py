@@ -1,7 +1,5 @@
-import hashlib
 from difflib import SequenceMatcher
 
-from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from rest_framework import permissions
 from rest_framework.exceptions import ValidationError
@@ -12,7 +10,6 @@ from ..bejerman_sdk import BejermanSDKClient, as_string, first_value, normalize_
 from ..customer_bejerman_sync import (
     BEJERMAN_COMPANY_CONTEXT_KEY,
     BEJERMAN_CUSTOMER_COLUMNS,
-    BEJERMAN_CUSTOMERS_CACHE_SECONDS,
     bejerman_customer_detail_payload_from_record,
     bejerman_customer_details_from_record,
     customer_bejerman_detail_payload,
@@ -240,58 +237,130 @@ def _bejerman_customer_cuit(record):
     return _digits_only(first_value(record, ("Cliente_NroDocumento", "Cliente_CUIT", "Cliente_Cuit", "CUIT", "Cuit", "TaxId")))
 
 
-def _name_score(left, right):
-    left_norm = normalize_search(left)
-    right_norm = normalize_search(right)
+# El puntaje sólo se usa contra dos umbrales: 0.82 ("Razón social similar") y 0.7
+# ("Coincide con la búsqueda"). Por debajo de eso el valor exacto nunca se ve, así
+# que alcanza con devolver 0.0 y saltear el cálculo caro. El margen contra 0.7 deja
+# afuera cualquier diferencia que el redondeo a 3 decimales pudiera hacer visible.
+_SCORE_PRUNE_FLOOR = 0.695
+
+
+def _name_score_norm(left_norm, right_norm, floor=0.0):
+    """Similitud entre dos nombres ya normalizados.
+
+    `floor` es el mínimo que le importa al llamador: por debajo de ese valor se
+    devuelve 0.0 sin calcular el ratio real. `ratio()` es O(n*m) y es lo que domina
+    el cruce de ~500 clientes locales contra ~500 registros de Bejerman; las cotas
+    superiores de `SequenceMatcher` (`real_quick_ratio` y `quick_ratio`) son O(n) y
+    descartan la enorme mayoría de los pares sin cambiar el resultado.
+    """
     if not left_norm or not right_norm:
         return 0.0
     if left_norm == right_norm:
         return 1.0
-    ratio = SequenceMatcher(None, left_norm, right_norm).ratio()
-    if left_norm in right_norm or right_norm in left_norm:
+    # Un nombre contenido en el otro se promueve a 0.86 aunque su ratio sea bajo
+    # (ej. "AMTA" dentro de "AMTA SOCIEDAD ANONIMA"), así que ese caso no se poda.
+    contained = left_norm in right_norm or right_norm in left_norm
+    if not contained and floor:
+        # Misma cota que `real_quick_ratio()`, pero calculada antes de construir el
+        # SequenceMatcher: el constructor indexa el segundo texto completo y la
+        # mayoría de los pares se descarta acá sin llegar a necesitarlo.
+        left_len, right_len = len(left_norm), len(right_norm)
+        if 2.0 * min(left_len, right_len) / (left_len + right_len) < floor:
+            return 0.0
+    matcher = SequenceMatcher(None, left_norm, right_norm)
+    if not contained and floor and matcher.quick_ratio() < floor:
+        return 0.0
+    ratio = matcher.ratio()
+    if contained:
         ratio = max(ratio, 0.86)
     return ratio
 
 
-def _candidate_payload(record, local=None, query=""):
-    details = bejerman_customer_details_from_record(record)
-    code = details.get("cod_empresa") or _bejerman_customer_code(record)
-    name = details.get("razon_social") or _bejerman_customer_name(record)
-    cuit = details.get("cuit") or _bejerman_customer_cuit(record)
+def _name_score(left, right):
+    return _name_score_norm(normalize_search(left), normalize_search(right))
+
+
+class _RemoteCustomerEntry:
+    """Datos derivados de un registro remoto de Bejerman, calculados una sola vez.
+
+    Antes cada comparación reconstruía código, razón social, CUIT y sus normalizados
+    a partir del registro crudo; con ~500 clientes locales por ~500 registros remotos
+    eso es un cuarto de millón de veces el mismo cálculo por carga de página.
+    """
+
+    __slots__ = ("record", "code", "code_upper", "name", "name_norm", "cuit", "flat_norm")
+
+    def __init__(self, record):
+        details = bejerman_customer_details_from_record(record)
+        self.record = record
+        self.code = details.get("cod_empresa") or _bejerman_customer_code(record)
+        self.name = details.get("razon_social") or _bejerman_customer_name(record)
+        self.cuit = details.get("cuit") or _bejerman_customer_cuit(record)
+        self.code_upper = _clean_upper(self.code)
+        self.name_norm = normalize_search(self.name)
+        self.flat_norm = normalize_search(f"{self.code} {self.name} {self.cuit}")
+
+
+def _remote_customer_index(records):
+    return [_RemoteCustomerEntry(record) for record in records]
+
+
+def _local_match_keys(local, query=""):
     local = local or {}
-    local_code = _clean_upper(local.get("cod_empresa"))
-    local_cuit = _digits_only(local.get("cuit"))
     local_name = _clean(local.get("razon_social"))
-    score = _name_score(local_name or query, name)
+    local_name_norm = normalize_search(local_name)
+    return {
+        "code": _clean_upper(local.get("cod_empresa")),
+        "cuit": _digits_only(local.get("cuit")),
+        "name_norm": local_name_norm,
+        # `_name_score` compara contra la razón social local y, si no hay, contra
+        # el texto buscado.
+        "left_norm": local_name_norm or normalize_search(query),
+        "query_norm": normalize_search(query),
+    }
+
+
+def _entry_score(entry, keys, floor=0.0):
+    """Puntaje y motivos de un registro remoto, sin construir el payload completo."""
+    score = _name_score_norm(keys["left_norm"], entry.name_norm, floor=floor)
     reasons = []
 
-    if code and local_code and _clean_upper(code) == local_code:
+    if entry.code and keys["code"] and entry.code_upper == keys["code"]:
         reasons.append("Código exacto")
         score = max(score, 1.0)
-    if cuit and local_cuit and cuit == local_cuit:
+    if entry.cuit and keys["cuit"] and entry.cuit == keys["cuit"]:
         reasons.append("CUIT exacto")
         score = max(score, 0.98)
-    if local_name and normalize_search(local_name) == normalize_search(name):
+    if keys["name_norm"] and keys["name_norm"] == entry.name_norm:
         reasons.append("Razón social exacta")
         score = max(score, 0.96)
     elif score >= 0.82:
         reasons.append("Razón social similar")
 
-    query_norm = normalize_search(query)
-    if query_norm and not reasons:
-        flat = normalize_search(f"{code} {name} {cuit}")
-        if query_norm in flat:
-            reasons.append("Coincide con la búsqueda")
-            score = max(score, 0.7)
+    if keys["query_norm"] and not reasons and keys["query_norm"] in entry.flat_norm:
+        reasons.append("Coincide con la búsqueda")
+        score = max(score, 0.7)
 
+    return score, reasons
+
+
+def _candidate_from_entry(entry, score, reasons):
     return {
-        "code": code,
-        "name": name,
-        "cuit": cuit,
+        "code": entry.code,
+        "name": entry.name,
+        "cuit": entry.cuit,
         "score": round(score, 3),
         "reasons": reasons,
-        "details": bejerman_customer_detail_payload_from_record(record),
+        # El detalle es la parte cara del payload y sólo lo necesitan los candidatos
+        # que efectivamente se devuelven, no todos los registros que se puntúan.
+        "details": bejerman_customer_detail_payload_from_record(entry.record),
     }
+
+
+def _candidate_payload(record, local=None, query=""):
+    entry = _RemoteCustomerEntry(record)
+    score, reasons = _entry_score(entry, _local_match_keys(local, query))
+    return _candidate_from_entry(entry, score, reasons)
 
 
 def _load_bejerman_records(user_id: int | None = None, force_refresh: bool = False):
@@ -311,18 +380,19 @@ def _candidate_score(candidate):
     return float(candidate.get("score") or 0)
 
 
-def _customer_candidates(local, records, limit=5, query=""):
-    out = []
-    for record in records:
-        candidate = _candidate_payload(record, local=local, query=query)
-        reasons = candidate.get("reasons") or []
-        if reasons or candidate["score"] >= 0.82:
-            out.append(candidate)
-    out.sort(key=_candidate_score, reverse=True)
-    return out[:limit]
+def _customer_candidates(local, records, limit=5, query="", index=None):
+    entries = _remote_customer_index(records) if index is None else index
+    keys = _local_match_keys(local, query)
+    scored = []
+    for entry in entries:
+        score, reasons = _entry_score(entry, keys, floor=_SCORE_PRUNE_FLOOR)
+        if reasons or round(score, 3) >= 0.82:
+            scored.append((score, reasons, entry))
+    scored.sort(key=lambda item: _candidate_score({"reasons": item[1], "score": item[0]}), reverse=True)
+    return [_candidate_from_entry(entry, score, reasons) for score, reasons, entry in scored[:limit]]
 
 
-def _bejerman_sync_payload(local, records, by_code):
+def _bejerman_sync_payload(local, records, by_code, index=None):
     local_code = _clean_upper(local.get("cod_empresa"))
     local_name = _clean(local.get("razon_social"))
     local_cuit = _digits_only(local.get("cuit"))
@@ -352,7 +422,7 @@ def _bejerman_sync_payload(local, records, by_code):
                 "candidates": [candidate],
             }
 
-        candidates = _customer_candidates(local, records, limit=5)
+        candidates = _customer_candidates(local, records, limit=5, index=index)
         return {
             "status": "code_mismatch" if candidates else "not_found",
             "label": "Código no encontrado" if not candidates else "Código posible",
@@ -367,30 +437,6 @@ def _bejerman_sync_payload(local, records, by_code):
         "message": "El cliente no tiene código Bejerman cargado.",
         "candidates": candidates,
     }
-
-
-def _bejerman_records_fingerprint(records):
-    """Huella barata del catálogo remoto para invalidar el cache de matching si cambia."""
-    codes = sorted(
-        f"{_record_company_key(record)}:{_clean_upper(_bejerman_customer_code(record))}"
-        for record in records
-    )
-    return hashlib.md5("|".join(codes).encode("utf-8")).hexdigest()
-
-
-def _bejerman_sync_cache_key(row, records_fingerprint):
-    fields = "|".join(
-        [
-            str(row.get("id") or ""),
-            _clean_upper(row.get("cod_empresa")),
-            _clean(row.get("razon_social")),
-            _digits_only(row.get("cuit")),
-            _clean_upper(row.get("bejerman_company_key")),
-            records_fingerprint,
-        ]
-    )
-    digest = hashlib.md5(fields.encode("utf-8")).hexdigest()
-    return f"bejerman_customer_sync:{digest}"
 
 
 def _attach_bejerman_sync(rows, user_id: int | None = None):
@@ -415,10 +461,11 @@ def _attach_bejerman_sync(rows, user_id: int | None = None):
         by_code.setdefault((_record_company_key(record), code), record)
         by_code.setdefault(code, record)
 
-    # El matching difuso contra todo el catálogo remoto (cuando no hay código exacto)
-    # es O(clientes locales x clientes Bejerman); se cachea por cliente para no
-    # recalcularlo en cada carga de la página mientras el catálogo no cambie.
-    records_fingerprint = _bejerman_records_fingerprint(records)
+    # El índice del catálogo remoto se arma una sola vez y lo comparten todas las
+    # filas: el matching difuso (el de los clientes cuyo código no está en Bejerman)
+    # es O(clientes locales x clientes Bejerman) y sin esto recalculaba los mismos
+    # datos derivados de cada registro remoto una vez por cliente local.
+    index = _remote_customer_index(records)
     for row in rows:
         row_company = _clean_upper(row.get("bejerman_company_key"))
         if row_company and row_company in failed_companies:
@@ -429,12 +476,7 @@ def _attach_bejerman_sync(rows, user_id: int | None = None):
                 "candidates": [],
             }
             continue
-        cache_key = _bejerman_sync_cache_key(row, records_fingerprint)
-        sync = cache.get(cache_key)
-        if sync is None:
-            sync = _bejerman_sync_payload(row, records, by_code)
-            cache.set(cache_key, sync, BEJERMAN_CUSTOMERS_CACHE_SECONDS)
-        row["bejerman_sync"] = sync
+        row["bejerman_sync"] = _bejerman_sync_payload(row, records, by_code, index=index)
     return rows
 
 
@@ -569,27 +611,30 @@ class ClienteBejermanCandidatesView(APIView):
         except Exception as exc:
             return Response({"detail": str(exc) or "No se pudo consultar Bejerman."}, status=503)
 
-        items = _customer_candidates(local, records, limit=limit, query=query)
+        index = _remote_customer_index(records)
+        items = _customer_candidates(local, records, limit=limit, query=query, index=index)
         if query:
             query_norm = normalize_search(query)
             query_digits = _digits_only(query)
+            keys = _local_match_keys(local, query)
             extra = []
             seen_codes = {_clean_upper(item.get("code")) for item in items}
-            for record in records:
-                candidate = _candidate_payload(record, local=local, query=query)
-                code_key = _clean_upper(candidate.get("code"))
-                if code_key in seen_codes:
+            for entry in index:
+                if entry.code_upper in seen_codes:
                     continue
-                flat = normalize_search(f"{candidate.get('code')} {candidate.get('name')} {candidate.get('cuit')}")
-                if query_norm and query_norm in flat:
-                    extra.append(candidate)
-                elif query_digits and query_digits in _digits_only(candidate.get("cuit")):
-                    extra.append(candidate)
-            extra.sort(key=_candidate_score, reverse=True)
-            for candidate in extra:
+                if query_norm and query_norm in entry.flat_norm:
+                    pass
+                elif query_digits and query_digits in _digits_only(entry.cuit):
+                    pass
+                else:
+                    continue
+                score, reasons = _entry_score(entry, keys, floor=_SCORE_PRUNE_FLOOR)
+                extra.append((score, reasons, entry))
+            extra.sort(key=lambda item: _candidate_score({"reasons": item[1], "score": item[0]}), reverse=True)
+            for score, reasons, entry in extra:
                 if len(items) >= limit:
                     break
-                items.append(candidate)
+                items.append(_candidate_from_entry(entry, score, reasons))
         return Response({"items": items[:limit]})
 
 

@@ -2,20 +2,79 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
+import {
+  ingresoIdOf,
+  formatOS,
+  formatDateOnly,
+  norm,
+  tipoEquipoOf,
+  resolveFechaIngreso,
+  catalogEquipmentLabel,
+} from "../lib/ui-helpers";
+import { estadoLabel } from "../lib/constants";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import StatusChip from "../components/StatusChip.jsx";
+import ReleaseOrderModal from "../components/ReleaseOrderModal.jsx";
+import BulkReleaseModal from "../components/BulkReleaseModal.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
+import IngresoTable from "../components/IngresoTable.jsx";
 import useQueryState from "../hooks/useQueryState";
-import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
-import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
-import { sortRows } from "../lib/table-sort";
-import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
-
-// Ajustar si el backend usa otra ruta.
-
+import useRowSelection from "../hooks/useRowSelection";
+import useColumnFilters from "../hooks/useColumnFilters";
+import { useAuth } from "../context/AuthContext";
+import { can, PERMISSION_CODES } from "../lib/permissions";
+import { isJefe } from "../lib/authz";
+import {
+  columnFilterOptions,
+  matchesColumnFilters,
+} from "../lib/ingreso-list-filters";
 
 const ENDPOINT = "/api/ingresos/aprobados-reparados/";
 
+const COLUMNS = [
+  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "estado",
+    label: "Estado",
+    render: (row) => <StatusChip value={row?.estado} />,
+    filter: "select",
+    filterLabel: (value) => estadoLabel(value),
+  },
+  {
+    field: "cliente",
+    label: "Cliente",
+    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    filter: "text",
+  },
+  {
+    field: "equipo",
+    label: "Equipo",
+    render: (row) => catalogEquipmentLabel(row) ?? "-",
+    filter: "select",
+  },
+  {
+    field: "identificacion",
+    label: "Serie",
+    render: (row) => <DeviceIdentifier row={row} />,
+    filter: "text",
+  },
+  {
+    field: "fecha_ingreso",
+    label: "Fecha ingreso",
+    cellClassName: "whitespace-nowrap",
+    render: (row) => formatDateOnly(resolveFechaIngreso(row)),
+  },
+  {
+    field: "fecha_reparado",
+    label: "Fecha reparación",
+    cellClassName: "whitespace-nowrap",
+    render: (row) =>
+      formatDateOnly(
+        row?.fecha_reparado ?? row?.fecha_reparacion ?? row?.reparado_fecha ?? row?.estado_fecha
+      ),
+  },
+];
 
 export default function Reparados() {
   const [rows, setRows] = useState([]);
@@ -23,7 +82,14 @@ export default function Reparados() {
   const [err, setErr] = useState("");
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
+  const [releaseRow, setReleaseRow] = useState(null);
+  const [bulkRows, setBulkRows] = useState(null);
+  const [bulkResultMsg, setBulkResultMsg] = useState("");
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const release = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
 
   async function load() {
     try {
@@ -45,8 +111,9 @@ export default function Reparados() {
 
   const filtered = useMemo(() => {
     const needle = norm(q);
-    if (!needle) return rows;
     return rows.filter((row) => {
+      if (!matchesColumnFilters(row, COLUMNS, filters)) return false;
+      if (!needle) return true;
       const campos = [
         formatOS(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
@@ -59,21 +126,36 @@ export default function Reparados() {
       ];
       return campos.some((c) => norm(c).includes(needle));
     });
-  }, [rows, q]);
+  }, [rows, q, filters]);
 
-  const displayRows = useMemo(
-    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
-    [filtered, sort]
-  );
-  const sortOptions = ingresoSortOptions([
-    "os",
-    "estado",
-    "cliente",
-    "equipo",
-    "identificacion",
-    "fecha_ingreso",
-    "fecha_reparado",
-  ]);
+  const filterOptions = useMemo(() => columnFilterOptions(rows, COLUMNS), [rows]);
+
+  const visibleIds = useMemo(() => filtered.map(ingresoIdOf).filter(Boolean), [filtered]);
+  const selection = useRowSelection(visibleIds);
+
+  function abrirLiberacionMultiple() {
+    const elegidas = selection.selectedRowsIn(rows);
+    if (elegidas.length === 0) return;
+    setErr("");
+    setBulkResultMsg("");
+    // Con una sola OS conviene el modal de siempre: es el único que deja al
+    // jefe elegir la resolución antes de liberar.
+    if (elegidas.length === 1) {
+      setReleaseRow(elegidas[0]);
+      return;
+    }
+    setBulkRows(elegidas);
+  }
+
+  async function onBulkDone({ emitidos = [], fallidos = [] } = {}) {
+    selection.remove(emitidos);
+    setBulkResultMsg(
+      fallidos.length > 0
+        ? `Se liberaron ${emitidos.length} órdenes y ${fallidos.length} quedaron pendientes.`
+        : `Se liberaron ${emitidos.length} órdenes.`
+    );
+    await load();
+  }
 
   const go = (row) => {
     const id = ingresoIdOf(row);
@@ -81,135 +163,86 @@ export default function Reparados() {
     navigate(`/ingresos/${id}`);
   };
 
-  const onRowKeyDown = (e, row) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      go(row);
-    }
-  };
+  const rowActions = (row) => (
+    <button
+      className="btn"
+      type="button"
+      title="Revisar salida"
+      onClick={() => {
+        setErr("");
+        setReleaseRow(row);
+      }}
+    >
+      Revisar salida
+    </button>
+  );
 
   return (
     <div className="card">
+      <ReleaseOrderModal
+        open={Boolean(releaseRow)}
+        row={releaseRow}
+        canManageResolution={isJefe(user)}
+        onClose={() => setReleaseRow(null)}
+        onReleased={load}
+      />
+      <BulkReleaseModal
+        open={Boolean(bulkRows)}
+        rows={bulkRows || []}
+        canManageResolution={isJefe(user)}
+        onClose={() => setBulkRows(null)}
+        onDone={onBulkDone}
+      />
       <div className="h1 mb-3">Reparados</div>
 
-      {err && (
-        <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">
-          {err}
-        </div>
-      )}
+      <AlertBanner tone="error">{err}</AlertBanner>
+      <AlertBanner tone="info">{bulkResultMsg}</AlertBanner>
 
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          type="text"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Filtrar por OS, cliente, marca, equipo, serie"
-          className="border rounded p-2 w-full max-w-md"
-          aria-label="Filtrar reparados"
-        />
-        <button
-          className="btn"
-          onClick={load}
-          title="Recargar lista"
-          disabled={loading}
-          aria-busy={loading ? "true" : "false"}
-        >
-          Recargar
-        </button>
-      </div>
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, cliente, marca, equipo, serie"
+        searchLabel="Filtrar reparados"
+        onReload={load}
+        loading={loading}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+        selectedCount={release ? selection.count : 0}
+      >
+        {release ? (
+          <button
+            className="btn"
+            type="button"
+            onClick={abrirLiberacionMultiple}
+            disabled={selection.count === 0}
+            title="Liberar las órdenes elegidas e imprimir todas juntas"
+          >
+            Liberar elegidas
+          </button>
+        ) : null}
+      </ListToolbar>
 
-      {loading ? (
-        "Cargando..."
-      ) : displayRows.length === 0 ? (
-        <div className="text-sm text-gray-500">No hay reparados que coincidan con el filtro.</div>
-      ) : (
-        <div>
-          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
-          <MobileDataList>
-            {displayRows.map((row) => (
-              <MobileDataCard
-                key={ingresoIdOf(row)}
-                as="button"
-                type="button"
-                onClick={() => go(row)}
-                className="hover:bg-gray-50"
-                aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                data-testid={`row-mobile-${ingresoIdOf(row)}`}
-              >
-                <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
-                <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                  <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
-                  <MobileDataField label="Estado">
-                    <StatusChip value={row?.estado} />
-                  </MobileDataField>
-                  <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
-                  <MobileDataField label="Serie">
-                    <DeviceIdentifier row={row} />
-                  </MobileDataField>
-                  <MobileDataField label="Fecha ingreso" value={formatDateOnly(resolveFechaIngreso(row))} />
-                  <MobileDataField label="Fecha reparación">
-                    {formatDateOnly(
-                      row?.fecha_reparado ??
-                        row?.fecha_reparacion ??
-                        row?.reparado_fecha ??
-                        row?.estado_fecha
-                    )}
-                  </MobileDataField>
-                </div>
-              </MobileDataCard>
-            ))}
-          </MobileDataList>
-          <DesktopTableWrap>
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="text-left">
-                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
-                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="p-2">Estado</SortableTh>
-                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
-                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
-                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
-                <SortableTh field="fecha_ingreso" sort={sort} onSortChange={setSort} className="p-2">Fecha ingreso</SortableTh>
-                <SortableTh field="fecha_reparado" sort={sort} onSortChange={setSort} className="p-2">Fecha reparación</SortableTh>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map((row) => (
-                <tr
-                  key={ingresoIdOf(row)}
-                  onClick={() => go(row)}
-                  onKeyDown={(e) => onRowKeyDown(e, row)}
-                  className="hover:bg-gray-50 cursor-pointer"
-                  role="link"
-                  tabIndex={0}
-                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                  data-testid={`row-${ingresoIdOf(row)}`}
-                >
-                  <td className="p-2 underline">{formatOS(row)}</td>
-                  <td className="p-2"><StatusChip value={row?.estado} /></td>
-                  <td className="p-2">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}</td>
-                  <td className="p-2">{catalogEquipmentLabel(row) ?? "-"}</td>
-                  
-                  <td className="p-2"><DeviceIdentifier row={row} /></td>
-                  <td className="p-2 whitespace-nowrap">{formatDateOnly(resolveFechaIngreso(row))}</td>
-                  <td className="p-2 whitespace-nowrap">
-                    {formatDateOnly(
-                      row?.fecha_reparado ??
-                        row?.fecha_reparacion ??
-                        row?.reparado_fecha ??
-                        row?.estado_fecha
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </DesktopTableWrap>
-          <div className="text-xs text-gray-500 mt-2">
-            Mostrando {displayRows.length} de {rows.length}.
-          </div>
-        </div>
-      )}
+      <IngresoTable
+        rows={filtered}
+        columns={COLUMNS}
+        sort={sort}
+        onSortChange={setSort}
+        selection={release ? selection : undefined}
+        selectionLabel={(row) => `Seleccionar ${formatOS(row)}`}
+        onOpen={go}
+        openLabel={(row) => `Abrir hoja de servicio de ${formatOS(row)}`}
+        rowActions={release ? rowActions : undefined}
+        filters={filters}
+        onFilterChange={setFilter}
+        filterOptions={filterOptions}
+        showFilters={filtersOpen}
+        loading={loading}
+        emptyText="No hay reparados que coincidan con el filtro."
+        totalCount={rows.length}
+      />
     </div>
   );
 }
-

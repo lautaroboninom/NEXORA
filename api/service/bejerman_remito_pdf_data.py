@@ -6,10 +6,10 @@ por su cuenta contra sus maestros:
 
 * **PM** — `dbo.Articulos.art_DescRedu` del artículo. Verificado contra el papel
   escaneado: 1204001 -> `2046-10`, 1205013 -> `2046-12`.
-* **VTO.** — el vencimiento de la partida. Éste **ya lo tiene NEXORA**: lo guarda en
-  `delivery_order_items.partida_expiration_date` cuando se arma la orden de entrega,
-  junto con la partida. Por eso se busca primero en casa y sólo se sale a Bejerman
-  por lo que falte.
+* **VTO.** — el vencimiento de la partida. Éste **ya lo tiene NEXORA**: una partida
+  histórica puede estar en `delivery_order_items`, mientras que las partidas de los
+  insumos se guardan en `delivery_order_item_partidas`. Por eso se busca primero en
+  casa y sólo se sale a Bejerman por lo que falte.
 
 Nada de esto puede fallar el remito: si no se consigue un dato, la columna sale vacía
 y el PDF se entrega igual, que es justamente el problema que estamos resolviendo.
@@ -35,6 +35,18 @@ _PM_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
 PM_CACHE_TTL_SECONDS = 900
 
 
+def _pm_lookup_timeout() -> int:
+    """Plazo de la consulta remota de PM. Corto a propósito: hay alguien esperando."""
+
+    from django.conf import settings
+
+    try:
+        value = int(getattr(settings, "BEJERMAN_REMITO_PDF_PM_LOOKUP_TIMEOUT", 10) or 10)
+    except (TypeError, ValueError):
+        return 10
+    return value if value > 0 else 10
+
+
 def _clean(value: Any) -> str:
     return str(value or "").strip()
 
@@ -57,34 +69,64 @@ def _partidas(items: list[dict[str, Any]]) -> list[str]:
     return partidas
 
 
-def expiration_dates_from_nexora(partidas: list[str], article_codes: list[str]) -> dict[str, Any]:
-    """Vencimientos por partida, de las órdenes de entrega que ya los cargaron.
+def expiration_dates_from_nexora(
+    partidas: list[str], article_codes: list[str]
+) -> dict[tuple[str, str], Any]:
+    """Vencimientos por ``(artículo, partida)`` ya guardados en NEXORA.
 
-    Se prioriza la carga más reciente: la misma partida puede haberse tipeado en
-    varias órdenes y la última es la que vale.
+    Las órdenes históricas guardaban la partida en el ítem padre; las órdenes
+    actuales de insumos la guardan en su tabla hija. Se prioriza la carga más
+    reciente y se conserva el artículo en la clave para no cruzar lotes homónimos.
     """
 
-    if not partidas:
+    normalized_partidas = sorted({_clean(partida).upper() for partida in partidas if _clean(partida)})
+    if not normalized_partidas:
         return {}
+    normalized_codes = sorted({_clean(code).upper() for code in article_codes if _clean(code)})
     with connection.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (UPPER(TRIM(partida)))
-                   UPPER(TRIM(partida)) AS partida,
+            WITH expiration_rows AS (
+                SELECT UPPER(TRIM(COALESCE(item.article_code, ''))) AS article_code,
+                       UPPER(TRIM(item.partida)) AS partida,
+                       item.partida_expiration_date,
+                       item.updated_at,
+                       1 AS source_priority
+                  FROM delivery_order_items AS item
+                 WHERE item.partida_expiration_date IS NOT NULL
+                   AND UPPER(TRIM(item.partida)) = ANY(%s)
+                   AND (%s = '{}'::text[] OR UPPER(TRIM(COALESCE(item.article_code, ''))) = ANY(%s))
+
+                UNION ALL
+
+                SELECT UPPER(TRIM(COALESCE(item.article_code, ''))) AS article_code,
+                       UPPER(TRIM(partida.partida)) AS partida,
+                       partida.partida_expiration_date,
+                       partida.updated_at,
+                       2 AS source_priority
+                  FROM delivery_order_item_partidas AS partida
+                  JOIN delivery_order_items AS item ON item.id = partida.order_item_id
+                 WHERE partida.partida_expiration_date IS NOT NULL
+                   AND UPPER(TRIM(partida.partida)) = ANY(%s)
+                   AND (%s = '{}'::text[] OR UPPER(TRIM(COALESCE(item.article_code, ''))) = ANY(%s))
+            )
+            SELECT DISTINCT ON (article_code, partida)
+                   article_code,
+                   partida,
                    partida_expiration_date
-              FROM delivery_order_items
-             WHERE partida_expiration_date IS NOT NULL
-               AND UPPER(TRIM(partida)) = ANY(%s)
-               AND (%s = '{}'::text[] OR COALESCE(article_code, '') = ANY(%s))
-             ORDER BY UPPER(TRIM(partida)), updated_at DESC
+              FROM expiration_rows
+             ORDER BY article_code, partida, updated_at DESC, source_priority DESC
             """,
             [
-                [p.upper() for p in partidas],
-                article_codes,
-                article_codes,
+                normalized_partidas,
+                normalized_codes,
+                normalized_codes,
+                normalized_partidas,
+                normalized_codes,
+                normalized_codes,
             ],
         )
-        return {row[0]: row[1] for row in cur.fetchall()}
+        return {(row[0], row[1]): row[2] for row in cur.fetchall()}
 
 
 def pm_from_bejerman(article_codes: list[str], *, company_key: Any = None) -> dict[str, str]:
@@ -94,14 +136,8 @@ def pm_from_bejerman(article_codes: list[str], *, company_key: Any = None) -> di
         return {}
     company = _clean(company_key).upper() or "SEPID"
     ahora = time.monotonic()
-    resultado: dict[str, str] = {}
-    faltantes: list[str] = []
-    for code in article_codes:
-        cacheado = _PM_CACHE.get((company, code))
-        if cacheado and ahora - cacheado[0] < PM_CACHE_TTL_SECONDS:
-            resultado[code] = cacheado[1]
-        else:
-            faltantes.append(code)
+    resultado = cached_pm_from_bejerman(article_codes, company_key=company, now=ahora)
+    faltantes = [code for code in article_codes if code not in resultado]
     if not faltantes:
         return resultado
 
@@ -121,7 +157,9 @@ SELECT LTRIM(RTRIM(COALESCE(a.art_CodGen, '') + COALESCE(a.art_CodEle1, '')
 """.strip()
 
     try:
-        filas = _remote_bejerman_sql_csv(sql, company_key=company, timeout_seconds=25)
+        filas = _remote_bejerman_sql_csv(
+            sql, company_key=company, timeout_seconds=_pm_lookup_timeout()
+        )
     except Exception:
         logger.warning("bejerman_remito_pdf_pm_lookup_failed", extra={"company_key": company}, exc_info=True)
         return resultado
@@ -132,6 +170,25 @@ SELECT LTRIM(RTRIM(COALESCE(a.art_CodGen, '') + COALESCE(a.art_CodEle1, '')
             resultado[codigo] = pm
             _PM_CACHE[(company, codigo)] = (ahora, pm)
     return resultado
+
+
+def cached_pm_from_bejerman(
+    article_codes: list[str],
+    *,
+    company_key: Any = None,
+    now: float | None = None,
+) -> dict[str, str]:
+    """Devuelve únicamente PM ya disponible en memoria, sin esperar a Bejerman."""
+
+    if not article_codes:
+        return {}
+    company = _clean(company_key).upper() or "SEPID"
+    moment = time.monotonic() if now is None else now
+    return {
+        code: cached[1]
+        for code in article_codes
+        if (cached := _PM_CACHE.get((company, code))) and moment - cached[0] < PM_CACHE_TTL_SECONDS
+    }
 
 
 def _maybe_json(value: Any) -> Any:
@@ -183,6 +240,42 @@ def _find_comprobante(node: Any, depth: int = 0) -> dict[str, Any] | None:
     return None
 
 
+_COMPROBANTE_HEADER_ALIASES = {
+    "Comprobante_Tipo": ("Comprobante_Tipo", "comprobanteTipo"),
+    "Comprobante_Letra": ("Comprobante_Letra", "comprobanteLetra"),
+    "Comprobante_PtoVenta": ("Comprobante_PtoVenta", "comprobantePtoVenta", "pointOfSale"),
+    "Comprobante_Numero": ("Comprobante_Numero", "comprobanteNumero"),
+    "Comprobante_FechaEmision": ("Comprobante_FechaEmision", "issueDate", "fechaEmision"),
+    "Cliente_Codigo": ("Cliente_Codigo", "customerCode"),
+}
+
+
+def _comprobante_headers(node: Any, *, depth: int = 0) -> dict[str, Any]:
+    """Busca la cabecera confirmada sin recorrer los renglones del comprobante."""
+
+    if depth > 10:
+        return {}
+    node = _maybe_json(node)
+    headers: dict[str, Any] = {}
+    if isinstance(node, dict):
+        for field, aliases in _COMPROBANTE_HEADER_ALIASES.items():
+            for alias in aliases:
+                value = node.get(alias)
+                if _clean(value):
+                    headers[field] = value
+                    break
+        for key, value in node.items():
+            if key == "Comprobante_Items":
+                continue
+            for field, header_value in _comprobante_headers(value, depth=depth + 1).items():
+                headers.setdefault(field, header_value)
+    elif isinstance(node, list):
+        for value in node:
+            for field, header_value in _comprobante_headers(value, depth=depth + 1).items():
+                headers.setdefault(field, header_value)
+    return headers
+
+
 def comprobante_from_emission(*candidates: Any) -> dict[str, Any] | None:
     """Saca el comprobante de la respuesta de emisión que todavía está en memoria.
 
@@ -191,11 +284,36 @@ def comprobante_from_emission(*candidates: Any) -> dict[str, Any] | None:
     orden de prioridad.
     """
 
+    comprobante = None
     for candidato in candidates:
         comprobante = _find_comprobante(candidato)
         if comprobante:
-            return comprobante
-    return None
+            break
+    if not comprobante:
+        return None
+
+    # El SDK suele confirmar sólo la cabecera y deja los renglones en el pedido
+    # original. Juntamos ambos datos para que el renderer propio tenga el número
+    # definitivo, sin volver a consultar el PDF al ERP.
+    headers: dict[str, Any] = {}
+    for candidato in candidates:
+        for field, value in _comprobante_headers(candidato).items():
+            headers.setdefault(field, value)
+    return {**comprobante, **headers}
+
+
+def _comprobante_from_payload_rows(rows: Any) -> dict[str, Any] | None:
+    """Combina respuestas y pedidos de varios intentos de la misma emisión.
+
+    Los intentos separados guardan primero el cuerpo enviado y luego la respuesta
+    confirmada. Ninguna de esas filas aislada tiene todo lo necesario para
+    reproducir el remito, pero juntas sí.
+    """
+
+    candidates: list[Any] = []
+    for response, request in rows or []:
+        candidates.extend((response, request))
+    return comprobante_from_emission(*candidates)
 
 
 def load_comprobante_for_document(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -247,15 +365,18 @@ def load_comprobante_for_document(row: dict[str, Any]) -> dict[str, Any] | None:
         except Exception:
             logger.warning("bejerman_remito_pdf_payload_query_failed", exc_info=True)
             continue
-        for respuesta, pedido in filas or []:
-            for candidato in (respuesta, pedido):
-                comprobante = _find_comprobante(candidato)
-                if comprobante:
-                    return comprobante
+        comprobante = _comprobante_from_payload_rows(filas)
+        if comprobante:
+            return comprobante
     return None
 
 
-def enrich_comprobante_for_pdf(comprobante: dict[str, Any], *, company_key: Any = None) -> dict[str, Any]:
+def enrich_comprobante_for_pdf(
+    comprobante: dict[str, Any],
+    *,
+    company_key: Any = None,
+    allow_remote_pm_lookup: bool = True,
+) -> dict[str, Any]:
     """Devuelve una copia del comprobante con PM y VTO cargados en cada renglón.
 
     Nunca levanta: lo que no se consigue queda vacío y el remito sale igual.
@@ -276,7 +397,11 @@ def enrich_comprobante_for_pdf(comprobante: dict[str, Any], *, company_key: Any 
         vencimientos = {}
 
     try:
-        pms = pm_from_bejerman(codes, company_key=company_key)
+        pms = (
+            pm_from_bejerman(codes, company_key=company_key)
+            if allow_remote_pm_lookup
+            else cached_pm_from_bejerman(codes, company_key=company_key)
+        )
     except Exception:
         logger.warning("bejerman_remito_pdf_pm_lookup_failed", exc_info=True)
         pms = {}
@@ -291,7 +416,7 @@ def enrich_comprobante_for_pdf(comprobante: dict[str, Any], *, company_key: Any 
         if codigo and not any(_clean(copia.get(k)) for k in PM_KEYS):
             copia["Item_PM"] = pms.get(codigo, "")
         if partida and not any(_clean(copia.get(k)) for k in VTO_KEYS):
-            copia["Item_Vencimiento"] = vencimientos.get(partida) or ""
+            copia["Item_Vencimiento"] = vencimientos.get((codigo.upper(), partida)) or ""
         nuevos_items.append(copia)
     enriquecido["Comprobante_Items"] = nuevos_items
     return enriquecido

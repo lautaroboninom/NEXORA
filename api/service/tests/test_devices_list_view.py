@@ -258,6 +258,42 @@ class DevicesListViewAPITest(TestCase):
         self.assertEqual(row.get("tipo_equipo"), "CPAP")
         self.assertEqual(row.get("variante"), "Elite")
 
+    def test_devices_list_exposes_last_ingreso_estado(self):
+        # El menú de acciones decide entre "Dar BAJA" y "Dar ALTA" con este campo.
+        resp = self.client.get("/api/equipos/?page_size=20")
+        self.assertEqual(resp.status_code, 200)
+        items = resp.data.get("items") or []
+        by_id = {int(item.get("id") or 0): item for item in items}
+
+        con_ingreso = by_id.get(self.device_id)
+        self.assertIsNotNone(con_ingreso)
+        self.assertEqual(con_ingreso.get("last_ingreso_estado"), "ingresado")
+
+        # Un equipo sin ingresos no puede quedar en None: la UI compara texto.
+        sin_ingreso = by_id.get(self.device_oxi_id)
+        self.assertIsNotNone(sin_ingreso)
+        self.assertIsNone(sin_ingreso.get("last_ingreso_id"))
+        self.assertEqual(sin_ingreso.get("last_ingreso_estado"), "")
+
+    def test_devices_list_last_ingreso_estado_follows_latest_ingreso(self):
+        # Tras una baja y un reingreso, el estado que vale es el del último.
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ingresos(device_id, estado, motivo, fecha_ingreso, ubicacion_id)
+                VALUES (%s,%s,%s, CURRENT_TIMESTAMP + INTERVAL '1 day', %s)
+                """,
+                [self.device_id, "baja", "obsoleto", self.location_id],
+            )
+        resp = self.client.get("/api/equipos/?page_size=20")
+        self.assertEqual(resp.status_code, 200)
+        row = next(
+            (item for item in (resp.data.get("items") or []) if int(item.get("id") or 0) == self.device_id),
+            None,
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(row.get("last_ingreso_estado"), "baja")
+
     def test_device_identificadores_uses_model_type_and_variant_when_device_is_blank(self):
         resp = self.client.get(f"/api/devices/{self.device_id}/identificadores/")
         self.assertEqual(resp.status_code, 200)

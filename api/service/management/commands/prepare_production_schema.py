@@ -18,6 +18,9 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     ("apply_ticket_sale_states_schema", {}),
     ("apply_no_se_repara_schema", {}),
     ("apply_delivery_orders_schema", {}),
+    # Después de apply_delivery_orders_schema: la FK de actor_user_id necesita users,
+    # que esa tanda ya deja en pie.
+    ("apply_delivery_remito_jobs_schema", {}),
     ("apply_route_sheet_schema", {}),
     ("apply_bejerman_purchase_entries_schema", {}),
     ("apply_bejerman_user_credentials_schema", {}),
@@ -34,6 +37,20 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     ("apply_notifications_schema", {}),
     ("apply_assignment_requests_schema", {}),
     ("apply_models_tipo_equipo_unique_schema", {}),
+    # Después de apply_models_tipo_equipo_unique_schema: es la misma corrección una capa más
+    # abajo (el humidificador comparte la serie del CPAP) y el backfill de tipo_equipo que
+    # hace adentro se apoya en que los modelos ya estén separados por tipo.
+    ("apply_devices_ns_tipo_unique_schema", {}),
+    ("apply_ingreso_open_conflicts_schema", {}),
+    # Estaba excluido como "parche histórico ya aplicado" y resultó no estarlo: sin sus columnas,
+    # rechazar un presupuesto devolvía 400. Es idempotente (ADD COLUMN / CREATE INDEX IF NOT EXISTS
+    # y la constraint bajo IF NOT EXISTS), así que corre en cada arranque sin costo.
+    ("apply_rejected_budget_charge_schema", {}),
+    # Agrega el valor 'anulado' al enum quote_estado. Tiene que estar commiteado antes de que la
+    # app lo escriba: con ATOMIC_REQUESTS no se puede agregar un valor de enum y usarlo en el
+    # mismo request. Es un ALTER TYPE ... ADD VALUE IF NOT EXISTS, así que corre en cada arranque
+    # sin costo.
+    ("apply_quote_anulacion_schema", {}),
 )
 
 
@@ -65,7 +82,6 @@ EXCLUDED_SCHEMA_COMMANDS: dict[str, str] = {
     "apply_presupuesto_alerts_schema": "Parche histórico de alertas de presupuesto (01/2026), ya aplicado.",
     "apply_quote_terms_schema": "Parche histórico de condiciones comerciales (02/2026), ya aplicado.",
     "apply_quote_versions_schema": "Parche histórico de versionado de presupuestos (06/2026), ya aplicado.",
-    "apply_rejected_budget_charge_schema": "Parche histórico de presupuesto rechazado (06/2026), ya aplicado.",
     "apply_cotizacion_equipo_schema": "Parche histórico del motivo 'Cotización de equipo' (06/2026), ya aplicado.",
     "apply_revision_tecnica_schema": "Parche histórico del motivo 'Revisión Técnica' (06/2026), ya aplicado.",
     # Los dos que siguen NO son históricos: crean tablas que la app usa hoy, pero nunca estuvieron

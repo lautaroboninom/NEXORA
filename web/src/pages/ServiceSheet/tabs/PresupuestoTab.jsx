@@ -57,6 +57,7 @@ function quoteStatusLabel(estado, tituloDocCap) {
     presupuestado: `${tituloDocCap} emitida`,
     aprobado: `${tituloDocCap} aprobada`,
     rechazado: `${tituloDocCap} rechazada`,
+    anulado: `${tituloDocCap} anulada`,
     no_aplica: "No aplica",
   };
   return labels[normalizedEstado] || normalizedEstado || "-";
@@ -612,7 +613,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
   }
 
   async function anularPresupuesto() {
-    if (!confirm(`Anular la ${tituloDoc} actual? Aplica también si está aprobada. Podrás editar y reemitir luego.`)) return;
+    if (!confirm(`Anular la ${tituloDoc} actual? Aplica también si está aprobada. La versión anulada queda en el historial y se crea una versión nueva, copiada de ella, para editar y reemitir.`)) return;
     try {
       setAnulando(true);
       setQErr("");

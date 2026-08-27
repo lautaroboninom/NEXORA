@@ -1,4 +1,31 @@
-from django.db import connection
+from django.db import connection, transaction
+
+
+REJECTED_BUDGET_CHARGE_DDL = (
+    "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_cobro_neto NUMERIC(12,2)",
+    "ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_quote_id INTEGER",
+    """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname = 'fk_ingresos_presupuesto_rechazado_quote'
+      ) THEN
+        ALTER TABLE ingresos
+          ADD CONSTRAINT fk_ingresos_presupuesto_rechazado_quote
+          FOREIGN KEY (presupuesto_rechazado_quote_id)
+          REFERENCES quotes(id)
+          ON DELETE SET NULL;
+      END IF;
+    END
+    $$;
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ingresos_presupuesto_rechazado_quote_id
+    ON ingresos(presupuesto_rechazado_quote_id)
+    """,
+)
 
 
 def _q(sql, params=None, one=False):
@@ -45,6 +72,26 @@ def has_rejected_budget_charge_schema() -> bool:
     return _has_table_column("ingresos", "presupuesto_rechazado_cobro_neto") and _has_table_column(
         "ingresos", "presupuesto_rechazado_quote_id"
     )
+
+
+def ensure_rejected_budget_charge_schema() -> bool:
+    """Materializa las columnas de cobro de presupuesto rechazado si faltan.
+
+    Devuelve True si el esquema quedó disponible. Evita que un entorno sin el
+    comando `apply_rejected_budget_charge_schema` ejecutado bloquee el rechazo.
+    """
+    if has_rejected_budget_charge_schema():
+        return True
+    if connection.vendor != "postgresql":
+        return False
+    try:
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                for statement in REJECTED_BUDGET_CHARGE_DDL:
+                    cur.execute(statement)
+    except Exception:
+        return False
+    return has_rejected_budget_charge_schema()
 
 
 def get_stored_rejected_budget_fields(ingreso_id: int) -> dict:

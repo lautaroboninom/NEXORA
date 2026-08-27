@@ -35,6 +35,7 @@ PERMISSION_CATALOG = [
     {"code": "action.ingreso.manage_derivations", "label": "Derivar/devolver derivaciones", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.baja_alta", "label": "Dar baja/alta", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.force_historical", "label": "Forzar correcciones históricas", "type": "action", "group": "Ingresos"},
+    {"code": "action.ingreso.resolve_open_conflict", "label": "Resolver ingresos con orden anterior abierta", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.print_exit_order", "label": "Imprimir orden de salida", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.emit_ingress_order", "label": "Emitir RIS de ingreso", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.fix_ris_preflight", "label": "Corregir validación previa del RIS", "type": "action", "group": "Ingresos"},
@@ -144,6 +145,7 @@ _grant(
     "action.ingreso.manage_derivations",
     "action.ingreso.baja_alta",
     "action.ingreso.force_historical",
+    "action.ingreso.resolve_open_conflict",
     "action.ingreso.print_exit_order",
     "action.ingreso.emit_ingress_order",
     "action.ingreso.fix_ris_preflight",
@@ -190,6 +192,7 @@ _grant(
     "action.ingreso.manage_derivations",
     "action.ingreso.baja_alta",
     "action.ingreso.force_historical",
+    "action.ingreso.resolve_open_conflict",
     "action.ingreso.print_exit_order",
     "action.ingreso.emit_ingress_order",
     "action.ingreso.fix_ris_preflight",
@@ -242,6 +245,7 @@ _grant(
     "action.ingreso.manage_derivations",
     "action.ingreso.baja_alta",
     "action.ingreso.force_historical",
+    "action.ingreso.resolve_open_conflict",
     "action.ingreso.print_exit_order",
     "action.ingreso.emit_ingress_order",
     "action.ingreso.fix_ris_preflight",
@@ -281,6 +285,10 @@ _grant(
     "action.ingreso.create",
     "action.ingreso.emit_ingress_order",
     "action.ingreso.fix_ris_preflight",
+    # Recepción es quien está en el mostrador cuando aparece el conflicto. Puede cerrar la
+    # orden anterior sólo cuando Bejerman muestra el RSS/RTA que prueba que el equipo salió;
+    # sin esa prueba el cierre sigue pidiendo action.ingreso.force_historical.
+    "action.ingreso.resolve_open_conflict",
     "action.ingreso.print_barcode",
     "action.bejerman_purchase_entries.manage",
     "action.bejerman_purchase_entries.emit",

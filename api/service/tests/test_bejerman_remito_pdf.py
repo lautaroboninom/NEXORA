@@ -61,11 +61,6 @@ def center_of(span):
     return x + len(texto) * size * CHAR_WIDTH_EM / 2
 
 
-def right_of(span):
-    _y, x, size, texto = span
-    return x + len(texto.rstrip()) * size * CHAR_WIDTH_EM
-
-
 COMPROBANTE = {
     "Comprobante_Tipo": "RT",
     "Comprobante_Letra": "R",
@@ -183,15 +178,6 @@ class RemitoPdfGeometriaTests(SimpleTestCase):
         find(self.spans, "01/03/2029")
         find(self.spans, "28/10/2027")
 
-    def test_valor_declarado_va_al_pie_alineado_a_la_derecha(self):
-        y, x, size, _valor = find(self.spans, "VALOR DECLARADO:")
-        self.assertAlmostEqual(y, TEMPLATE_SEPID.footer_label_baseline, delta=TOLERANCIA)
-        self.assertAlmostEqual(x, TEMPLATE_SEPID.footer_label_x, delta=TOLERANCIA)
-
-        monto = find(self.spans, "2.766.400,00")
-        self.assertAlmostEqual(monto[0], TEMPLATE_SEPID.footer_amount_baseline, delta=TOLERANCIA)
-        self.assertAlmostEqual(right_of(monto), TEMPLATE_SEPID.footer_amount_right_x, delta=TOLERANCIA)
-
     def test_no_dibuja_logo_ni_lineas_solo_texto(self):
         # El PDF es un overlay sobre papel preimpreso: si apareciera un dibujo,
         # taparía el formulario.
@@ -205,12 +191,19 @@ class RemitoPdfGeometriaTests(SimpleTestCase):
 class RemitoPdfCantidadTests(SimpleTestCase):
     def test_la_cantidad_reserva_el_lugar_del_signo(self):
         self.assertEqual(_format_quantity(1), " 1,00")
-        self.assertEqual(_format_quantity(-1), "-1,00")
         self.assertEqual(_format_quantity("140"), " 140,00")
 
+    def test_la_cantidad_se_imprime_siempre_en_positivo(self):
+        # El negativo con el que viajan RDA/RD/RDN es la dirección del movimiento de
+        # stock, no una cantidad: en el papel del cliente se lee como un error y es
+        # lo que reclamó cobranzas.
+        self.assertEqual(_format_quantity(-1), " 1,00")
+        self.assertEqual(_format_quantity(-2.5), " 2,50")
+
     def test_positivo_y_negativo_centran_en_el_mismo_punto(self):
-        # Es la prueba de que la columna está centrada y no alineada de un lado:
-        # en los remitos reales '-1,00' y ' 1,00' caen exactamente igual.
+        # Es la prueba de que la columna está centrada y no alineada de un lado: en
+        # los remitos reales '-1,00' y ' 1,00' caen exactamente igual, así que el
+        # renglón cae en su lugar aunque el signo ya no se imprima.
         def centro(cantidad):
             comprobante = dict(
                 COMPROBANTE,
@@ -223,7 +216,7 @@ class RemitoPdfCantidadTests(SimpleTestCase):
                     }
                 ],
             )
-            return center_of(find(spans(render_remito_pdf(comprobante, company_key="SEPID")), _format_quantity(cantidad)))
+            return center_of(find(spans(render_remito_pdf(comprobante, company_key="SEPID")), " 1,00"))
 
         self.assertAlmostEqual(centro(1), centro(-1), delta=0.01)
         self.assertAlmostEqual(centro(1), TEMPLATE_SEPID.col_cantidad_center_x, delta=TOLERANCIA)
@@ -314,7 +307,10 @@ class RemitoPdfRobustezTests(SimpleTestCase):
         textos = [s[3].strip() for s in spans(render_remito_pdf(comprobante, company_key="SEPID"))]
         self.assertNotIn("9999999", textos)
 
-    def test_sin_valor_declarado_no_dibuja_el_pie(self):
-        comprobante = {k: v for k, v in COMPROBANTE.items() if k != "Comprobante_ValorDeclarado"}
-        textos = [s[3].strip() for s in spans(render_remito_pdf(comprobante, company_key="SEPID"))]
-        self.assertNotIn("VALOR DECLARADO:", textos)
+    def test_nunca_imprime_el_valor_declarado(self):
+        # No va en el remito, aunque el comprobante traiga el importe y el PDF de
+        # Crystal que se reproduce sí lo imprima.
+        for company_key in ("SEPID", "MGBIO"):
+            textos = [s[3].strip() for s in spans(render_remito_pdf(COMPROBANTE, company_key=company_key))]
+            self.assertNotIn("VALOR DECLARADO:", textos, msg=company_key)
+            self.assertNotIn("2.766.400,00", textos, msg=company_key)

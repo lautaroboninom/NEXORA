@@ -371,6 +371,29 @@ class NoSeReparaFlowAPITest(TestCase):
         self.assertIsNone(resolucion)
         self.assertEqual(presupuesto_estado, "presupuestado")
 
+    def test_quitar_reparar_no_desaprueba_presupuesto_con_quote_aprobado_de_verdad(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparar', resolucion=NULL, presupuesto_estado='aprobado' WHERE id=%s",
+                [self.ingreso_id],
+            )
+        self._clear_estado_audit()
+        self._insert_estado_audit("presupuestado", "reparar")
+        self._insert_presupuesto_audit("presupuestado", "aprobado")
+        # A diferencia del test anterior, acá SÍ hay una versión de `quotes` aprobada
+        # de verdad respaldando el 'aprobado' de ingresos.presupuesto_estado (no es
+        # sólo un efecto colateral de marcar "reparar" a mano).
+        self._insert_approved_quote()
+        self.client.force_authenticate(user=self.jefe)
+
+        resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/quitar-reparar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "presupuestado")
+        self.assertIsNone(resolucion)
+        self.assertEqual(presupuesto_estado, "aprobado")
+
     def test_quitar_reparar_solo_jefe(self):
         with connection.cursor() as cur:
             cur.execute(

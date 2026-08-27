@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import quote
 
 from django.db import connection
@@ -16,7 +17,7 @@ from ..bejerman_documents import cobranzas_remito_pdf_metadata, retry_after_head
 from ..bejerman_sdk import decode_document_id
 from ..bejerman_delivery import (
     BillingError,
-    generate_bejerman_remito,
+    check_delivery_remito_stock_sync,
     get_delivery_order_invoice_pdf,
     get_delivery_order_remito_pdf,
     get_facturacion_pdf,
@@ -33,6 +34,8 @@ from ..bejerman_delivery import (
     resolve_registered_ingreso_remito_for_document_id,
     resolve_remito_group_for_document_id,
 )
+from ..bejerman_remito_lookup import search_remitos_by_serial
+from ..delivery_remito_jobs import enqueue_remito_job, get_remito_job
 from ..delivery_orders import (
     DeliveryOrderError,
     cancel_order,
@@ -60,6 +63,9 @@ from ..service_order_billing import (
     render_service_order_billing_pdf,
 )
 from .pdf_wait_pages import render_bejerman_pdf_wait_page
+
+
+logger = logging.getLogger(__name__)
 
 
 def _actor_id(request):
@@ -196,6 +202,29 @@ class DeliveryOrderPreparedView(DeliveryOrderPermissionMixin, APIView):
             return _error_response(exc)
 
 
+class BejermanRemitoSerialSearchView(DeliveryOrderPermissionMixin, APIView):
+    """Busca en Bejerman el remito ya emitido para un equipo, por serie o por MG.
+
+    Da vuelta la carga manual: en vez de pedir el número de comprobante, que el operador
+    no tiene, se pregunta por el equipo que salió.
+    """
+
+    def get(self, request):
+        params = request.query_params
+        try:
+            return Response(
+                search_remitos_by_serial(
+                    params.get("serial") or params.get("q"),
+                    flow=params.get("flow") or "service_release",
+                    company_key=params.get("companyKey"),
+                    ingreso_id=params.get("ingresoId"),
+                    since=params.get("since"),
+                )
+            )
+        except Exception as exc:
+            return _error_response(exc)
+
+
 class DeliveryOrderRemitosView(DeliveryOrderPermissionMixin, APIView):
 
     def post(self, request, order_id):
@@ -289,9 +318,6 @@ class DeliveryOrderRemitoLocationView(DeliveryOrderPermissionMixin, APIView):
 class DeliveryOrderCommercialCorrectionView(DeliveryOrderPermissionMixin, APIView):
 
     def patch(self, request, order_id):
-        role = str(getattr(request.user, "rol", "") or "").strip().lower()
-        if role != "supervisor":
-            raise PermissionDenied("Solo el rol supervisor puede corregir precio o plazo de una orden entregada.")
         try:
             return Response(correct_delivery_order_commercial_terms(order_id, request.data or {}, _actor_id(request)))
         except Exception as exc:
@@ -319,11 +345,55 @@ class DeliveryOrderItemPartidasView(DeliveryOrderPermissionMixin, APIView):
 
 
 class DeliveryOrderBejermanRemitoView(DeliveryOrderPermissionMixin, APIView):
+    """Encola la emisión y contesta enseguida.
+
+    Antes esto emitía dentro del propio request, que podía tardar minutos. El
+    navegador congela las pestañas en segundo plano, así que la pestaña que estaba
+    esperando la respuesta se dormía y no la recogía nunca: el remito salía pero en
+    pantalla seguía diciendo "Emitiendo". Ahora el resultado queda guardado y se
+    consulta con `DeliveryOrderBejermanRemitoJobView`; el `jobId` sobrevive a que la
+    pestaña se congele, se cierre o se recargue.
+
+    Emitir sigue siendo `POST`, así que un cliente viejo que no conozca `jobId` no
+    dispara nada raro: recibe 202 y no encuentra el remito, en vez de emitir dos veces.
+    """
 
     def post(self, request):
         payload = request.data or {}
         try:
-            return Response(generate_bejerman_remito(payload.get("orderIds") or [], _actor_id(request), payload))
+            job = enqueue_remito_job(payload.get("orderIds") or [], _actor_id(request), payload)
+        except Exception as exc:
+            return _error_response(exc)
+        return Response(job, status=status.HTTP_202_ACCEPTED)
+
+
+class DeliveryOrderBejermanRemitoJobView(DeliveryOrderPermissionMixin, APIView):
+    """Estado de una emisión encolada. Es lo que sondea la pestaña que espera."""
+
+    def get(self, request, job_id: str):
+        try:
+            return Response(get_remito_job(job_id, _actor_id(request)))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class DeliveryOrderBejermanRemitoPreflightView(DeliveryOrderPermissionMixin, APIView):
+    """Avisa que el stock todavía no está sincronizado antes de emitir el remito.
+
+    El control duro sigue viviendo en la emisión; esto sólo lo adelanta para que
+    el operador no espere el envío a Bejerman para enterarse.
+    """
+
+    def post(self, request):
+        payload = request.data or {}
+        try:
+            return Response(
+                check_delivery_remito_stock_sync(
+                    payload.get("orderIds") or [],
+                    _actor_id(request),
+                    retry=bool(payload.get("retry")),
+                )
+            )
         except Exception as exc:
             return _error_response(exc)
 
@@ -374,12 +444,18 @@ class DeliveryOrderBejermanArticleStockView(DeliveryOrderPermissionMixin, APIVie
                 )
             )
         except Exception:
+            logger.warning("delivery_order_article_stock_unavailable", exc_info=True)
             return Response(
                 {
                     "items": [],
                     "depositCode": deposit_code or "",
+                    "companyKey": (
+                        request.query_params.get("companyKey") or request.query_params.get("company_key") or ""
+                    ).strip().upper(),
+                    "totalAvailableQuantity": None,
                     "unavailable": True,
-                    "warning": "No fue posible verificar stock Bejerman.",
+                    "code": "BEJERMAN_ARTICLE_STOCK_UNAVAILABLE",
+                    "warning": "No fue posible verificar stock y partidas en Bejerman. Reintentá en unos instantes.",
                 }
             )
 
@@ -673,6 +749,7 @@ __all__ = [
     "DeliveryOrderItemArticleView",
     "DeliveryOrderItemPartidasView",
     "DeliveryOrderBejermanRemitoView",
+    "DeliveryOrderBejermanRemitoPreflightView",
     "DeliveryOrderBejermanRemitoHistoryView",
     "DeliveryOrderBejermanArticlesView",
     "DeliveryOrderBejermanDepositsView",

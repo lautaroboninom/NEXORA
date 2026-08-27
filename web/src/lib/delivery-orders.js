@@ -48,6 +48,40 @@ export function deliveryOrderItemCanOmitPartida(order, item) {
   return ["sale", "demo"].includes(deliveryType) && deliveryOrderItemRequiresPartida(item) === false;
 }
 
+function itemPartidaRows(item) {
+  if (Array.isArray(item?.partidas) && item.partidas.length) return item.partidas;
+  return clean(item?.partida) ? [item] : [];
+}
+
+export function deliveryOrderUsedPartidaKeys(items, itemIndex, partidaIndex, fallbackDeposit = "") {
+  const itemList = Array.isArray(items) ? items : [];
+  const targetItem = itemList[itemIndex] || {};
+  const targetArticle = clean(targetItem.articleCode).toLowerCase();
+  if (!targetArticle) return new Set();
+
+  const targetRows = itemPartidaRows(targetItem);
+  const targetRow = targetRows[partidaIndex] || {};
+  const targetDeposit = clean(targetRow.stockDepositCode || targetItem.stockDepositCode || fallbackDeposit).toUpperCase();
+  const used = new Set();
+
+  itemList.forEach((item, candidateItemIndex) => {
+    // Sólo se consideran renglones anteriores: son los que el operador ya cargó arriba.
+    if (candidateItemIndex > itemIndex) return;
+    if (clean(item?.articleCode).toLowerCase() !== targetArticle) return;
+
+    itemPartidaRows(item).forEach((row, candidatePartidaIndex) => {
+      if (candidateItemIndex === itemIndex && candidatePartidaIndex === partidaIndex) return;
+      const partidaKey = clean(row?.partida).toLowerCase();
+      if (!partidaKey) return;
+      const rowDeposit = clean(row?.stockDepositCode || item?.stockDepositCode || fallbackDeposit).toUpperCase();
+      if (targetDeposit && rowDeposit && rowDeposit !== targetDeposit) return;
+      used.add(partidaKey);
+    });
+  });
+
+  return used;
+}
+
 export function formatOrderMoney(value, currency = "ARS") {
   const parsed = parseNumber(value);
   if (parsed === null) return "-";

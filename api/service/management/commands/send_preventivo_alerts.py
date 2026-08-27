@@ -2,10 +2,9 @@ import logging
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.core.mail import send_mail
-from django.utils import timezone
 
-from service.views.helpers import _email_append_footer_text, q
-from service.notifications import emit_notification
+from service.views.helpers import _email_append_footer_text, mg_estado_select_sql, q
+from service.notifications import emit_notification, filter_email_recipients_by_preference
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +70,10 @@ class Command(BaseCommand):
         if not recipients:
             self.stdout.write("No hay destinatarios activos con rol jefe.")
             return
+        # La campana usa la lista completa; el correo, sólo los jefes que
+        # dejaron prendido el canal Mail en el centro de notificaciones.
+        campana = list(recipients)
+        recipients = filter_email_recipients_by_preference("preventivo_vencido", campana)
 
         has_repuestos = True
         try:
@@ -80,7 +83,7 @@ class Command(BaseCommand):
 
         if has_repuestos:
             rows = q(
-                """
+                f"""
                 WITH plans AS (
                   SELECT
                     p.id AS plan_id,
@@ -96,6 +99,7 @@ class Command(BaseCommand):
                     COALESCE(cdev.razon_social, ccust.razon_social, '') AS cliente,
                     COALESCE(d.numero_interno,'') AS numero_interno,
                     COALESCE(d.numero_serie,'') AS numero_serie,
+                    {mg_estado_select_sql()}
                     COALESCE(b.nombre,'') AS marca,
                     COALESCE(m.nombre,'') AS modelo
                   FROM preventivo_planes p
@@ -139,7 +143,7 @@ class Command(BaseCommand):
             ) or []
         else:
             rows = q(
-                """
+                f"""
                 WITH plans AS (
                   SELECT
                     p.id AS plan_id,
@@ -155,6 +159,7 @@ class Command(BaseCommand):
                     COALESCE(cdev.razon_social, ccust.razon_social, '') AS cliente,
                     COALESCE(d.numero_interno,'') AS numero_interno,
                     COALESCE(d.numero_serie,'') AS numero_serie,
+                    {mg_estado_select_sql()}
                     COALESCE(b.nombre,'') AS marca,
                     COALESCE(m.nombre,'') AS modelo
                   FROM preventivo_planes p
@@ -198,7 +203,12 @@ class Command(BaseCommand):
                 equipo = " | ".join(
                     p for p in [r.get("marca") or "", r.get("modelo") or ""] if p
                 ) or "-"
-                ns = (r.get("numero_interno") or "").strip() or (r.get("numero_serie") or "").strip() or "-"
+                interno = (r.get("numero_interno") or "").strip()
+                serie = (r.get("numero_serie") or "").strip()
+                # Un MG vendido es histórico: el equipo ya se identifica por su N/S.
+                if str(r.get("mg_estado") or "").strip().lower() == "inactivo_venta":
+                    interno = ""
+                ns = interno or serie or "-"
                 return (
                     f"- Plan #{r.get('plan_id')} | Cliente: {r.get('cliente') or '-'} | "
                     f"Equipo: {equipo} | Serie: {ns} | Proxima: {r.get('proxima_revision_fecha')} | "
@@ -232,35 +242,43 @@ class Command(BaseCommand):
             return
 
         try:
-            today = timezone.localdate().isoformat()
+            # Sin la fecha en el dedupe: el resumen es siempre el mismo renglón
+            # de la campana, que se actualiza con el conteo del día.
             if vencidos:
                 emit_notification(
                     "preventivo_vencido",
-                    emails=recipients,
+                    emails=campana,
                     title=f"Preventivos vencidos: {len(vencidos)}",
                     body="\n".join(fmt_row(r) for r in vencidos[:8]),
                     href="/equipos?tab=preventivos",
                     severity="critical",
                     entity_type="preventivo",
                     entity_id="vencidos",
-                    dedupe_key=f"preventivo_vencido:{today}",
+                    dedupe_key="preventivo_vencido",
                     payload={"count": len(vencidos)},
+                    push=True,
+                    refresh=True,
                 )
             if proximos:
                 emit_notification(
                     "preventivo_proximo",
-                    emails=recipients,
+                    emails=campana,
                     title=f"Preventivos próximos: {len(proximos)}",
                     body="\n".join(fmt_row(r) for r in proximos[:8]),
                     href="/equipos?tab=preventivos",
                     severity="warning",
                     entity_type="preventivo",
                     entity_id="proximos",
-                    dedupe_key=f"preventivo_proximo:{today}",
+                    dedupe_key="preventivo_proximo",
                     payload={"count": len(proximos)},
+                    push=True,
+                    refresh=True,
                 )
         except Exception:
-            pass
+            logger.exception(
+                "No se pudieron crear las notificaciones de preventivos",
+                extra={"vencidos": len(vencidos), "proximos": len(proximos)},
+            )
 
         if _send(subject, body, recipients):
             self.stdout.write(f"Resumen preventivos enviado a {len(recipients)} destinatarios")

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Trash2, X } from "lucide-react";
-import { postDeliveryOrderRemitos } from "../lib/api";
+import { Plus, Search, Trash2, X } from "lucide-react";
+import { getBejermanRemitosBySerial, postDeliveryOrderRemitos } from "../lib/api";
 import { ResponsiveModalOverlay, ResponsiveModalPanel } from "./Responsive.jsx";
 
 const ALLOWED_POINTS_OF_SALE = new Set(["00001", "00004", "00007"]);
@@ -20,9 +20,11 @@ function requestErrorMessage(error, fallback) {
   return error?.message || fallback;
 }
 
-function draftRemito({ remitoNumber = "", completed = false } = {}) {
+function draftRemito({ remitoNumber = "", completed = false, equipmentSerials = [] } = {}) {
   remitoDraftSequence += 1;
-  return { id: `manual-remito-${remitoDraftSequence}`, remitoNumber, completed };
+  // `equipmentSerials` es el equipo que eligió el buscador: el backend lo cuelga del
+  // renglón, porque un alquiler sin equipo identificado no queda registrado en ningún lado.
+  return { id: `manual-remito-${remitoDraftSequence}`, remitoNumber, completed, equipmentSerials };
 }
 
 function suggestedDraftCount(order) {
@@ -225,6 +227,7 @@ function allocationValidation(units, drafts, values) {
 function remitoPayload(drafts, units, allocationValues, withAllocations) {
   return drafts.map((draft) => {
     const remito = { remitoNumber: clean(draft.remitoNumber) };
+    if (draft.equipmentSerials?.length) remito.equipmentSerials = draft.equipmentSerials;
     if (!withAllocations) return remito;
 
     const byItem = new Map();
@@ -262,6 +265,10 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
   const [allocationValues, setAllocationValues] = useState({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // El operador tiene el equipo, no el número: se busca en Bejerman por serie o MG.
+  const [lookupQuery, setLookupQuery] = useState("");
+  const [lookup, setLookup] = useState(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
   const units = useMemo(() => allocationUnits(order), [order]);
 
   useEffect(() => {
@@ -271,6 +278,9 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
     setAllocationValues(initialized.allocationValues);
     setSaving(false);
     setError("");
+    setLookupQuery("");
+    setLookup(null);
+    setLookupLoading(false);
   }, [open, order?.id, order?.expectedCount, order?.expectedRemitoCount, order?.remitoExpectedCount, order?.suggestedRemitoCount]);
 
   useEffect(() => {
@@ -295,6 +305,49 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
   );
 
   if (!open || !order) return null;
+
+  const lookupFlow = clean(order?.deliveryType) === "rental" ? "rental" : "service_release";
+  const lookupIngresoId = order?.ingresoId
+    || (order?.items || []).map((item) => item?.ingresoId).find(Boolean)
+    || (order?.items || []).flatMap((item) => item?.partidas || []).map((row) => row?.ingresoId).find(Boolean);
+
+  const buscarRemitos = async () => {
+    const serial = clean(lookupQuery);
+    if (!serial || lookupLoading) return;
+    setLookupLoading(true);
+    setError("");
+    try {
+      const result = await getBejermanRemitosBySerial({
+        serial,
+        flow: lookupFlow,
+        companyKey: order?.companyKey,
+        ingresoId: lookupIngresoId,
+      });
+      setLookup(result || null);
+    } catch (err) {
+      setLookup(null);
+      setError(requestErrorMessage(err, "No se pudo buscar el remito en Bejerman."));
+    } finally {
+      setLookupLoading(false);
+    }
+  };
+
+  const usarCandidato = (candidate) => {
+    const numero = clean(candidate?.remitoNumber);
+    if (!numero) return;
+    const serial = clean(candidate?.partida) || clean(lookup?.serial);
+    const serials = serial ? [serial] : [];
+    setDrafts((current) => {
+      const libre = current.find((draft) => !draft.completed && !clean(draft.remitoNumber));
+      if (libre) {
+        return current.map((draft) => (
+          draft.id === libre.id ? { ...draft, remitoNumber: numero, equipmentSerials: serials } : draft
+        ));
+      }
+      return [...current, draftRemito({ remitoNumber: numero, equipmentSerials: serials })];
+    });
+    setError("");
+  };
 
   const updateRemitoNumber = (id, value) => {
     setDrafts((current) => current.map((draft) => (
@@ -433,6 +486,85 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
               La emisión anterior quedó en revisión. Registre los números solamente si confirmó los comprobantes directamente en Bejerman.
             </div>
           )}
+
+          <div className="mb-4 rounded border border-sky-200 bg-sky-50 p-3">
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs font-semibold uppercase text-sky-900">
+                Buscar el remito en Bejerman por equipo
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={lookupQuery}
+                  onChange={(event) => setLookupQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    void buscarRemitos();
+                  }}
+                  disabled={saving || lookupLoading}
+                  className="h-10 min-w-[200px] flex-1 rounded border bg-white px-3 text-sm"
+                  placeholder="N° de serie o MG"
+                />
+                <button
+                  type="button"
+                  onClick={() => void buscarRemitos()}
+                  disabled={saving || lookupLoading || !clean(lookupQuery)}
+                  className="inline-flex h-10 items-center gap-1 rounded border border-sky-300 bg-white px-3 text-sm text-sky-900 hover:bg-sky-100 disabled:opacity-50"
+                >
+                  <Search className="h-4 w-4" aria-hidden="true" />
+                  {lookupLoading ? "Buscando..." : "Buscar"}
+                </button>
+              </div>
+              <span className="mt-1 block text-xs text-sky-800">
+                Se listan los {lookupFlow === "rental" ? "RTA" : "RSS"} de Bejerman que citan ese equipo, posteriores a su ingreso.
+              </span>
+            </label>
+
+            {lookup?.equipment && (
+              <div className="mt-2 text-xs text-sky-900">
+                {[lookup.equipment.marca, lookup.equipment.modelo].filter(Boolean).join(" ")}
+                {lookup.serial ? ` · N/S ${lookup.serial}` : ""}
+                {lookup.equipment.numero_interno ? ` · ${lookup.equipment.numero_interno}` : ""}
+              </div>
+            )}
+            {lookup && lookup.status !== "ok" && (
+              <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                {lookup.detail || "No se pudo consultar Bejerman."}
+              </div>
+            )}
+            {lookup?.status === "ok" && (
+              <div className="mt-2 space-y-2">
+                {(lookup.candidates || []).map((candidate) => (
+                  <button
+                    key={candidate.remitoNumber}
+                    type="button"
+                    onClick={() => usarCandidato(candidate)}
+                    disabled={saving}
+                    className="block w-full rounded border border-sky-200 bg-white px-3 py-2 text-left text-sm hover:bg-sky-100 disabled:opacity-50"
+                  >
+                    <span className="block font-mono font-semibold text-gray-900">{candidate.remitoNumber}</span>
+                    <span className="mt-0.5 block text-xs text-gray-600">
+                      {candidate.issueDate}
+                      {candidate.customerCode ? ` · ${candidate.customerCode}` : ""}
+                      {candidate.articleCode ? ` · ${candidate.articleCode}` : ""}
+                    </span>
+                  </button>
+                ))}
+                {!(lookup.candidates || []).length && (
+                  <div className="rounded border bg-white px-3 py-2 text-xs text-gray-600">
+                    {(lookup.alreadyLinked || []).length
+                      ? "El único remito que cita ese equipo ya está asociado a esa serie."
+                      : "Bejerman no tiene remitos de ese tipo para ese equipo desde su fecha de ingreso."}
+                  </div>
+                )}
+                {(lookup.alreadyLinked || []).length > 0 && (
+                  <div className="text-xs text-gray-500">
+                    Ya asociados a esta serie: {(lookup.alreadyLinked || []).map((item) => item.remitoNumber).join(", ")}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="space-y-3">
             {drafts.map((draft, index) => (

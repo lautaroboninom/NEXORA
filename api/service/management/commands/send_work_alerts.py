@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 from django.conf import settings
@@ -7,7 +8,9 @@ from django.utils import timezone
 
 from service.views.helpers import _email_append_footer_text, exec_void, q
 from service.views.work_views import build_work_summary, work_summary_email_fingerprint
-from service.notifications import emit_notification
+from service.notifications import emit_notification, filter_email_recipients_by_preference
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -42,7 +45,12 @@ class Command(BaseCommand):
         sent = 0
         skipped = 0
         today = timezone.localdate().isoformat()
+        # `notification_key` lleva la fecha porque marca la cadencia del correo
+        # (`work_notification_state`), que es diaria. La campana NO: con la
+        # fecha adentro del `dedupe_key` el resumen creaba una fila nueva sin
+        # leer todos los días y terminaba tapando el resto de los avisos.
         notification_key = f"work_summary:{periodo}:{today}"
+        bell_dedupe_key = f"work_summary:{periodo}"
 
         for user in rows:
             request = SimpleNamespace(
@@ -108,18 +116,29 @@ class Command(BaseCommand):
                         severity="warning" if alerts else "info",
                         entity_type="trabajo",
                         entity_id=periodo,
-                        dedupe_key=notification_key,
+                        dedupe_key=bell_dedupe_key,
                         payload={"periodo": periodo, "alerts": alerts},
+                        push=True,
+                        refresh=True,
                     )
                 except Exception:
-                    pass
-                send_mail(
-                    subject,
-                    body,
-                    getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                    logger.exception(
+                        "No se pudo crear la notificación de resumen operativo",
+                        extra={"user_id": user.get("id"), "periodo": periodo},
+                    )
+                # El resumen por correo también pasa por el toggle "Mail".
+                mail_to = filter_email_recipients_by_preference(
+                    "resumen_operativo",
                     [user.get("email")],
-                    fail_silently=True,
                 )
+                if mail_to:
+                    send_mail(
+                        subject,
+                        body,
+                        getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                        mail_to,
+                        fail_silently=True,
+                    )
                 exec_void(
                     """
                     INSERT INTO work_notification_state(

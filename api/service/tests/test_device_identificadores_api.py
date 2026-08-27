@@ -293,3 +293,50 @@ class DeviceIdentificadoresApiTest(TestCase):
         )
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.data.get("conflict_type"), "MG_DUPLICATE")
+
+    def test_patch_permite_misma_serie_si_cambia_el_tipo(self):
+        # El calentador humidificador no trae serie propia: entra con la del CPAP con el que
+        # vino. Compartir la serie con otro equipo es legítimo mientras el tipo sea distinto.
+        resp = self.client.patch(
+            self._url(self.device_1_id),
+            {"numero_serie": "NS-DUP-2", "tipo_equipo": "Calentador humidificador"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(numero_serie,''), COALESCE(tipo_equipo,'') FROM devices WHERE id=%s",
+                [self.device_1_id],
+            )
+            numero_serie, tipo_equipo = cur.fetchone()
+        self.assertEqual(numero_serie, "NS-DUP-2")
+        self.assertEqual(tipo_equipo, "Calentador humidificador")
+
+    def test_patch_detecta_choque_al_mover_solo_el_tipo(self):
+        # Mover un equipo al tipo que ya ocupa otro con la misma serie sí choca, aunque la
+        # serie no se toque: es el par (serie, tipo) el que tiene que ser único.
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, tipo_equipo, ubicacion_id)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                [
+                    self.customer_1_id,
+                    self.marca_1_id,
+                    self.model_1_id,
+                    "NS-BASE-1",
+                    "Calentador humidificador",
+                    self.loc_1_id,
+                ],
+            )
+            humidificador_id = self._last_id(cur)
+
+        resp = self.client.patch(
+            self._url(humidificador_id),
+            {"tipo_equipo": "Monitor"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data.get("conflict_type"), "NS_DUPLICATE")
+        self.assertEqual(int(resp.data.get("conflict_device_id") or 0), self.device_1_id)

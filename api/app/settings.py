@@ -89,6 +89,11 @@ EMAIL_USE_TLS = _bool_env("EMAIL_USE_TLS", "1")
 EMAIL_USE_SSL = _bool_env("EMAIL_USE_SSL", "0")
 EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "20"))
 EMAIL_INSECURE_SKIP_VERIFY = _bool_env("EMAIL_INSECURE_SKIP_VERIFY", "0")
+# Jaula de correo para entornos que no son producción: si tiene valor, todos los
+# destinatarios se reemplazan por esta casilla (los originales quedan en las
+# cabeceras X-Original-To/Cc/Bcc). Debe estar VACÍO en producción.
+EMAIL_REDIRECT_TO = os.getenv("EMAIL_REDIRECT_TO", "")
+EMAIL_REDIRECT_SUBJECT_PREFIX = os.getenv("EMAIL_REDIRECT_SUBJECT_PREFIX", "[DEV] ")
 # Los correos remotos no deben demorar las acciones de operación. Los backends
 # locales de desarrollo y prueba se mantienen sincrónicos para facilitar su verificación.
 EMAIL_DELIVERY_ASYNC = _bool_env("EMAIL_DELIVERY_ASYNC", "1")
@@ -106,6 +111,10 @@ EMAIL_LEGAL_FOOTER = os.getenv(
 
 # Notificaciones: solicitudes de asignación de técnico
 ASSIGNMENT_REQUEST_RECIPIENTS = _csv("ASSIGNMENT_REQUEST_RECIPIENTS", "")
+# Notificaciones: equipo reparado que espera la impresión del remito. Estaba
+# referenciado en repair_ready_notifications pero nunca definido acá, así que
+# siempre caía al fallback de ASSIGNMENT_REQUEST_RECIPIENTS.
+REPAIR_READY_RECIPIENTS = _csv("REPAIR_READY_RECIPIENTS", "")
 # Notificaciones: bajas de equipos (otros sistemas)
 BAJA_NOTIFY_RECIPIENTS = _csv("BAJA_NOTIFY_RECIPIENTS", "eduardo@sepid.com.ar")
 # Avisos patrimoniales (baja, alta, alta MG y venta MG). Si queda vacío se usan
@@ -215,6 +224,13 @@ PERMISSIONS_V2_ENABLED = os.getenv("PERMISSIONS_V2_ENABLED", "1").strip().lower(
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = list(default_headers) + ["authorization"]
 CORS_ALLOW_METHODS = list(default_methods)
+# El lote de órdenes de salida devuelve un PDF y reporta en estos headers qué OS
+# salieron y cuáles fallaron; sin exponerlos el navegador no se los deja leer.
+CORS_EXPOSE_HEADERS = [
+    "Content-Disposition",
+    "X-Nexora-Remitos-Emitidos",
+    "X-Nexora-Remitos-Fallidos",
+]
 # Solo útil en dev/LAN; no afecta prod si no se usa
 CORS_ALLOW_PRIVATE_NETWORK = True
 
@@ -304,6 +320,11 @@ BEJERMAN_COMPANY_TEST = os.getenv("BEJERMAN_COMPANY_TEST", "SEP")
 BEJERMAN_WORKSTATION = os.getenv("BEJERMAN_WORKSTATION", "")
 BEJERMAN_SERVICE_WORKSTATION = os.getenv("BEJERMAN_SERVICE_WORKSTATION", BEJERMAN_WORKSTATION or "STEC")
 BEJERMAN_ADMIN_WORKSTATION = os.getenv("BEJERMAN_ADMIN_WORKSTATION", BEJERMAN_WORKSTATION or "ADMV")
+# Los técnicos no tienen usuario propio en Bejerman: sus movimientos entran con la
+# credencial de este usuario de NEXORA. Sin esto, todo lo que dispara un técnico
+# (transferencias de depósito, sobre todo) se bloquea pidiéndole credenciales que
+# nunca va a poder cargar. La estación de trabajo sigue siendo la del técnico.
+BEJERMAN_TECHNICAL_DELEGATE_EMAIL = os.getenv("BEJERMAN_TECHNICAL_DELEGATE_EMAIL", "")
 BEJERMAN_BRANCH = os.getenv("BEJERMAN_BRANCH", "")
 BEJERMAN_SOURCE_DEPOSIT = os.getenv("BEJERMAN_SOURCE_DEPOSIT", "STR")
 BEJERMAN_TARGET_DEPOSIT = os.getenv("BEJERMAN_TARGET_DEPOSIT", "STL")
@@ -313,6 +334,12 @@ BEJERMAN_STOCK_NUMERA_FLEX = os.getenv("BEJERMAN_STOCK_NUMERA_FLEX", "N")
 BEJERMAN_STOCK_ENTRY_COMPROBANTE = os.getenv("BEJERMAN_STOCK_ENTRY_COMPROBANTE", "ENT")
 if BEJERMAN_STOCK_ENTRY_COMPROBANTE.strip().upper() == "RIS":
     BEJERMAN_STOCK_ENTRY_COMPROBANTE = "ENT"
+# Cuando el importador rechaza la partida, NEXORA la da de alta con un ENT. Ese ENT
+# deja la partida en +1 y por eso el comprobante se reintentaba con ActualizaStock=N,
+# que lo deja sin movimiento de stock y por lo tanto fuera de los reportes por cliente.
+# Con esto en 1 la partida se compensa a cero y el comprobante hace su propio
+# movimiento; si algo falla se repone el ENT y se usa el camino anterior.
+BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT = _bool_env("BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT", "1")
 BEJERMAN_STOCK_EXIT_COMPROBANTE = os.getenv("BEJERMAN_STOCK_EXIT_COMPROBANTE", "SAL")
 if BEJERMAN_STOCK_EXIT_COMPROBANTE.strip().upper() == "RSS":
     BEJERMAN_STOCK_EXIT_COMPROBANTE = "SAL"
@@ -343,6 +370,13 @@ BEJERMAN_REQUEST_TIMEOUT = int(os.getenv("BEJERMAN_REQUEST_TIMEOUT", "30"))
 # Con el cache de abajo la descarga completa pasa a ser esporádica, así que se
 # deja margen para que la primera (fría) igual llegue a completarse.
 BEJERMAN_INTERACTIVE_REQUEST_TIMEOUT = int(os.getenv("BEJERMAN_INTERACTIVE_REQUEST_TIMEOUT", "20"))
+# El selector de partidas consulta el volcado completo de stock. Debe abandonar
+# rápido para poder responder con un estado disponible/no disponible antes del
+# timeout del proxy; la emisión y sus validaciones estrictas conservan sus
+# propios tiempos de espera.
+BEJERMAN_DELIVERY_ORDER_STOCK_REQUEST_TIMEOUT = int(
+    os.getenv("BEJERMAN_DELIVERY_ORDER_STOCK_REQUEST_TIMEOUT", "8")
+)
 # TTL de los volcados completos que el SDK devuelve sin filtrar (ver
 # service/bejerman_catalog_cache.py). 0 desactiva el cache.
 BEJERMAN_ARTICLES_CACHE_SECONDS = int(os.getenv("BEJERMAN_ARTICLES_CACHE_SECONDS", "300"))
@@ -401,7 +435,20 @@ BEJERMAN_SALE_ITEMS_SYNC_CHUNK_DAYS = int(
     os.getenv("BEJERMAN_SALE_ITEMS_SYNC_CHUNK_DAYS", "31")
 )
 BEJERMAN_SALE_ITEMS_REFRESH_DAYS = int(os.getenv("BEJERMAN_SALE_ITEMS_REFRESH_DAYS", "2"))
-BEJERMAN_SALE_MAX_ARTICLE_LINES = int(os.getenv("BEJERMAN_SALE_MAX_ARTICLE_LINES", "10"))
+# Empresas cuyas ventas se cachean para resolver garantía de fábrica por N/S. El mismo
+# equipo puede haberse vendido por cualquiera de las dos, así que ambas tienen que estar.
+BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEYS = [
+    key.strip().upper()
+    for key in os.getenv(
+        "BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEYS",
+        os.getenv("BEJERMAN_SALE_ITEMS_SYNC_COMPANY_KEY", "SEPID,MGBIO"),
+    ).split(",")
+    if key.strip()
+] or ["SEPID"]
+# Tipos que fijan la fecha de venta real. El remito va aparte porque sólo prueba que el
+# equipo salió del depósito, y con eso la garantía se muestra como estimada.
+BEJERMAN_WARRANTY_INVOICE_TYPES = os.getenv("BEJERMAN_WARRANTY_INVOICE_TYPES", "FC,FCF,FCC,FCE")
+BEJERMAN_WARRANTY_REMITO_TYPES = os.getenv("BEJERMAN_WARRANTY_REMITO_TYPES", "RT")
 BEJERMAN_SALE_MAX_PRINT_LINES = int(os.getenv("BEJERMAN_SALE_MAX_PRINT_LINES", "22"))
 BEJERMAN_RSS_MAX_PRINT_LINES = int(os.getenv("BEJERMAN_RSS_MAX_PRINT_LINES", "22"))
 BEJERMAN_RSS_PRINT_LINES_PER_ITEM = int(os.getenv("BEJERMAN_RSS_PRINT_LINES_PER_ITEM", "3"))
@@ -437,6 +484,11 @@ BEJERMAN_REMITO_PDF_FALLBACK_ENABLED = _bool_env("BEJERMAN_REMITO_PDF_FALLBACK_E
 # usa la Courier de ReportLab, que tiene el mismo avance (0.6 em) y cae en la misma
 # posición; sólo cambian los trazos de los glifos.
 BEJERMAN_REMITO_PDF_FONT_DIR = os.getenv("BEJERMAN_REMITO_PDF_FONT_DIR", "")
+# PM es una columna auxiliar y la consulta al maestro sale por SSH a SAMTRONIC. En la
+# emisión ni se intenta (se usa sólo lo cacheado); en la reimpresión sí se sale, pero
+# con un plazo corto: el operador está esperando el papel del otro lado y un PM vacío
+# es mejor que 25 segundos de reloj por documento.
+BEJERMAN_REMITO_PDF_PM_LOOKUP_TIMEOUT = int(os.getenv("BEJERMAN_REMITO_PDF_PM_LOOKUP_TIMEOUT", "10"))
 # El worker declara su propia ventana de validez: el peor tick legítimo ronda los
 # 220s (SSH 20 + register 100 + generación 100), así que la API no puede adivinar
 # un umbral propio sin dar falsos "worker muerto".
@@ -508,6 +560,9 @@ BEJERMAN_RIS_CURRENCY = os.getenv("BEJERMAN_RIS_CURRENCY", "")
 BEJERMAN_RIS_EXCHANGE_TYPE = os.getenv("BEJERMAN_RIS_EXCHANGE_TYPE", "")
 BEJERMAN_RIS_EXCHANGE_RATE = float(os.getenv("BEJERMAN_RIS_EXCHANGE_RATE", "0") or "0")
 BEJERMAN_RIS_UPDATE_STOCK = _bool_env("BEJERMAN_RIS_UPDATE_STOCK", "0")
+# Límite físico del formulario preimpreso. Los lotes emitidos en línea se
+# parten por equipos completos y repiten el título en cada remito.
+BEJERMAN_RIS_MAX_PRINT_LINES = _int_env("BEJERMAN_RIS_MAX_PRINT_LINES", 22)
 BEJERMAN_RIS_RENTAL_RETURN_TYPE = os.getenv("BEJERMAN_RIS_RENTAL_RETURN_TYPE", "RDA")
 BEJERMAN_RIS_RENTAL_RETURN_POINT_OF_SALE = os.getenv("BEJERMAN_RIS_RENTAL_RETURN_POINT_OF_SALE", "00004")
 BEJERMAN_RIS_RENTAL_RETURN_OPERATION = os.getenv("BEJERMAN_RIS_RENTAL_RETURN_OPERATION", "ALQ")

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -22,6 +22,19 @@ from django.utils import timezone
 
 from .bejerman_companies import company_for_key, require_company
 from .bejerman_documents import is_transient_pdf_lookup_message
+from .bejerman_remito_legends import (
+    SERVICE_INGRESS_TITLE,
+    SERVICE_RELEASE_RESOLUTION_LABELS,
+    accessory_legend_lines,
+    delivery_order_legend,
+    service_ingress_equipment_legend_lines,
+    service_ingress_main_legend,
+    service_ingress_reason_legend,
+    service_release_item_legend,
+    service_release_legend,
+    service_release_order_reference,
+    service_release_resolution_label,
+)
 from .bejerman_pdf_remote import (
     is_remote_pdf_path,
     read_remote_pdf,
@@ -198,6 +211,26 @@ _CUSTOMER_RESOLUTION_MARKERS = (
 def is_bejerman_customer_resolution_message(value: Any) -> bool:
     text = remove_accents(as_string(value)).lower()
     return any(marker in text for marker in _CUSTOMER_RESOLUTION_MARKERS)
+
+
+# Estos tres no son una demora de la consulta: son campos que faltan en la ficha del
+# cliente en Bejerman. Distinguirlos importa porque el consejo es el opuesto —
+# reintentar no los arregla nunca, hay que completar la ficha en el ERP.
+_CUSTOMER_MASTER_DATA_FIELDS = (
+    ("customer_vat_missing", "la situación de IVA"),
+    ("customer_document_type_missing", "el tipo de documento"),
+    ("customer_document_missing", "el número de documento (CUIT/DNI)"),
+)
+
+
+def bejerman_customer_missing_master_field(value: Any) -> str:
+    """El campo que le falta a la ficha del cliente, o '' si el error es otro."""
+
+    text = remove_accents(as_string(value)).lower()
+    for marker, label in _CUSTOMER_MASTER_DATA_FIELDS:
+        if marker in text:
+            return label
+    return ""
 
 
 _PARTIDA_INEXISTENTE_MARKERS = ("partida inexistente",)
@@ -906,7 +939,7 @@ def _delivery_vat_rate_for_code(value: Any) -> float | None:
     return _delivery_vat_rate_code_map().get(code)
 
 
-def _article_tax_lookup_key(value: Any) -> str:
+def _article_lookup_key(value: Any) -> str:
     return normalize_article_code(value) or normalize_search(value)
 
 
@@ -914,7 +947,7 @@ def build_article_sales_vat_map(
     responses: list[dict[str, Any]] | dict[str, Any],
     article_codes: list[str] | set[str] | tuple[str, ...],
 ) -> dict[str, dict[str, Any]]:
-    wanted = {_article_tax_lookup_key(code) for code in article_codes if _article_tax_lookup_key(code)}
+    wanted = {_article_lookup_key(code) for code in article_codes if _article_lookup_key(code)}
     if not wanted:
         return {}
     response_list = responses if isinstance(responses, list) else [responses]
@@ -924,7 +957,7 @@ def build_article_sales_vat_map(
             article = map_article(record)
             if not article:
                 continue
-            key = _article_tax_lookup_key(article.get("code"))
+            key = _article_lookup_key(article.get("code"))
             if key in wanted and key not in result:
                 result[key] = {
                     "salesVatType": article.get("salesVatType"),
@@ -932,6 +965,42 @@ def build_article_sales_vat_map(
                     "salesVatRate": article.get("salesVatRate"),
                     "raw": article.get("raw"),
                 }
+    return result
+
+
+def build_article_description_map(
+    responses: list[dict[str, Any]] | dict[str, Any],
+    article_codes: list[str] | set[str] | tuple[str, ...],
+) -> dict[str, str]:
+    """Descripción que Bejerman tiene registrada para cada código de artículo.
+
+    El nexo entre NEXORA y Bejerman es el **número de artículo**: la descripción que
+    se imprime en el remito sale siempre del maestro de Bejerman, no del texto que
+    quedó guardado en NEXORA cuando se armó el pedido. Ese texto es una foto vieja del
+    catálogo y se desincroniza (un artículo renombrado, o —peor— el mismo código con
+    otro artículo en la otra empresa: en MGBIO el 1206087 salió impreso como "Cánula
+    nasal adulto BESMED" cuando en su maestro es una cánula de traqueotomía).
+
+    Se usa `name` (`Articulo_Descripcion`) y no `description`, que es el texto de la
+    interfaz y le agrega el código al final.
+    """
+
+    wanted = {_article_lookup_key(code) for code in article_codes if _article_lookup_key(code)}
+    if not wanted:
+        return {}
+    response_list = responses if isinstance(responses, list) else [responses]
+    result: dict[str, str] = {}
+    for response in response_list:
+        for record in records_from_response(response):
+            article = map_article(record)
+            if not article:
+                continue
+            key = _article_lookup_key(article.get("code"))
+            description = as_string(article.get("name"))
+            # `map_article` cae al código cuando el artículo no tiene descripción:
+            # eso no es una descripción, así que se deja pasar el texto local.
+            if key in wanted and description and key not in result and _article_lookup_key(description) != key:
+                result[key] = description
     return result
 
 
@@ -1078,21 +1147,51 @@ def _sortable_expiration(value: Any) -> str:
     return normalize_date(value) or "9999-12-31"
 
 
+class PartidaIndex:
+    """Partidas indexadas por (depósito, partida) y por partida sola.
+
+    `ObtenerPartidas` devuelve la tabla entera (~40k filas para SEPID) y armar
+    estos dos dicts cuesta unos 35 ms. Hacerlo dentro de
+    `build_article_stock_lots` lo repetía una vez por artículo consultado, así
+    que un listado de equipos de alquiler pagaba el reindexado decenas de veces.
+    Se arma una vez y se reusa para todos los artículos del mismo request.
+    """
+
+    __slots__ = ("by_deposit_partida", "by_partida")
+
+    def __init__(self, partida_rows: list[dict[str, Any]]):
+        by_deposit_partida: dict[str, dict[str, Any]] = {}
+        by_partida: dict[str, dict[str, Any]] = {}
+        for row in partida_rows:
+            by_deposit_partida[_partida_key(row.get("depositCode"), row.get("partida"))] = row
+            key = _partida_only_key(row.get("partida"))
+            current = by_partida.get(key)
+            if not current or (not current.get("expirationDate") and row.get("expirationDate")):
+                by_partida[key] = row
+        self.by_deposit_partida = by_deposit_partida
+        self.by_partida = by_partida
+
+    def lookup(self, deposit_code: Any, partida: Any) -> dict[str, Any] | None:
+        """Partida del depósito pedido, o la misma partida en cualquier otro."""
+        return self.by_deposit_partida.get(_partida_key(deposit_code, partida)) or self.by_partida.get(
+            _partida_only_key(partida)
+        )
+
+
+def as_partida_index(partidas: list[dict[str, Any]] | PartidaIndex) -> PartidaIndex:
+    """Acepta el volcado crudo o un índice ya armado."""
+    return partidas if isinstance(partidas, PartidaIndex) else PartidaIndex(partidas)
+
+
 def build_article_stock_lots(
     stock_rows: list[dict[str, Any]],
-    partida_rows: list[dict[str, Any]],
+    partida_rows: list[dict[str, Any]] | PartidaIndex,
     article_code: Any,
     deposit_code: Any,
 ) -> list[dict[str, Any]]:
     normalized_article_code = normalize_article_code(article_code)
     normalized_deposit_code = as_string(deposit_code).upper()
-    partidas_by_key = {_partida_key(row.get("depositCode"), row.get("partida")): row for row in partida_rows}
-    partidas_by_partida: dict[str, dict[str, Any]] = {}
-    for row in partida_rows:
-        key = _partida_only_key(row.get("partida"))
-        current = partidas_by_partida.get(key)
-        if not current or (not current.get("expirationDate") and row.get("expirationDate")):
-            partidas_by_partida[key] = row
+    partidas = as_partida_index(partida_rows)
 
     lots: list[dict[str, Any]] = []
     for row in stock_rows:
@@ -1108,9 +1207,7 @@ def build_article_stock_lots(
         effective_stock = available if available is not None else real
         if effective_stock is None or effective_stock <= 0:
             continue
-        partida_row = partidas_by_key.get(_partida_key(row.get("depositCode"), partida)) or partidas_by_partida.get(
-            _partida_only_key(partida)
-        )
+        partida_row = partidas.lookup(row.get("depositCode"), partida)
         lots.append(
             {
                 "articleCode": row.get("articleCode") or as_string(article_code),
@@ -2371,72 +2468,6 @@ def equipment_article_description(equipment: dict[str, Any], fallback: str) -> s
     return detail or as_string(equipment.get("articleName")) or fallback
 
 
-SERVICE_RELEASE_RESOLUTION_LABELS = {
-    "controlado sin defecto": "controlado sin defecto",
-    "controlado_sin_defecto": "controlado sin defecto",
-    "no se encontro falla": "controlado sin defecto",
-    "no_se_encontro_falla": "controlado sin defecto",
-    "no reparado": "sin reparar",
-    "no_reparado": "sin reparar",
-    "sin reparar": "sin reparar",
-    "sin_reparar": "sin reparar",
-    "reparado": "reparado",
-}
-
-REMITO_ITEM_SEPARATOR = "------------------------------"
-SERVICE_RELEASE_LEGEND_SEPARATOR = REMITO_ITEM_SEPARATOR
-
-
-def service_release_resolution_label(value: Any) -> str:
-    raw = as_string(value)
-    normalized = normalize_search(raw).replace("-", " ").replace("_", " ")
-    compact = normalized.replace(" ", "_")
-    return SERVICE_RELEASE_RESOLUTION_LABELS.get(compact) or SERVICE_RELEASE_RESOLUTION_LABELS.get(normalized) or "reparado"
-
-
-def service_release_legend(order: dict[str, Any]) -> str:
-    resolution = (
-        order.get("serviceResolution")
-        or order.get("rawPedido")
-        or order.get("resolution")
-        or order.get("resolucion")
-    )
-    return f"Se entrega {service_release_resolution_label(resolution)}"
-
-
-def service_release_order_reference(order: dict[str, Any], item: dict[str, Any] | None = None) -> str:
-    item = item or {}
-    candidates = (
-        item.get("ingresoId"),
-        item.get("ingreso_id"),
-        item.get("sourceReference"),
-        item.get("source_reference"),
-        order.get("ingresoId"),
-        order.get("ingreso_id"),
-        order.get("sourceReference"),
-        order.get("source_reference"),
-        order.get("orderNumber"),
-        order.get("order_number"),
-    )
-    for candidate in candidates:
-        text = as_string(candidate)
-        if not text:
-            continue
-        try:
-            return f"OS-{int(text):05d}"
-        except (TypeError, ValueError):
-            pass
-        match = re.search(r"\bOS[\s-]*(\d+)\b", text, re.IGNORECASE)
-        if match:
-            return f"OS-{int(match.group(1)):05d}"
-    return ""
-
-
-def service_release_item_legend(order: dict[str, Any], item: dict[str, Any]) -> str:
-    reference = service_release_order_reference(order, item)
-    return " ".join(part for part in (service_release_legend(order), reference) if part)
-
-
 def service_release_equipment_line(value: Any, fallback: Any = "") -> str:
     text = as_string(value) or as_string(fallback) or "Equipo"
     text = re.sub(r"\s*-\s*OS[\s-]*\d+\b", "", text, flags=re.IGNORECASE)
@@ -2491,18 +2522,35 @@ def legend_line(common: dict[str, Any], text: str) -> dict[str, Any]:
     }
 
 
-def item_separator_line(common: dict[str, Any]) -> dict[str, Any]:
-    return legend_line(common, REMITO_ITEM_SEPARATOR)
+def append_remito_legend_lines(
+    items: list[dict[str, Any]],
+    *,
+    tipo: str,
+    letter: str,
+    point: str,
+    issue_date: str,
+    customer_code: str,
+    sort_order: int,
+    lines: Iterable[Any],
+) -> int:
+    """Serializa leyendas visibles de forma uniforme y devuelve el próximo orden.
 
+    La composición de los textos vive en ``bejerman_remito_legends``; este
+    adaptador concentra la forma técnica ``Item_Tipo='L'`` que exige el SDK.
+    """
 
-def accessory_legend_lines(accessories: Any) -> list[str]:
-    text = as_string(accessories)
-    if not text:
-        return []
-    parts = [part.strip() for part in re.split(r"\s*[;,]\s*", text) if part.strip()]
-    if not parts:
-        parts = [text]
-    return [f"Accesorios: {part}" for part in parts]
+    for raw_line in lines:
+        text = as_string(raw_line)
+        if not text:
+            continue
+        items.append(
+            legend_line(
+                item_common(tipo, letter, point, issue_date, customer_code, sort_order),
+                text,
+            )
+        )
+        sort_order += 1
+    return sort_order
 
 
 # Bejerman's ventas SDK represents some stock-ingress remitos with negative
@@ -2563,47 +2611,6 @@ def resolve_equipment_partida(equipment: dict[str, Any] | None) -> str:
     return as_string(equipment.get("serial")) or as_string(equipment.get("internalNumber"))
 
 
-def service_ingress_reason_legend(
-    equipment: dict[str, Any] | None,
-    *,
-    payload: dict[str, Any] | None = None,
-    profile: dict[str, Any] | None = None,
-) -> str:
-    equipment = equipment or {}
-    payload = payload or {}
-    profile = profile or {}
-    reason = (
-        as_string(equipment.get("repairReason"))
-        or as_string(equipment.get("motivo"))
-        or as_string(payload.get("repairReason"))
-        or as_string(payload.get("motivo"))
-    )
-    profile_type = as_string(profile.get("type")).upper()
-    profile_key = as_string(profile.get("key")).lower()
-    if not reason and (profile_key in {"rda", "rdn"} or profile_type in {"RDA", "RDN"}):
-        reason = as_string(profile.get("reason"))
-    return f"Motivo de ingreso: {reason}" if reason else ""
-
-
-def service_ingress_equipment_legend_lines(equipment: dict[str, Any] | None, *, os_text: Any = "", partida: Any = "", reason: str = "") -> list[str]:
-    equipment = equipment or {}
-    serial = as_string(equipment.get("serial"))
-    internal = as_string(equipment.get("internalNumber"))
-    identifier = as_string(partida) or resolve_equipment_partida(equipment)
-    lines: list[str] = []
-    if reason:
-        lines.append(reason)
-    os_value = as_string(os_text)
-    if os_value:
-        lines.append(f"OS {os_value}")
-        if identifier:
-            label = "N/S" if serial and identifier == serial else "Partida"
-            lines.append(f"{label}: {identifier}")
-    if internal and internal != identifier:
-        lines.append(f"Interno: {internal}")
-    return lines
-
-
 def _service_ingress_partida_or_error(tipo: str, article_code: str, deposit: str, equipment: dict[str, Any]) -> str:
     partida = resolve_equipment_partida(equipment)
     if not partida:
@@ -2641,27 +2648,24 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
     partida = _service_ingress_partida_or_error(tipo, article_code, deposit, equipment) if update_stock and not equipments else ""
     serial_for_column = resolve_equipment_partida(equipment) if not partida else ""
     article_quantity = sdk_signed_article_quantity(tipo)
-    ingreso_id_text = as_string(payload.get("ingresoId"))
-    ingreso_line = "Ingreso a servicio técnico"
-    if ingreso_id_text:
-        ingreso_line = f"{ingreso_line} OS {ingreso_id_text}"
-    items = [
-        item_separator_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 1)),
-        legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 2), ingreso_line),
-    ]
-    sort_order = 3
-    reason_line = service_ingress_reason_legend(equipment, payload=payload, profile=profile_payload)
-    if reason_line:
-        items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), reason_line))
-        sort_order += 1
-    for detail_line in service_ingress_equipment_legend_lines(
-        equipment,
-        os_text="",
-        partida=partida,
-        reason="",
-    ):
-        items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), detail_line))
-        sort_order += 1
+    # Mismo criterio que en el camino por lote: si el equipo arrastra un conflicto de ingreso
+    # abierto, el comprobante sale sin número de OS.
+    ingreso_id_text = "" if as_bool(equipment.get("suppressOsLabel")) else as_string(payload.get("ingresoId"))
+    items: list[dict[str, Any]] = []
+    sort_order = append_remito_legend_lines(
+        items,
+        tipo=tipo,
+        letter=letter,
+        point=point,
+        issue_date=issue_date,
+        customer_code=payload.get("customerCode"),
+        sort_order=1,
+        lines=[
+            service_ingress_main_legend(ingreso_id_text),
+            service_ingress_reason_legend(equipment, payload=payload, profile=profile_payload),
+            *service_ingress_equipment_legend_lines(equipment, partida=partida),
+        ],
+    )
     items.append(
         {
             **item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order),
@@ -2744,37 +2748,43 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
                 "Item_DatosAdicionales": None,
             }
 
-        items = [
-            legend_line(
-                item_common(tipo, letter, point, issue_date, payload.get("customerCode"), 1),
-                "Se recibe para servicio técnico:",
-            )
-        ]
-        sort_order = 2
+        items = []
+        sort_order = append_remito_legend_lines(
+            items,
+            tipo=tipo,
+            letter=letter,
+            point=point,
+            issue_date=issue_date,
+            customer_code=payload.get("customerCode"),
+            sort_order=1,
+            lines=[SERVICE_INGRESS_TITLE],
+        )
         compact_legends = as_bool(payload.get("compactServiceIngressLegends"))
         for equipment_item in equipments:
             if not compact_legends:
-                items.append(
-                    item_separator_line(
-                        item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order)
-                    )
+                # `suppressOsLabel` marca los equipos cuya OS anterior quedó abierta: el renglón
+                # sale sin número de OS hasta que se resuelva cuál de las dos órdenes vale.
+                # Sin este corte el fallback a `ingresoId` volvería a imprimirla igual.
+                os_text = (
+                    ""
+                    if as_bool(equipment_item.get("suppressOsLabel"))
+                    else as_string(equipment_item.get("osLabel")) or as_string(equipment_item.get("ingresoId"))
                 )
-                sort_order += 1
-                os_text = as_string(equipment_item.get("osLabel")) or as_string(equipment_item.get("ingresoId"))
-                for detail_line in service_ingress_equipment_legend_lines(equipment_item, os_text=os_text):
-                    items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), detail_line))
-                    sort_order += 1
-                reason_line = service_ingress_reason_legend(equipment_item, profile=profile_payload)
-                if reason_line:
-                    items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), reason_line))
-                    sort_order += 1
-                for accessory_line in accessory_legend_lines(equipment_item.get("accessories")):
-                    items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), accessory_line))
-                    sort_order += 1
-                comments = as_string(equipment_item.get("comments"))
-                if comments:
-                    items.append(legend_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), comments))
-                    sort_order += 1
+                sort_order = append_remito_legend_lines(
+                    items,
+                    tipo=tipo,
+                    letter=letter,
+                    point=point,
+                    issue_date=issue_date,
+                    customer_code=payload.get("customerCode"),
+                    sort_order=sort_order,
+                    lines=[
+                        *service_ingress_equipment_legend_lines(equipment_item, os_text=os_text),
+                        service_ingress_reason_legend(equipment_item, profile=profile_payload),
+                        *accessory_legend_lines(equipment_item.get("accessories")),
+                        as_string(equipment_item.get("comments")),
+                    ],
+                )
             items.append(batch_article_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), equipment_item))
             sort_order += 1
 
@@ -2983,11 +2993,24 @@ def delivery_remito_config(default_profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def article_description_for(article_code: Any, article_descriptions: dict[str, str] | None) -> str:
+    """Busca en el mapa de `build_article_description_map` con las mismas variantes
+    de código que usa el IVA de venta, que es donde se vio que los códigos llegan
+    escritos de más de una forma."""
+
+    if not article_descriptions:
+        return ""
+    for key in (_article_lookup_key(article_code), normalize_search(article_code), as_string(article_code)):
+        if key and as_string(article_descriptions.get(key)):
+            return as_string(article_descriptions[key])
+    return ""
+
+
 def _lookup_article_sales_vat(article_code: Any, article_tax_by_code: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
     if not article_tax_by_code:
         return {}
     lookup_keys = [
-        _article_tax_lookup_key(article_code),
+        _article_lookup_key(article_code),
         normalize_search(article_code),
         as_string(article_code),
     ]
@@ -3094,13 +3117,6 @@ def _delivery_unit_price_number(value: Any) -> float:
     return float(_delivery_decimal(value).quantize(DELIVERY_UNIT_PRICE_QUANT, rounding=ROUND_HALF_UP))
 
 
-def _delivery_rt_uses_tax_included_amounts(profile: dict[str, Any], customer_fields: dict[str, str]) -> bool:
-    if as_string(profile.get("type")).upper() != "RT":
-        return False
-    customer_vat_status = as_string(customer_fields.get("Cliente_SitIVA")).upper()
-    return bool(customer_vat_status and customer_vat_status != "1")
-
-
 def _validate_delivery_comprobante_amounts(comprobante: dict[str, Any]) -> None:
     article_items = [
         item
@@ -3130,6 +3146,7 @@ def build_delivery_remito_comprobante(
     config: dict[str, Any],
     customer_fields: dict[str, str] | None = None,
     article_tax_by_code: dict[str, dict[str, Any]] | None = None,
+    article_descriptions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     customer_fields = customer_fields or {}
     orders = request.get("orders") or []
@@ -3142,7 +3159,6 @@ def build_delivery_remito_comprobante(
         raise BejermanSdkResponseError("INVALID_SELLER_CODE_LENGTH")
     first_type = orders[0].get("deliveryType") or "sale"
     profile = _profile_for_delivery_type(first_type, config)
-    tax_included_rt = _delivery_rt_uses_tax_included_amounts(profile, customer_fields)
     issue_date = normalize_date(request.get("issueDate")) or timezone.localdate().isoformat()
     item_price_currencies = _delivery_item_price_currencies(request, orders)
     if len(item_price_currencies) != 1:
@@ -3160,32 +3176,18 @@ def build_delivery_remito_comprobante(
     tax_total = Decimal("0")
     for order in orders:
         is_service_release = order.get("deliveryType") == "service_release"
-        if not is_service_release:
-            items.append(
-                item_separator_line(
-                    item_common(
-                        profile["type"],
-                        config["letter"],
-                        profile["pointOfSale"],
-                        issue_date,
-                        request.get("customerCode"),
-                        sort_order,
-                    )
-                )
+        is_sale = order.get("deliveryType") == "sale"
+        if not is_service_release and not is_sale:
+            sort_order = append_remito_legend_lines(
+                items,
+                tipo=profile["type"],
+                letter=config["letter"],
+                point=profile["pointOfSale"],
+                issue_date=issue_date,
+                customer_code=request.get("customerCode"),
+                sort_order=sort_order,
+                lines=[delivery_order_legend(order)],
             )
-            sort_order += 1
-            legend = " - ".join(
-                part
-                for part in (
-                    f"Orden {order.get('orderNumber')}",
-                    f"Ref {order.get('sourceReference')}" if order.get("sourceReference") else "",
-                    f"Equipo {order.get('equipmentModel')}" if order.get("equipmentModel") else "",
-                    f"Serie {order.get('equipmentSerial')}" if order.get("equipmentSerial") else "",
-                )
-                if part
-            )
-            items.append(legend_line(item_common(profile["type"], config["letter"], profile["pointOfSale"], issue_date, request.get("customerCode"), sort_order), legend))
-            sort_order += 1
         for item in order.get("items") or []:
             article_code = as_string(item.get("articleCode"))
             quantity = _positive_quantity(item.get("quantity"))
@@ -3196,7 +3198,15 @@ def build_delivery_remito_comprobante(
             omit_partida = as_nullable_bool(item.get("articleRequiresPartida")) is False and not explicit_partida and not (item.get("partidas") or [])
             partida = "" if omit_partida else as_string(explicit_partida or item.get("equipmentSerial") or order.get("equipmentSerial"))
             item_deposit = as_string(item.get("stockDepositCode")) or profile["deposit"]
-            article_name = as_string(item.get("articleName")) or as_string(item.get("description")) or article_code
+            # La descripción del maestro de Bejerman manda sobre el texto guardado en
+            # NEXORA: el vínculo entre los dos sistemas es el código de artículo, y el
+            # texto local es una foto del catálogo al momento de armar el pedido.
+            article_name = (
+                article_description_for(article_code, article_descriptions)
+                or as_string(item.get("articleName"))
+                or as_string(item.get("description"))
+                or article_code
+            )
             if is_service_release:
                 article_name = service_release_equipment_line(article_name, item.get("description") or article_code)
             line_defs: list[tuple[float, str, str]] = []
@@ -3221,42 +3231,36 @@ def build_delivery_remito_comprobante(
                 line_defs = [(quantity, partida, item_deposit)]
             for line_quantity, line_partida, line_deposit in line_defs:
                 if is_service_release:
-                    items.append(
-                        legend_line(
-                            item_common(
-                                profile["type"],
-                                config["letter"],
-                                profile["pointOfSale"],
-                                issue_date,
-                                request.get("customerCode"),
-                                sort_order,
-                            ),
-                            service_release_item_legend(order, item),
-                        )
+                    sort_order = append_remito_legend_lines(
+                        items,
+                        tipo=profile["type"],
+                        letter=config["letter"],
+                        point=profile["pointOfSale"],
+                        issue_date=issue_date,
+                        customer_code=request.get("customerCode"),
+                        sort_order=sort_order,
+                        lines=[service_release_item_legend(order, item)],
                     )
-                    sort_order += 1
                 signed_line_quantity = sdk_signed_article_quantity(profile["type"], line_quantity)
                 vat = _delivery_item_sales_vat(item, article_code, article_tax_by_code) if article_code else {"type": "1", "rate": 0}
                 quantity_decimal = _delivery_decimal(line_quantity)
                 unit_price_decimal = _delivery_decimal(unit_price)
                 discount_decimal = _delivery_decimal(discount_percent)
                 vat_rate_decimal = _delivery_decimal(vat["rate"])
-                if tax_included_rt:
-                    item_unit_price = unit_price_decimal * (Decimal("1") + vat_rate_decimal / Decimal("100"))
-                    gross_amount = quantity_decimal * item_unit_price
-                    discount_amount = _delivery_money(gross_amount * discount_decimal / Decimal("100"))
-                    amount = _delivery_money(gross_amount - discount_amount)
-                    final_unit_price = item_unit_price * (Decimal("1") - discount_decimal / Decimal("100"))
-                    item_vat_rate = Decimal("0")
-                    vat_amount = Decimal("0")
-                else:
-                    item_unit_price = unit_price_decimal
-                    gross_amount = quantity_decimal * item_unit_price
-                    discount_amount = _delivery_money(gross_amount * discount_decimal / Decimal("100"))
-                    amount = _delivery_money(gross_amount - discount_amount)
-                    final_unit_price = item_unit_price * (Decimal("1") - discount_decimal / Decimal("100"))
-                    item_vat_rate = vat_rate_decimal
-                    vat_amount = _delivery_money(amount * vat_rate_decimal / Decimal("100"))
+                # El renglón siempre viaja con el neto y la alícuota del artículo discriminada,
+                # cualquiera sea la situación de IVA del cliente. Entre el 14/07 y el 07/08/2026
+                # los clientes que no eran responsables inscriptos salían con el precio
+                # multiplicado por 1+tasa y la alícuota en 0: Bejerman guardaba el renglón con
+                # código de IVA 04 (0%) y toda factura hecha desde ese remito —A, B o FCC—
+                # nacía con IVA cero. Cómo se imprime el precio (neto o final) lo decide la
+                # letra del comprobante en el ERP, no el remito.
+                item_unit_price = unit_price_decimal
+                gross_amount = quantity_decimal * item_unit_price
+                discount_amount = _delivery_money(gross_amount * discount_decimal / Decimal("100"))
+                amount = _delivery_money(gross_amount - discount_amount)
+                final_unit_price = item_unit_price * (Decimal("1") - discount_decimal / Decimal("100"))
+                item_vat_rate = vat_rate_decimal
+                vat_amount = _delivery_money(amount * vat_rate_decimal / Decimal("100"))
                 total += amount
                 tax_total += vat_amount
                 items.append(
@@ -3294,40 +3298,24 @@ def build_delivery_remito_comprobante(
                 )
                 sort_order += 1
                 if article_code and discount_percent > 0:
-                    items.append(
-                        legend_line(
-                            item_common(
-                                profile["type"],
-                                config["letter"],
-                                profile["pointOfSale"],
-                                issue_date,
-                                request.get("customerCode"),
-                                sort_order,
-                            ),
+                    sort_order = append_remito_legend_lines(
+                        items,
+                        tipo=profile["type"],
+                        letter=config["letter"],
+                        point=profile["pointOfSale"],
+                        issue_date=issue_date,
+                        customer_code=request.get("customerCode"),
+                        sort_order=sort_order,
+                        lines=[
                             _delivery_discount_legend(
                                 discount_percent,
                                 float(final_unit_price),
                                 float(amount),
                                 item_currency,
                                 line_quantity,
-                            ),
-                        )
-                    )
-                    sort_order += 1
-                if is_service_release:
-                    items.append(
-                        item_separator_line(
-                            item_common(
-                                profile["type"],
-                                config["letter"],
-                                profile["pointOfSale"],
-                                issue_date,
-                                request.get("customerCode"),
-                                sort_order,
                             )
-                        )
+                        ],
                     )
-                    sort_order += 1
     notes = "\n".join(part for part in (as_string(request.get("notes")), f"NEXORA {request.get('groupId')}", f"Órdenes {', '.join(as_string(order.get('orderNumber')) for order in orders)}") if part)
     comprobante = {
             "Comprobante_Tipo": profile["type"],
@@ -3367,7 +3355,7 @@ def build_delivery_remito_comprobante(
         "comprobante": comprobante,
         "profile": profile,
         "lineCount": len(items),
-        "amountMode": "tax_included" if tax_included_rt else "tax_discriminated",
+        "amountMode": "tax_discriminated",
     }
 
 

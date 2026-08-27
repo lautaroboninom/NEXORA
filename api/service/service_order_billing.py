@@ -1061,6 +1061,11 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
     if not users:
         return {"notifications": 0, "emails": 0, "recipients": []}
 
+    # Con la clave sin fecha, una OS que volvía a quedar lista para facturar
+    # (reapertura, corrección) chocaba contra el ON CONFLICT y no avisaba nunca más.
+    ready_to_bill_dedupe_key = (
+        f"ingreso:{ingreso_id}:service_order_ready_to_bill:{timezone.localdate().isoformat()}"
+    )
     amounts = _billing_amounts(item)
     currency = amounts["currency"]
     total_label = _money(amounts["billingTotal"], currency)
@@ -1089,7 +1094,7 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
             severity="warning",
             entity_type="ingreso",
             entity_id=ingreso_id,
-            dedupe_key=f"ingreso:{ingreso_id}:service_order_ready_to_bill",
+            dedupe_key=ready_to_bill_dedupe_key,
             payload={
                 "ingreso_id": ingreso_id,
                 "os": item.get("os"),
@@ -1102,6 +1107,7 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
                 "presupuesto_total": amounts["quoteTotal"],
                 "total_a_facturar": amounts["billingTotal"],
             },
+            push=True,
         )
         inserted_total += inserted
     email_users = active_users_for_notification(
@@ -1113,7 +1119,7 @@ def notify_service_order_ready_to_bill(ingreso_id: int, *, request: Any = None, 
     email_recipients = notification_email_recipients_for_users(email_users)
     queued = queue_notification_email(
         notification_key=NOTIFICATION_KEY,
-        dedupe_key=f"ingreso:{ingreso_id}:service_order_ready_to_bill",
+        dedupe_key=ready_to_bill_dedupe_key,
         recipients=email_recipients,
         subject=subject,
         body=body,

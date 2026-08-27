@@ -320,6 +320,37 @@ class QuoteAnularAPITest(TestCase):
 
         return ingreso_id, quote_id, repuesto_id
 
+    def _assert_nueva_version_editable(self, ingreso_id: int, anulada_quote_id: int) -> int:
+        """La anulación no pisa la versión: la deja histórica y copia una nueva."""
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, version_num, origen_quote_id, estado, fecha_emitido, fecha_aprobado, pdf_url
+                FROM quotes
+                WHERE ingreso_id=%s
+                ORDER BY version_num
+                """,
+                [ingreso_id],
+            )
+            rows = cur.fetchall()
+            self.assertEqual(len(rows), 2)
+            nueva = rows[1]
+            self.assertEqual(int(nueva[1]), 2)
+            self.assertEqual(int(nueva[2]), anulada_quote_id)
+            self.assertEqual(nueva[3], "pendiente")
+            self.assertIsNone(nueva[4])
+            self.assertIsNone(nueva[5])
+            self.assertIsNone(nueva[6])
+
+            cur.execute("SELECT COUNT(*) FROM quote_items WHERE quote_id=%s", [anulada_quote_id])
+            items_anulada = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM quote_items WHERE quote_id=%s", [int(nueva[0])])
+            items_nueva = int(cur.fetchone()[0])
+
+        self.assertGreater(items_anulada, 0)
+        self.assertEqual(items_anulada, items_nueva)
+        return int(nueva[0])
+
     def test_anular_aprobado_revierte_stock_y_vuelve_a_diagnosticado(self):
         ingreso_id, quote_id, repuesto_id = self._seed_case(
             ingreso_estado="reparar",
@@ -339,12 +370,13 @@ class QuoteAnularAPITest(TestCase):
             self.assertEqual(ingreso_estado, "diagnosticado")
             self.assertEqual(ingreso_presu, "pendiente")
 
+            # La versión anulada queda intacta: es el rastro de lo que se aprobó.
             cur.execute("SELECT estado, fecha_emitido, fecha_aprobado, pdf_url FROM quotes WHERE id=%s", [quote_id])
             q_estado, q_emit, q_aprob, q_pdf = cur.fetchone()
-            self.assertEqual(q_estado, "pendiente")
-            self.assertIsNone(q_emit)
-            self.assertIsNone(q_aprob)
-            self.assertIsNone(q_pdf)
+            self.assertEqual(q_estado, "anulado")
+            self.assertIsNotNone(q_emit)
+            self.assertIsNotNone(q_aprob)
+            self.assertEqual(q_pdf, "/api/quotes/x/pdf/")
 
             cur.execute("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s", [repuesto_id])
             stock = Decimal(str(cur.fetchone()[0]))
@@ -369,6 +401,35 @@ class QuoteAnularAPITest(TestCase):
             self.assertEqual(mov[4], "quote")
             self.assertEqual(int(mov[5]), quote_id)
             self.assertEqual(int(mov[6]), self.jefe_user.id)
+
+        self._assert_nueva_version_editable(ingreso_id, quote_id)
+
+    def test_anular_deja_la_version_en_el_historial_y_abre_una_nueva(self):
+        ingreso_id, quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+
+        resp = self.client.post(self._url_anular(ingreso_id), {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get("estado"), "pendiente")
+        self.assertEqual(int(resp.data.get("version_num") or 0), 2)
+        self.assertNotEqual(int(resp.data.get("quote_id") or 0), quote_id)
+
+        versiones = {int(v.get("version_num")): v for v in (resp.data.get("versions") or [])}
+        self.assertEqual(sorted(versiones), [1, 2])
+        self.assertEqual(versiones[1].get("estado"), "anulado")
+        self.assertFalse(versiones[1].get("is_current"))
+        self.assertIsNotNone(versiones[1].get("fecha_emitido"))
+        self.assertEqual(versiones[2].get("estado"), "pendiente")
+        self.assertTrue(versiones[2].get("is_current"))
+
+        detalle = self.client.get(self._url_detail(ingreso_id, quote_id=quote_id))
+        self.assertEqual(detalle.status_code, 200)
+        self.assertEqual(detalle.data.get("estado"), "anulado")
+        self.assertFalse(detalle.data.get("is_current"))
+        self.assertFalse(detalle.data.get("is_editable"))
 
     def test_anular_aprobado_bloquea_entregado_alquilado_y_baja(self):
         for estado_final in ("entregado", "alquilado", "baja"):
@@ -425,18 +486,21 @@ class QuoteAnularAPITest(TestCase):
             self.assertEqual(ingreso_estado, "diagnosticado")
             self.assertEqual(ingreso_presu, "pendiente")
 
+            # La versión anulada queda intacta: es el rastro de lo que se emitió.
             cur.execute("SELECT estado, fecha_emitido, fecha_aprobado, pdf_url FROM quotes WHERE id=%s", [quote_id])
             q_estado, q_emit, q_aprob, q_pdf = cur.fetchone()
-            self.assertEqual(q_estado, "pendiente")
-            self.assertIsNone(q_emit)
+            self.assertEqual(q_estado, "anulado")
+            self.assertIsNotNone(q_emit)
             self.assertIsNone(q_aprob)
-            self.assertIsNone(q_pdf)
+            self.assertEqual(q_pdf, "/api/quotes/x/pdf/")
 
             cur.execute("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s", [repuesto_id])
             self.assertEqual(Decimal(str(cur.fetchone()[0])), Decimal("10"))
 
             cur.execute("SELECT COUNT(*) FROM repuestos_movimientos WHERE repuesto_id=%s", [repuesto_id])
             self.assertEqual(int(cur.fetchone()[0]), 0)
+
+        self._assert_nueva_version_editable(ingreso_id, quote_id)
 
     def test_detalle_emitido_legacy_muestra_acciones_de_emitido(self):
         ingreso_id, _quote_id, _repuesto_id = self._seed_case(
@@ -592,6 +656,69 @@ class QuoteAnularAPITest(TestCase):
         self.assertEqual(ingreso_presu, "rechazado")
         self.assertEqual(Decimal(str(cobro_neto)), Decimal("12800"))
         self.assertEqual(int(linked_quote_id), quote_id)
+
+    @patch("service.views.quotes_views.notify_presupuesto_rechazado_reparado")
+    def test_rechazar_con_el_equipo_reparado_avisa_al_tecnico_asignado(self, mock_notify):
+        """El técnico tiene que enterarse de que hay reparación para desandar."""
+        tecnico = User.objects.create(
+            nombre="Tecnico Rechazo",
+            email="tecnico-rechazo-quotes@example.com",
+            hash_pw="",
+            rol="tecnico",
+            activo=True,
+        )
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET asignado_a=%s WHERE id=%s", [tecnico.id, ingreso_id])
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"presupuesto_rechazado_cobro_neto": "0"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        mock_notify.assert_called_once_with(ingreso_id, tecnico.id)
+
+    @patch("service.views.quotes_views.notify_presupuesto_rechazado_reparado")
+    def test_rechazar_sin_reparacion_hecha_no_avisa(self, mock_notify):
+        """El aviso es por el trabajo ya hecho, no por el rechazo en sí."""
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparar",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"presupuesto_rechazado_cobro_neto": "0"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        mock_notify.assert_not_called()
+
+    @patch("service.views.quotes_views.notify_presupuesto_rechazado_reparado")
+    def test_rechazar_el_propio_asignado_no_se_autoavisa(self, mock_notify):
+        # `_seed_case` deja el ingreso asignado al mismo jefe que rechaza.
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"presupuesto_rechazado_cobro_neto": "0"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        mock_notify.assert_not_called()
 
     def test_rechazar_presupuesto_exige_cobro_neto(self):
         ingreso_id, quote_id, _repuesto_id = self._seed_case(

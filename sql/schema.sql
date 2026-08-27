@@ -24,7 +24,7 @@ DO $$ BEGIN
     CREATE TYPE disposicion_type AS ENUM ('normal','para_repuesto');
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quote_estado') THEN
-    CREATE TYPE quote_estado AS ENUM ('pendiente','emitido','aprobado','rechazado','presupuestado','no_aplica');
+    CREATE TYPE quote_estado AS ENUM ('pendiente','emitido','aprobado','rechazado','presupuestado','no_aplica','anulado');
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quote_item_tipo') THEN
     CREATE TYPE quote_item_tipo AS ENUM ('repuesto','mano_obra','servicio');
@@ -100,6 +100,22 @@ BEGIN
          AND e.enumlabel = 'vendido_entregado'
     ) THEN
       ALTER TYPE ticket_state ADD VALUE 'vendido_entregado' AFTER 'vendido_pendiente_entrega';
+    END IF;
+  END IF;
+END $$;
+
+-- Presupuesto anulado: la versión anulada queda como histórica y se genera una versión nueva.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quote_estado') THEN
+    IF NOT EXISTS (
+      SELECT 1
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+       WHERE t.typname = 'quote_estado'
+         AND e.enumlabel = 'anulado'
+    ) THEN
+      ALTER TYPE quote_estado ADD VALUE 'anulado';
     END IF;
   END IF;
 END $$;
@@ -409,9 +425,15 @@ CREATE TABLE IF NOT EXISTS devices (
 );
 
 -- índices funcionales y unicidad (normalizados)
--- Unicidad por número de serie normalizado (UPPER, sin espacios ni guiones)
-CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_norm
-  ON devices ((UPPER(REPLACE(REPLACE(numero_serie, ' ', ''), '-', ''))))
+-- Unicidad por número de serie normalizado (UPPER, sin espacios ni guiones) + tipo de equipo.
+-- El tipo entra en la clave porque hay equipos distintos que comparten la serie del equipo
+-- principal: el calentador humidificador no trae serie propia y se carga con la del CPAP.
+-- Ver apply_devices_ns_tipo_unique_schema (y su par apply_models_tipo_equipo_unique_schema).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_tipo_norm
+  ON devices (
+    (UPPER(REPLACE(REPLACE(numero_serie, ' ', ''), '-', ''))),
+    (LOWER(COALESCE(TRIM(tipo_equipo), '')))
+  )
   WHERE NULLIF(TRIM(numero_serie), '') IS NOT NULL;
 
 -- Unicidad por número interno normalizado a 'XX ####' (MG|NM|NV|CE)
@@ -1102,6 +1124,34 @@ ALTER TABLE bejerman_ingreso_remitos
 ALTER TABLE bejerman_ingreso_remitos
   ADD CONSTRAINT chk_bejerman_ingreso_remitos_document_mode
   CHECK (document_mode IN ('emit','register'));
+
+-- Equipos que entraron mientras su ingreso anterior seguía abierto (se olvidaron de tildar
+-- la entrega). El RIS se emite igual —el cliente está esperando el remito—, pero el renglón
+-- de ese equipo sale sin número de OS y el caso queda acá para que lo resuelvan después.
+CREATE TABLE IF NOT EXISTS ingreso_open_conflicts (
+  id                     INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ingreso_id             INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  conflicting_ingreso_id INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  status                 TEXT NOT NULL DEFAULT 'pending',
+  remito_number          TEXT NULL,
+  numero_serie           TEXT NOT NULL DEFAULT '',
+  tipo_equipo            TEXT NOT NULL DEFAULT '',
+  evidence               JSONB NOT NULL DEFAULT '{}'::jsonb,
+  resolution_note        TEXT NULL,
+  resolved_by            INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at            TIMESTAMPTZ NULL,
+  created_by             INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_ingreso_open_conflicts_status
+    CHECK (status IN ('pending','resolved','dismissed'))
+);
+
+-- Un ingreso arrastra un solo conflicto: si se reintenta la emisión no se duplica la fila.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingreso_open_conflicts_ingreso
+  ON ingreso_open_conflicts (ingreso_id);
+CREATE INDEX IF NOT EXISTS idx_ingreso_open_conflicts_status
+  ON ingreso_open_conflicts (status);
 
 -- NEXORA: órdenes de entrega, remitos Bejerman y cobranzas.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT;
@@ -2327,7 +2377,7 @@ CREATE TABLE IF NOT EXISTS notification_email_outbox (
   CONSTRAINT chk_notification_email_outbox_dedupe CHECK (NULLIF(TRIM(dedupe_key), '') IS NOT NULL),
   CONSTRAINT chk_notification_email_outbox_recipient CHECK (NULLIF(TRIM(recipient), '') IS NOT NULL),
   CONSTRAINT chk_notification_email_outbox_status CHECK (status IN ('pending','retry','sending','sent','failed')),
-  CONSTRAINT chk_notification_email_outbox_attachment CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing')),
+  CONSTRAINT chk_notification_email_outbox_attachment CHECK (attachment_kind IN ('','delivery_remito_group','ingress_remito','service_order_billing','quote_pdf')),
   CONSTRAINT chk_notification_email_outbox_attempts CHECK (attempt_count >= 0 AND max_attempts > 0)
 );
 

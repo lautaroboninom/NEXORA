@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getUbicaciones, getGeneralEquipos } from "../lib/api";
-import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf } from "../lib/ui-helpers";
+import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, isMgInactiveBySale } from "../lib/ui-helpers";
 import { useNavigate } from "react-router-dom";
 import useQueryState from "../hooks/useQueryState";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
@@ -9,6 +9,8 @@ import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-li
 
 const numeroInternoOf = (row, fallback = "-") => {
   if (!row) return fallback;
+  // El MG de un equipo vendido es histórico: ya no es su número interno.
+  if (isMgInactiveBySale(row)) return fallback;
   const raw = row?.numero_interno ?? row?.equipo?.numero_interno ?? "";
   const value = String(raw ?? "").trim();
   return value || fallback;

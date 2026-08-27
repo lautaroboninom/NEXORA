@@ -156,7 +156,7 @@ export default function NotificationBell() {
     if (!quiet) setLoading(true);
     setError("");
     try {
-      const data = await getNotificaciones({ limit: 20 });
+      const data = await getNotificaciones({ limit: 50 });
       if (!mountedRef.current) return;
       setItems(Array.isArray(data?.items) ? data.items : []);
       setUnreadCount(Number(data?.unread_count || 0));
@@ -598,6 +598,7 @@ export default function NotificationBell() {
                   <div className="text-sm font-semibold text-gray-900">Notificaciones</div>
                   <div className="text-xs text-gray-500">
                     {unreadCount === 1 ? "1 pendiente" : `${unreadCount} pendientes`}
+                    {items.length >= 50 && " · mostrando 50"}
                   </div>
                 </div>
                 <div className="flex items-center gap-1">

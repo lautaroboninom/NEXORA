@@ -107,6 +107,23 @@ services:
     networks:
       - backend
 
+  daily-alerts:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+    container_name: nexora-daily-alerts
+    env_file: .env.prod.internet
+    environment:
+      - DJANGO_SETTINGS_MODULE=app.settings_internet
+      - TZ=${TZ:-America/Argentina/Buenos_Aires}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python manage.py run_daily_alerts
+    restart: unless-stopped
+    networks:
+      - backend
+
   email-outbox:
     build:
       context: ./api

@@ -8,7 +8,11 @@ class Command(BaseCommand):
     help = "Sincroniza renglones de venta Bejerman con partida/serie hacia la caché local"
 
     def add_arguments(self, parser):
-        parser.add_argument("--company-key", default="SEPID")
+        parser.add_argument(
+            "--company-key",
+            default="SEPID",
+            help="Empresa Bejerman. Acepta varias separadas por coma (ej: SEPID,MGBIO).",
+        )
         parser.add_argument("--date-from", default="")
         parser.add_argument("--date-to", default="")
         parser.add_argument("--days", type=int, default=365)
@@ -20,26 +24,32 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         types = [item.strip().upper() for item in (opts.get("types") or "").split(",") if item.strip()] or None
-        client = BejermanSDKClient(
-            company_key=opts.get("company_key") or "SEPID",
-            actor_user_id=opts.get("user_id"),
-            allow_system_credentials=bool(opts.get("allow_system_credentials")),
-        )
-        summary = sync_bejerman_sale_items(
-            client,
-            date_from=opts.get("date_from") or None,
-            date_to=opts.get("date_to") or None,
-            days=opts.get("days"),
-            types=types,
-            max_comprobantes=opts.get("max_comprobantes"),
-            dry_run=bool(opts.get("dry_run")),
-        )
-        self.stdout.write(
-            "OK ventas Bejerman: "
-            f"headers={summary['headers']} details={summary['details']} "
-            f"items={summary['items']} upserted={summary['upserted']} "
-            f"errors={len(summary['errors'])} dry_run={summary['dryRun']}"
-        )
-        if summary["errors"]:
-            for error in summary["errors"][:10]:
-                self.stderr.write(f"{error.get('comprobanteId')}: {error.get('error')}")
+        companies = [
+            item.strip().upper()
+            for item in (opts.get("company_key") or "SEPID").split(",")
+            if item.strip()
+        ] or ["SEPID"]
+        for company_key in companies:
+            client = BejermanSDKClient(
+                company_key=company_key,
+                actor_user_id=opts.get("user_id"),
+                allow_system_credentials=bool(opts.get("allow_system_credentials")),
+            )
+            summary = sync_bejerman_sale_items(
+                client,
+                date_from=opts.get("date_from") or None,
+                date_to=opts.get("date_to") or None,
+                days=opts.get("days"),
+                types=types,
+                max_comprobantes=opts.get("max_comprobantes"),
+                dry_run=bool(opts.get("dry_run")),
+            )
+            self.stdout.write(
+                f"OK ventas Bejerman [{company_key}]: "
+                f"headers={summary['headers']} details={summary['details']} "
+                f"items={summary['items']} upserted={summary['upserted']} "
+                f"errors={len(summary['errors'])} dry_run={summary['dryRun']}"
+            )
+            if summary["errors"]:
+                for error in summary["errors"][:10]:
+                    self.stderr.write(f"[{company_key}] {error.get('comprobanteId')}: {error.get('error')}")

@@ -279,15 +279,15 @@ class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
         self.assertEqual(VIEW_PERMISSION_MATRIX["RouteSheetLocationDetailView"]["PATCH"], "action.route_sheet.manage")
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["CobranzasRemitosView"]["GET"],
-            "action.billing.view",
+            ["action.billing.view", "page.billing"],
         )
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["CobranzasRemitoPdfView"]["GET"],
-            "action.billing.view",
+            ["action.billing.view", "page.billing"],
         )
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["CobranzasRemitoPrintView"]["GET"],
-            "action.billing.view",
+            ["action.billing.view", "page.billing"],
         )
         self.assertEqual(
             VIEW_PERMISSION_MATRIX["ServiceOrderBillingListView"]["GET"],

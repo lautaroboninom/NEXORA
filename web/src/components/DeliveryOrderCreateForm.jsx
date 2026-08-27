@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  bejermanLookupErrorMessage,
   getClientesBasico,
   getDeliveryOrderBejermanArticleStock,
   getDeliveryOrderBejermanArticles,
@@ -9,7 +10,11 @@ import {
   postDeliveryOrder,
 } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
-import { deliveryOrderItemCanOmitPartida, deliveryOrderItemRequiresPartida } from "../lib/delivery-orders";
+import {
+  deliveryOrderItemCanOmitPartida,
+  deliveryOrderItemRequiresPartida,
+  deliveryOrderUsedPartidaKeys,
+} from "../lib/delivery-orders";
 
 const BEJERMAN_COMPANIES = [
   { key: "SEPID", label: "SEPID" },
@@ -28,6 +33,10 @@ const RENTAL_SELLER_CODE = "ADM";
 // descarga por la cantidad de caracteres tipeados.
 const ARTICLE_SEARCH_DEBOUNCE_MS = 350;
 const ARTICLE_SEARCH_MIN_CHARS = 2;
+// El atajo de equipos de alquiler cruza los candidatos locales contra el stock y
+// las partidas de Bejerman, así que vale el mismo debounce que el buscador de
+// artículos: sin él cada tecla dispara ese cruce entero de nuevo.
+const RENTAL_SEARCH_DEBOUNCE_MS = 350;
 const REMITO_PROFILE_BY_TYPE = {
   sale: "RT / MC / VAL",
   rental: "RTA / ALQ / STL",
@@ -460,6 +469,13 @@ function suppressEnterSubmit(event) {
   if (event.key === "Enter") event.preventDefault();
 }
 
+// Las listas de sugerencias tienen scroll propio: sin esto el resaltado que se mueve
+// con las flechas se va abajo del recorte y parece que la navegación no hace nada.
+// Es una función estable a propósito, así React sólo la llama al montar la opción.
+function keepOptionVisible(node) {
+  node?.scrollIntoView({ block: "nearest" });
+}
+
 export default function DeliveryOrderCreateForm({
   initialOrder = null,
   onCreated,
@@ -493,12 +509,15 @@ export default function DeliveryOrderCreateForm({
   const [loadingCustomers, setLoadingCustomers] = useState(false);
   const [customerActiveIndex, setCustomerActiveIndex] = useState(0);
   const [articleOptions, setArticleOptions] = useState({});
+  const [articleActiveIndex, setArticleActiveIndex] = useState({});
   const [articleLoading, setArticleLoading] = useState({});
   const [articleEmpty, setArticleEmpty] = useState({});
   const [articleStock, setArticleStock] = useState({});
   const [articleUnavailable, setArticleUnavailable] = useState(false);
   const [partidaScanWarnings, setPartidaScanWarnings] = useState({});
   const partidaInputRefs = useRef({});
+  const customerSearchRef = useRef(null);
+  const customerNameRef = useRef(null);
   const articleSearchTimers = useRef({});
   const articleSearchSeq = useRef({});
   useEffect(() => {
@@ -511,8 +530,17 @@ export default function DeliveryOrderCreateForm({
   const [error, setError] = useState("");
   const effectiveCompanyKey = useMemo(() => normalizeCompanyKey(form.companyKey), [form.companyKey]);
   const isRental = form.deliveryType === "rental";
+  // El equipo dado de alta con su MG no tiene OS: la clave del atajo sigue al equipo,
+  // si no todos los equipos sin OS comparten la clave vacía y el atajo esconde de más.
+  const rentalEquipmentKey = (option) =>
+    clean(option?.ingresoId) ? `os:${clean(option.ingresoId)}` : `dev:${clean(option?.deviceId)}`;
   const selectedRentalIngresoIds = useMemo(
-    () => new Set((form.items || []).map((item) => clean(item.ingresoId)).filter(Boolean)),
+    () =>
+      new Set(
+        (form.items || [])
+          .filter((item) => clean(item.ingresoId) || clean(item.deviceId))
+          .map((item) => rentalEquipmentKey(item))
+      ),
     [form.items]
   );
   const sellerOptions = useMemo(
@@ -537,6 +565,7 @@ export default function DeliveryOrderCreateForm({
     setCustomerSearchOpen(false);
     setCustomerActiveIndex(0);
     setArticleOptions({});
+    setArticleActiveIndex({});
     setArticleLoading({});
     setArticleEmpty({});
     setArticleStock({});
@@ -551,32 +580,37 @@ export default function DeliveryOrderCreateForm({
   useEffect(() => {
     if (!isRental) return undefined;
     let active = true;
+    // La carga inicial va derecho; sólo se difiere lo que se dispara tecleando.
+    const delay = rentalSearch ? RENTAL_SEARCH_DEBOUNCE_MS : 0;
     setRentalEquipment((current) => ({ ...current, loading: true, warning: "" }));
-    getDeliveryOrderRentalAvailableEquipment({
-      q: rentalSearch,
-      limit: 80,
-      companyKey: effectiveCompanyKey,
-    })
-      .then((data) => {
-        if (!active) return;
-        setRentalEquipment({
-          items: Array.isArray(data?.items) ? data.items : [],
-          loading: false,
-          unavailable: Boolean(data?.unavailable),
-          warning: clean(data?.warning),
-        });
+    const timer = window.setTimeout(() => {
+      getDeliveryOrderRentalAvailableEquipment({
+        q: rentalSearch,
+        limit: 80,
+        companyKey: effectiveCompanyKey,
       })
-      .catch((err) => {
-        if (!active) return;
-        setRentalEquipment({
-          items: [],
-          loading: false,
-          unavailable: true,
-          warning: err?.message || "No se pudieron consultar equipos de alquiler disponibles.",
+        .then((data) => {
+          if (!active) return;
+          setRentalEquipment({
+            items: Array.isArray(data?.items) ? data.items : [],
+            loading: false,
+            unavailable: Boolean(data?.unavailable),
+            warning: clean(data?.warning),
+          });
+        })
+        .catch((err) => {
+          if (!active) return;
+          setRentalEquipment({
+            items: [],
+            loading: false,
+            unavailable: true,
+            warning: bejermanLookupErrorMessage(err, "No se pudieron consultar equipos de alquiler disponibles."),
+          });
         });
-      });
+    }, delay);
     return () => {
       active = false;
+      window.clearTimeout(timer);
     };
   }, [isRental, rentalSearch, effectiveCompanyKey]);
 
@@ -626,6 +660,13 @@ export default function DeliveryOrderCreateForm({
       return Math.min(current, filteredCustomers.length - 1);
     });
   }, [filteredCustomers.length]);
+
+  // Los mensajes personalizados dejan el campo inválido hasta limpiarlos a mano:
+  // se limpian con cada cambio de valor, incluso cuando lo cambia selectCustomer.
+  useEffect(() => {
+    if (customerSearchRef.current) customerSearchRef.current.setCustomValidity("");
+    if (customerNameRef.current) customerNameRef.current.setCustomValidity("");
+  }, [form.customerSearch, form.customerName]);
 
   const setAllItemDeposits = (nextDeposit) => {
     const normalized = clean(nextDeposit).toUpperCase() || defaultDepositForDeliveryType(form.deliveryType);
@@ -962,14 +1003,20 @@ export default function DeliveryOrderCreateForm({
 
   const addRentalEquipment = (option) => {
     if (readOnlyItems) return;
-    const ingresoId = clean(option?.ingresoId);
-    if (!ingresoId || selectedRentalIngresoIds.has(ingresoId)) return;
+    if (!clean(option?.ingresoId) && !clean(option?.deviceId)) return;
+    if (selectedRentalIngresoIds.has(rentalEquipmentKey(option))) return;
+    const articleCode = clean(option?.articleCode);
+    const itemIndex = form.items.length === 1 && isBlankItem(form.items[0]) ? 0 : form.items.length;
     setForm((current) => ({
       ...current,
       items: current.items.length === 1 && isBlankItem(current.items[0])
         ? [{ ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }]
         : [...current.items, { ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }],
     }));
+    // El renglón nace con el NS asignado, así que el bloque de NS aparece abierto sin pasar
+    // por openPartidas y nadie consultaba el stock: el panel "NS disponibles" quedaba vacío,
+    // como si STL no tuviera nada, justo del depósito del que salió el equipo.
+    if (articleCode) void loadArticleStock(itemIndex, articleCode, "STL");
   };
 
   const removeItem = (index) => {
@@ -981,6 +1028,7 @@ export default function DeliveryOrderCreateForm({
         : current.items,
     }));
     setArticleOptions((current) => shiftIndexedState(current, index));
+    setArticleActiveIndex((current) => shiftIndexedState(current, index));
     setArticleLoading((current) => shiftIndexedState(current, index));
     setArticleEmpty((current) => shiftIndexedState(current, index));
     setArticleStock((current) => shiftIndexedState(current, index));
@@ -1028,6 +1076,12 @@ export default function DeliveryOrderCreateForm({
     setPartidasOpenByItem((current) => ({ ...current, [itemIndex]: false }));
   };
 
+  const closeArticleOptions = (index) => {
+    setArticleOptions((current) => ({ ...current, [index]: [] }));
+    setArticleActiveIndex((current) => ({ ...current, [index]: 0 }));
+    setArticleEmpty((current) => ({ ...current, [index]: false }));
+  };
+
   const fetchArticleOptions = async (index, q) => {
     // Descarta las respuestas que llegan fuera de orden: sin esto, la búsqueda de
     // "MAS" puede pisar a la de "MASCARA" si el servidor contesta más tarde.
@@ -1043,11 +1097,13 @@ export default function DeliveryOrderCreateForm({
       const items = Array.isArray(data?.items) ? data.items : [];
       setArticleUnavailable(Boolean(data?.unavailable));
       setArticleOptions((current) => ({ ...current, [index]: items }));
+      setArticleActiveIndex((current) => ({ ...current, [index]: 0 }));
       setArticleEmpty((current) => ({ ...current, [index]: items.length === 0 }));
     } catch {
       if (!isCurrent()) return;
       setArticleUnavailable(true);
       setArticleOptions((current) => ({ ...current, [index]: [] }));
+      setArticleActiveIndex((current) => ({ ...current, [index]: 0 }));
       setArticleEmpty((current) => ({ ...current, [index]: true }));
     } finally {
       if (isCurrent()) {
@@ -1078,8 +1134,7 @@ export default function DeliveryOrderCreateForm({
     if (q.length < ARTICLE_SEARCH_MIN_CHARS) {
       // Invalida cualquier búsqueda en vuelo para que no repueble el listado.
       articleSearchSeq.current[index] = (articleSearchSeq.current[index] || 0) + 1;
-      setArticleOptions((current) => ({ ...current, [index]: [] }));
-      setArticleEmpty((current) => ({ ...current, [index]: false }));
+      closeArticleOptions(index);
       setArticleLoading((current) => ({ ...current, [index]: false }));
       return;
     }
@@ -1108,13 +1163,18 @@ export default function DeliveryOrderCreateForm({
         deliveryType: form.deliveryType,
         depositCode: selectedDeposit,
       });
+      const unavailable = Boolean(data?.unavailable);
       setArticleStock((current) => ({
         ...current,
         [index]: {
           items: Array.isArray(data?.items) ? data.items : [],
           loading: false,
-          unavailable: Boolean(data?.unavailable),
-          warning: clean(data?.warning),
+          unavailable,
+          warning: clean(data?.warning) || (
+            unavailable
+              ? `No se pudieron consultar ${isRental ? "los NS" : "las partidas"} de Bejerman. Reintentá en unos minutos.`
+              : ""
+          ),
           depositCode: clean(data?.depositCode) || selectedDeposit,
         },
       }));
@@ -1125,7 +1185,10 @@ export default function DeliveryOrderCreateForm({
           items: [],
           loading: false,
           unavailable: true,
-          warning: err?.message || "No se pudo verificar stock Bejerman.",
+          warning: bejermanLookupErrorMessage(
+            err,
+            `No se pudieron consultar ${isRental ? "los NS" : "las partidas"} de Bejerman.`,
+          ),
           depositCode: selectedDeposit,
         },
       }));
@@ -1133,10 +1196,12 @@ export default function DeliveryOrderCreateForm({
   };
 
   useEffect(() => {
-    if (!partidasRequired && !partidasOpenByDefault) return;
     form.items.forEach((item, index) => {
       const articleCode = clean(item.articleCode);
-      if (articleCode) {
+      // Un renglón que ya trae partidas muestra el bloque abierto sin pasar por openPartidas:
+      // sin esto el panel de sugerencias arranca vacío al editar una orden ya cargada.
+      const partidasVisible = partidasRequired || partidasOpenByDefault || activePartidas(item).length > 0;
+      if (articleCode && partidasVisible) {
         void loadArticleStock(index, articleCode, clean(item.stockDepositCode) || depositCode);
       }
     });
@@ -1174,11 +1239,46 @@ export default function DeliveryOrderCreateForm({
       articleRequiresPartida,
       partidas: [emptyPartida("1", depositCode)],
     });
-    setArticleOptions((current) => ({ ...current, [index]: [] }));
-    setArticleEmpty((current) => ({ ...current, [index]: false }));
+    closeArticleOptions(index);
     setArticleStock((current) => ({ ...current, [index]: null }));
     if (partidasRequired || partidasOpenByItem[index]) {
       void loadArticleStock(index, articleCode, depositCode);
+    }
+  };
+
+  // Mientras busca, el listado anterior queda oculto detrás de "Buscando artículos...":
+  // navegarlo a ciegas con las flechas terminaría eligiendo un artículo que no se ve.
+  const articleOptionsFor = (index) =>
+    readOnlyItems || articleLoading[index] ? [] : articleOptions[index] || [];
+
+  // El índice guardado puede quedar fuera de rango si llegó una tanda más corta.
+  const articleActiveFor = (index, options) =>
+    options.length ? Math.min(Math.max(articleActiveIndex[index] || 0, 0), options.length - 1) : 0;
+
+  const handleArticleSearchKeyDown = (event, index) => {
+    const options = articleOptionsFor(index);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!options.length) return;
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      const next = (articleActiveFor(index, options) + step + options.length) % options.length;
+      setArticleActiveIndex((current) => ({ ...current, [index]: next }));
+      return;
+    }
+    if (event.key === "Escape") {
+      if (!options.length) return;
+      event.preventDefault();
+      closeArticleOptions(index);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (options.length) chooseArticle(index, options[articleActiveFor(index, options)]);
+      return;
+    }
+    // Tab no se cancela: elige lo resaltado y sigue al campo siguiente.
+    if (event.key === "Tab" && options.length) {
+      chooseArticle(index, options[articleActiveFor(index, options)]);
     }
   };
 
@@ -1384,6 +1484,7 @@ export default function DeliveryOrderCreateForm({
         setDepositCode(depositFromForm(resetForm));
         setCustomerSearchOpen(false);
         setArticleOptions({});
+        setArticleActiveIndex({});
         setArticleLoading({});
         setArticleEmpty({});
         setArticleStock({});
@@ -1423,7 +1524,12 @@ export default function DeliveryOrderCreateForm({
         <label className="relative text-sm md:col-span-2">
           <span className="mb-1 block text-xs uppercase text-gray-500">Cliente</span>
           <input
+            ref={customerSearchRef}
             value={form.customerSearch}
+            required={!clean(form.customerName)}
+            onInvalid={(event) => {
+              event.target.setCustomValidity("Elegí un cliente de la lista.");
+            }}
             onFocus={() => {
               if (readOnlyHeader) return;
               setCustomerSearchOpen(true);
@@ -1450,6 +1556,7 @@ export default function DeliveryOrderCreateForm({
                   <button
                     key={customer.id}
                     type="button"
+                    ref={customerIndex === customerActiveIndex ? keepOptionVisible : null}
                     onMouseDown={(event) => event.preventDefault()}
                     onMouseEnter={() => setCustomerActiveIndex(customerIndex)}
                     onClick={() => selectCustomer(customer)}
@@ -1471,8 +1578,12 @@ export default function DeliveryOrderCreateForm({
         <label className="text-sm">
           <span className="mb-1 block text-xs uppercase text-gray-500">Cliente en remito</span>
           <input
+            ref={customerNameRef}
             value={form.customerName}
             onChange={update("customerName")}
+            onInvalid={(event) => {
+              event.target.setCustomValidity("Completá el nombre que va impreso en el remito.");
+            }}
             onKeyDown={suppressEnterSubmit}
             className="h-10 w-full rounded border px-3 py-2 disabled:bg-gray-100 disabled:text-gray-600"
             disabled={headerDisabled}
@@ -1611,11 +1722,6 @@ export default function DeliveryOrderCreateForm({
                 ))}
               </select>
             </label>
-            {!readOnlyItems && (
-              <button type="button" onClick={addItem} className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50">
-                Agregar renglón
-              </button>
-            )}
           </div>
         </div>
         {depositWarning && (
@@ -1652,7 +1758,7 @@ export default function DeliveryOrderCreateForm({
             ) : (
               <div className="mt-3 grid gap-2 md:grid-cols-2">
                 {(rentalEquipment.items || [])
-                  .filter((option) => !selectedRentalIngresoIds.has(clean(option.ingresoId)))
+                  .filter((option) => !selectedRentalIngresoIds.has(rentalEquipmentKey(option)))
                   .slice(0, 12)
                   .map((option) => (
                     <button
@@ -1662,7 +1768,7 @@ export default function DeliveryOrderCreateForm({
                       className="rounded border bg-white px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-50"
                       disabled={itemDisabled}
                     >
-                      <span className="block font-semibold text-gray-900">{option.sourceReference || formatServiceOrderReference(option.ingresoId)}</span>
+                      <span className="block font-semibold text-gray-900">{option.sourceReference || (option.ingresoId ? formatServiceOrderReference(option.ingresoId) : option.equipmentInternalNumber || option.equipmentSerial)}</span>
                       <span className="mt-0.5 block text-gray-700">{option.equipmentDetail || option.equipmentModel}</span>
                       <span className="mt-1 block text-xs text-gray-500">
                         Serie/partida {option.partida || option.equipmentSerial || "-"} · Artículo {option.articleCode || "-"} · STL {formatQuantity(option.stockAvailableQuantity, 0)}
@@ -1670,7 +1776,7 @@ export default function DeliveryOrderCreateForm({
                     </button>
                   ))}
                 {!rentalEquipment.loading &&
-                  (rentalEquipment.items || []).filter((option) => !selectedRentalIngresoIds.has(clean(option.ingresoId))).length === 0 && (
+                  (rentalEquipment.items || []).filter((option) => !selectedRentalIngresoIds.has(rentalEquipmentKey(option))).length === 0 && (
                     <div className="rounded border bg-white px-3 py-2 text-sm text-gray-500">Sin equipos seleccionables para el filtro actual.</div>
                   )}
               </div>
@@ -1689,22 +1795,29 @@ export default function DeliveryOrderCreateForm({
           const stockLots = Array.isArray(stockState?.items) ? stockState.items : [];
           const partidaRows = item.partidas || [emptyPartida()];
           const suggestedPartidaIndex = Math.max(0, partidaRows.length - 1);
-          const suggestedPartidaQuery = clean(partidaRows[suggestedPartidaIndex]?.partida).toLowerCase();
-          const usedPartidas = new Set(
-            partidaRows
-              .map((row, rowIndex) => (rowIndex === suggestedPartidaIndex ? "" : clean(row.partida).toLowerCase()))
-              .filter(Boolean)
+          const suggestedRow = partidaRows[suggestedPartidaIndex];
+          const suggestedPartidaQuery = clean(suggestedRow?.partida).toLowerCase();
+          // Las sugerencias son para completar la fila en curso: si su NS ya quedó resuelto contra
+          // el stock (atajo o clic en la sugerencia) sobra ofrecer justo el que ya está elegido.
+          const suggestedRowResolved = Boolean(suggestedPartidaQuery && clean(suggestedRow?.stockCheckedAt));
+          const usedPartidas = deliveryOrderUsedPartidaKeys(
+            form.items,
+            index,
+            suggestedPartidaIndex,
+            stockState?.depositCode || depositCode,
           );
-          const visibleStockLots = stockLots.filter((lot) => {
-            const lotPartida = clean(lot?.partida).toLowerCase();
-            if (lotPartida && usedPartidas.has(lotPartida)) return false;
-            if (!suggestedPartidaQuery) return true;
-            return lotLabel(lot).toLowerCase().includes(suggestedPartidaQuery);
-          });
+          const visibleStockLots = suggestedRowResolved
+            ? []
+            : stockLots.filter((lot) => {
+                const lotPartida = clean(lot?.partida).toLowerCase();
+                if (lotPartida && usedPartidas.has(lotPartida)) return false;
+                if (!suggestedPartidaQuery) return true;
+                return lotLabel(lot).toLowerCase().includes(suggestedPartidaQuery);
+              });
           const partidasOpen = !canOmitPartida && (partidasRequired || Boolean(partidasOpenByItem[index]) || stats.hasRows);
           return (
             <div key={item.id || index} className="rounded border bg-gray-50 p-2">
-              <div className={`grid grid-cols-1 gap-2 ${canEditItemDiscounts ? "lg:grid-cols-[82px_minmax(180px,1fr)_minmax(220px,1.25fr)_105px_74px_82px_42px]" : "lg:grid-cols-[82px_minmax(180px,1fr)_minmax(220px,1.25fr)_105px_74px_42px]"}`}>
+              <div className={`grid grid-cols-1 gap-2 ${canEditItemDiscounts ? "lg:grid-cols-[72px_minmax(240px,1.6fr)_minmax(200px,1fr)_96px_66px_72px_38px]" : "lg:grid-cols-[72px_minmax(240px,1.6fr)_minmax(200px,1fr)_96px_66px_38px]"}`}>
                 <input
                   value={item.quantity}
                   onChange={(event) => updateItem(index, { quantity: event.target.value })}
@@ -1717,7 +1830,7 @@ export default function DeliveryOrderCreateForm({
                   <input
                     value={item.articleCode || item.articleName}
                     onChange={(event) => searchArticles(index, event.target.value)}
-                    onKeyDown={suppressEnterSubmit}
+                    onKeyDown={(event) => handleArticleSearchKeyDown(event, index)}
                     placeholder="Buscar por código o detalle"
                     className="w-full rounded border bg-white px-3 py-2 disabled:bg-gray-100 disabled:text-gray-600"
                     disabled={itemDisabled}
@@ -1732,21 +1845,27 @@ export default function DeliveryOrderCreateForm({
                   )}
                   {!readOnlyItems && !articleLoading[index] && (articleOptions[index] || []).length > 0 && (
                     <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded border bg-white shadow-lg">
-                      {(articleOptions[index] || []).map((article) => (
-                        <button
-                          key={`${article.code || article.id || ""}-${article.name || article.description || ""}`}
-                          type="button"
-                          onClick={() => chooseArticle(index, article)}
-                          className="block w-full border-b px-3 py-2 text-left text-sm hover:bg-gray-50"
-                          disabled={saving}
-                        >
-                          <span className="block font-mono text-xs text-sky-700">{article.code || "Sin código"}</span>
-                          <span className="block truncate text-gray-900">{article.name || article.description || "-"}</span>
-                          {article.description && article.description !== article.name && (
-                            <span className="mt-0.5 block line-clamp-2 text-xs text-gray-500">{article.description}</span>
-                          )}
-                        </button>
-                      ))}
+                      {(articleOptions[index] || []).map((article, optionIndex) => {
+                        const optionActive = optionIndex === articleActiveFor(index, articleOptions[index] || []);
+                        return (
+                          <button
+                            key={`${article.code || article.id || ""}-${article.name || article.description || ""}`}
+                            type="button"
+                            ref={optionActive ? keepOptionVisible : null}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onMouseEnter={() => setArticleActiveIndex((current) => ({ ...current, [index]: optionIndex }))}
+                            onClick={() => chooseArticle(index, article)}
+                            className={`block w-full border-b px-3 py-2 text-left text-sm ${optionActive ? "bg-slate-100" : "hover:bg-gray-50"}`}
+                            disabled={saving}
+                          >
+                            <span className="block font-mono text-xs text-sky-700">{article.code || "Sin código"}</span>
+                            <span className="block truncate text-gray-900">{article.name || article.description || "-"}</span>
+                            {article.description && article.description !== article.name && (
+                              <span className="mt-0.5 block line-clamp-2 text-xs text-gray-500">{article.description}</span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                   {!articleLoading[index] && articleEmpty[index] && (
@@ -1931,7 +2050,12 @@ export default function DeliveryOrderCreateForm({
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div>
                             <div className="text-xs font-medium uppercase text-sky-900">{isRental ? "NS disponibles" : "Partidas disponibles"}</div>
-                            <div className="text-xs text-sky-700">Depósito {stockState?.depositCode || depositCode}</div>
+                            {/* El contador va aparte del listado: con el NS ya cargado el filtro deja
+                                una sola tarjeta a la vista y sin esto parece que hay uno solo en el depósito. */}
+                            <div className="text-xs text-sky-700">
+                              Depósito {stockState?.depositCode || depositCode}
+                              {stockLots.length > 0 ? ` · ${stockLots.length} con stock` : ""}
+                            </div>
                           </div>
                         </div>
                         {stockState?.loading && (
@@ -1957,7 +2081,23 @@ export default function DeliveryOrderCreateForm({
                           </div>
                         )}
                         {!stockState?.loading && stockLots.length > 0 && visibleStockLots.length === 0 && (
-                          <div className="mt-2 text-xs text-sky-800">Sin coincidencias para el filtro ingresado.</div>
+                          <div className="mt-2 text-xs text-sky-800">
+                            {suggestedRowResolved
+                              ? `${isRental ? "El NS" : "La partida"} de este renglón ya está tomado del stock.`
+                              : "Sin coincidencias para el filtro ingresado."}
+                          </div>
+                        )}
+                        {/* Sin estos dos avisos el recuadro queda con el título solo, que se lee
+                            como "no hay nada disponible" incluso cuando nunca se consultó. */}
+                        {!stockState && (
+                          <div className="mt-2 text-xs text-sky-800">
+                            Todavía no se consultaron. Use "{isRental ? "Actualizar NS sugeridos" : "Actualizar partidas sugeridas"}".
+                          </div>
+                        )}
+                        {stockState && !stockState.loading && !stockState.warning && stockLots.length === 0 && (
+                          <div className="mt-2 text-xs text-amber-800">
+                            Sin {isRental ? "NS" : "partidas"} con stock en {stockState.depositCode || depositCode} para este artículo.
+                          </div>
                         )}
                       </div>
                     )}
@@ -1972,12 +2112,24 @@ export default function DeliveryOrderCreateForm({
         })}
       </div>
 
+      {!readOnlyItems && (
+        <div className="flex justify-end">
+          <button type="button" onClick={addItem} className="rounded border px-3 py-1.5 text-sm hover:bg-gray-50">
+            Agregar renglón
+          </button>
+        </div>
+      )}
+
       <label className="block text-sm">
-        <span className="mb-1 block text-xs uppercase text-gray-500">Detalle completo de la entrega</span>
+        <span className="mb-1 block text-xs uppercase text-gray-500">Comentarios</span>
+        <span className="mb-1 block text-xs text-gray-500">
+          Instrucciones, referencias u observaciones generales que no corresponden a un renglón.
+        </span>
         <textarea
           value={form.rawPedido}
           onChange={update("rawPedido")}
           rows={4}
+          placeholder="Escribí aquí los comentarios de la entrega."
           className="w-full rounded border px-3 py-2 disabled:bg-gray-100 disabled:text-gray-600"
           disabled={headerDisabled}
         />

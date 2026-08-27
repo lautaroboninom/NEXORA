@@ -1,5 +1,4 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { Search, SlidersHorizontal, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/Tabs";
@@ -43,8 +42,18 @@ import { openPdfBlob } from "../lib/pdf";
 import { patrimonialEmailMessage, watchPatrimonialEmail } from "../lib/patrimonialEmail";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
-import { tipoEquipoOf } from "../lib/ui-helpers";
+import {
+  tipoEquipoOf,
+  deviceCustomerTitle,
+  deviceCustomerSubtitle,
+  deviceOwnerMeta,
+  deviceModelTitle,
+  deviceBarcodeValue,
+} from "../lib/ui-helpers";
+import { DEVICE_ACTION, canRequestDeviceBaja, getDeviceActions } from "../lib/device-actions.js";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import ActionMenu, { ActionButtons } from "../components/ActionMenu.jsx";
+import DeviceBajaModal from "../components/DeviceBajaModal.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
 import { sortRows } from "../lib/table-sort.js";
@@ -173,49 +182,6 @@ function PropiedadBadge({ row }) {
     return <span className="px-2 py-1 text-xs rounded bg-emerald-100 text-emerald-800">Propio (MG/BIO)</span>;
   }
   return <span className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700">Cliente</span>;
-}
-
-function isOwnerDisplayCustomer(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) return false;
-  if (normalized === "particular") return true;
-  return normalized.includes("mg") && normalized.includes("bio");
-}
-
-function deviceCustomerTitle(row) {
-  const customer = String(row?.last_customer_nombre || row?.customer_nombre || "").trim();
-  const owner = String(row?.propietario_nombre || "").trim();
-  if (owner && isOwnerDisplayCustomer(customer)) return owner;
-  return customer || owner || "-";
-}
-
-function deviceCustomerSubtitle(row) {
-  const customer = String(row?.last_customer_nombre || row?.customer_nombre || "").trim();
-  const owner = String(row?.propietario_nombre || "").trim();
-  if (owner && customer && isOwnerDisplayCustomer(customer)) {
-    return `Cliente base: ${customer}`;
-  }
-  if (owner && customer && owner.toLowerCase() !== customer.toLowerCase()) {
-    return `Dueño: ${owner}`;
-  }
-  return "";
-}
-
-function deviceOwnerMeta(row) {
-  const parts = [row?.propietario_contacto, row?.propietario_doc]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-  return parts.join(" | ");
-}
-
-function deviceModelTitle(row) {
-  const modelo = String(row?.modelo || "").trim();
-  const variante = String(row?.variante || "").trim();
-  return [modelo, variante].filter(Boolean).join(" ").trim() || "-";
-}
-
-function deviceBarcodeValue(row) {
-  return String(row?.numero_serie || row?.numero_interno || "").trim();
 }
 
 function deviceBarcodeSubtitle(row) {
@@ -779,7 +745,13 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                   onClose();
                 } catch (e) {
                   const ctype = e?.data?.conflict_type;
-                  if (ctype === "NS_DUPLICATE") setErr("El número de serie ya está asignado a otro equipo.");
+                  // Un equipo es su número de serie **más** su tipo: el humidificador entra
+                  // con la serie del CPAP, así que el choque es sólo contra el mismo tipo.
+                  if (ctype === "NS_DUPLICATE")
+                    setErr(
+                      e?.data?.detail ||
+                        "El número de serie ya está asignado a otro equipo del mismo tipo."
+                    );
                   else if (ctype === "MG_DUPLICATE") setErr("El número interno ya está asignado a otro equipo.");
                   else setErr(e?.message || "No se pudo guardar.");
                 } finally {
@@ -2236,6 +2208,9 @@ export default function Equipos() {
   const canEdit = canManageDevices;
   const canPlanEdit = canManageDevices;
   const canRevisionMutate = canManageDevices;
+  const canBajaAlta = can(user, PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA);
+  // El backend rechaza la solicitud si el usuario ya puede dar la baja directa.
+  const canRequestBaja = !canBajaAlta && canRequestDeviceBaja(user);
   const nav = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -2275,6 +2250,8 @@ export default function Equipos() {
   const [editDeviceId, setEditDeviceId] = useState(null);
   const [mgModalRow, setMgModalRow] = useState(null);
   const [mgModalMode, setMgModalMode] = useState("venta");
+  const [bajaModalRow, setBajaModalRow] = useState(null);
+  const [bajaModalMode, setBajaModalMode] = useState("baja");
   const [reloadDevicesKey, setReloadDevicesKey] = useState(0);
   const [sort, setSortState] = useState(searchParams.get("sort") || "");
   const setSort = (nextSort) => {
@@ -2562,6 +2539,52 @@ export default function Equipos() {
       setErr(e?.message || "No se pudo imprimir el QR.");
     } finally {
       setBarcodeBusyId(null);
+    }
+  }
+
+  // Descriptores de acción de una fila. La decisión de qué se ofrece vive en
+  // `device-actions.js`; acá sólo se le pasan los permisos y el estado de la UI.
+  const deviceActionsFor = (row) =>
+    getDeviceActions(row, {
+      canEdit,
+      canPrintBarcode: canPrintEquipmentBarcode,
+      canBajaAlta,
+      canRequestBaja,
+      barcodeBusy: barcodeBusyId === (row?.id || deviceBarcodeValue(row)),
+    });
+
+  function runDeviceAction(key, row) {
+    switch (key) {
+      case DEVICE_ACTION.VER_INGRESO:
+        if (row?.last_ingreso_id) nav(`/ingresos/${row.last_ingreso_id}`);
+        break;
+      case DEVICE_ACTION.IMPRIMIR_QR:
+        printDeviceBarcode(row);
+        break;
+      case DEVICE_ACTION.EDITAR_DATOS:
+        setEditDeviceId(Number(row?.id || 0) || null);
+        break;
+      case DEVICE_ACTION.VENTA_MG:
+        setMgModalMode(row?.mg_inactivo_venta ? "reactivar" : "venta");
+        setMgModalRow(row);
+        break;
+      case DEVICE_ACTION.UNIFICAR:
+        openMergeFor(row);
+        break;
+      case DEVICE_ACTION.DAR_BAJA:
+      case DEVICE_ACTION.DAR_ALTA:
+      case DEVICE_ACTION.SOLICITAR_BAJA:
+        setBajaModalMode(
+          key === DEVICE_ACTION.DAR_ALTA
+            ? "alta"
+            : key === DEVICE_ACTION.SOLICITAR_BAJA
+              ? "solicitar"
+              : "baja",
+        );
+        setBajaModalRow(row);
+        break;
+      default:
+        break;
     }
   }
 
@@ -3249,8 +3272,6 @@ export default function Equipos() {
               <MobileDataList>
                 {rows.map((row) => {
                   const isHighlight = highlightId && String(highlightId) === String(row.id);
-                  const barcodeValue = deviceBarcodeValue(row);
-                  const barcodeBusy = barcodeBusyId === (row?.id || barcodeValue);
                   return (
                     <MobileDataCard
                       key={row.id}
@@ -3290,54 +3311,10 @@ export default function Equipos() {
                         </MobileDataField>
                         {row.last_ingreso_id ? <MobileDataField label="Último ingreso" value={`#${row.last_ingreso_id}`} /> : null}
                       </div>
-                      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                        <button
-                          className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
-                          onClick={() => {
-                            if (row.last_ingreso_id) nav(`/ingresos/${row.last_ingreso_id}`);
-                          }}
-                          disabled={!row.last_ingreso_id}
-                        >
-                          Ver ingreso
-                        </button>
-                        {canPrintEquipmentBarcode && (
-                          <button
-                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-                            onClick={() => printDeviceBarcode(row)}
-                            disabled={!barcodeValue || barcodeBusy}
-                            title={barcodeValue ? "Imprimir QR" : "El equipo no tiene N/S ni número interno"}
-                          >
-                            {barcodeBusy ? "Preparando QR..." : "Imprimir QR"}
-                          </button>
-                        )}
-                        {canEdit && (
-                          <button
-                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
-                            onClick={() => setEditDeviceId(Number(row?.id || 0) || null)}
-                          >
-                            Editar datos
-                          </button>
-                        )}
-                        {canEdit && row?.es_propietario_mg && row?.numero_interno && (
-                          <button
-                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
-                            onClick={() => {
-                              setMgModalMode(row?.mg_inactivo_venta ? "reactivar" : "venta");
-                              setMgModalRow(row);
-                            }}
-                          >
-                            {row?.mg_inactivo_venta ? "Reactivar MG" : "Marcar vendido"}
-                          </button>
-                        )}
-                        {canEdit && (
-                          <button
-                            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
-                            onClick={() => openMergeFor(row)}
-                          >
-                            Unificar
-                          </button>
-                        )}
-                      </div>
+                      <ActionButtons
+                        items={deviceActionsFor(row)}
+                        onSelect={(key) => runDeviceAction(key, row)}
+                      />
                     </MobileDataCard>
                   );
                 })}
@@ -3360,8 +3337,6 @@ export default function Equipos() {
                 <tbody>
                   {rows.map((row) => {
                     const isHighlight = highlightId && String(highlightId) === String(row.id);
-                    const barcodeValue = deviceBarcodeValue(row);
-                    const barcodeBusy = barcodeBusyId === (row?.id || barcodeValue);
                     return (
                       <tr key={row.id} className={`hover:bg-gray-50 ${isHighlight ? "bg-amber-50" : ""}`}>
                         <td className="p-2 font-mono text-xs">{row.id}</td>
@@ -3395,76 +3370,10 @@ export default function Equipos() {
                           )}
                         </td>
                         <td className="p-2">
-                          <div className="inline-block text-left">
-                            <Menu
-                              button={({ toggle, buttonRef }) => (
-                                <button ref={buttonRef} onClick={toggle} className="px-2 py-1 rounded hover:bg-gray-100" aria-label="Acciones">
-                                  &#8942;
-                                </button>
-                              )}
-                            >
-                              {({ close }) => (
-                                <div className="w-40 bg-white border border-gray-200 rounded shadow z-10">
-                                  <button
-                                    className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                                    onClick={() => {
-                                      close();
-                                      if (row.last_ingreso_id) nav(`/ingresos/${row.last_ingreso_id}`);
-                                    }}
-                                  >
-                                    Ver ingreso
-                                  </button>
-                                  {canPrintEquipmentBarcode && (
-                                    <button
-                                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                      onClick={() => {
-                                        close();
-                                        printDeviceBarcode(row);
-                                      }}
-                                      disabled={!barcodeValue || barcodeBusy}
-                                      title={barcodeValue ? "Imprimir QR" : "El equipo no tiene N/S ni número interno"}
-                                    >
-                                      {barcodeBusy ? "Preparando..." : "Imprimir QR"}
-                                    </button>
-                                  )}
-                                  {canEdit && (
-                                    <button
-                                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                                      onClick={() => {
-                                        close();
-                                        setEditDeviceId(Number(row?.id || 0) || null);
-                                      }}
-                                    >
-                                      Editar datos
-                                    </button>
-                                  )}
-                                  {canEdit && row?.es_propietario_mg && row?.numero_interno && (
-                                    <button
-                                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                                      onClick={() => {
-                                        close();
-                                        setMgModalMode(row?.mg_inactivo_venta ? "reactivar" : "venta");
-                                        setMgModalRow(row);
-                                      }}
-                                    >
-                                      {row?.mg_inactivo_venta ? "Reactivar MG" : "Marcar vendido"}
-                                    </button>
-                                  )}
-                                  {canEdit && (
-                                    <button
-                                      className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
-                                      onClick={() => {
-                                        close();
-                                        openMergeFor(row);
-                                      }}
-                                    >
-                                      Unificar
-                                    </button>
-                                  )}
-                                </div>
-                              )}
-                            </Menu>
-                          </div>
+                          <ActionMenu
+                            items={deviceActionsFor(row)}
+                            onSelect={(key) => runDeviceAction(key, row)}
+                          />
                         </td>
                       </tr>
                     );
@@ -4167,6 +4076,14 @@ export default function Equipos() {
           }}
         />
       )}
+      {bajaModalRow && (
+        <DeviceBajaModal
+          row={bajaModalRow}
+          mode={bajaModalMode}
+          onClose={() => setBajaModalRow(null)}
+          onDone={() => setReloadDevicesKey(Date.now())}
+        />
+      )}
       {mgModalRow && (
         <MgVentaModal
           row={mgModalRow}
@@ -4409,79 +4326,3 @@ export default function Equipos() {
     </div>
   );
 }
-
-function Menu({ button, children }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  const buttonRef = useRef(null);
-  const panelRef = useRef(null);
-  const [coords, setCoords] = useState({ top: 0, left: 0 });
-
-  const recalcPosition = () => {
-    const btn = buttonRef.current;
-    if (!btn) return;
-    const rect = btn.getBoundingClientRect();
-    const panelWidth = panelRef.current?.offsetWidth || 160;
-    const margin = 8;
-    const viewportWidth = window.innerWidth || 0;
-    let left = rect.right - panelWidth;
-    if (left < margin) left = margin;
-    if (left + panelWidth > viewportWidth - margin) {
-      left = Math.max(margin, viewportWidth - panelWidth - margin);
-    }
-    const top = rect.bottom + 6;
-    setCoords({ top, left });
-  };
-
-  const toggle = () => setOpen((v) => !v);
-  const close = () => setOpen(false);
-
-  useEffect(() => {
-    if (!open) return;
-    const raf = requestAnimationFrame(recalcPosition);
-    return () => cancelAnimationFrame(raf);
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onMouseDown = (e) => {
-      const insideTrigger = ref.current && ref.current.contains(e.target);
-      const insidePanel = panelRef.current && panelRef.current.contains(e.target);
-      if (!insideTrigger && !insidePanel) setOpen(false);
-    };
-    const onKeyDown = (e) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    const onResize = () => recalcPosition();
-    const onScroll = () => recalcPosition();
-    document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("keydown", onKeyDown);
-    window.addEventListener("resize", onResize);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [open]);
-
-  return (
-    <div ref={ref}>
-      {button({ open, toggle, buttonRef })}
-      {open
-        ? createPortal(
-          <div
-            ref={panelRef}
-            style={{ position: "fixed", top: coords.top, left: coords.left, zIndex: 80 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {children({ close })}
-          </div>,
-          document.body
-        )
-        : null}
-    </div>
-  );
-}
-

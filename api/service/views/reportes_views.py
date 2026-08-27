@@ -1,3 +1,6 @@
+import json
+import logging
+
 from django.http import HttpResponse
 from rest_framework import permissions
 from django.db import transaction
@@ -16,7 +19,24 @@ from ..bejerman_sync import (
 from ..delivery_orders import ensure_service_release_order_for_ingreso
 from ..pdf import render_remito_salida_pdf, render_remito_derivacion_pdf
 from ..notifications import notify_ingreso_liberado
+from ..repair_ready_notifications import resolve_remito_pending_notifications
 from ..service_order_billing import notify_service_order_ready_to_bill
+
+logger = logging.getLogger(__name__)
+
+# Nombres de los headers con los que el lote informa qué salió y qué no.
+_HEADER_EMITIDOS = "X-Nexora-Remitos-Emitidos"
+_HEADER_FALLIDOS = "X-Nexora-Remitos-Fallidos"
+
+
+def _response_detail(response) -> str:
+    try:
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            return str(data.get("detail") or "")
+    except Exception:
+        pass
+    return ""
 
 
 def _parse_ingreso_ids(raw_ids: str, *, max_ids: int = 100) -> list[int]:
@@ -176,7 +196,21 @@ class RemitoSalidaPdfView(APIView):
             if not es_venta_pendiente:
                 notify_ingreso_liberado(ingreso_id)
         except Exception:
-            pass
+            logger.exception(
+                "No se pudo crear la notificación de equipo liberado",
+                extra={"ingreso_id": ingreso_id},
+            )
+
+        # La salida ya está impresa: los avisos de "falta imprimir el remito" de
+        # esta OS dejan de ser pendientes y no tienen que seguir ocupando la
+        # campana.
+        try:
+            resolve_remito_pending_notifications(ingreso_id)
+        except Exception:
+            logger.exception(
+                "No se pudieron cerrar los avisos pendientes de orden de salida",
+                extra={"ingreso_id": ingreso_id},
+            )
 
         try:
             if not es_venta_pendiente:
@@ -193,7 +227,10 @@ class RemitoSalidaPdfView(APIView):
                     actor_name=getattr(getattr(request, "user", None), "nombre", ""),
                 )
         except Exception:
-            pass
+            logger.exception(
+                "No se pudo avisar que la OS quedó lista para facturar",
+                extra={"ingreso_id": ingreso_id},
+            )
 
         pdf_bytes, fname = render_remito_salida_pdf(ingreso_id, printed_by=getattr(request.user, "nombre", ""))
         resp = HttpResponse(pdf_bytes, content_type="application/pdf")
@@ -211,26 +248,56 @@ class RemitosSalidaBulkPdfView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
 
+        # Con skip_errors la OS que falla se saltea en vez de cortar el lote. Sin
+        # el flag el comportamiento es el de siempre (fail-fast), porque liberar
+        # ya no tiene vuelta atrás: cortar dejaba liberadas las anteriores y sin
+        # PDF, y quien pedía el lote no se enteraba de cuáles habían salido.
+        skip_errors = str(request.GET.get("skip_errors") or "").strip().lower() in {"1", "true", "yes"}
+
         documents = []
+        emitidos: list[int] = []
+        fallidos: list[dict] = []
         single_view = RemitoSalidaPdfView()
         for ingreso_id in ingreso_ids:
             response = single_view.get(request, ingreso_id)
-            if getattr(response, "status_code", 500) != 200:
-                detail = ""
-                try:
-                    detail = response.data.get("detail") if isinstance(response.data, dict) else ""
-                except Exception:
-                    detail = ""
-                suffix = f": {detail}" if detail else ""
-                return Response(
-                    {"detail": f"No se pudo generar el remito de salida de OS {ingreso_id}{suffix}"},
-                    status=getattr(response, "status_code", 400),
+            status_code = getattr(response, "status_code", 500)
+            if status_code != 200:
+                detail = _response_detail(response)
+                if not skip_errors:
+                    suffix = f": {detail}" if detail else ""
+                    return Response(
+                        {"detail": f"No se pudo generar el remito de salida de OS {ingreso_id}{suffix}"},
+                        status=status_code,
+                    )
+                fallidos.append(
+                    {
+                        "id": ingreso_id,
+                        "status": status_code,
+                        "detail": detail or f"No se pudo generar el remito de salida de OS {ingreso_id}",
+                    }
                 )
+                continue
             documents.append(response.content)
+            emitidos.append(ingreso_id)
+
+        if not documents:
+            return Response(
+                {
+                    "detail": "No se pudo generar ninguna orden de salida.",
+                    "fallidos": fallidos,
+                },
+                status=409,
+            )
 
         merged_pdf = _merge_pdf_documents(documents)
         resp = HttpResponse(merged_pdf, content_type="application/pdf")
-        resp["Content-Disposition"] = f'inline; filename="Remitos_salida_{len(ingreso_ids)}_OS.pdf"'
+        resp["Content-Disposition"] = f'inline; filename="Remitos_salida_{len(emitidos)}_OS.pdf"'
+        if skip_errors:
+            # ensure_ascii deja el JSON en ASCII puro: los headers HTTP no
+            # toleran los acentos que traen los mensajes de error en castellano.
+            resp[_HEADER_EMITIDOS] = ",".join(str(value) for value in emitidos)
+            resp[_HEADER_FALLIDOS] = json.dumps(fallidos, ensure_ascii=True)
+            resp["Access-Control-Expose-Headers"] = f"{_HEADER_EMITIDOS}, {_HEADER_FALLIDOS}"
         return resp
 
 

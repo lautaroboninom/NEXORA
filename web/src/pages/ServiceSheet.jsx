@@ -8,9 +8,7 @@ import {
   getIngresoHistorial,
   getGeneralEquipos,
   postBajaIngreso,
-  postAltaIngreso,
   postIngresoConvertirPropioMg,
-  postSolicitarBaja,
   postRechazarSolicitudBaja,
   getClientes,
   getClientesBasico,
@@ -28,13 +26,15 @@ import {
   getIngresoRisStatus,
   getIngresoBarcodeBlob,
 } from "../lib/api";
-import { isPendingPdfError, openPdfBlob } from "../lib/pdf";
+import { isPendingPdfError, openPdfBlob, PDF_REPRINT_STEPS, PDF_WAIT_STEPS } from "../lib/pdf";
 import { patrimonialEmailMessage, watchPatrimonialEmail } from "../lib/patrimonialEmail";
 import {
   documentNameFromRis,
   isRisGenerated,
   isRisRegistered,
+  openReservedRisPrintablePdf,
   openRisPrintablePdf,
+  reserveRisPrintWindow,
   risRemitoFrom,
   waitForRisPdfBlob,
 } from "../lib/ris-print";
@@ -70,6 +70,9 @@ import PrincipalTab from "./ServiceSheet/tabs/PrincipalTab";
 import DerivacionesTab from "./ServiceSheet/tabs/DerivacionesTab";
 import ServiceCriticalStrip from "../components/ServiceCriticalStrip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import ActionMenu from "../components/ActionMenu.jsx";
+import DeviceBajaModal from "../components/DeviceBajaModal.jsx";
+import { canRequestDeviceBaja, describeBejermanStockJob } from "../lib/device-actions.js";
 import RisProgressModal, {
   waitForRisProgressMinimum,
   waitForRisProgressPaint,
@@ -590,8 +593,6 @@ export default function ServiceSheet() {
   const [editBasics, setEditBasics] = useState(false);
   const [formBasics, setFormBasics] = useState(null);
   const [savingBasics, setSavingBasics] = useState(false);
-  const [actionsOpen, setActionsOpen] = useState(false);
-  const actionsMenuRef = useRef(null);
   const [risBusy, setRisBusy] = useState(false);
   const [risProgressStatus, setRisProgressStatus] = useState("");
   const [risWaitStartedAt, setRisWaitStartedAt] = useState(0);
@@ -603,10 +604,8 @@ export default function ServiceSheet() {
   const [risPreflightError, setRisPreflightError] = useState("");
   const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [savingBaja, setSavingBaja] = useState(false);
-  const [savingAlta, setSavingAlta] = useState(false);
-  const [solicitarBajaOpen, setSolicitarBajaOpen] = useState(false);
-  const [solicitarBajaMotivo, setSolicitarBajaMotivo] = useState("");
-  const [savingSolicitarBaja, setSavingSolicitarBaja] = useState(false);
+  const [bajaModalOpen, setBajaModalOpen] = useState(false);
+  const [bajaModalMode, setBajaModalMode] = useState("baja");
   const [rejectingBajaRequest, setRejectingBajaRequest] = useState(false);
   const [mgModalOpen, setMgModalOpen] = useState(false);
   const [mgSaving, setMgSaving] = useState(false);
@@ -967,7 +966,6 @@ export default function ServiceSheet() {
 
   async function emitirRisIngreso() {
     if (risBusy) return;
-    setActionsOpen(false);
     setErr("");
     setManualRisPrint(null);
     if (isRisRegistered(data)) {
@@ -976,6 +974,23 @@ export default function ServiceSheet() {
       setTimeout(() => setToastMsg(""), 2500);
       return;
     }
+    // Reimprimir un remito ya emitido no pasa por Bejerman de nuevo: la pestaña
+    // no tiene que prometer una emisión que no va a ocurrir.
+    const yaEmitido = isRisGenerated(data);
+    const reservedPrintWindow = reserveRisPrintWindow({
+      title: `${ingressDocumentName} - NEXORA`,
+      heading: yaEmitido ? `Reimprimiendo ${ingressDocumentName}` : `Emitiendo ${ingressDocumentName}`,
+      message: yaEmitido
+        ? `Buscando el PDF del ${ingressDocumentName}`
+        : `Emitiendo ${ingressDocumentName} en Bejerman`,
+      detail: `Esta pestaña abre la impresión del ${ingressDocumentName} cuando el PDF esté listo.`,
+      steps: yaEmitido ? PDF_REPRINT_STEPS : PDF_WAIT_STEPS,
+    });
+    const avisar = (status, patch = {}) => {
+      setRisProgressStatus(status);
+      reservedPrintWindow.update({ status, ...patch });
+    };
+    let printWindowUsed = false;
     const progressStartedAt = Date.now();
     try {
       setRisBusy(true);
@@ -983,7 +998,9 @@ export default function ServiceSheet() {
       let risSource = data;
       const existingRemito = risRemitoFrom(data);
       if (!isRisGenerated(risSource) && existingRemito) {
-        setRisProgressStatus(`Buscando PDF del ${ingressDocumentName}...`);
+        avisar(`Buscando PDF del ${ingressDocumentName}...`, {
+          detail: "NEXORA está consultando en Bejerman el estado del comprobante.",
+        });
         const status = await getIngresoRisStatus(id);
         risSource = { ...data, ...status, ris: status?.ris || status };
         await refreshIngreso({ strong: 1 });
@@ -995,11 +1012,17 @@ export default function ServiceSheet() {
         return;
       }
       if (!isRisGenerated(risSource)) {
-        setRisProgressStatus(`Validando ${ingressDocumentName}...`);
+        avisar(`Validando ${ingressDocumentName}...`, {
+          step: "emit",
+          detail: "NEXORA está revisando artículos, partidas y stock antes de emitir.",
+        });
         const preflight = await runRisPreflight({ silent: true });
         if (!preflight?.can_emit) return;
         const preflightDocumentName = ingressDocumentNameFor(preflight);
-        setRisProgressStatus(`Emitiendo ${preflightDocumentName} en Bejerman...`);
+        avisar(`Emitiendo ${preflightDocumentName} en Bejerman...`, {
+          step: "emit",
+          detail: "NEXORA está enviando el comprobante a Bejerman.",
+        });
         await waitForRisProgressPaint();
         risSource = await postIngresoRisEmitir(id);
         await refreshIngreso({ strong: 1 });
@@ -1018,12 +1041,18 @@ export default function ServiceSheet() {
       risWaitAbortRef.current = controller;
       setRisWaitStartedAt(Date.now());
       setRisWaitRemito(remito || "");
+      reservedPrintWindow.update({
+        step: "pdf",
+        documentLabel: remito ? `Remito ${remito}` : "",
+      });
       const blob = await waitForRisPdfBlob(id, risSource, {
         signal: controller.signal,
+        reservedWindow: reservedPrintWindow,
         onProgress: (progress) => setRisProgressStatus(progress?.status || `Preparando PDF del ${risDocumentName}...`),
       });
-      setRisProgressStatus("Abriendo impresión...");
-      const opened = openRisPrintablePdf(blob, risSource).opened;
+      avisar("Abriendo impresión...", { step: "print", state: "ready" });
+      const opened = openReservedRisPrintablePdf(reservedPrintWindow, blob, risSource).opened;
+      printWindowUsed = opened;
       if (opened) {
         setToastMsg(remito ? `${risDocumentName} ${remito} listo para imprimir.` : `${risDocumentName} listo para imprimir.`);
         setTimeout(() => setToastMsg(""), 2500);
@@ -1045,6 +1074,7 @@ export default function ServiceSheet() {
       }
       setErr(e?.message || `No se pudo emitir o reimprimir el ${ingressDocumentName}`);
     } finally {
+      if (!printWindowUsed) reservedPrintWindow.close();
       risWaitAbortRef.current = null;
       setRisWaitStartedAt(0);
       setRisWaitRemito("");
@@ -1077,7 +1107,6 @@ export default function ServiceSheet() {
     if (barcodeBusy) return;
     try {
       setBarcodeBusy(true);
-      setActionsOpen(false);
       const blob = await getIngresoBarcodeBlob(id);
       openPdfBlob(blob);
     } catch (e) {
@@ -1111,9 +1140,9 @@ export default function ServiceSheet() {
     setRelatedErr("");
     setRelatedLoading(false);
     setManualRisPrint(null);
-    setSolicitarBajaOpen(false);
-    setSolicitarBajaMotivo("");
-    setSavingSolicitarBaja(false);
+    setBajaModalOpen(false);
+    setBajaModalMode("baja");
+    setSavingBaja(false);
     setRejectingBajaRequest(false);
     setHistModalOpen(false);
     setHistSaving(false);
@@ -1216,18 +1245,6 @@ export default function ServiceSheet() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [relatedOpen]);
-
-  // Cerrar menú de acciones al hacer click fuera
-  useEffect(() => {
-    const handleClickOutside = (ev) => {
-      if (!actionsOpen) return;
-      if (actionsMenuRef.current && !actionsMenuRef.current.contains(ev.target)) {
-        setActionsOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [actionsOpen]);
 
   // Activar edicion basica
   function startEditBasics() {
@@ -1441,35 +1458,21 @@ export default function ServiceSheet() {
     [],
   );
 
-  async function ejecutarBaja({ askConfirm = true } = {}) {
-    if (savingBaja || savingAlta) return;
-    if (askConfirm) {
-      const ok = window.confirm("¿Dar de baja el equipo? Esto deja el ingreso como baja.");
-      if (!ok) return;
-    }
+  // Camino sin modal: lo usa "Aceptar" del modal de decisión, que ya es la
+  // confirmación. El menú de acciones va por DeviceBajaModal.
+  async function ejecutarBaja() {
+    if (savingBaja) return;
     try {
       setSavingBaja(true);
       const resp = await postBajaIngreso(id);
-      setActionsOpen(false);
       await refreshIngreso({ strong: 1 });
       setTabPersisted("principal");
       setErr("");
-      const job = resp?.bejerman_sync_job || {};
-      const jobStatus = String(job?.status || "").trim().toLowerCase();
-      const jobDetail = String(job?.last_error || job?.detail || "").trim();
-      let base;
-      if (jobStatus === "succeeded") {
-        base = "Baja registrada. La sincronización Bejerman fue completada.";
-      } else if (jobStatus === "blocked") {
-        base = `Baja registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`;
-      } else if (jobStatus === "not_queued") {
-        base = `Baja registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`;
-      } else if (jobStatus) {
-        base = "Baja registrada. La sincronización Bejerman quedó en cola.";
-      } else {
-        base = "Baja registrada.";
-      }
-      anunciarPatrimonial(base, resp?.patrimonial_email, "baja");
+      anunciarPatrimonial(
+        describeBejermanStockJob(resp?.bejerman_sync_job, "Baja"),
+        resp?.patrimonial_email,
+        "baja",
+      );
     } catch (e) {
       setNotice("");
       setErr(e?.message || "No se pudo marcar la baja");
@@ -1478,20 +1481,15 @@ export default function ServiceSheet() {
     }
   }
 
-  async function marcarBaja() {
-    await ejecutarBaja({ askConfirm: true });
-  }
-
   async function aceptarSolicitudBaja() {
-    await ejecutarBaja({ askConfirm: false });
+    await ejecutarBaja();
   }
 
   async function rechazarSolicitudBaja() {
-    if (rejectingBajaRequest || savingBaja || savingAlta) return;
+    if (rejectingBajaRequest || savingBaja) return;
     try {
       setRejectingBajaRequest(true);
       await postRechazarSolicitudBaja(id);
-      setActionsOpen(false);
       await refreshIngreso({ strong: 1 });
       setTabPersisted("principal");
       setErr("");
@@ -1499,72 +1497,6 @@ export default function ServiceSheet() {
       setErr(e?.message || "No se pudo rechazar la solicitud de baja");
     } finally {
       setRejectingBajaRequest(false);
-    }
-  }
-
-  async function marcarAlta() {
-    if (savingAlta || savingBaja) return;
-    const ok = window.confirm("Dar ALTA al equipo? Esta acción cambiará el ingreso a estado ingresado.");
-    if (!ok) return;
-    try {
-      setSavingAlta(true);
-      const resp = await postAltaIngreso(id);
-      setActionsOpen(false);
-      await refreshIngreso({ strong: 1 });
-      setTabPersisted("principal");
-      setErr("");
-      const job = resp?.bejerman_sync_job || {};
-      const jobStatus = String(job?.status || "").trim().toLowerCase();
-      const jobDetail = String(job?.last_error || job?.detail || "").trim();
-      let base;
-      if (jobStatus === "succeeded") {
-        base = "Alta registrada. La sincronización Bejerman fue completada.";
-      } else if (jobStatus === "blocked") {
-        base = `Alta registrada. La sincronización Bejerman quedó bloqueada${jobDetail ? `: ${jobDetail}` : "."} Revisá la cola Bejerman.`;
-      } else if (jobStatus === "not_queued") {
-        base = `Alta registrada. No se pudo encolar la sincronización Bejerman${jobDetail ? `: ${jobDetail}` : "."}`;
-      } else if (jobStatus) {
-        base = "Alta registrada. La sincronización Bejerman quedó en cola.";
-      } else {
-        base = "Alta registrada.";
-      }
-      anunciarPatrimonial(base, resp?.patrimonial_email, "alta");
-    } catch (e) {
-      setNotice("");
-      setErr(e?.message || "No se pudo marcar el alta");
-    } finally {
-      setSavingAlta(false);
-    }
-  }
-
-  async function enviarSolicitudBaja() {
-    if (savingSolicitarBaja) return;
-    const motivo = (solicitarBajaMotivo || "").trim();
-    if (!motivo) {
-      setErr("Debe indicar el motivo para solicitar la BAJA.");
-      return;
-    }
-    try {
-      setSavingSolicitarBaja(true);
-      const resp = await postSolicitarBaja(id, { motivo });
-      if (resp?.already_pending) {
-        setErr("Ya existe una solicitud de BAJA pendiente para este ingreso.");
-      } else if (resp?.already_baja) {
-        setErr("El ingreso ya está en estado BAJA.");
-      } else if (resp && resp.ok && resp.email_sent === false) {
-        setErr("Solicitud de BAJA registrada; no se pudo enviar el correo.");
-      } else {
-        setErr("");
-      }
-      setSolicitarBajaOpen(false);
-      setSolicitarBajaMotivo("");
-      setActionsOpen(false);
-      await refreshIngreso({ strong: 1 });
-      setTabPersisted("principal");
-    } catch (e) {
-      setErr(e?.message || "No se pudo solicitar la baja");
-    } finally {
-      setSavingSolicitarBaja(false);
     }
   }
 
@@ -1594,7 +1526,6 @@ export default function ServiceSheet() {
     setHistCustomerSearchOpen(false);
     setHistCustomerActiveIndex(0);
     setHistModalOpen(true);
-    setActionsOpen(false);
     if (!clientes.length) {
       setHistClientesLoading(true);
       loadClientesCatalogo()
@@ -1818,7 +1749,6 @@ export default function ServiceSheet() {
       numero_interno: String(data?.numero_interno || "").trim(),
     });
     setPropioMgModalOpen(true);
-    setActionsOpen(false);
   }
 
   async function guardarAltaMg() {
@@ -1923,9 +1853,11 @@ export default function ServiceSheet() {
           model_id: modeloIdSel || null,
         });
         if (typeof r?.within_365_days !== "boolean") {
-          setForm((f) => ({ ...f, garantia_fabrica: false }));
+          setFormBasics((s) => ({ ...(s || {}), garantia: false }));
           return;
         }
+        // Fecha estimada por remito: se deja como está y decide la persona.
+        if (r?.estimated === true) return;
         const enGarantia = r.within_365_days;
         setFormBasics((s) => ({ ...(s || {}), garantia: enGarantia }));
       } catch {}
@@ -2028,17 +1960,9 @@ export default function ServiceSheet() {
   const canAutorizarReparar = canRepairTransitions && isJefe(user);
   const canDarBaja = Boolean(canBajaAltaPermission && isOwnedByMgCustomer);
   const canDarAlta = Boolean(canBajaAltaPermission && estadoLower === "baja");
-  const canRequestBaja = Boolean(
-    isOwnedByMgCustomer && (
-      canEditBasics
-        || canEditDiagPermission
-        || canEditLocation
-        || canEditEntrega
-        || canManageDerivations
-        || canRepairTransitions
-      || canManagePresupuesto
-    )
-  );
+  // La lista de permisos que habilitan la solicitud vive en device-actions.js,
+  // que es el espejo de lo que exige IngresoSolicitarBajaView.
+  const canRequestBaja = Boolean(isOwnedByMgCustomer && canRequestDeviceBaja(user));
   const openReleaseOrderModal = (row = data) => {
     if (!canReleaseOrder || !row) return;
     setErr("");
@@ -2088,17 +2012,100 @@ export default function ServiceSheet() {
     risPreflightError ? { can_emit: false, detail: risPreflightError, issues: [] } : null
   );
   const maxDateOnly = maxLocalNow.slice(0, 10);
-  const hasMenuActions = Boolean(
-    (canSeeHistory && numeroSerie)
-      || canShowRisAction
-      || canPrintIngresoBarcode
-      || canDarBaja
-      || canDarAlta
-      || canSolicitarBaja
-      || canManageMgFromMenu
-      || canConvertToOwnMg
-      || canForceHistorical
-  );
+  // Descriptores para el ActionMenu compartido. Las acciones de baja/alta usan
+  // las mismas etiquetas que el listado de Equipos.
+  const menuActions = [
+    canSeeHistory && numeroSerie
+      ? { key: "ingresos_equipo", label: "Ingresos del equipo", tone: "default" }
+      : null,
+    canSeeHistory ? { key: "historial", label: "Historial de cambios", tone: "default" } : null,
+    canShowRisAction
+      ? {
+        key: "ris",
+        label: risBusy
+          ? `Preparando ${ingressDocumentName}...`
+          : data?.ris?.remito_number
+            ? `Ver ${ingressDocumentName}`
+            : `Emitir ${ingressDocumentName}`,
+        tone: "info",
+        disabled: risBusy,
+      }
+      : null,
+    canPrintIngresoBarcode
+      ? {
+        key: "barcode",
+        label: barcodeBusy ? "Preparando etiqueta..." : "Imprimir código de barras",
+        tone: "default",
+        disabled: barcodeBusy,
+      }
+      : null,
+    canForceHistorical
+      ? { key: "correccion_historica", label: "Corrección histórica", tone: "accent" }
+      : null,
+    canManageMgFromMenu
+      ? {
+        key: "venta_mg",
+        label: data?.mg_inactivo_venta ? "Venta MG / Reactivar" : "Venta del equipo (MG)",
+        tone: "warning",
+      }
+      : null,
+    canConvertToOwnMg ? { key: "alta_mg", label: "Alta de MG", tone: "success" } : null,
+    (canDarBaja || canDarAlta)
+      ? (estadoLower === "baja"
+        ? { key: "dar_alta", label: "Dar ALTA al equipo", tone: "success" }
+        : { key: "dar_baja", label: "Dar BAJA al equipo", tone: "danger" })
+      : null,
+    !canDarBaja && canSolicitarBaja
+      ? {
+        key: "solicitar_baja",
+        label: hasPendingBajaRequest ? "Solicitud de BAJA pendiente" : "Solicitar BAJA",
+        tone: hasPendingBajaRequest ? "warning" : "danger",
+        disabled: !canOpenSolicitarBaja,
+      }
+      : null,
+  ].filter(Boolean);
+
+  function runMenuAction(key) {
+    switch (key) {
+      case "ingresos_equipo":
+        setRelatedOpen(true);
+        break;
+      case "historial":
+        setTabPersisted("historial");
+        break;
+      case "ris":
+        emitirRisIngreso();
+        break;
+      case "barcode":
+        imprimirCodigoBarrasIngreso();
+        break;
+      case "correccion_historica":
+        abrirCorreccionHistorica();
+        break;
+      case "venta_mg":
+        setMgModalOpen(true);
+        break;
+      case "alta_mg":
+        abrirAltaMg();
+        break;
+      case "dar_baja":
+        setBajaModalMode("baja");
+        setBajaModalOpen(true);
+        break;
+      case "dar_alta":
+        setBajaModalMode("alta");
+        setBajaModalOpen(true);
+        break;
+      case "solicitar_baja":
+        setErr("");
+        setBajaModalMode("solicitar");
+        setBajaModalOpen(true);
+        break;
+      default:
+        break;
+    }
+  }
+
   const serialIdentifier = deviceIdentifierPartsOf(data, "-");
   const serialLabel = serialIdentifier.primary;
   const activeTab = isTabAllowed(tab) ? tab : "principal";
@@ -2138,141 +2145,11 @@ export default function ServiceSheet() {
             Hoja de servicio - OS: {formatOSHelper(data, id)} - NS/MG: {serialLabel}
           </h1>
         </div>
-        {hasMenuActions && (
-          <div className="relative" ref={actionsMenuRef}>
-            <button
-              type="button"
-              onClick={() => setActionsOpen((v) => !v)}
-              className="p-2 rounded border text-gray-600 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-400"
-              aria-haspopup="menu"
-              aria-expanded={actionsOpen ? "true" : "false"}
-              aria-label="Acciones"
-            >
-              <span aria-hidden className="text-xl leading-none">{"\u22EE"}</span>
-            </button>
-            {actionsOpen && (
-              <div className="absolute right-0 mt-2 w-56 rounded border bg-white shadow-lg z-50">
-                <div className="py-1">
-                  {canSeeHistory && numeroSerie && (
-                    <button
-                      type="button"
-                      onClick={() => { setRelatedOpen(true); setActionsOpen(false); }}
-                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                    >
-                      Ingresos del equipo
-                    </button>
-                  )}
-                  {canSeeHistory && (
-                    <button
-                      type="button"
-                      onClick={() => { setTabPersisted("historial"); setActionsOpen(false); }}
-                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                    >
-                      Historial de cambios
-                    </button>
-                  )}
-                  {canShowRisAction && (
-                    <button
-                      type="button"
-                      onClick={emitirRisIngreso}
-                      disabled={risBusy}
-                      className="w-full text-left px-3 py-2 text-sm text-sky-700 hover:bg-sky-50 disabled:opacity-60 disabled:cursor-not-allowed"
-                    >
-                      {risBusy
-                        ? `Preparando ${ingressDocumentName}...`
-                        : data?.ris?.remito_number
-                          ? `Ver ${ingressDocumentName}`
-                          : `Emitir ${ingressDocumentName}`}
-                    </button>
-                  )}
-                  {canPrintIngresoBarcode && (
-                    <button
-                      type="button"
-                      onClick={imprimirCodigoBarrasIngreso}
-                      disabled={barcodeBusy}
-                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed"
-                    >
-                      {barcodeBusy ? "Preparando etiqueta..." : "Imprimir código de barras"}
-                    </button>
-                  )}
-                  {canForceHistorical && (
-                    <button
-                      type="button"
-                      onClick={abrirCorreccionHistorica}
-                      className="w-full text-left px-3 py-2 text-sm text-indigo-700 hover:bg-indigo-50"
-                    >
-                      Corrección histórica
-                    </button>
-                  )}
-                  {canManageMgFromMenu && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMgModalOpen(true);
-                        setActionsOpen(false);
-                      }}
-                      className="w-full text-left px-3 py-2 text-sm text-amber-700 hover:bg-amber-50"
-                    >
-                      {data?.mg_inactivo_venta ? "Venta MG / Reactivar" : "Venta del equipo (MG)"}
-                    </button>
-                  )}
-                  {canConvertToOwnMg && (
-                    <button
-                      type="button"
-                      onClick={abrirAltaMg}
-                      className="w-full text-left px-3 py-2 text-sm text-emerald-700 hover:bg-emerald-50"
-                    >
-                      Alta de MG
-                    </button>
-                  )}
-                  {(canDarBaja || canDarAlta) && (
-                    estadoLower === "baja" ? (
-                      <button
-                        type="button"
-                        onClick={marcarAlta}
-                        disabled={savingAlta}
-                        className="w-full text-left px-3 py-2 text-sm text-emerald-700 hover:bg-emerald-50 disabled:opacity-60 disabled:cursor-not-allowed"
-                      >
-                        {savingAlta ? "Marcando alta..." : "Dar ALTA al equipo"}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={marcarBaja}
-                        disabled={savingBaja}
-                        className="w-full text-left px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed"
-                      >
-                        {savingBaja ? "Marcando baja..." : "Dar BAJA al equipo"}
-                      </button>
-                    )
-                  )}
-                  {!canDarBaja && canSolicitarBaja && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!canOpenSolicitarBaja) return;
-                        setErr("");
-                        setSolicitarBajaMotivo("");
-                        setSolicitarBajaOpen(true);
-                        setActionsOpen(false);
-                      }}
-                      disabled={!canOpenSolicitarBaja || savingSolicitarBaja}
-                      className={`w-full text-left px-3 py-2 text-sm disabled:opacity-60 disabled:cursor-not-allowed ${
-                        hasPendingBajaRequest
-                          ? "text-amber-700 bg-amber-50"
-                          : "text-red-700 hover:bg-red-50"
-                      }`}
-                    >
-                      {hasPendingBajaRequest
-                        ? "Solicitud de BAJA pendiente"
-                        : (savingSolicitarBaja ? "Enviando solicitud..." : "Solicitar BAJA")}
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+        <ActionMenu
+          items={menuActions}
+          onSelect={runMenuAction}
+          variant="bordered"
+        />
       </div>
       <ServiceCriticalStrip data={data} isCotizacion={isCotizacion} />
       {showRisErrorBanner && (
@@ -2558,70 +2435,17 @@ export default function ServiceSheet() {
         </div>
       )}
 
-      {solicitarBajaOpen && (
-        <div
-          className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-black/50 p-2 sm:p-4"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => { if (!savingSolicitarBaja) setSolicitarBajaOpen(false); }}
-        >
-          <div className="my-2 max-h-[calc(100dvh-1rem)] w-full max-w-xl overflow-y-auto rounded bg-white p-3 shadow-xl sm:my-4 sm:max-h-[calc(100dvh-2rem)] sm:p-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <h2 className="text-lg font-semibold">Solicitar BAJA</h2>
-                <div className="text-sm text-gray-600">
-                  OS: {formatOSHelper(data, id)} - NS: {serialLabel}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="text-sm text-gray-500 hover:text-gray-900 disabled:opacity-60"
-                onClick={() => setSolicitarBajaOpen(false)}
-                disabled={savingSolicitarBaja}
-              >
-                Cerrar
-              </button>
-            </div>
-
-            <label className="block">
-              <div className="text-xs text-gray-600 mb-1">Motivo (obligatorio)</div>
-              <textarea
-                className="border rounded p-2 w-full min-h-[120px]"
-                value={solicitarBajaMotivo}
-                onChange={(e) => setSolicitarBajaMotivo(e.target.value)}
-                placeholder="Describí por qué se solicita la BAJA del equipo"
-                disabled={savingSolicitarBaja}
-              />
-            </label>
-
-            {hasPendingBajaRequest && (
-              <div className="mt-2 text-xs text-amber-700">
-                Ya hay una solicitud pendiente
-                {data?.baja_solicitada_nombre ? ` de ${data.baja_solicitada_nombre}` : ""}
-                {data?.baja_solicitada_fecha ? ` (${formatDateTimeHelper(data.baja_solicitada_fecha)})` : ""}.
-              </div>
-            )}
-
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                className="px-3 py-2 rounded border bg-white hover:bg-gray-50 disabled:opacity-60"
-                onClick={() => setSolicitarBajaOpen(false)}
-                disabled={savingSolicitarBaja}
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                className="px-3 py-2 rounded bg-red-700 text-white hover:bg-red-800 disabled:opacity-60"
-                onClick={enviarSolicitudBaja}
-                disabled={savingSolicitarBaja || !String(solicitarBajaMotivo || "").trim() || hasPendingBajaRequest}
-              >
-                {savingSolicitarBaja ? "Enviando..." : "Enviar solicitud"}
-              </button>
-            </div>
-          </div>
-        </div>
+      {bajaModalOpen && (
+        <DeviceBajaModal
+          row={data}
+          ingresoId={id}
+          mode={bajaModalMode}
+          onClose={() => setBajaModalOpen(false)}
+          onDone={async () => {
+            await refreshIngreso({ strong: 1 });
+            setTabPersisted("principal");
+          }}
+        />
       )}
 
       {histModalOpen && canForceHistorical && (

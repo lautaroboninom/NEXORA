@@ -1,3 +1,4 @@
+import logging
 import re
 
 from django.db import connection
@@ -8,8 +9,15 @@ from rest_framework.views import APIView
 from .helpers import q, require_roles, _set_audit_user
 from .mg_state import resolve_mg_flags
 from ..bejerman_companies import company_for_key
-from ..bejerman_sales import bejerman_sale_response, find_latest_sale_by_serial, lookup_and_cache_sale_by_serial
-from ..bejerman_sdk import BejermanSDKClient
+from ..bejerman_sales import (
+    bejerman_sale_response,
+    find_latest_sale_by_serial_any_company,
+    lookup_and_cache_sale_by_serial,
+)
+from ..bejerman_sdk import BejermanSDKClient, is_bejerman_sales_query_schema_message
+
+
+logger = logging.getLogger(__name__)
 
 
 INGRESO_ESTADOS_NO_BLOQUEAN_ALTA = {
@@ -196,10 +204,21 @@ def _has_mg_schema() -> bool:
         return False
 
 
-def _fetch_device_by_code(raw: str, mg_select_sql: str):
+def _fetch_device_by_code(raw: str, mg_select_sql: str, device_id=None):
+    """Equipos que responden a ese código.
+
+    Devuelve ``(elegido, ns_key, candidatos)``. Desde que ``devices`` es único por número de
+    serie **más** tipo de equipo, un mismo número puede traer dos equipos distintos: el
+    calentador humidificador no tiene serie propia y entra con la del CPAP con el que vino.
+    Antes esto era un ``LIMIT 1`` que elegía cualquiera de los dos en silencio, y el
+    autocompletado llenaba la pantalla con el equipo equivocado.
+
+    ``device_id`` fija cuál de los candidatos se quiere, para cuando el operador ya eligió.
+    """
+
     raw = (raw or "").strip()
     if not raw:
-        return None, None
+        return None, None, []
     ns_key = re.sub(r"[\s-]+", "", raw).upper()
     mg_match = re.match(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", raw, re.IGNORECASE)
     mg_no_space = None
@@ -217,7 +236,7 @@ def _fetch_device_by_code(raw: str, mg_select_sql: str):
         wh.append("REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s")
         params.append(mg_no_space)
     if not wh:
-        return None, ns_key
+        return None, ns_key, []
 
     where_sql = " OR ".join(wh)
     sql = f"""
@@ -231,7 +250,7 @@ def _fetch_device_by_code(raw: str, mg_select_sql: str):
           COALESCE(b.nombre,'') AS marca,
           d.model_id,
           COALESCE(m.nombre,'') AS modelo,
-          COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+          COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, '') AS tipo_equipo,
           COALESCE(d.numero_serie,'') AS numero_serie,
           COALESCE(d.numero_interno,'') AS numero_interno,
           COALESCE(d.variante,'') AS variante,
@@ -246,10 +265,32 @@ def _fetch_device_by_code(raw: str, mg_select_sql: str):
         LEFT JOIN marcas b ON b.id = d.marca_id
         LEFT JOIN models m ON m.id = d.model_id
         WHERE ({where_sql})
-        LIMIT 1
+        ORDER BY LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))), d.id
     """
-    dev = q(sql, params, one=True)
-    return dev, ns_key
+    rows = q(sql, params) or []
+    if device_id:
+        # El operador ya eligió: se respeta su elección, pero sólo entre los equipos que de
+        # verdad responden a este código.
+        elegido = next((row for row in rows if int(row.get("id") or 0) == int(device_id)), None)
+        if elegido:
+            return elegido, ns_key, rows
+    return (rows[0] if rows else None), ns_key, rows
+
+
+def _device_candidate_summary(row: dict, selected_id) -> dict:
+    """Lo justo para que alguien pueda decidir cuál de los dos equipos es el que tiene enfrente."""
+
+    return {
+        "id": row.get("id"),
+        "tipo_equipo": row.get("tipo_equipo") or "",
+        "marca": row.get("marca") or "",
+        "modelo": row.get("modelo") or "",
+        "variante": row.get("variante") or "",
+        "numero_serie": row.get("numero_serie") or "",
+        "numero_interno": row.get("numero_interno") or "",
+        "customer_nombre": row.get("customer_nombre") or "",
+        "selected": int(row.get("id") or 0) == int(selected_id or 0),
+    }
 
 
 def _fetch_ingreso_en_curso(device_id: int):
@@ -333,7 +374,10 @@ def _company_key_from_request(request) -> str:
 def _find_sale_for_new_device(serial: str, user_id: int | None = None, company_key: str | None = None):
     company = company_for_key(company_key, default="SEPID")
     normalized_company_key = company.key if company else "SEPID"
-    sale_payload = find_latest_sale_by_serial(serial, company_key=normalized_company_key)
+    sale_payload = find_latest_sale_by_serial_any_company(
+        serial,
+        preferred_company_key=normalized_company_key,
+    )
     if sale_payload.get("found"):
         return sale_payload
     try:
@@ -342,10 +386,27 @@ def _find_sale_for_new_device(serial: str, user_id: int | None = None, company_k
             serial,
         )
     except Exception as exc:
+        logger.warning(
+            "scan_bejerman_sale_lookup_failed",
+            exc_info=True,
+            extra={"serial": serial, "company_key": normalized_company_key},
+        )
+        if is_bejerman_sales_query_schema_message(str(exc)):
+            lookup_error = (
+                "No se encontró el equipo en NEXORA. No se pudo consultar una venta asociada en Bejerman "
+                "por un error interno del servicio. "
+                "Podés completar los datos del equipo manualmente o reintentar en unos minutos."
+            )
+        else:
+            lookup_error = (
+                "No se encontró el equipo en NEXORA. No se pudo consultar una venta asociada en Bejerman "
+                "en este momento. "
+                "Podés completar los datos del equipo manualmente o reintentar en unos minutos."
+            )
         return {
             "found": False,
             "source": "bejerman_sale_live",
-            "lookup_error": f"No se pudo consultar Bejerman: {exc}",
+            "lookup_error": lookup_error,
         }
 
 
@@ -359,6 +420,10 @@ class ScanLookupView(APIView):
         if not code:
             return Response({"detail": "code requerido"}, status=400)
         company_key = _company_key_from_request(request)
+        try:
+            requested_device_id = int(request.GET.get("device_id") or 0) or None
+        except (TypeError, ValueError):
+            requested_device_id = None
 
         ingreso_id, source = _parse_ingreso_id(code)
         if ingreso_id:
@@ -400,7 +465,9 @@ class ScanLookupView(APIView):
               NULL AS mg_venta_usuario_id
             """
 
-        device, ns_key = _fetch_device_by_code(code, mg_select_sql)
+        device, ns_key, device_candidates = _fetch_device_by_code(
+            code, mg_select_sql, device_id=requested_device_id
+        )
         if not device:
             user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
             sale_payload = _find_sale_for_new_device(code, user_id=user_id, company_key=company_key)
@@ -428,7 +495,10 @@ class ScanLookupView(APIView):
         mg_owner_id = mg_owner["id"] if mg_owner else None
         flags = resolve_mg_flags(device, mg_owner_id)
 
-        sale_payload = find_latest_sale_by_serial(device.get("numero_serie") or code, company_key=company_key)
+        sale_payload = find_latest_sale_by_serial_any_company(
+            device.get("numero_serie") or code,
+            preferred_company_key=company_key,
+        )
         sale_response = bejerman_sale_response(
             device.get("numero_serie") or code,
             ns_key,
@@ -436,6 +506,9 @@ class ScanLookupView(APIView):
             create_customer=False,
         )
 
+        # `kind` sigue siendo "device" y `device` sigue trayendo uno solo: los consumidores que
+        # ya existen (el lector de QR) no tienen que saber nada de esto. Lo nuevo es la lista:
+        # quien pueda preguntar cuál de los dos es, que pregunte.
         return Response({
             "kind": "device",
             "companyKey": company_key,
@@ -448,6 +521,10 @@ class ScanLookupView(APIView):
             "rental_return_customer": _rental_return_customer(device, last_ingreso),
             "flags": flags,
             "bejerman_sale": (sale_response or {}).get("suggestion"),
+            "ambiguous": len(device_candidates) > 1 and not requested_device_id,
+            "device_candidates": [
+                _device_candidate_summary(row, device["id"]) for row in device_candidates
+            ],
         })
 
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from datetime import date, datetime, timedelta
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
+from django.utils.decorators import method_decorator
 from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
@@ -41,6 +42,7 @@ from .helpers import (
 from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
 from .mg_state import is_mg_owner_device, normalize_mg, resolve_mg_flags
 from ..rejected_budget import (
+    ensure_rejected_budget_charge_schema,
     get_rejected_quote_summary,
     get_stored_rejected_budget_fields,
     has_rejected_budget_charge_schema,
@@ -76,7 +78,7 @@ from ..serializers import (
 )
 from ..permissions import require_any_permission, user_has_any_permission, user_has_permission
 from ..warranty import compute_warranty_from_sale_date
-from ..bejerman_sales import find_latest_sale_by_serial
+from ..bejerman_sales import find_latest_remito_by_serial, find_latest_sale_by_serial
 from ..bejerman_companies import require_company
 from ..bejerman_ris import (
     BejermanRisError,
@@ -94,14 +96,24 @@ from ..bejerman_rental_remito import (
     execute_rental_remito_action,
     get_rental_remito_state,
 )
+from ..bejerman_ingreso_conflicts import (
+    attach_remito_number as attach_conflict_remito_number,
+    record_conflict,
+)
 from ..notifications import (
+    filter_email_recipients_by_preference,
     notify_estado_patrimonial,
     notify_ingreso_asignado,
+    notify_ingreso_conflicto_abierto,
     notify_solicitud_asignacion,
     notify_solicitud_baja,
 )
 from ..patrimonial_notifications import notify_patrimonial_email
-from ..repair_ready_notifications import notify_repair_ready_for_remito
+from ..repair_ready_notifications import (
+    notify_no_se_repara_for_remito,
+    notify_repair_ready_for_remito,
+    resolve_presupuesto_rechazado_reparado,
+)
 
 
 SALE_TICKET_STATES = ("vendido_pendiente_entrega", "vendido_entregado")
@@ -119,7 +131,12 @@ def _compute_factory_warranty_from_bejerman_sale(
     bejerman_sale_payload=None,
 ):
     serial = (numero_serie or "").strip()
-    sale_payload = find_latest_sale_by_serial(serial, company_key=company_key)
+    # La garantía de fábrica no depende de la empresa que factura la reparación: el mismo
+    # equipo puede haber salido por SEPID o por MG BIO (o por SEPID a MG BIO y de ahí al
+    # cliente final). Se busca la venta más reciente en todas las empresas; `company_key`
+    # queda sólo como dato de contexto para el meta de la respuesta.
+    sale_payload = find_latest_sale_by_serial(serial)
+    estimated = False
     if not sale_payload.get("found") and isinstance(bejerman_sale_payload, dict):
         payload_date = (
             bejerman_sale_payload.get("issueDate")
@@ -148,6 +165,16 @@ def _compute_factory_warranty_from_bejerman_sale(
                 "cacheSaleItemId": bejerman_sale_payload.get("cacheSaleItemId") or "",
                 "syncedAt": bejerman_sale_payload.get("syncedAt"),
             }
+
+    if not sale_payload.get("found"):
+        # Sin factura queda el remito de salida. No es la fecha de venta al cliente final
+        # (el equipo pudo pasar meses en el distribuidor), pero es anterior a ella: la
+        # garantía que sale de acá es la más corta posible, nunca una de más. Va marcada
+        # como estimada para que la decida una persona.
+        remito_payload = find_latest_remito_by_serial(serial)
+        if remito_payload.get("found"):
+            sale_payload = remito_payload
+            estimated = True
 
     if not sale_payload.get("found"):
         return {
@@ -184,6 +211,9 @@ def _compute_factory_warranty_from_bejerman_sale(
             "cacheSyncedAt": sale_payload.get("syncedAt"),
             "companyKey": sale_payload.get("companyKey") or company_key or "",
             "found": True,
+            "estimated": estimated,
+            "dateBasis": "remito" if estimated else "factura",
+            "documentType": sale_payload.get("documentType") or "",
         }
     )
     calc["meta"] = meta
@@ -265,16 +295,32 @@ def _equipolabel_row(r):
         return "-"
 
 
+def _mg_vendido(r) -> bool:
+    try:
+        mg_estado = (r.get("mg_estado") or "").strip().lower()
+        estado = (r.get("estado") or "").strip().lower()
+        return bool(r.get("mg_inactivo_venta")) or mg_estado == "inactivo_venta" or estado in SALE_TICKET_STATES
+    except Exception:
+        return False
+
+
 def _ns_label(r):
     try:
         interno = (r.get("numero_interno") or "").strip()
         serie = (r.get("numero_serie") or "").strip()
-        mg_estado = (r.get("mg_estado") or "").strip().lower()
-        estado = (r.get("estado") or "").strip().lower()
-        vendido = bool(r.get("mg_inactivo_venta")) or mg_estado == "inactivo_venta" or estado in SALE_TICKET_STATES
-        if vendido:
+        if _mg_vendido(r):
             return serie or interno or "-"
         return interno or serie or "-"
+    except Exception:
+        return "-"
+
+
+def _mg_label(r):
+    """MG para columnas de listado: el de un equipo vendido ya es histórico."""
+    try:
+        if _mg_vendido(r):
+            return "-"
+        return (r.get("numero_interno") or "").strip() or "-"
     except Exception:
         return "-"
 
@@ -1706,7 +1752,10 @@ class MarcarReparadoView(APIView):
                     actor_name=getattr(request.user, "nombre", ""),
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo avisar que la reparación quedó lista para remito",
+                    extra={"ingreso_id": ingreso_id},
+                )
 
         resp = {"ok": True}
         try:
@@ -1895,11 +1944,21 @@ class QuitarRepararView(APIView):
 
         presupuesto_actual = row.get("presupuesto_estado")
         estado_next, estado_transition = _estado_previo_a_estado(ingreso_id, "reparar")
-        presupuesto_next = _presupuesto_previo_en_misma_transicion(
-            ingreso_id,
-            estado_transition,
-            presupuesto_actual,
+        presupuesto_ya_aprobado_en_quote = (
+            (presupuesto_actual or "").strip().lower() == "aprobado"
+            and _latest_quote_is_approved(ingreso_id)
         )
+        if presupuesto_ya_aprobado_en_quote:
+            # El presupuesto está aprobado de verdad en `quotes` (aprobación formal,
+            # no un efecto colateral de marcar "reparar" a mano): sólo "Anular
+            # presupuesto" puede tocar eso, "Quitar reparar" no debe des-aprobarlo.
+            presupuesto_next = presupuesto_actual
+        else:
+            presupuesto_next = _presupuesto_previo_en_misma_transicion(
+                ingreso_id,
+                estado_transition,
+                presupuesto_actual,
+            )
 
         _set_audit_user(request)
         exec_void(
@@ -2516,7 +2575,12 @@ class IngresoCorreccionesHistoricasView(APIView):
 
     @transaction.atomic
     def post(self, request, ingreso_id: int):
-        require_permission(request, "action.ingreso.force_historical")
+        # La resolución de un conflicto de ingreso abierto entra por acá con la autorización
+        # ya chequeada por su propia vista (que además exige la prueba en Bejerman), igual que
+        # `_skip_ris_preflight` en el alta por lote. Sin ese permiso propio, sigue pidiendo
+        # el de correcciones históricas.
+        if not getattr(request, "_historical_correction_authorized", False):
+            require_permission(request, "action.ingreso.force_historical")
         _set_audit_user(request)
 
         if not _has_historical_corrections_schema():
@@ -3859,7 +3923,7 @@ class GeneralEquiposExportView(APIView):
                 r.get("equipo_variante") or "-",
                 r.get("estado") or "-",
                 r.get("numero_serie") or "-",
-                r.get("numero_interno") or "-",
+                _mg_label(r),
                 _dt_txt(r.get("fecha_ingreso")),
                 _dt_txt(r.get("fecha_liberacion")),
                 _dt_txt(r.get("fecha_entrega")),
@@ -4214,10 +4278,16 @@ class IngresoSolicitarAsignacionView(APIView):
                 fallback1 = getattr(settings, "COMPANY_FOOTER_EMAIL_2", None)
                 fallback2 = getattr(settings, "COMPANY_FOOTER_EMAIL", None)
                 recips = [x for x in [fallback1, fallback2] if x]
+            # El toggle "Mail" del centro de notificaciones manda sobre la lista
+            # de entorno: si el usuario apagó el correo, no se le escribe.
+            recips = filter_email_recipients_by_preference("solicitud_asignacion", recips)
             try:
                 notify_solicitud_asignacion(ingreso_id, uid, tecnico_nombre=tech_name, emails=recips)
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo crear la notificación de solicitud de asignación",
+                    extra={"ingreso_id": ingreso_id, "tecnico_id": uid},
+                )
 
             # Debug info (sin secretos)
             try:
@@ -4443,11 +4513,17 @@ class IngresoSolicitarBajaView(APIView):
                  ORDER BY 1
                 """
             ) or []
-            recips = [str(r.get("email") or "").strip() for r in rec_rows if str(r.get("email") or "").strip()]
+            campana = [str(r.get("email") or "").strip() for r in rec_rows if str(r.get("email") or "").strip()]
+            # La campana usa la lista completa de jefes; el correo, sólo los que
+            # dejaron prendido el canal Mail en el centro de notificaciones.
+            recips = filter_email_recipients_by_preference("solicitud_baja", campana)
             try:
-                notify_solicitud_baja(ingreso_id, solicitante_id=uid, motivo=motivo, emails=recips)
+                notify_solicitud_baja(ingreso_id, solicitante_id=uid, motivo=motivo, emails=campana)
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo crear la notificación de solicitud de baja",
+                    extra={"ingreso_id": ingreso_id, "solicitante_id": uid},
+                )
             try:
                 email_debug.update(
                     {
@@ -5051,7 +5127,7 @@ class CerrarReparacionView(APIView):
                 (request.data or {}).get("presupuesto_rechazado_cobro_neto"),
                 required=False,
             )
-            if has_rejected_budget_charge_schema():
+            if ensure_rejected_budget_charge_schema():
                 stored_fields = get_stored_rejected_budget_fields(ingreso_id)
                 if presupuesto_rechazado_cobro_neto is None:
                     presupuesto_rechazado_cobro_neto = stored_fields.get("presupuesto_rechazado_cobro_neto")
@@ -5114,6 +5190,19 @@ class CerrarReparacionView(APIView):
                     [r, ingreso_id],
                 )
         return Response({"ok": True})
+
+
+# El tipo de equipo forma parte de la identidad del equipo, no es sólo una etiqueta: un CPAP
+# y el calentador humidificador que lo acompaña comparten el número de serie (el humidificador
+# no trae uno propio), y sin el tipo son indistinguibles. Ver
+# apply_devices_ns_tipo_unique_schema y su par apply_models_tipo_equipo_unique_schema.
+def _tipo_equipo_de_modelo(modelo_id) -> str:
+    try:
+        model_id = int(modelo_id)
+    except (TypeError, ValueError):
+        return ""
+    row = q("SELECT COALESCE(tipo_equipo,'') AS tipo_equipo FROM models WHERE id=%s", [model_id], one=True)
+    return ((row or {}).get("tipo_equipo") or "").strip()
 
 
 class NuevoIngresoView(APIView):
@@ -5267,6 +5356,19 @@ class NuevoIngresoView(APIView):
 
         numero_serie = (equipo.get("numero_serie") or "").strip()
         ns_key = (numero_serie or "").replace(" ", "").replace("-", "").upper()
+        # El tipo sale del modelo elegido, que es la fuente de verdad del catálogo. El que
+        # manda la pantalla queda de respaldo para los modelos que todavía no lo tienen
+        # cargado: sin tipo, dos equipos que comparten serie vuelven a ser indistinguibles.
+        tipo_equipo = _tipo_equipo_de_modelo(equipo.get("modelo_id")) or (equipo.get("tipo_equipo") or "").strip()
+        tipo_key = tipo_equipo.strip().lower()
+        # El operador declaró en la pantalla que este equipo comparte el número con otro que
+        # ya está en la base (el humidificador que entra con la serie del CPAP).
+        otro_equipo_mismo_ns = bool(equipo.get("otro_equipo_mismo_ns"))
+        # El lote crea los ingresos uno por uno dentro de una misma transacción, así que los
+        # chequeos de duplicado ven lo que acaban de crear los equipos anteriores. Con el tipo
+        # en la clave, el humidificador ya no choca contra el CPAP con el que vino.
+        allow_open_duplicate = bool(getattr(request, "_allow_open_duplicate", False))
+        open_conflict = None
         # Cálculo preliminar de garantía de fábrica desde ventas Bejerman.
         try:
             wcalc = _compute_factory_warranty_from_bejerman_sale(
@@ -5351,34 +5453,38 @@ class NuevoIngresoView(APIView):
                        t.fecha_creacion
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
+                  LEFT JOIN models m ON m.id = d.model_id
                  WHERE d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
                    AND UPPER(REGEXP_REPLACE(d.numero_interno,
                        '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
                        UPPER(REGEXP_REPLACE(%s,
                        '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                   AND LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))) = %s
                    AND t.estado NOT IN ('entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                  ORDER BY t.id DESC
                  LIMIT 1
                 """,
-                [numero_interno],
+                [numero_interno, tipo_key],
                 one=True,
             )
             if dup_mg:
-                existing_id = dup_mg["id"]
-                fecha_ingreso_val = dup_mg.get("fecha_ingreso") or dup_mg.get("fecha_creacion")
-                try:
-                    fecha_ingreso_iso = fecha_ingreso_val.isoformat()
-                except Exception:
-                    fecha_ingreso_iso = fecha_ingreso_val
-                return Response({
-                    "ok": True,
-                    "ingreso_id": existing_id,
-                    "os": os_label(existing_id),
-                    "existing": True,
-                    "fecha_ingreso": fecha_ingreso_iso,
-                })
+                if not allow_open_duplicate:
+                    existing_id = dup_mg["id"]
+                    fecha_ingreso_val = dup_mg.get("fecha_ingreso") or dup_mg.get("fecha_creacion")
+                    try:
+                        fecha_ingreso_iso = fecha_ingreso_val.isoformat()
+                    except Exception:
+                        fecha_ingreso_iso = fecha_ingreso_val
+                    return Response({
+                        "ok": True,
+                        "ingreso_id": existing_id,
+                        "os": os_label(existing_id),
+                        "existing": True,
+                        "fecha_ingreso": fecha_ingreso_iso,
+                    })
+                open_conflict = dup_mg
 
-        if ns_key:
+        if ns_key and not open_conflict:
             dup = q(
                 """
                 SELECT t.id,
@@ -5386,28 +5492,32 @@ class NuevoIngresoView(APIView):
                        t.fecha_creacion
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
+                  LEFT JOIN models m ON m.id = d.model_id
                  WHERE REPLACE(REPLACE(UPPER(d.numero_serie),' ',''),'-','') = %s
+                   AND LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))) = %s
                    AND t.estado NOT IN ('entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                  ORDER BY t.id DESC
                  LIMIT 1
                 """,
-                [ns_key],
+                [ns_key, tipo_key],
                 one=True,
             )
             if dup:
-                existing_id = dup["id"]
-                fecha_ingreso_val = dup.get("fecha_ingreso") or dup.get("fecha_creacion")
-                try:
-                    fecha_ingreso_iso = fecha_ingreso_val.isoformat()
-                except Exception:
-                    fecha_ingreso_iso = fecha_ingreso_val
-                return Response({
-                    "ok": True,
-                    "ingreso_id": existing_id,
-                    "os": os_label(existing_id),
-                    "existing": True,
-                    "fecha_ingreso": fecha_ingreso_iso,
-                })
+                if not allow_open_duplicate:
+                    existing_id = dup["id"]
+                    fecha_ingreso_val = dup.get("fecha_ingreso") or dup.get("fecha_creacion")
+                    try:
+                        fecha_ingreso_iso = fecha_ingreso_val.isoformat()
+                    except Exception:
+                        fecha_ingreso_iso = fecha_ingreso_val
+                    return Response({
+                        "ok": True,
+                        "ingreso_id": existing_id,
+                        "os": os_label(existing_id),
+                        "existing": True,
+                        "fecha_ingreso": fecha_ingreso_iso,
+                    })
+                open_conflict = dup
 
         # Auto-chequeo de garantía de fábrica por N/S si el usuario no la marcó
         # no auto-calculo de garantia de fabrica por ahora (se toma del payload)
@@ -5421,11 +5531,32 @@ class NuevoIngresoView(APIView):
                 SELECT id, COALESCE(numero_serie,'') AS numero_serie, COALESCE(numero_interno,'') AS numero_interno
                   FROM devices
                  WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                   AND LOWER(TRIM(COALESCE(tipo_equipo,''))) = %s
                  LIMIT 1
                 """,
-                [ns_key],
+                [ns_key, tipo_key],
                 one=True,
             )
+            if not dev_ns and not otro_equipo_mismo_ns:
+                # Adopción de equipos anteriores al índice por tipo: si hay exactamente uno con
+                # esta serie y sin tipo cargado, es el mismo equipo y se lo adopta estampándole
+                # el tipo. Crear uno nuevo en su lugar partiría el historial en dos.
+                #
+                # Salvo que el operador haya dicho lo contrario: cuando declara que está
+                # cargando el otro equipo que comparte el número, adoptar sería convertir el
+                # CPAP de la base en su humidificador y llevarse su historial puesto.
+                legacy = q(
+                    """
+                    SELECT id, COALESCE(numero_serie,'') AS numero_serie, COALESCE(numero_interno,'') AS numero_interno
+                      FROM devices
+                     WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                       AND COALESCE(TRIM(tipo_equipo),'') = ''
+                     LIMIT 2
+                    """,
+                    [ns_key],
+                )
+                if len(legacy or []) == 1:
+                    dev_ns = legacy[0]
         if numero_interno:
             # Intento exacto primero
             dev_mg = q(
@@ -5461,6 +5592,25 @@ class NuevoIngresoView(APIView):
             "device_ns": dev_ns,
             "device_mg": dev_mg,
         }
+
+        # El número interno identifica una sola máquina. Si el operador declaró que éste es
+        # otro equipo con el mismo número de serie y aun así vino un MG que ya está tomado,
+        # ese MG es del equipo anterior: sin este corte el ingreso se colgaba del device
+        # equivocado y le reescribía marca, modelo y tipo.
+        if otro_equipo_mismo_ns and dev_mg and (not dev_ns or dev_ns["id"] != dev_mg["id"]):
+            logger.warning("MG tomado por otro equipo con la misma serie: %s", conflict_payload)
+            return Response(
+                {
+                    "detail": (
+                        "El número interno ingresado ya está asignado a otro equipo. "
+                        "El equipo que comparte el número de serie debe entrar sin ese número "
+                        "interno o con el suyo propio."
+                    ),
+                    "conflict_type": "MG_LINKED_TO_OTHER_NS",
+                    "payload": conflict_payload,
+                },
+                status=400,
+            )
 
         # Clasificar conflictos NS/MG
         if dev_ns and dev_mg and dev_ns["id"] != dev_mg["id"]:
@@ -5505,16 +5655,18 @@ class NuevoIngresoView(APIView):
         elif dev_mg:
             device_id = dev_mg["id"]
         else:
-            # No existe device; crear uno nuevo respetando constraints
+            # No existe device; crear uno nuevo respetando constraints.
+            # tipo_equipo va en el INSERT porque forma parte de la identidad: es la columna
+            # que el índice único usa junto al número de serie.
             if connection.vendor == "postgresql":
                 device_id = exec_returning(
                     """
-                    INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno)
-                    VALUES (%s, %s, %s, %s, NULLIF(%s,''))
+                    INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
+                    VALUES (%s, %s, %s, %s, NULLIF(%s,''), NULLIF(%s,''))
                     ON CONFLICT DO NOTHING
                     RETURNING id
                     """,
-                    [customer_id, equipo["marca_id"], equipo["modelo_id"], numero_serie, numero_interno],
+                    [customer_id, equipo["marca_id"], equipo["modelo_id"], numero_serie, numero_interno, tipo_equipo],
                 )
                 if not device_id and ns_key:
                     row_dev = None
@@ -5523,9 +5675,10 @@ class NuevoIngresoView(APIView):
                             """
                             SELECT id FROM devices
                              WHERE REPLACE(REPLACE(UPPER(numero_serie),' ',''),'-','') = %s
+                               AND LOWER(TRIM(COALESCE(tipo_equipo,''))) = %s
                              LIMIT 1
                             """,
-                            [ns_key],
+                            [ns_key, tipo_key],
                             one=True,
                         )
                         if row_dev:
@@ -5535,18 +5688,20 @@ class NuevoIngresoView(APIView):
             else:
                 exec_void(
                     """
-                    INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno)
-                    VALUES (%s, %s, %s, %s, NULLIF(%s,''))
+                    INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
+                    VALUES (%s, %s, %s, %s, NULLIF(%s,''), NULLIF(%s,''))
                     """,
-                    [customer_id, equipo["marca_id"], equipo["modelo_id"], numero_serie, numero_interno],
+                    [customer_id, equipo["marca_id"], equipo["modelo_id"], numero_serie, numero_interno, tipo_equipo],
                 )
                 device_id = last_insert_id()
         # Blindaje: siempre alinear marca/modelo del device con la selección actual.
         # Evita órdenes con cruces (marca de un lado y modelo de otra marca).
+        # El tipo se estampa junto con el modelo: es lo que le da identidad al device frente a
+        # otro con la misma serie, y lo que deja adoptado de verdad a un device legacy sin tipo.
         if device_id:
             exec_void(
-                "UPDATE devices SET marca_id=%s, model_id=%s WHERE id=%s",
-                [equipo["marca_id"], equipo["modelo_id"], device_id],
+                "UPDATE devices SET marca_id=%s, model_id=%s, tipo_equipo=COALESCE(NULLIF(%s,''), tipo_equipo) WHERE id=%s",
+                [equipo["marca_id"], equipo["modelo_id"], tipo_equipo, device_id],
             )
         # Actualizar snapshot de cliente del device al del ingreso actual
         if device_id and customer_id:
@@ -5731,7 +5886,24 @@ class NuevoIngresoView(APIView):
               [ingreso_id, acc_id, ref, desc]
             )
 
-        return Response({"ok": True, "ingreso_id": ingreso_id, "os": os_label(ingreso_id)}, status=201)
+        payload = {"ok": True, "ingreso_id": ingreso_id, "os": os_label(ingreso_id)}
+        if open_conflict:
+            # El ingreso se creó igual (lo pidió el lote con `_allow_open_duplicate`), pero
+            # arrastra un conflicto: el equipo ya tenía una OS abierta. Quien llamó decide qué
+            # hacer con el dato; acá sólo se informa.
+            fecha_conflicto = open_conflict.get("fecha_ingreso") or open_conflict.get("fecha_creacion")
+            try:
+                fecha_conflicto = fecha_conflicto.isoformat()
+            except Exception:
+                pass
+            payload["open_conflict"] = {
+                "conflicting_ingreso_id": open_conflict["id"],
+                "conflicting_os": os_label(open_conflict["id"]),
+                "conflicting_fecha_ingreso": fecha_conflicto,
+                "numero_serie": numero_serie,
+                "tipo_equipo": tipo_equipo,
+            }
+        return Response(payload, status=201)
 
 
 class NuevoIngresoLoteError(Exception):
@@ -5742,7 +5914,7 @@ class NuevoIngresoLoteError(Exception):
         self.item_index = item_index
 
 
-def _child_ingreso_request(request, payload):
+def _child_ingreso_request(request, payload, **flags):
     user = getattr(request, "user", None)
     child = SimpleNamespace(
         data=payload,
@@ -5751,6 +5923,7 @@ def _child_ingreso_request(request, payload):
         user_obj=getattr(request, "user_obj", None) or user,
         user_role=getattr(request, "user_role", None) or getattr(user, "rol", ""),
         _skip_ris_preflight=True,
+        **flags,
     )
     cached_permissions = getattr(request, "_effective_permissions_v2", None)
     if isinstance(cached_permissions, dict):
@@ -5758,13 +5931,144 @@ def _child_ingreso_request(request, payload):
     return child
 
 
-def _ris_lote_urls(first_ingreso_id):
+def _register_ingreso_conflicts(conflicts, request):
+    """Anota los conflictos del lote y avisa al jefe. Nunca corta la emisión.
+
+    Si esto falla, el remito igual tiene que salir: el precio de perder el aviso es mucho
+    menor que el de dejar al cliente sin comprobante.
+    """
+
+    if not conflicts:
+        return []
+    user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+    registered = []
+    for conflict in conflicts:
+        try:
+            conflict_id = record_conflict(
+                conflict["ingreso_id"],
+                conflict["conflicting_ingreso_id"],
+                numero_serie=conflict.get("numero_serie") or "",
+                tipo_equipo=conflict.get("tipo_equipo") or "",
+                user_id=user_id,
+            )
+        except Exception:
+            logger.exception(
+                "ingreso_open_conflict_record_failed",
+                extra={"ingreso_id": conflict.get("ingreso_id")},
+            )
+            continue
+        registered.append({**conflict, "conflict_id": conflict_id})
+        try:
+            notify_ingreso_conflicto_abierto(
+                conflict["ingreso_id"],
+                conflict["conflicting_ingreso_id"],
+            )
+        except Exception:
+            logger.exception(
+                "ingreso_open_conflict_notify_failed",
+                extra={"ingreso_id": conflict.get("ingreso_id")},
+            )
+    return registered
+
+
+def _ris_lote_urls(first_ingreso_id, remitos=None):
+    representatives = [
+        item.get("ingreso_id")
+        for item in (remitos or [])
+        if isinstance(item, dict) and item.get("ingreso_id")
+    ]
+    if len(representatives) > 1:
+        raw_ids = ",".join(str(item) for item in representatives)
+        return {
+            "pdf_url": f"/api/ingresos/ris/lote/pdf/?ids={raw_ids}",
+            "print_url": f"/api/ingresos/ris/lote/print/?ids={raw_ids}",
+        }
     return {
         "pdf_url": f"/api/ingresos/{first_ingreso_id}/ris/pdf/",
         "print_url": f"/api/ingresos/{first_ingreso_id}/ris/print/",
     }
 
 
+def _ris_lote_remitos(ingreso_ids, batch_result=None):
+    raw_entries = batch_result.get("remitos") if isinstance(batch_result, dict) else None
+    entries = []
+    for raw in raw_entries if isinstance(raw_entries, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        raw_ids = raw.get("ingreso_ids") or raw.get("ingresoIds") or []
+        clean_ids = []
+        for value in raw_ids if isinstance(raw_ids, (list, tuple)) else []:
+            try:
+                ingreso_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if ingreso_id > 0 and ingreso_id not in clean_ids:
+                clean_ids.append(ingreso_id)
+        if not clean_ids:
+            try:
+                ingreso_id = int(raw.get("ingreso_id") or raw.get("ingresoId") or 0)
+            except (TypeError, ValueError):
+                ingreso_id = 0
+            if ingreso_id > 0:
+                clean_ids.append(ingreso_id)
+        remito_number = str(raw.get("remito_number") or raw.get("remitoNumber") or "").strip()
+        if not clean_ids or not remito_number:
+            continue
+        representative_id = clean_ids[0]
+        entries.append(
+            {
+                "ingreso_id": representative_id,
+                "ingreso_ids": clean_ids,
+                "remito_number": remito_number,
+                "comprobante_tipo": raw.get("comprobante_tipo") or "RIS",
+                "line_count": raw.get("line_count") or raw.get("lineCount") or 0,
+                "equipment_count": len(clean_ids),
+                "pdf_status": raw.get("pdf_status") or "pending",
+                "pdf_url": f"/api/ingresos/{representative_id}/ris/pdf/",
+                "print_url": f"/api/ingresos/{representative_id}/ris/print/",
+            }
+        )
+    if entries:
+        return entries
+
+    grouped = {}
+    for ingreso_id in ingreso_ids:
+        status = get_ris_status_for_ingreso(ingreso_id)
+        remito_number = str(status.get("remito_number") or "").strip()
+        if not remito_number:
+            continue
+        entry = grouped.setdefault(
+            remito_number,
+            {
+                "ingreso_id": ingreso_id,
+                "ingreso_ids": [],
+                "remito_number": remito_number,
+                "comprobante_tipo": status.get("comprobante_tipo") or "RIS",
+                "line_count": 0,
+                "equipment_count": 0,
+                "pdf_status": status.get("pdf_status") or "pending",
+                "pdf_url": f"/api/ingresos/{ingreso_id}/ris/pdf/",
+                "print_url": f"/api/ingresos/{ingreso_id}/ris/print/",
+            },
+        )
+        entry["ingreso_ids"].append(ingreso_id)
+        entry["equipment_count"] = len(entry["ingreso_ids"])
+    return list(grouped.values())
+
+
+def _ris_lote_result_fields(ingreso_ids, first_ingreso_id, batch_result=None):
+    remitos = _ris_lote_remitos(ingreso_ids, batch_result)
+    remito_numbers = [item["remito_number"] for item in remitos]
+    return {
+        "multiple": len(remito_numbers) > 1,
+        "remitos": remitos,
+        "remito_numbers": remito_numbers,
+        "remitoNumbers": remito_numbers,
+        **_ris_lote_urls(first_ingreso_id, remitos),
+    }
+
+
+@method_decorator(transaction.non_atomic_requests, name="dispatch")
 class NuevoIngresoLoteView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -5796,6 +6100,7 @@ class NuevoIngresoLoteView(APIView):
         )
         ingreso_view = NuevoIngresoView()
         ingresos = []
+        conflicts = []
         try:
             with transaction.atomic():
                 for index, item in enumerate(raw_items):
@@ -5805,18 +6110,20 @@ class NuevoIngresoLoteView(APIView):
                     for key in shared_keys:
                         if key in data and key not in payload:
                             payload[key] = data.get(key)
-                    child_response = ingreso_view.post(_child_ingreso_request(request, payload))
+                    # Un equipo con la OS anterior todavía abierta ya no frena el lote: el
+                    # cliente está esperando el remito y el resto de los equipos no tienen la
+                    # culpa. Se crea igual y el conflicto queda anotado para resolverlo después.
+                    child_response = ingreso_view.post(
+                        _child_ingreso_request(request, payload, _allow_open_duplicate=True)
+                    )
                     body = getattr(child_response, "data", None) or {}
                     status_code = getattr(child_response, "status_code", 500)
                     if status_code >= 400:
                         raise NuevoIngresoLoteError(body, status_code, index)
-                    if isinstance(body, dict) and body.get("existing") is True:
-                        duplicate_payload = {
-                            **body,
-                            "detail": "El equipo ya tiene un ingreso abierto.",
-                        }
-                        raise NuevoIngresoLoteError(duplicate_payload, 409, index)
                     ingresos.append(dict(body))
+                    conflict = body.get("open_conflict") if isinstance(body, dict) else None
+                    if conflict and body.get("ingreso_id"):
+                        conflicts.append({**conflict, "ingreso_id": body["ingreso_id"], "item_index": index})
         except NuevoIngresoLoteError as exc:
             payload = {**exc.payload, "item_index": exc.item_index}
             return Response(payload, status=exc.status_code)
@@ -5826,7 +6133,10 @@ class NuevoIngresoLoteView(APIView):
         if not first_ingreso_id:
             return Response({"detail": "No se pudo identificar el primer ingreso creado."}, status=500)
 
-        urls = _ris_lote_urls(first_ingreso_id)
+        # Antes de emitir: los conflictos tienen que estar anotados, porque de esa tabla sale
+        # la decisión de imprimir el renglón sin número de OS.
+        conflicts = _register_ingreso_conflicts(conflicts, request)
+
         user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
         is_register_mode = ris_mode == RIS_DOCUMENT_MODE_REGISTER
         try:
@@ -5836,7 +6146,22 @@ class NuevoIngresoLoteView(APIView):
                 else emit_or_get_ris_batch(ingreso_ids, user_id=user_id)
             )
             ris = get_ris_status_for_ingreso(first_ingreso_id)
-            remito_number = ris.get("remito_number") or row.get("remito_number") or ""
+            lote_result = _ris_lote_result_fields(ingreso_ids, first_ingreso_id, row)
+            remito_number = (
+                (lote_result.get("remito_numbers") or [""])[0]
+                or ris.get("remito_number")
+                or row.get("remito_number")
+                or ""
+            )
+            if conflicts and remito_number:
+                # Deja rastro de en qué remito salió el equipo trabado, para poder ubicarlo
+                # cuando alguien vaya a resolver el conflicto.
+                try:
+                    attach_conflict_remito_number(
+                        [item["ingreso_id"] for item in conflicts], remito_number
+                    )
+                except Exception:
+                    logger.exception("ingreso_open_conflict_attach_remito_failed")
             response_payload = {
                 "ok": True,
                 "ingresos": ingresos,
@@ -5845,6 +6170,12 @@ class NuevoIngresoLoteView(APIView):
                 "ris": ris,
                 "document_mode": ris.get("document_mode") or ris_mode,
                 "pdf_status": ris.get("pdf_status") or ("not_applicable" if is_register_mode else "pending"),
+                "open_conflicts": conflicts,
+                **{
+                    key: value
+                    for key, value in lote_result.items()
+                    if not is_register_mode or key not in {"pdf_url", "print_url"}
+                },
             }
             if is_register_mode:
                 response_payload["detail"] = (
@@ -5853,13 +6184,14 @@ class NuevoIngresoLoteView(APIView):
                     else "Ingresos creados y remito registrado en Bejerman."
                 )
             else:
-                response_payload.update({"retry_after_ms": 2500, **urls})
+                response_payload["retry_after_ms"] = 2500
             return Response(
                 response_payload,
                 status=201,
             )
         except BejermanRisPreflightError as exc:
             ris = get_ris_status_for_ingreso(first_ingreso_id)
+            lote_result = _ris_lote_result_fields(ingreso_ids, first_ingreso_id)
             response_payload = {
                 "ok": True,
                 "ingresos": ingresos,
@@ -5868,13 +6200,20 @@ class NuevoIngresoLoteView(APIView):
                 "ris": ris,
                 "document_mode": ris.get("document_mode") or ris_mode,
                 "pdf_status": ris.get("pdf_status") or ("not_applicable" if is_register_mode else "pending"),
+                "open_conflicts": conflicts,
+                **{
+                    key: value
+                    for key, value in lote_result.items()
+                    if not is_register_mode or key not in {"pdf_url", "print_url"}
+                },
                 **exc.payload,
             }
             if not is_register_mode:
-                response_payload.update({"retry_after_ms": 2500, **urls})
+                response_payload["retry_after_ms"] = 2500
             return Response(response_payload, status=409)
         except BejermanRisError as exc:
             ris = get_ris_status_for_ingreso(first_ingreso_id)
+            lote_result = _ris_lote_result_fields(ingreso_ids, first_ingreso_id)
             action = "registrar remito" if is_register_mode else "emitir RIS"
             response_payload = {
                 "ok": True,
@@ -5884,10 +6223,16 @@ class NuevoIngresoLoteView(APIView):
                 "ris": ris,
                 "document_mode": ris.get("document_mode") or ris_mode,
                 "pdf_status": ris.get("pdf_status") or ("not_applicable" if is_register_mode else "pending"),
+                "open_conflicts": conflicts,
+                **{
+                    key: value
+                    for key, value in lote_result.items()
+                    if not is_register_mode or key not in {"pdf_url", "print_url"}
+                },
                 "detail": f"Ingresos creados. No se pudo {action}: {exc}",
             }
             if not is_register_mode:
-                response_payload.update({"retry_after_ms": 2500, **urls})
+                response_payload["retry_after_ms"] = 2500
             return Response(response_payload, status=201)
 
 
@@ -5896,22 +6241,37 @@ class GarantiaReparacionCheckView(APIView):
     def get(self, request):
         ns = (request.GET.get("numero_serie") or "").strip()
         mg = (request.GET.get("numero_interno") or request.GET.get("mg") or "").strip()
+        # El tipo de equipo desempata los equipos que comparten número de serie: el
+        # humidificador entra con la serie del CPAP y no hereda su garantía de reparación.
+        # Es opcional: sin tipo el chequeo se comporta como antes.
+        tipo_key = (request.GET.get("tipo_equipo") or "").strip().lower()
         if mg and not mg.upper().startswith(("MG", "NM", "NV", "CE")):
             mg = "MG " + mg
         if not ns and not mg:
             return Response({"within_90_days": False, "last_ingreso": None})
 
+        # Los equipos anteriores al índice por tipo pueden no tenerlo cargado: esos siguen
+        # contando, porque descartarlos sería inventar que no hay garantía.
+        tipo_filter_sql = """
+                   AND (
+                        %s = ''
+                     OR LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))) IN ('', %s)
+                   )
+        """
+
         last_out_candidates = []
         if ns:
             row_ns = q(
-                """
+                f"""
                 SELECT MAX(t.fecha_entrega) AS last_out
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
+                  LEFT JOIN models m ON m.id = d.model_id
                  WHERE d.numero_serie = %s
                    AND t.fecha_entrega IS NOT NULL
+                   {tipo_filter_sql}
                 """,
-                [ns],
+                [ns, tipo_key, tipo_key],
                 one=True,
             )
             last_ns = row_ns and row_ns.get("last_out")
@@ -5920,14 +6280,16 @@ class GarantiaReparacionCheckView(APIView):
 
         if mg:
             row_mg = q(
-                """
+                f"""
                 SELECT MAX(t.fecha_entrega) AS last_out
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
+                  LEFT JOIN models m ON m.id = d.model_id
                  WHERE d.numero_interno = %s
                    AND t.fecha_entrega IS NOT NULL
+                   {tipo_filter_sql}
                 """,
-                [mg],
+                [mg, tipo_key, tipo_key],
                 one=True,
             )
             last_mg = row_mg and row_mg.get("last_out")
@@ -5991,6 +6353,9 @@ class GarantiaFabricaCheckView(APIView):
                 company_key=request.GET.get("company_key") or request.GET.get("empresa_bejerman") or None,
             )
         except Exception:
+            # Sin este log un error de cálculo se ve idéntico a "no hay venta": las dos
+            # cosas devuelven garantía nula y el operador no tiene cómo distinguirlas.
+            logger.warning("garantia_fabrica_check_failed", exc_info=True, extra={"numeroSerie": numero_serie})
             calc = {"garantia": None, "fecha_venta": None, "vence_el": None, "meta": {}}
 
         en_garantia = calc.get("garantia")
@@ -6005,6 +6370,9 @@ class GarantiaFabricaCheckView(APIView):
             "days": calc.get("days"),
             "warranty_days": calc.get("days"),
             "found": bool(fecha_venta),
+            # La fecha sale de un remito, no de una factura: quien la consuma tiene que
+            # mostrarla como estimada y no dar la garantía por cierta.
+            "estimated": bool(meta.get("estimated")),
             "source": "bejerman_sale",
             "meta": meta,
         })
@@ -6173,7 +6541,7 @@ def build_ingreso_bejerman_estado(ingreso_id: int, actor_user_id: int | None) ->
         if release_remito:
             warning = (
                 f"Bejerman devolvió la partida {identifier} sin stock positivo, "
-                f"pero es lo esperado: el equipo ya fue liberado (RSS {release_remito})."
+                f"pero es lo esperado: el equipo ya fue liberado ({release_remito})."
             )
         else:
             ris_status = get_ris_status_for_ingreso(ingreso_id)
@@ -6900,15 +7268,26 @@ class IngresoDetalleView(APIView):
             ns = (d.get("numero_serie") or "").strip()
             needs_warranty_recompute = True
             ns_key = (ns or "").replace(" ", "").replace("-", "").upper()
-            # Reasociar el ingreso al device que ya tenga ese N/S (normalizado)
+            # Reasociar el ingreso al device que ya tenga ese N/S (normalizado) **y el mismo
+            # tipo de equipo**: la serie sola no identifica al equipo desde que el
+            # humidificador entra con la del CPAP. Sin el tipo, corregir la serie del
+            # humidificador lo colgaba del CPAP o daba "ya está asignado a otro equipo".
             if ns_key:
                 row_target = q(
                     """
-                    SELECT id FROM devices
-                     WHERE REPLACE(REPLACE(UPPER(numero_serie),' ','') ,'-','') = %s
+                    SELECT d.id FROM devices d
+                     LEFT JOIN models m ON m.id = d.model_id
+                     WHERE REPLACE(REPLACE(UPPER(d.numero_serie),' ','') ,'-','') = %s
+                       AND LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))) = (
+                             SELECT LOWER(TRIM(COALESCE(NULLIF(dd.tipo_equipo,''), mm.tipo_equipo, '')))
+                               FROM ingresos tt
+                               JOIN devices dd ON dd.id = tt.device_id
+                          LEFT JOIN models mm ON mm.id = dd.model_id
+                              WHERE tt.id = %s
+                           )
                      LIMIT 1
                     """,
-                    [ns_key],
+                    [ns_key, ingreso_id],
                     one=True,
                 )
                 if row_target:
@@ -7437,6 +7816,24 @@ class MarcarNoSeReparaView(APIView):
             "UPDATE ingresos SET estado='no_se_repara', resolucion='no_reparado', presupuesto_estado='no_aplica' WHERE id=%s",
             [ingreso_id],
         )
+
+        # El equipo ya no vuelve al banco: sólo falta la orden de salida.
+        try:
+            notify_no_se_repara_for_remito(ingreso_id, request=request)
+        except Exception:
+            logger.exception(
+                "No se pudo avisar que el equipo sale sin reparar",
+                extra={"ingreso_id": ingreso_id},
+            )
+        # Si el aviso venía de un rechazo con la reparación hecha, esto es
+        # justamente lo que se le había pedido al técnico: se cierra solo.
+        try:
+            resolve_presupuesto_rechazado_reparado(ingreso_id)
+        except Exception:
+            logger.exception(
+                "No se pudo cerrar el aviso de deshacer la reparación",
+                extra={"ingreso_id": ingreso_id},
+            )
         return Response({"ok": True, "estado": "no_se_repara", "resolucion": "no_reparado", "presupuesto_estado": "no_aplica"})
 
 

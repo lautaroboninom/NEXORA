@@ -7,11 +7,13 @@ import {
   postEntregarIngreso,
   postIngresoRisEmitir,
 } from "../lib/api";
-import { isPendingPdfError, openPdfBlob } from "../lib/pdf";
+import { isPendingPdfError, openPdfBlob, PDF_REPRINT_STEPS, PDF_WAIT_STEPS } from "../lib/pdf";
 import {
   isRisGenerated,
   isRisRegistered,
+  openReservedRisPrintablePdf,
   openRisPrintablePdf,
+  reserveRisPrintWindow,
   risRemitoFrom,
   waitForRisPdfBlob,
 } from "../lib/ris-print";
@@ -247,7 +249,10 @@ export default function QrScanCard({
     };
   }, []);
 
-  const lookupCode = async (value) => {
+  // `deviceId` fija cuál de los equipos que responden al código se quiere, para cuando el
+  // operador ya eligió: un mismo número de serie puede traer dos equipos distintos, porque el
+  // calentador humidificador no tiene serie propia y entra con la del CPAP.
+  const lookupCode = async (value, { deviceId = "" } = {}) => {
     const trimmed = (value || "").trim();
     if (!trimmed || loading) return;
     setLoading(true);
@@ -257,7 +262,7 @@ export default function QrScanCard({
     setDeliverOk("");
     setActionOk("");
     try {
-      const res = await lookupScan(trimmed);
+      const res = await lookupScan(trimmed, deviceId ? { device_id: deviceId } : {});
       setResult(res);
       setEntrega(emptyEntrega);
     } catch (e2) {
@@ -413,6 +418,8 @@ export default function QrScanCard({
   const ingreso = result?.ingreso || null;
   const device = result?.device || null;
   const flags = result?.flags || {};
+  // Los equipos que responden a ese mismo código. Con uno solo no hay nada que preguntar.
+  const deviceCandidates = Array.isArray(result?.device_candidates) ? result.device_candidates : [];
   const estado = String(ingreso?.estado || "").toLowerCase();
   const ingresoEnCurso = Boolean(ingreso?.ingreso_en_curso);
   const isLiberado = estado === "liberado" || estado === "vendido_pendiente_entrega";
@@ -521,12 +528,25 @@ export default function QrScanCard({
       setActionOk(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
       return;
     }
+    const yaEmitido = isRisGenerated(ingreso);
+    const reservedPrintWindow = reserveRisPrintWindow({
+      title: "Remito - NEXORA",
+      heading: yaEmitido ? "Reimprimiendo el remito" : "Emitiendo el remito",
+      message: yaEmitido ? "Buscando el PDF del remito" : "Emitiendo el remito en Bejerman",
+      detail: "Esta pestaña abre la impresión del remito cuando el PDF esté listo.",
+      steps: yaEmitido ? PDF_REPRINT_STEPS : PDF_WAIT_STEPS,
+    });
+    const avisar = (status, patch = {}) => {
+      setRisProgressStatus(status);
+      reservedPrintWindow.update({ status, ...patch });
+    };
+    let printWindowUsed = false;
     const progressStartedAt = Date.now();
     setRisBusy(true);
-    setRisProgressStatus(isRisGenerated(ingreso) ? "Buscando PDF del Remito..." : "Emitiendo Remito en Bejerman...");
+    setRisProgressStatus(yaEmitido ? "Buscando PDF del Remito..." : "Emitiendo Remito en Bejerman...");
     try {
       await waitForRisProgressPaint();
-      const risSource = isRisGenerated(ingreso) ? ingreso : await postIngresoRisEmitir(ingreso.id);
+      const risSource = yaEmitido ? ingreso : await postIngresoRisEmitir(ingreso.id);
       const remito = risRemitoFrom(risSource);
       if (isRisRegistered(risSource)) {
         setActionOk(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
@@ -536,12 +556,15 @@ export default function QrScanCard({
       const controller = new AbortController();
       risWaitAbortRef.current = controller;
       setRisWait({ startedAt: Date.now(), remito: remito || "" });
+      reservedPrintWindow.update({ step: "pdf", documentLabel: remito ? `Remito ${remito}` : "" });
       const blob = await waitForRisPdfBlob(ingreso.id, risSource, {
         signal: controller.signal,
+        reservedWindow: reservedPrintWindow,
         onProgress: (progress) => setRisProgressStatus(progress?.status || "Preparando PDF del Remito..."),
       });
-      setRisProgressStatus("Abriendo impresión...");
-      const opened = openRisPrintablePdf(blob, risSource).opened;
+      avisar("Abriendo impresión...", { step: "print", state: "ready" });
+      const opened = openReservedRisPrintablePdf(reservedPrintWindow, blob, risSource).opened;
+      printWindowUsed = opened;
       if (opened) {
         setActionOk(remito ? `Remito ${remito} listo para imprimir.` : "Remito listo para imprimir.");
       } else {
@@ -556,6 +579,7 @@ export default function QrScanCard({
         setErr(e2?.message || "No se pudo emitir o reimprimir el Remito.");
       }
     } finally {
+      if (!printWindowUsed) reservedPrintWindow.close();
       risWaitAbortRef.current = null;
       setRisWait({ startedAt: 0, remito: "" });
       await waitForRisProgressMinimum(progressStartedAt);
@@ -770,6 +794,39 @@ export default function QrScanCard({
 
             {!loading && result && (
               <div className="mt-4 space-y-4">
+                {deviceCandidates.length > 1 && (
+                  <div className="rounded border border-amber-300 bg-amber-50 p-3">
+                    <div className="font-semibold text-amber-900">Hay más de un equipo con ese número</div>
+                    <p className="mt-1 text-sm text-amber-800">
+                      Suele pasar con los accesorios que no traen serie propia y se cargan con la del
+                      equipo principal (el humidificador con la del CPAP). Abajo está el primero;
+                      elegí cuál escaneaste.
+                    </p>
+                    <div className="mt-2 flex flex-col gap-2">
+                      {deviceCandidates.map((candidate) => (
+                        <button
+                          key={candidate.id}
+                          type="button"
+                          className={`rounded border p-2 text-left text-sm hover:border-amber-500 hover:bg-amber-100 ${
+                            candidate.selected ? "border-amber-500 bg-white" : "border-amber-200 bg-white"
+                          }`}
+                          onClick={() => lookupCode(result?.raw || code, { deviceId: candidate.id })}
+                        >
+                          <div className="font-semibold text-gray-900">
+                            {[candidate.tipo_equipo, candidate.marca, candidate.modelo, candidate.variante]
+                              .filter(Boolean)
+                              .join(" - ") || "Equipo sin descripción"}
+                            {candidate.selected ? " (mostrando)" : ""}
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-600">
+                            {candidate.numero_interno && <span>Interno: {candidate.numero_interno}</span>}
+                            {candidate.customer_nombre && <span>Cliente: {candidate.customer_nombre}</span>}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {shouldShowIngresoCard && (
                   <div className={ingresoEnCurso ? "rounded border border-amber-300 bg-amber-50 p-3" : "rounded border p-3"}>
                     <div className="mb-2">

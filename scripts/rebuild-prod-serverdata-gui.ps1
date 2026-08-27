@@ -1,6 +1,7 @@
 ﻿param(
   [switch]$ValidateOnly,
-  [string]$PreviewPath = ""
+  [string]$PreviewPath = "",
+  [string]$AnchorBounds = ""
 )
 
 Set-StrictMode -Version Latest
@@ -64,12 +65,84 @@ $colorSuccess = [System.Drawing.ColorTranslator]::FromHtml("#16A36A")
 $colorError = [System.Drawing.ColorTranslator]::FromHtml("#D92D20")
 $colorLog = [System.Drawing.ColorTranslator]::FromHtml("#101828")
 
+function ConvertTo-AnchorRectangle {
+  param([string]$Anchor)
+
+  if ([string]::IsNullOrWhiteSpace($Anchor)) {
+    return $null
+  }
+  $parts = $Anchor -split ","
+  if ($parts.Count -ne 4) {
+    return $null
+  }
+  $numbers = New-Object System.Collections.Generic.List[int]
+  foreach ($part in $parts) {
+    $value = 0
+    if (-not [int]::TryParse($part.Trim(), [ref]$value)) {
+      return $null
+    }
+    [void]$numbers.Add($value)
+  }
+  if ($numbers[2] -le 0 -or $numbers[3] -le 0) {
+    return $null
+  }
+  return New-Object System.Drawing.Rectangle($numbers[0], $numbers[1], $numbers[2], $numbers[3])
+}
+
+function Get-InitialWindowLocation {
+  param(
+    [System.Drawing.Size]$WindowSize,
+    [string]$Anchor
+  )
+
+  # La ventana del rebuild no debe caer encima de quien la abrió (centro de control
+  # o consola de PowerShell): se ubica al costado y, si no entra, contra el borde
+  # más lejano de la pantalla.
+  $anchorBounds = ConvertTo-AnchorRectangle -Anchor $Anchor
+  if ($null -ne $anchorBounds) {
+    $area = [System.Windows.Forms.Screen]::FromRectangle($anchorBounds).WorkingArea
+  } else {
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  }
+
+  $gap = 16
+  if ($null -ne $anchorBounds) {
+    $x = $anchorBounds.Right + $gap
+    $y = $anchorBounds.Top
+    if (($x + $WindowSize.Width) -gt $area.Right) {
+      $x = $anchorBounds.Left - $gap - $WindowSize.Width
+      if ($x -lt $area.Left) {
+        # No entra a ningún costado: se va al borde más lejano del ancla para
+        # tapar lo menos posible.
+        $anchorCenter = $anchorBounds.Left + [int]($anchorBounds.Width / 2)
+        $areaCenter = $area.Left + [int]($area.Width / 2)
+        if ($anchorCenter -le $areaCenter) {
+          $x = $area.Right - $WindowSize.Width
+        } else {
+          $x = $area.Left
+        }
+        $y = $area.Top + 24
+      }
+    }
+  } else {
+    $x = $area.Right - $WindowSize.Width - 32
+    $y = $area.Top + [int](($area.Height - $WindowSize.Height) / 2)
+  }
+
+  $maxX = [Math]::Max($area.Left, ($area.Right - $WindowSize.Width))
+  $maxY = [Math]::Max($area.Top, ($area.Bottom - $WindowSize.Height))
+  $x = [Math]::Min([Math]::Max([int]$x, $area.Left), $maxX)
+  $y = [Math]::Min([Math]::Max([int]$y, $area.Top), $maxY)
+  return (New-Object System.Drawing.Point($x, $y))
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "NEXORA - Rebuild de producción"
-$form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $form.Size = New-Object System.Drawing.Size(900, 760)
 $form.MinimumSize = New-Object System.Drawing.Size(900, 760)
 $form.MaximumSize = New-Object System.Drawing.Size(900, 760)
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+$form.Location = Get-InitialWindowLocation -WindowSize $form.Size -Anchor $AnchorBounds
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
 $form.MaximizeBox = $false
 $form.BackColor = $colorBackground

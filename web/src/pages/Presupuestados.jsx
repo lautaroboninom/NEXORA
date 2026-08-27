@@ -1,4 +1,4 @@
-// web/src/pages/JefePresupuestos.jsx
+// web/src/pages/Presupuestados.jsx
 import { useEffect, useMemo, useState } from "react";
 import api, { downloadAuth, getBlob } from "../lib/api";
 import { useNavigate } from "react-router-dom";
@@ -15,15 +15,67 @@ import {
   tipoEquipoOf,
 } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import StatusChip from "../components/StatusChip.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ListToolbar from "../components/ListToolbar.jsx";
+import IngresoTable from "../components/IngresoTable.jsx";
 import useQueryState from "../hooks/useQueryState";
-import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
+import useRowSelection from "../hooks/useRowSelection";
+import useColumnFilters from "../hooks/useColumnFilters";
 import { reservePdfWindow } from "../lib/pdf";
-import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
-import { sortRows } from "../lib/table-sort";
-import { INGRESO_LIST_SORT_COLUMNS, ingresoSortOptions } from "../lib/ingreso-list-sort";
+import { estadoLabel } from "../lib/constants";
+import {
+  columnFilterOptions,
+  matchesColumnFilters,
+} from "../lib/ingreso-list-filters";
 
 // ENDPOINT para "presupuestados" (ya emitidos/enviados)
-const ENDPOINT = "/api/ingresos/presupuestados/"; // Ajustar si la API usa otra ruta.
+const ENDPOINT = "/api/ingresos/presupuestados/";
+
+const COLUMNS = [
+  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "cliente",
+    label: "Cliente",
+    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    filter: "text",
+  },
+  {
+    field: "equipo",
+    label: "Equipo",
+    render: (row) => catalogEquipmentLabel(row) ?? "-",
+    filter: "select",
+  },
+  {
+    field: "identificacion",
+    label: "Serie",
+    render: (row) => <DeviceIdentifier row={row} />,
+    filter: "text",
+  },
+  {
+    field: "estado",
+    label: "Estado",
+    render: (row) => <StatusChip value={row?.estado} />,
+    filter: "select",
+    filterLabel: (value) => estadoLabel(value),
+  },
+  {
+    field: "monto",
+    label: "Monto",
+    cellClassName: "whitespace-nowrap",
+    render: (row) =>
+      formatMoney(
+        row?.presupuesto_monto ?? row?.presupuesto_total ?? null,
+        row?.presupuesto_moneda ?? "ARS"
+      ),
+  },
+  {
+    field: "fecha_emision",
+    label: "Fecha emisión",
+    cellClassName: "whitespace-nowrap",
+    render: (row) => formatDateOnly(row?.presupuesto_fecha_emision ?? row?.fecha_emision),
+  },
+];
 
 export default function JefePresupuestos() {
   const { user } = useAuth();
@@ -31,12 +83,14 @@ export default function JefePresupuestos() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [bulkResultMsg, setBulkResultMsg] = useState("");
+  const [bulkFailures, setBulkFailures] = useState([]);
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
   const [busyId, setBusyId] = useState(null);
   const [bulkApproving, setBulkApproving] = useState(false);
-  const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [exporting, setExporting] = useState(false);
+  const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
+  const [filtersOpen, setFiltersOpen] = useState(() => activeCount > 0);
 
   const navigate = useNavigate();
   const canApprove = can(user, PERMISSION_CODES.ACTION_PRESUPUESTO_MANAGE);
@@ -72,8 +126,9 @@ export default function JefePresupuestos() {
 
   const filtered = useMemo(() => {
     const needle = norm(q);
-    if (!needle) return rows;
     return rows.filter((row) => {
+      if (!matchesColumnFilters(row, COLUMNS, filters)) return false;
+      if (!needle) return true;
       const campos = [
         formatOS(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
@@ -87,21 +142,9 @@ export default function JefePresupuestos() {
       ];
       return campos.some((c) => norm(c).includes(needle));
     });
-  }, [rows, q]);
+  }, [rows, q, filters]);
 
-  const displayRows = useMemo(
-    () => sortRows(filtered, sort, INGRESO_LIST_SORT_COLUMNS),
-    [filtered, sort]
-  );
-  const sortOptions = ingresoSortOptions([
-    "os",
-    "cliente",
-    "equipo",
-    "identificacion",
-    "estado",
-    "monto",
-    "fecha_emision",
-  ]);
+  const filterOptions = useMemo(() => columnFilterOptions(rows, COLUMNS), [rows]);
 
   const rowById = useMemo(() => {
     const map = new Map();
@@ -113,33 +156,8 @@ export default function JefePresupuestos() {
     return map;
   }, [rows]);
 
-  const visibleIds = useMemo(() => new Set(filtered.map((r) => ingresoIdOf(r))), [filtered]);
-  const allVisibleSelected = useMemo(() => {
-    if (visibleIds.size === 0) return false;
-    for (const id of visibleIds) if (!selectedIds.has(id)) return false;
-    return true;
-  }, [visibleIds, selectedIds]);
-
-  const toggleSelectAllVisible = () => {
-    if (bulkApproving) return;
-    const next = new Set(selectedIds);
-    if (allVisibleSelected) {
-      for (const id of visibleIds) next.delete(id);
-    } else {
-      for (const id of visibleIds) next.add(id);
-    }
-    setSelectedIds(next);
-  };
-
-  const toggleRow = (e, row) => {
-    e.stopPropagation();
-    if (bulkApproving) return;
-    const id = ingresoIdOf(row);
-    const next = new Set(selectedIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelectedIds(next);
-  };
+  const visibleIds = useMemo(() => filtered.map(ingresoIdOf).filter(Boolean), [filtered]);
+  const selection = useRowSelection(visibleIds);
 
   async function exportByIds(ids, fnameHint = "presupuestados") {
     if (!ids || ids.length === 0) return;
@@ -160,28 +178,8 @@ export default function JefePresupuestos() {
     navigate(`/ingresos/${id}`);
   };
 
-  const onRowKeyDown = (e, row) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      go(row);
-    }
-  };
-
   function isReparado(row) {
     return norm(row?.estado) === "reparado";
-  }
-
-  function closeIfOpen(win) {
-    if (!win) return;
-    try {
-      if (typeof win.close === "function") {
-        win.close();
-      } else if (!win.closed) {
-        win.close();
-      }
-    } catch (_) {
-      // noop
-    }
   }
 
   function remitosSalidaPath(ingresoIds) {
@@ -194,8 +192,13 @@ export default function JefePresupuestos() {
   async function openRemitosSalida(ingresoIds, reservedWindow) {
     const ids = (ingresoIds || []).filter(Boolean);
     if (ids.length === 0) return [];
+    reservedWindow?.update?.({
+      status: ids.length > 1 ? "Generando las órdenes de salida" : "Generando la orden de salida",
+      step: "pdf",
+    });
     const blob = await getBlob(remitosSalidaPath(ids));
     if (!(blob instanceof Blob)) throw new Error("La respuesta no fue un PDF");
+    reservedWindow?.update?.({ status: "Abriendo impresión", step: "print", state: "ready" });
     const opened = reservedWindow?.open ? reservedWindow.open(blob) : false;
     if (!opened) throw new Error("El navegador bloqueó la apertura de la orden de salida.");
     return ids;
@@ -227,14 +230,21 @@ export default function JefePresupuestos() {
 
     let reservedPrintWindow = null;
     if (shouldPrint) {
+      const variasOrdenes = reparadoRows.length > 1;
       reservedPrintWindow = reservePdfWindow({
-        title: reparadoRows.length > 1 ? "Órdenes de salida" : "Orden de salida",
-        message:
-          reparadoRows.length > 1
-            ? "Preparando órdenes de salida..."
-            : "Preparando orden de salida...",
+        title: variasOrdenes ? "Órdenes de salida - NEXORA" : "Orden de salida - NEXORA",
+        heading: variasOrdenes ? "Preparando las órdenes de salida" : "Preparando la orden de salida",
+        message: variasOrdenes
+          ? `NEXORA está aprobando ${reparadoRows.length} presupuestos`
+          : "NEXORA está aprobando el presupuesto",
+        detail: "Esta pestaña muestra la orden de salida cuando el PDF esté listo.",
         fallbackMessage:
           "NEXORA sigue preparando el PDF de la orden de salida. Si ya terminó, puede cerrar esta pestaña y reintentar la impresión.",
+        // La orden de salida la arma NEXORA: acá no hay emisión en Bejerman.
+        steps: [
+          { id: "pdf", label: variasOrdenes ? "Generando las órdenes de salida" : "Generando la orden de salida" },
+          { id: "print", label: "Abriendo la impresión" },
+        ],
       });
     }
 
@@ -261,10 +271,10 @@ export default function JefePresupuestos() {
         for (const ingresoId of idsToPrint) {
           printFailures.push({ ingresoId, error: e });
         }
-        closeIfOpen(reservedPrintWindow);
+        reservedPrintWindow?.close?.();
       }
     } else {
-      closeIfOpen(reservedPrintWindow);
+      reservedPrintWindow?.close?.();
     }
 
     return {
@@ -288,6 +298,7 @@ export default function JefePresupuestos() {
       setBusyId(ingresoId);
       setErr("");
       setBulkResultMsg("");
+      setBulkFailures([]);
       const result = await approveRows([row], {
         askPrint: true,
         confirmPrintMessage: "Este equipo ya está reparado. ¿Imprimir orden de salida?",
@@ -311,22 +322,18 @@ export default function JefePresupuestos() {
   }
 
   async function aprobarSeleccion() {
-    if (!canApprove || bulkApproving || busyId !== null || selectedIds.size === 0) return;
-    const selectedSnapshot = Array.from(selectedIds);
+    if (!canApprove || bulkApproving || busyId !== null || selection.count === 0) return;
+    const selectedSnapshot = Array.from(selection.ids);
     setErr("");
     setBulkResultMsg("");
+    setBulkFailures([]);
     setBulkApproving(true);
     try {
-      const selectedRows = [];
-      const missingIds = [];
-      for (const id of selectedSnapshot) {
-        const row = rowById.get(id);
-        if (!row) {
-          missingIds.push(id);
-          continue;
-        }
-        selectedRows.push(row);
-      }
+      // En el orden de la lista, no en el que se fueron tildando: ese orden
+      // es el que termina teniendo el PDF de las órdenes de salida.
+      const selectedRows = selection.selectedRowsIn(rows);
+      const presentes = new Set(selectedRows.map(ingresoIdOf));
+      const missingIds = selectedSnapshot.filter((id) => !presentes.has(id));
 
       const reparadosCount = selectedRows.filter(isReparado).length;
       const result = await approveRows(selectedRows, {
@@ -337,20 +344,35 @@ export default function JefePresupuestos() {
 
       await load();
 
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        for (const id of result.approvedIds) next.delete(id);
-        for (const id of missingIds) next.delete(id);
-        return next;
-      });
+      selection.remove([...result.approvedIds, ...missingIds]);
+
+      // El detalle por OS es lo único accionable cuando falla parte del lote:
+      // saber que "fallaron 3" no dice cuáles hay que reintentar ni por qué.
+      const failures = [
+        ...missingIds.map((id) => ({
+          id,
+          detail: "Ya no está en la lista: puede haber cambiado de estado.",
+        })),
+        ...result.approvalFailures.map((item) => ({
+          id: item.ingresoId,
+          detail: item.error?.message || "No se pudo aprobar el presupuesto.",
+        })),
+        ...result.printFailures.map((item) => ({
+          id: item.ingresoId,
+          detail: item.error?.message || "No se pudo imprimir la orden de salida.",
+        })),
+      ];
+      setBulkFailures(failures);
 
       const summary = [
-        `Total: ${selectedSnapshot.length}.`,
-        `Aprobados OK: ${result.approvedIds.length}.`,
+        `Elegidos: ${selectedSnapshot.length}.`,
+        `Aprobados: ${result.approvedIds.length}.`,
         `Órdenes de salida impresas: ${result.printedIds.length}.`,
-        `Fallos de aprobación: ${totalApprovalFailures}.`,
-        `Fallos de impresión: ${result.printFailures.length}.`,
       ];
+      if (totalApprovalFailures > 0) summary.push(`Fallos de aprobación: ${totalApprovalFailures}.`);
+      if (result.printFailures.length > 0) {
+        summary.push(`Fallos de impresión: ${result.printFailures.length}.`);
+      }
       if (reparadosCount > 0 && !result.shouldPrint) {
         summary.push("Impresión cancelada por el usuario.");
       }
@@ -364,227 +386,114 @@ export default function JefePresupuestos() {
 
   const approvingBusy = bulkApproving || busyId !== null;
 
+  const rowActions = (row) => (
+    <button
+      className="btn"
+      type="button"
+      onClick={() => aprobar(row)}
+      disabled={approvingBusy}
+      aria-busy={approvingBusy ? "true" : "false"}
+      title="Aprobar presupuesto"
+    >
+      Aprobar
+    </button>
+  );
+
   return (
     <div className="card">
       <div className="h1 mb-3">Presupuestados</div>
 
-      {err && (
-        <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">
-          {err}
-        </div>
-      )}
+      <AlertBanner tone="error">{err}</AlertBanner>
 
       {bulkResultMsg && (
-        <div className="bg-blue-100 border border-blue-300 text-blue-800 p-2 rounded mb-3">
-          {bulkResultMsg}
-        </div>
+        <AlertBanner tone={bulkFailures.length > 0 ? "warning" : "info"}>
+          <div>{bulkResultMsg}</div>
+          {bulkFailures.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-sm">
+              {bulkFailures.map((item) => (
+                <li key={`fail-${item.id}`}>
+                  <span className="font-medium">
+                    {formatOS(rowById.get(item.id) || { id: item.id })}
+                  </span>
+                  : {item.detail}
+                </li>
+              ))}
+            </ul>
+          )}
+        </AlertBanner>
       )}
 
-      <div className="mb-3 flex flex-col gap-2 lg:flex-row lg:items-center">
-        <input
-          type="text"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Filtrar por OS, cliente, equipo, estado, monto"
-          className="border rounded p-2 w-full max-w-md"
-          aria-label="Filtrar presupuestados"
-        />
+      <ListToolbar
+        q={q}
+        onQChange={setQ}
+        searchPlaceholder="Filtrar por OS, cliente, equipo, estado, monto"
+        searchLabel="Filtrar presupuestados"
+        onReload={load}
+        loading={loading || bulkApproving}
+        showFilterToggle
+        filtersOpen={filtersOpen}
+        onToggleFilters={() => setFiltersOpen((open) => !open)}
+        activeFilterCount={activeCount}
+        onClearFilters={clearFilters}
+        selectedCount={selection.count}
+      >
         <button
           className="btn"
-          onClick={load}
-          title="Recargar lista"
-          disabled={loading || bulkApproving}
-          aria-busy={loading ? "true" : "false"}
+          type="button"
+          onClick={() => exportByIds(filtered.map(ingresoIdOf), `presupuestados_filtrados_${filtered.length}`)}
+          disabled={exporting || bulkApproving || filtered.length === 0}
+          aria-busy={exporting ? "true" : "false"}
+          title="Exportar todos los filtrados a Excel"
         >
-          Recargar
+          Exportar filtrados
         </button>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:ml-auto">
+        <button
+          className="btn"
+          type="button"
+          onClick={() =>
+            exportByIds(
+              selection.selectedRowsIn(rows).map(ingresoIdOf),
+              `presupuestados_seleccion_${selection.count}`
+            )
+          }
+          disabled={exporting || bulkApproving || selection.count === 0}
+          aria-busy={exporting ? "true" : "false"}
+          title="Exportar elegidos a Excel"
+        >
+          Exportar elegidos
+        </button>
+        {canApprove ? (
           <button
             className="btn"
-            onClick={() => exportByIds(filtered.map(ingresoIdOf), `presupuestados_filtrados_${filtered.length}`)}
-            disabled={exporting || bulkApproving || filtered.length === 0}
-            aria-busy={exporting ? "true" : "false"}
-            title="Exportar todos los filtrados a Excel"
+            type="button"
+            onClick={aprobarSeleccion}
+            disabled={approvingBusy || selection.count === 0}
+            aria-busy={bulkApproving ? "true" : "false"}
+            title="Aprobar elegidos"
           >
-            Exportar filtrados
+            {bulkApproving ? "Aprobando..." : "Aprobar elegidos"}
           </button>
-          <button
-            className="btn"
-            onClick={() => exportByIds(Array.from(selectedIds), `presupuestados_seleccion_${selectedIds.size}`)}
-            disabled={exporting || bulkApproving || selectedIds.size === 0}
-            aria-busy={exporting ? "true" : "false"}
-            title="Exportar elegidos a Excel"
-          >
-            Exportar elegidos
-          </button>
-          {canApprove ? (
-            <button
-              className="btn"
-              onClick={aprobarSeleccion}
-              disabled={approvingBusy || selectedIds.size === 0}
-              aria-busy={bulkApproving ? "true" : "false"}
-              title="Aprobar elegidos"
-            >
-              {bulkApproving ? "Aprobando..." : "Aprobar elegidos"}
-            </button>
-          ) : null}
-        </div>
-      </div>
+        ) : null}
+      </ListToolbar>
 
-      {loading ? (
-        "Cargando..."
-      ) : displayRows.length === 0 ? (
-        <div className="text-sm text-gray-500">No hay presupuestos emitidos/enviados.</div>
-      ) : (
-        <div>
-          <MobileSortControl sort={sort} onSortChange={setSort} options={sortOptions} className="mb-3" />
-          <MobileDataList>
-            {displayRows.map((row) => {
-              const moneda = row?.presupuesto_moneda ?? "ARS";
-              const monto = row?.presupuesto_monto ?? row?.presupuesto_total ?? null;
-              const ingresoId = ingresoIdOf(row);
-              return (
-                <MobileDataCard
-                  key={ingresoId}
-                  onClick={() => go(row)}
-                  onKeyDown={(e) => onRowKeyDown(e, row)}
-                  className="cursor-pointer hover:bg-gray-50"
-                  role="link"
-                  tabIndex={0}
-                  aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                  data-testid={`row-mobile-${ingresoId}`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
-                    <span onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(ingresoId)}
-                        onChange={(e) => toggleRow(e, row)}
-                        disabled={bulkApproving}
-                        aria-label={`Seleccionar ${formatOS(row)}`}
-                        className="h-5 w-5"
-                      />
-                    </span>
-                  </div>
-                  <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                    <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
-                    <MobileDataField label="Equipo" value={catalogEquipmentLabel(row) ?? "-"} />
-                    <MobileDataField label="Serie">
-                      <DeviceIdentifier row={row} />
-                    </MobileDataField>
-                    <MobileDataField label="Estado" value={row?.estado ?? "-"} />
-                    <MobileDataField label="Monto" value={formatMoney(monto, moneda)} />
-                    <MobileDataField label="Fecha emisión" value={formatDateOnly(row?.presupuesto_fecha_emision ?? row?.fecha_emision)} />
-                  </div>
-                  {canApprove ? (
-                    <button
-                      className="btn mt-3 w-full justify-center"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        aprobar(row);
-                      }}
-                      disabled={approvingBusy}
-                      aria-busy={approvingBusy ? "true" : "false"}
-                      title="Aprobar presupuesto"
-                    >
-                      Aprobar
-                    </button>
-                  ) : null}
-                </MobileDataCard>
-              );
-            })}
-          </MobileDataList>
-          <DesktopTableWrap>
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="text-left">
-                <th scope="col" className="p-2">
-                  <input
-                    type="checkbox"
-                    checked={allVisibleSelected}
-                    onChange={toggleSelectAllVisible}
-                    disabled={bulkApproving}
-                    aria-label="Seleccionar todos los visibles"
-                  />
-                </th>
-                <SortableTh field="os" sort={sort} onSortChange={setSort} className="p-2">OS</SortableTh>
-                <SortableTh field="cliente" sort={sort} onSortChange={setSort} className="p-2">Cliente</SortableTh>
-                <SortableTh field="equipo" sort={sort} onSortChange={setSort} className="p-2">Equipo</SortableTh>
-                <SortableTh field="identificacion" sort={sort} onSortChange={setSort} className="p-2">Serie</SortableTh>
-                <SortableTh field="estado" sort={sort} onSortChange={setSort} className="p-2">Estado</SortableTh>
-                <SortableTh field="monto" sort={sort} onSortChange={setSort} className="p-2">Monto</SortableTh>
-                <SortableTh field="fecha_emision" sort={sort} onSortChange={setSort} className="p-2">Fecha emisión</SortableTh>
-                <th scope="col" className="p-2 text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map((row) => {
-                const moneda = row?.presupuesto_moneda ?? "ARS";
-                const monto = row?.presupuesto_monto ?? row?.presupuesto_total ?? null;
-                const ingresoId = ingresoIdOf(row);
-
-                return (
-                  <tr
-                    key={ingresoId}
-                    onClick={() => go(row)}
-                    onKeyDown={(e) => onRowKeyDown(e, row)}
-                    className="hover:bg-gray-50 cursor-pointer border-t"
-                    role="link"
-                    tabIndex={0}
-                    aria-label={`Abrir hoja de servicio de ${formatOS(row)}`}
-                    data-testid={`row-${ingresoId}`}
-                  >
-                    <td className="p-2" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(ingresoId)}
-                        onChange={(e) => toggleRow(e, row)}
-                        disabled={bulkApproving}
-                        aria-label={`Seleccionar ${formatOS(row)}`}
-                      />
-                    </td>
-                    <td className="p-2 underline">{formatOS(row)}</td>
-                    <td className="p-2">
-                      {row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}
-                    </td>
-                    <td className="p-2">{catalogEquipmentLabel(row) ?? "-"}</td>
-                    <td className="p-2"><DeviceIdentifier row={row} /></td>
-                    <td className="p-2">{row?.estado ?? "-"}</td>
-                    <td className="p-2">{formatMoney(monto, moneda)}</td>
-                    <td className="p-2 whitespace-nowrap">
-                      {formatDateOnly(row?.presupuesto_fecha_emision ?? row?.fecha_emision)}
-                    </td>
-                    <td className="p-2">
-                      <div className="flex gap-2 justify-end">
-                        {canApprove ? (
-                          <button
-                            className="btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              aprobar(row);
-                            }}
-                            disabled={approvingBusy}
-                            aria-busy={approvingBusy ? "true" : "false"}
-                            title="Aprobar presupuesto"
-                          >
-                            Aprobar
-                          </button>
-                        ) : null}
-                        {/* Si el backend permite rechazar o anular, se puede agregar otro botón acá. */}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          </DesktopTableWrap>
-          <div className="text-xs text-gray-500 mt-2">
-            Mostrando {displayRows.length} de {rows.length}.
-          </div>
-        </div>
-      )}
+      <IngresoTable
+        rows={filtered}
+        columns={COLUMNS}
+        sort={sort}
+        onSortChange={setSort}
+        selection={selection}
+        selectionLabel={(row) => `Seleccionar ${formatOS(row)}`}
+        onOpen={go}
+        openLabel={(row) => `Abrir hoja de servicio de ${formatOS(row)}`}
+        rowActions={canApprove ? rowActions : undefined}
+        filters={filters}
+        onFilterChange={setFilter}
+        filterOptions={filterOptions}
+        showFilters={filtersOpen}
+        loading={loading}
+        emptyText="No hay presupuestos emitidos/enviados."
+        totalCount={rows.length}
+      />
     </div>
   );
 }
