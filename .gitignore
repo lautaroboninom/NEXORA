@@ -50,3 +50,11 @@ deploy/tailscale-certs/
 
 # --- Claude Code (permisos locales de la maquina)
 .claude/
+
+# --- Salida de builds mal apuntadas: un `vite build` con el outDir sin resolver escribe
+# literalmente en web/undefined/ (5,6 MB de bundle) y se colaba en el commit.
+web/undefined/
+
+# --- Archivos de trabajo que no son del producto (analisis puntuales, notas sueltas)
+/discrepancias_*.xlsx
+/prompt_codex_*.md

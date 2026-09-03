@@ -6,6 +6,7 @@ import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFecha
 import useQueryState from "../hooks/useQueryState";
 import DataChip from "../components/DataChip.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import StatusChip from "../components/StatusChip.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
@@ -267,7 +268,10 @@ export default function GeneralPorCliente() {
                   data-testid={`row-mobile-${rowId}`}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div className="font-semibold text-gray-900 underline">{formatOS(row)}</div>
+                    <div className="font-semibold text-gray-900 underline">
+                      {formatOS(row)}
+                      <DerivadoMark row={row} className="ml-1.5 align-middle" />
+                    </div>
                     <span onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
@@ -341,7 +345,10 @@ export default function GeneralPorCliente() {
                       aria-label={`Seleccionar ${formatOS(row)}`}
                     />
                   </td>
-                  <td className="p-2 underline">{formatOS(row)}</td>
+                  <td className="p-2 underline">
+                    {formatOS(row)}
+                    <DerivadoMark row={row} className="ml-1.5 align-middle" />
+                  </td>
                   <td className="p-2">{catalogEquipmentLabel(row)}</td>
                   <td className="p-2"><DeviceIdentifier row={row} /></td>
                   <td className="p-2"><StatusChip value={row?.estado} title="Estado del equipo" /></td>

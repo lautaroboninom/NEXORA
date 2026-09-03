@@ -9,12 +9,15 @@ import {
   formatDateOnly,
   formatMoney,
   formatOS,
+  ingresoCustomerName,
   ingresoIdOf,
   norm,
   resolveFechaCreacion,
   tipoEquipoOf,
 } from "../lib/ui-helpers";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import StatusChip from "../components/StatusChip.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
 import ListToolbar from "../components/ListToolbar.jsx";
@@ -33,11 +36,22 @@ import {
 const ENDPOINT = "/api/ingresos/presupuestados/";
 
 const COLUMNS = [
-  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "os",
+    label: "OS",
+    cellClassName: "underline",
+    render: (row) => (
+      <>
+        {formatOS(row)}
+        <DerivadoMark row={row} className="ml-1.5" />
+      </>
+    ),
+    filter: "text",
+  },
   {
     field: "cliente",
     label: "Cliente",
-    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    render: (row) => <CustomerCell row={row} />,
     filter: "text",
   },
   {
@@ -131,6 +145,7 @@ export default function JefePresupuestos() {
       if (!needle) return true;
       const campos = [
         formatOS(row),
+        ingresoCustomerName(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
         row?.marca ?? row?.equipo?.marca,
         catalogEquipmentLabel(row),

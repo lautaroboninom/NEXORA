@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api, { postDerivacionDevuelto } from "../lib/api";
 import {
+  ingresoCustomerName,
   ingresoIdOf,
   formatOS,
   formatDateOnly,
@@ -9,7 +10,10 @@ import {
   tipoEquipoOf,
   catalogEquipmentLabel,
 } from "../lib/ui-helpers";
+import { estadoLabel } from "../lib/constants.js";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import StatusChip from "../components/StatusChip.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
 import ListToolbar from "../components/ListToolbar.jsx";
 import IngresoTable from "../components/IngresoTable.jsx";
@@ -25,10 +29,17 @@ const COLUMNS = [
   {
     field: "cliente",
     label: "Cliente",
-    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    render: (row) => <CustomerCell row={row} />,
     filter: "text",
   },
   { field: "proveedor", label: "Proveedor", render: (row) => row?.proveedor ?? "-", filter: "select" },
+  {
+    field: "estado",
+    label: "Estado",
+    render: (row) => <StatusChip value={row?.estado} />,
+    filter: "select",
+    filterLabel: (value) => estadoLabel(value),
+  },
   {
     field: "equipo",
     label: "Equipo",
@@ -94,6 +105,7 @@ export default function Derivados() {
       if (!needle) return true;
       const campos = [
         formatOS(row),
+        ingresoCustomerName(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
         row?.proveedor,
         row?.marca ?? row?.equipo?.marca,

@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import IngresoPhotos from "../../../components/IngresoPhotos";
 import RejectedBudgetChargeModal from "../../../components/RejectedBudgetChargeModal";
 import Row from "../../../components/Row";
+import { useAuth } from "../../../context/AuthContext";
+import { can, PERMISSION_CODES } from "../../../lib/permissions";
 import { RESOLUCION, RESOLUCION_OPTIONS, ESTADO } from "../../../lib/constants";
 import {
   deleteAccesorioIngreso,
@@ -18,6 +20,7 @@ import {
   postQuitarReparar,
 } from "../../../lib/api";
 import { isSaleTicketState } from "../../../lib/ui-helpers";
+import { describeSwapSummary } from "../../../lib/device-swap.js";
 
 function resolveRejectedQuoteReference(quotePayload, preferredQuoteId = null) {
   if (!quotePayload) return null;
@@ -90,6 +93,7 @@ export default function DiagnosticoTab({
   savingDiag,
   canManagePhotos,
   onOpenReleaseModal,
+  onOpenSwapModal,
 }) {
   const [addingAcc, setAddingAcc] = useState(false);
   const [deletingAccId, setDeletingAccId] = useState(null);
@@ -101,7 +105,6 @@ export default function DiagnosticoTab({
   const [marcandoNoSeRepara, setMarcandoNoSeRepara] = useState(false);
   const [quitandoEstadoFinal, setQuitandoEstadoFinal] = useState(false);
   const [habilitandoReparacion, setHabilitandoReparacion] = useState(false);
-  const [serialCambio, setSerialCambio] = useState("");
   const [fajaGarantiaInput, setFajaGarantiaInput] = useState(data?.faja_garantia || "");
   const [rejectedChargeModalOpen, setRejectedChargeModalOpen] = useState(false);
   const [rejectedChargeModalLoading, setRejectedChargeModalLoading] = useState(false);
@@ -111,6 +114,14 @@ export default function DiagnosticoTab({
 
   const estadoLower = (data?.estado || "").toLowerCase();
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
+  // "Cambio" no se guarda desde este botón: abre el modal, que exige `device_swap`. Sin el
+  // permiso la opción era un callejón sin salida — se elegía, se abría el modal con todo
+  // deshabilitado y la OS no se podía cerrar por ninguna vía.
+  const { user: usuarioActual } = useAuth();
+  const puedeCambioEquipo = can(usuarioActual, PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP);
+  const opcionesResolucion = puedeCambioEquipo
+    ? RESOLUCION_OPTIONS
+    : RESOLUCION_OPTIONS.filter((opt) => opt.value !== RESOLUCION.CAMBIO);
   const estadosCierreSalida = new Set([
     ESTADO.LIBERADO,
     ESTADO.ENTREGADO,
@@ -150,13 +161,7 @@ export default function DiagnosticoTab({
     && estadoLower === "reparar"
     && !isEstadoCierreSalida;
   const sinTecnicoAsignado = !data?.asignado_a;
-
-  useEffect(() => {
-    try {
-      setSerialCambio((data?.serial_cambio || "").toString());
-    } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.id]);
+  const swapSummary = describeSwapSummary(data || {});
 
   useEffect(() => {
     setFajaGarantiaInput(data?.faja_garantia || "");
@@ -181,10 +186,10 @@ export default function DiagnosticoTab({
       setSavingResol(true);
       await postCerrarReparacion(id, payload);
       await refreshIngreso();
+      // Por acá ya no pasa el cambio de equipo: tiene su propio circuito.
       onOpenReleaseModal?.({
         ...data,
         resolucion: payload.resolucion,
-        serial_cambio: payload.serial_cambio ?? data?.serial_cambio,
         presupuesto_rechazado_cobro_neto:
           payload.presupuesto_rechazado_cobro_neto ?? data?.presupuesto_rechazado_cobro_neto,
       });
@@ -249,18 +254,15 @@ export default function DiagnosticoTab({
       await openRejectedChargeModal();
       return;
     }
+    // El cambio de equipo no se guarda desde acá: tiene su propio circuito, que vincula el
+    // equipo entregado de verdad y decide qué pasa con el que queda. Ese modal ya deja la
+    // resolución puesta, así que este botón sólo lo abre.
     if (String(resolucion) === RESOLUCION.CAMBIO) {
-      const serial = (serialCambio || "").trim();
-      if (!serial) {
-        setErr("Ingrese la serie del cambio.");
-        return;
-      }
+      onOpenSwapModal?.();
+      return;
     }
 
-    const payload = String(resolucion) === RESOLUCION.CAMBIO
-      ? { resolucion, serial_cambio: (serialCambio || "").trim() }
-      : { resolucion };
-    await submitResolucion(payload);
+    await submitResolucion({ resolucion });
   }
 
   async function marcarControladoSinDefecto() {
@@ -563,7 +565,7 @@ export default function DiagnosticoTab({
                   disabled={isEntregadoOBaja}
                 >
                   <option value="">-- Seleccionar --</option>
-                  {RESOLUCION_OPTIONS.map((opt) => (
+                  {opcionesResolucion.map((opt) => (
                     <option key={opt.value} value={opt.value}>
                       {opt.label}
                     </option>
@@ -572,14 +574,11 @@ export default function DiagnosticoTab({
               </div>
 
               {String(resolucion) === RESOLUCION.CAMBIO ? (
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">Serie (cambio)</label>
-                  <input
-                    className="border rounded p-2 w-64"
-                    value={serialCambio}
-                    onChange={(e) => setSerialCambio(e.target.value)}
-                    placeholder="Ej.: MG 1234 o serie del equipo entregado"
-                  />
+                <div className="min-w-[260px]">
+                  <label className="block text-sm text-gray-600 mb-1">Cambio de equipo</label>
+                  <div className="rounded border bg-gray-50 p-2 text-sm">
+                    {swapSummary || "Falta elegir el equipo que se entrega."}
+                  </div>
                 </div>
               ) : null}
 
@@ -589,7 +588,11 @@ export default function DiagnosticoTab({
                 onClick={saveResolucionCambioAware}
                 type="button"
               >
-                {savingResol ? "Guardando..." : "Guardar resolución"}
+                {savingResol
+                  ? "Guardando..."
+                  : String(resolucion) === RESOLUCION.CAMBIO
+                    ? (swapSummary ? "Ver / editar cambio" : "Registrar cambio de equipo")
+                    : "Guardar resolución"}
               </button>
 
               {puedeQuitarReparar ? (

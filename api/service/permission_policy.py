@@ -20,6 +20,12 @@ VIEW_PERMISSION_MATRIX = {
     "DarBajaIngresoView": {"POST": "action.ingreso.baja_alta"},
     "DarAltaIngresoView": {"POST": "action.ingreso.baja_alta"},
     "IngresoConvertirPropioMgView": {"POST": ["action.devices_preventivos.manage", "action.ingreso.baja_alta"]},
+    "IngresoCambioEquipoView": {
+        "GET": "action.ingreso.device_swap",
+        "POST": "action.ingreso.device_swap",
+        "DELETE": "action.ingreso.device_swap",
+    },
+    "IngresoCambioEquipoCandidatosView": {"GET": "action.ingreso.device_swap"},
     "IngresoCorreccionesHistoricasView": {"POST": "action.ingreso.force_historical"},
     "IngresoConflictoEvidenciaView": {"POST": "action.ingreso.resolve_open_conflict"},
     # El resolver chequea el permiso adentro: con prueba en Bejerman alcanza

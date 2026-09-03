@@ -359,6 +359,11 @@ class RecepcionPermissionsAPITest(TestCase):
                 """
             )
             cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (3, 1, 1, 1, 'NS-ACT-OLDER', 'MG 0003')")
+            # Equipo que salió con la orden de salida impresa y nada más: quedó 'liberado' y
+            # sin fecha_entrega, que es como se cierra la mayoría de las entregas.
+            cur.execute(
+                "INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (6, 1, 1, 1, 'NS-LIB-SIN-ENTREGA', 'MG 0006')"
+            )
             cur.execute(
                 """
                 INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno, alquilado, alquiler_a)
@@ -427,7 +432,43 @@ class RecepcionPermissionsAPITest(TestCase):
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso,
+                    trabajos_realizados, ubicacion_id, asignado_a, recibido_por
+                )
+                VALUES (8, 6, 'reparacion', 'liberado', 'no_aplica', 'reparado', '2026-05-20 09:00:00',
+                        'cambio de filtros', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            # Después de la reparación el equipo salió en alquiler: ese ingreso es más nuevo
+            # pero no es "el último servicio", porque nadie reparó nada.
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso,
+                    fecha_entrega, trabajos_realizados, ubicacion_id, asignado_a, recibido_por
+                )
+                VALUES (9, 6, 'alquiler', 'entregado', 'no_aplica', NULL, '2026-06-01 09:00:00',
+                        '2026-06-05 15:00:00', 'preparacion para alquiler', 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
+            cur.execute(
+                """
+                INSERT INTO ingresos(
+                    id, device_id, motivo, estado, presupuesto_estado, fecha_ingreso,
+                    garantia_reparacion, ubicacion_id, asignado_a, recibido_por
+                )
+                VALUES (10, 6, 'reparacion', 'ingresado', 'pendiente', '2026-07-01 09:00:00',
+                        TRUE, 1, %s, %s)
+                """,
+                [cls.tecnico_user.id, cls.recepcion_user.id],
+            )
             cur.execute("INSERT INTO ingreso_events(ingreso_id, a_estado) VALUES (1, 'liberado')")
+            cur.execute("INSERT INTO ingreso_events(ingreso_id, a_estado) VALUES (8, 'liberado')")
             cur.execute("INSERT INTO catalogo_accesorios(id, nombre, activo) VALUES (1, 'Bolso', TRUE)")
             cur.execute("INSERT INTO catalogo_tipos_equipo(id, nombre, activo) VALUES (1, 'CPAP', TRUE)")
 
@@ -510,6 +551,24 @@ class RecepcionPermissionsAPITest(TestCase):
         self.assertEqual(con_tipo_humi.status_code, 200, con_tipo_humi.data)
         self.assertIsNotNone(con_tipo_cpap.data["last_ingreso"])
         self.assertIsNone(con_tipo_humi.data["last_ingreso"])
+
+    def test_garantia_reparacion_cuenta_la_salida_sin_fecha_de_entrega(self):
+        # La orden de salida impresa deja el ingreso en 'liberado' y no escribe fecha_entrega:
+        # si sólo se mirara esa columna, el equipo volvería sin garantía de reparación.
+        resp = self._client().get("/api/equipos/garantia-reparacion/?numero_serie=NS-LIB-SIN-ENTREGA")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data["within_90_days"])
+        self.assertIsNotNone(resp.data["last_ingreso"])
+
+    def test_aviso_de_garantia_muestra_la_ultima_reparacion_y_no_el_alquiler_posterior(self):
+        # El ingreso 8 se reparó y salió con la orden de salida impresa (sin fecha_entrega, y con
+        # el evento de liberación cargado después); el 9 es un alquiler más nuevo y sin reparación.
+        # El aviso tiene que traer los trabajos del 8.
+        resp = self._client().get("/api/ingresos/10/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["garantia_reparacion_trabajos"], "cambio de filtros")
 
     def test_scan_lookup_exposes_rental_customer_for_return(self):
         resp = self._client().get("/api/scan/lookup/?code=NS-ALQ-RETURN")

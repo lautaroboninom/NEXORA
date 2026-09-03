@@ -58,6 +58,8 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
   let blockedReason = "";
   if (!id) {
     blockedReason = "No se pudo identificar la OS.";
+  } else if (row?.derivacion_activa && !isReprint) {
+    blockedReason = "El equipo sigue derivado. Marcá la derivación como devuelta antes de liberarlo.";
   } else if (estado === "vendido_pendiente_entrega") {
     blockedReason = "Es una venta pendiente de entrega. Completá la entrega de venta desde la hoja de servicio.";
   } else if (CLOSED_STATES.has(estado) && !isReprint) {

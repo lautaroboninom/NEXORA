@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buscarAccesorioPorRef } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, resolveFechaIngreso } from "../lib/ui-helpers";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
@@ -69,7 +70,7 @@ export default function BuscarAccesorio() {
                   <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                     <MobileDataField label="Accesorio" value={r?.accesorio_nombre || "-"} />
                     <MobileDataField label="Referencia" value={r?.referencia || "-"} />
-                    <MobileDataField label="Cliente" value={r?.razon_social || "-"} />
+                    <MobileDataField label="Cliente"><CustomerCell row={r} /></MobileDataField>
                     <MobileDataField label="Equipo" value={equipo || "-"} />
                     <MobileDataField label="Serie">
                       <DeviceIdentifier row={r} />
@@ -107,7 +108,7 @@ export default function BuscarAccesorio() {
                     <td className="p-2 underline">{formatOSHelper(r, ingresoId)}</td>
                     <td className="p-2">{r?.accesorio_nombre || "-"}</td>
                     <td className="p-2">{r?.referencia || "-"}</td>
-                    <td className="p-2">{r?.razon_social || "-"}</td>
+                    <td className="p-2"><CustomerCell row={r} /></td>
                     <td className="p-2">{equipo || "-"}</td>
                     <td className="p-2"><DeviceIdentifier row={r} /></td>
                     <td className="p-2 whitespace-nowrap">{formatDateOnlyHelper(resolveFechaIngreso(r))}</td>

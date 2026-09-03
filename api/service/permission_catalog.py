@@ -7,9 +7,9 @@ PERMISSION_CATALOG = [
     {"code": "page.home_search", "label": "Ver inicio y buscadores", "type": "page", "group": "Páginas"},
     {"code": "page.general_cliente", "label": "Ver General por cliente", "type": "page", "group": "Páginas"},
     {"code": "page.ingresos_history", "label": "Ver historial de ingresos", "type": "page", "group": "Páginas"},
-    {"code": "page.work_queues", "label": "Ver pendientes técnicos/aprobados/reparados", "type": "page", "group": "Páginas"},
+    {"code": "page.work_queues", "label": "Ver pendientes técnicos / pendientes de reparación / listos para liberar", "type": "page", "group": "Páginas"},
     {"code": "page.budget_queues", "label": "Ver pendientes de presupuesto/presupuestados", "type": "page", "group": "Páginas"},
-    {"code": "page.logistics", "label": "Ver derivados/listos/depósitos/stock alquiler", "type": "page", "group": "Páginas"},
+    {"code": "page.logistics", "label": "Ver derivados, stock y depósitos", "type": "page", "group": "Páginas"},
     {"code": "page.liberados", "label": "Ver liberados", "type": "page", "group": "Páginas"},
     {"code": "page.service_sheet_principal", "label": "Ver pestaña Principal de hoja de servicio", "type": "page", "group": "Páginas"},
     {"code": "page.devices_preventivos", "label": "Ver equipos y preventivos", "type": "page", "group": "Páginas"},
@@ -32,6 +32,9 @@ PERMISSION_CATALOG = [
     {"code": "action.ingreso.edit_location", "label": "Editar ubicación", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.edit_delivery", "label": "Editar datos de entrega", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.repair_transitions", "label": "Cerrar reparación/cambiar estados", "type": "action", "group": "Ingresos"},
+    # Permiso propio y acotado: recepción registra el cambio de equipo desde el mostrador
+    # sin que se le abra toda la pestaña de diagnóstico.
+    {"code": "action.ingreso.device_swap", "label": "Registrar cambio de equipo", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.manage_derivations", "label": "Derivar/devolver derivaciones", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.baja_alta", "label": "Dar baja/alta", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.force_historical", "label": "Forzar correcciones históricas", "type": "action", "group": "Ingresos"},
@@ -142,6 +145,7 @@ _grant(
     "action.ingreso.edit_location",
     "action.ingreso.edit_delivery",
     "action.ingreso.repair_transitions",
+    "action.ingreso.device_swap",
     "action.ingreso.manage_derivations",
     "action.ingreso.baja_alta",
     "action.ingreso.force_historical",
@@ -242,6 +246,7 @@ _grant(
     "action.ingreso.edit_location",
     "action.ingreso.edit_delivery",
     "action.ingreso.repair_transitions",
+    "action.ingreso.device_swap",
     "action.ingreso.manage_derivations",
     "action.ingreso.baja_alta",
     "action.ingreso.force_historical",
@@ -283,6 +288,9 @@ _grant(
     "page.route_sheet",
     "page.bejerman_purchase_entries",
     "action.ingreso.create",
+    # Recepción está en el mostrador cuando se define el cambio de equipo, así que
+    # registra el cambio sin tener `repair_transitions` ni la pestaña de diagnóstico.
+    "action.ingreso.device_swap",
     "action.ingreso.emit_ingress_order",
     "action.ingreso.fix_ris_preflight",
     # Recepción es quien está en el mostrador cuando aparece el conflicto. Puede cerrar la

@@ -139,19 +139,28 @@ def _parse_ingreso_id(raw: str):
 
 
 def _fetch_ingreso_summary(ingreso_id: int):
+    # El escáner es la otra pantalla desde la que se entrega. Sin las columnas del cambio
+    # sólo veía `resolucion`: no sabía qué equipo hay que entregar (pedía una serie a
+    # ciegas) ni podía distinguir una parte de pago, en la que no sale ningún equipo.
+    # El dueño va por el mismo motivo: detrás de 'Particular' o 'MG BIO' el mostrador no veía
+    # de quién es el equipo que está entregando.
+    from .ingresos_views import _owner_list_select_sql, _swap_list_select_sql
+
     return _normalize_ingreso_summary(q(
-        """
+        f"""
         SELECT
           t.id,
           t.estado,
           t.presupuesto_estado,
           t.resolucion,
+          {_swap_list_select_sql()}
           COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
           t.fecha_creacion,
           t.fecha_entrega,
           COALESCE(t.equipo_variante,'') AS equipo_variante,
           t.device_id,
           c.id AS customer_id,
+          {_owner_list_select_sql()}
           COALESCE(c.razon_social,'') AS razon_social,
           COALESCE(c.cod_empresa,'') AS cod_empresa,
           COALESCE(c.telefono,'') AS telefono,
@@ -294,12 +303,19 @@ def _device_candidate_summary(row: dict, selected_id) -> dict:
 
 
 def _fetch_ingreso_en_curso(device_id: int):
+    # Un ingreso 'liberado' entra por acá, así que desde el escaneo del equipo también se
+    # entrega: necesita los mismos datos del cambio y del dueño que el escaneo de la OS.
+    from .ingresos_views import _owner_list_select_sql, _swap_list_select_sql
+
     return _normalize_ingreso_summary(q(
-        """
+        f"""
         SELECT
           t.id,
           t.estado,
           t.presupuesto_estado,
+          t.resolucion,
+          {_swap_list_select_sql()}
+          {_owner_list_select_sql()}
           COALESCE(t.alquilado, false) AS alquilado,
           COALESCE(t.alquiler_a, '') AS alquiler_a,
           COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,

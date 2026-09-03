@@ -1,5 +1,6 @@
 import Row from "../../../components/Row";
 import StatusChip from "../../../components/StatusChip";
+import DerivadoBadge from "../../../components/DerivadoBadge.jsx";
 import { useMemo, useState, useEffect, useCallback } from "react";
 import {
   formatDateOnly as formatDateOnlyHelper,
@@ -12,8 +13,9 @@ import {
 } from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
 import { isJefe } from "../../../lib/authz";
-import { documentNameFromRis, isRisRegistered, risRemitoFrom } from "../../../lib/ris-print";
+import { documentNameFromRis, isRisRegistered, risRemitoFrom, risRemitoWithDocumentName } from "../../../lib/ris-print";
 import { getReleaseFlow } from "../../../lib/release-flow";
+import { getDeviceSwapState, swapConfirmMatches } from "../../../lib/device-swap.js";
 import { Printer, X } from "lucide-react";
 import { ResponsiveModalOverlay, ResponsiveModalPanel } from "../../../components/Responsive.jsx";
 import {
@@ -200,7 +202,7 @@ function BuscadorRemitoBejerman({
   const [pendiente, setPendiente] = useState(null);
   const [aplicando, setAplicando] = useState(false);
   const [errorConfirmacion, setErrorConfirmacion] = useState("");
-  const etiqueta = flow === "rental" ? "RTA" : "RSS";
+  const etiqueta = flow === "rental" ? "RTA" : flow === "sale" ? "RT" : "RSS";
 
   const buscar = async () => {
     const identificador = String(serial || "").trim();
@@ -449,6 +451,8 @@ export default function PrincipalTab(props) {
     () => getReleaseFlow(data, { canManageResolution: canManageReleaseResolution }),
     [data, canManageReleaseResolution],
   );
+  // Qué equipo hay que entregar cuando la resolución es un cambio.
+  const swapEsperado = getDeviceSwapState(data || {}, { canSwap: true }).deliveredLabel;
 
   // Derivados del catlogo (para filtros de equipo)
   const tiposDisponibles = useMemo(() => {
@@ -545,13 +549,31 @@ export default function PrincipalTab(props) {
   const isOwnedByMgCustomer = isMgOwned(equipoOwnership);
   const mgHistorico = Boolean(hasMgCode(equipoOwnership) && mgVendido);
   const propiedadLabel = propiedadEquipoLabelOf(equipoOwnership);
-  const propiedadClass = isOwnedByMgCustomer
+  // El color sale de la etiqueta y no de `isOwnedByMgCustomer`: una devolución de demo es
+  // patrimonio nuestro sin ser un MG, y tiene que verse igual de propia que uno.
+  const propiedadClass = propiedadLabel === "MG BIO"
     ? "bg-emerald-100 text-emerald-800"
     : mgHistorico
       ? "bg-amber-100 text-amber-800"
     : "bg-gray-100 text-gray-700";
   const mgHistoricoHelp = "Equipo vendido: este MG queda solo como trazabilidad y ya no indica stock propio.";
   const isEntregadoOBaja = ["entregado", "baja"].includes(estadoLower) || isSaleTicketState(estadoLower);
+  // Cierre por venta: el equipo salió con un RT emitido por comercial, no con la orden de
+  // salida del taller. Por eso se puede registrar sin haber pasado por 'liberado'.
+  const [ventaSalida, setVentaSalida] = useState(false);
+  // La ruta es /ingresos/:id y ServiceSheet no se remonta al cambiar de OS: sin este reset el
+  // tilde se arrastraba a la OS siguiente y le abría el form de entrega en modo venta.
+  useEffect(() => {
+    setVentaSalida(false);
+  }, [data?.id]);
+  // Cerrar por venta es registrar una entrega: mismo permiso que "Editar entrega", que el
+  // bloque de abajo ya exige. Sin esto el técnico veía el checkbox y comía un 403.
+  const puedeCerrarPorVenta =
+    canEditEntrega &&
+    !data?.derivacion_activa &&
+    ["reparado", "controlado_sin_defecto", "no_se_repara", "liberado"].includes(estadoLower);
+  const registrandoVenta = Boolean(ventaSalida && puedeCerrarPorVenta);
+  const mostrarFormEntrega = estadoLower === "liberado" || isVentaPendienteEntrega || registrandoVenta;
   const alquilerEditable = Boolean(canEditAlquiler && !mgVendido);
   const alquilerBloqueadoPorEntrega = Boolean(
     data?.alquilado
@@ -584,7 +606,6 @@ export default function PrincipalTab(props) {
   const etapaFlujo = useMemo(() => {
     if (isSaleTicketState(estadoLower)) return "Venta";
     if (["entregado", "alquilado", "baja"].includes(estadoLower)) return "Cierre";
-    if (estadoLower === "derivado") return "Derivación externa";
     if (["reparar", "controlado_sin_defecto", "no_se_repara", "reparado", "liberado"].includes(estadoLower)) return "Reparación / Salida";
     if (estadoLower === "presupuestado" || ["emitido", "presupuestado", "aprobado", "rechazado"].includes(presupuestoLower)) return "Presupuesto";
     if (estadoLower === "diagnosticado") return "Diagnóstico";
@@ -607,10 +628,12 @@ export default function PrincipalTab(props) {
   const fechasImportantes = [
     { label: "Creación", value: firstDateValue(fechasHitos.fecha_creacion, data?.fecha_creacion) },
     { label: "Ingreso", value: firstDateValue(fechasHitos.fecha_ingreso, resolveFechaIngreso(data)) },
-    { label: "Diagnóstico", value: fechasHitos.fecha_diagnosticado },
+    // "Servicio" era la fecha de diagnóstico con otro nombre: el backend ya la unifica en
+    // fecha_diagnosticado, acá queda el fallback para respuestas viejas del detalle.
+    { label: "Diagnóstico", value: firstDateValue(fechasHitos.fecha_diagnosticado, fechasHitos.fecha_servicio, data?.fecha_servicio) },
+    { label: "Presupuestado", value: fechasHitos.fecha_presupuestado },
     { label: "Reparación", value: fechasHitos.fecha_reparado },
     { label: "Liberación", value: fechasHitos.fecha_liberacion },
-    { label: "Servicio", value: firstDateValue(fechasHitos.fecha_servicio, data?.fecha_servicio) },
     { label: "Entrega", value: firstDateValue(fechasHitos.fecha_entrega, data?.fecha_entrega) },
     ...(data?.alquilado || fechaAlquiler ? [{ label: "Alquiler", value: fechaAlquiler }] : []),
     ...(data?.mg_inactivo_venta || fechaVentaMg ? [{ label: "Venta MG", value: fechaVentaMg }] : []),
@@ -1218,7 +1241,9 @@ export default function PrincipalTab(props) {
                     <span className="block text-xs text-gray-500">
                       {isRegisteredRis
                         ? `Remito registrado: ${risRemito || data?.ris?.status || "pendiente"}`
-                        : `${ingressDocumentName}: ${data?.ris?.remito_number || data?.ris?.status || "pendiente"}`}
+                        : data?.ris?.remito_number
+                          ? risRemitoWithDocumentName(data.ris.remito_number, ingressDocumentName)
+                          : `${ingressDocumentName}: ${data?.ris?.status || "pendiente"}`}
                     </span>
                   )}
                   {!isRegisteredRis && canShowRisAction && typeof onEmitRis === "function" && (
@@ -1321,6 +1346,17 @@ export default function PrincipalTab(props) {
             <Row label="Estado"><StatusChip value={data?.estado} title="Estado del equipo" /></Row>
             <Row label="Presupuesto"><StatusChip value={data?.presupuesto_estado} title={presupuestoLabel} /></Row>
             <Row label="Resolución">{data.resolucion ? resolutionLabel(data.resolucion) : "-"}</Row>
+            <Row label="Derivado">
+              {data?.derivacion_activa ? (
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <DerivadoBadge row={data} />
+                  <span>
+                    {data?.derivacion_proveedor || "Proveedor sin identificar"}
+                    {data?.derivacion_fecha ? ` · desde ${formatDateOnlyHelper(data.derivacion_fecha)}` : ""}
+                  </span>
+                </span>
+              ) : "No"}
+            </Row>
           </div>
           <div className="mt-3 border-t pt-3">
             <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Fechas importantes</div>
@@ -1614,10 +1650,32 @@ export default function PrincipalTab(props) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
         <div className="border rounded p-4">
         <h2 className="font-semibold mb-2">Entrega</h2>
-        {data.estado === "liberado" || isVentaPendienteEntrega ? (
+        {data?.derivacion_activa && (
+          <div className="mb-3 rounded border border-cyan-200 bg-cyan-50 p-2 text-sm text-cyan-900">
+            El equipo sigue derivado. Marcá la derivación como devuelta antes de entregarlo.
+          </div>
+        )}
+        {puedeCerrarPorVenta && !isVentaPendienteEntrega && (
+          <label className="mb-3 flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={ventaSalida}
+              onChange={(e) => setVentaSalida(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">El equipo salió vendido (RT)</span>
+              <span className="block text-xs text-gray-600">
+                La OS cierra como “Vendido entregado”. El RT ya movió el stock en Bejerman,
+                así que NEXORA no genera ningún movimiento de depósito.
+              </span>
+            </span>
+          </label>
+        )}
+        {mostrarFormEntrega ? (
           <>
             <div className="grid grid-cols-1 gap-3">
-                <Row label="Remito salida (requerido)">{
+                <Row label={registrandoVenta ? "Remito de venta RT (requerido)" : "Remito salida (requerido)"}>{
 
                 <div>
                   <input
@@ -1626,7 +1684,7 @@ export default function PrincipalTab(props) {
                     onChange={(e) => setEntrega({ ...entrega, remito_salida: e.target.value })}
                   />
                   <BuscadorRemitoBejerman
-                    flow="service_release"
+                    flow={registrandoVenta ? "sale" : "service_release"}
                     ingresoId={id}
                     serial={equipoIdentificador}
                     onPick={(numero) => setEntrega((current) => ({ ...current, remito_salida: numero }))}
@@ -1636,7 +1694,11 @@ export default function PrincipalTab(props) {
                       return actual === nuevo ? [] : [{ campo: "Remito salida", actual, nuevo }];
                     }}
                     confirmLabel="Usar este remito"
-                    advertencia="Se completa el campo; la entrega se registra con el botón de abajo."
+                    advertencia={
+                      registrandoVenta
+                        ? "Se completa el campo; la venta se registra con el botón de abajo."
+                        : "Se completa el campo; la entrega se registra con el botón de abajo."
+                    }
                   />
                 </div>
                 }
@@ -1658,30 +1720,50 @@ export default function PrincipalTab(props) {
                   max={maxDateOnly}
                 />
               }</Row>
-              {String(data?.resolucion || "") === "cambio" && (
+              {/* Sólo cuando hay un equipo que entregar: en una parte de pago sin permuta
+                  no sale nada, y pedir una serie trababa la entrega sin nada que verificar. */}
+              {String(data?.resolucion || "") === "cambio" && swapEsperado && (
                 <div>
-                  <label className="text-sm">Verificar serie (Cambio)</label>
+                  <label className="text-sm">
+                    Verificar serie (Cambio)
+                    {swapEsperado ? (
+                      <span className="ml-1 font-medium">- se entrega {swapEsperado}</span>
+                    ) : null}
+                  </label>
                   <input
                     className="border rounded p-2 w-full"
                     value={entrega.serial_confirm || ""}
                     onChange={(e) => setEntrega({ ...entrega, serial_confirm: e.target.value })}
-                    placeholder="Ingrese la serie nueva para confirmar"
+                    placeholder="Ingrese la serie del equipo que se entrega"
                   />
                 </div>
               )}
             </div>
             <div className="mt-3">
               <button
-                className="bg-green-600 text-white px-4 py-2 rounded"
+                className="bg-green-600 text-white px-4 py-2 rounded disabled:opacity-60"
+                disabled={Boolean(data?.derivacion_activa || savingEntrega)}
                 onClick={async () => {
                   try {
                     if (!entrega.remito_salida.trim()) {
                       setErr("El remito es requerido para entregar.");
                       return;
                     }
-                    if (String(data?.resolucion || "") === "cambio") {
-                      if (!String(entrega?.serial_confirm || "").trim()) {
+                    // El backend cierra como venta según el tipo del comprobante, así que
+                    // se avisa acá antes de que un RSS quede registrado como venta.
+                    if (registrandoVenta && !/^\s*RT\b/i.test(entrega.remito_salida)) {
+                      setErr("Para cerrar por venta el remito tiene que ser un RT.");
+                      return;
+                    }
+                    if (String(data?.resolucion || "") === "cambio" && swapEsperado) {
+                      const confirmado = String(entrega?.serial_confirm || "").trim();
+                      if (!confirmado) {
                         setErr("Debe verificar la Serie (Cambio) antes de entregar.");
+                        return;
+                      }
+                      // Se avisa acá para no mandar al mostrador a leer un 409 del backend.
+                      if (swapEsperado && !swapConfirmMatches(confirmado, swapEsperado)) {
+                        setErr(`La serie no coincide con el equipo del cambio (${swapEsperado}).`);
                         return;
                       }
                     }
@@ -1693,7 +1775,7 @@ export default function PrincipalTab(props) {
                   }
                 }}
               >
-                {isVentaPendienteEntrega ? "Marcar venta entregada" : "Marcar ENTREGADO"}
+                {isVentaPendienteEntrega || registrandoVenta ? "Marcar venta entregada" : "Marcar ENTREGADO"}
               </button>
             </div>
           </>
@@ -1715,7 +1797,7 @@ export default function PrincipalTab(props) {
                 </div>
               </div>
             )}
-            {canEditEntrega && !editEntrega && (
+            {canEditEntrega && !data?.derivacion_activa && !editEntrega && (
               <div className="mt-3">
                 <button className="px-3 py-2 border rounded" type="button" onClick={() => setEditEntrega(true)}>
                   Editar entrega
@@ -1755,7 +1837,7 @@ export default function PrincipalTab(props) {
                 <div className="mt-3 flex gap-2">
                   <button
                     className="bg-blue-600 text-white px-4 py-2 rounded disabled:opacity-60"
-                    disabled={savingEntrega}
+                    disabled={savingEntrega || data?.derivacion_activa}
                     type="button"
                     onClick={async () => {
                       try {

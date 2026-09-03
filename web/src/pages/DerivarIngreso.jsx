@@ -14,12 +14,12 @@ export default function DerivarIngreso() {
   const [loading, setLoading] = useState(false);
   const [proveedores, setProveedores] = useState([]);
   const [form, setForm] = useState({
-    external_service_id: "",
+    proveedor_id: "",
     fecha_deriv: new Date().toISOString().slice(0, 10),
     comentarios: "",
   });
   const [error, setError] = useState("");
-  const busyRef = useRef(false); // barrera sincrnica contra doble submit
+  const busyRef = useRef(false); // barrera sincrónica contra doble submit
 
   useEffect(() => {
     (async () => {
@@ -42,8 +42,8 @@ export default function DerivarIngreso() {
     if (loading || busyRef.current) return;
     busyRef.current = true;
     setError("");
-    if (!form.external_service_id) {
-      setError("Seleccion un proveedor externo.");
+    if (!form.proveedor_id) {
+      setError("Seleccioná un proveedor.");
       busyRef.current = false;
       return;
     }
@@ -54,11 +54,11 @@ export default function DerivarIngreso() {
     setLoading(true);
     try {
       const res = await postDerivarIngreso(id, {
-        external_service_id: Number(form.external_service_id),
+        proveedor_id: Number(form.proveedor_id),
         fecha_deriv: form.fecha_deriv || null,
         comentarios: form.comentarios || null,
       });
-      // Intentar abrir el remito de derivacin inmediatamente
+      // Intentar abrir el remito de derivación inmediatamente.
       try {
         const derivId = res?.deriv_id;
         if (derivId) {
@@ -68,10 +68,12 @@ export default function DerivarIngreso() {
           setTimeout(() => URL.revokeObjectURL(url), 20000);
         }
       } catch (_) {
-        // Fallback: abrir la derivacin abierta si existe
+        // Fallback: abrir la derivación activa si existe.
         try {
           const list = await getDerivacionesPorIngreso(id);
-          const abierta = Array.isArray(list) ? list.find(d => !d.fecha_entrega) : null;
+          const abierta = Array.isArray(list)
+            ? list.find((d) => !d.fecha_entrega && ["derivado", "en_servicio"].includes(String(d?.estado || "").toLowerCase()))
+            : null;
           if (abierta) {
             const { blob } = await fetchBlobAuth(`/api/ingresos/${id}/derivaciones/${abierta.id}/remito/`);
             const url = URL.createObjectURL(blob);
@@ -85,11 +87,13 @@ export default function DerivarIngreso() {
       // Volver a la hoja de servicio y resaltar Derivaciones
       nav(`/ingresos/${id}`, { state: { tab: "derivaciones" } });
     } catch (e) {
-      setError(String(e));
-      // Si el POST fall (por ejemplo, 409 por derivacin abierta), intentar abrir el PDF de la abierta
+      setError(e?.data?.detail || e?.message || "No se pudo registrar la derivación.");
+      // Si el POST falló por una derivación activa, intentar abrir el PDF correspondiente.
       try {
         const list = await getDerivacionesPorIngreso(id);
-        const abierta = Array.isArray(list) ? list.find(d => !d.fecha_entrega) : null;
+        const abierta = Array.isArray(list)
+          ? list.find((d) => !d.fecha_entrega && ["derivado", "en_servicio"].includes(String(d?.estado || "").toLowerCase()))
+          : null;
         if (abierta) {
           const { blob } = await fetchBlobAuth(`/api/ingresos/${id}/derivaciones/${abierta.id}/remito/`);
           const url = URL.createObjectURL(blob);
@@ -118,10 +122,10 @@ export default function DerivarIngreso() {
 
       <form onSubmit={onSubmit} className="space-y-4">
         <div>
-          <label className="block text-sm mb-1">Proveedor externo</label>
+          <label className="block text-sm mb-1">Proveedor</label>
           <select
-            name="external_service_id"
-            value={form.external_service_id}
+            name="proveedor_id"
+            value={form.proveedor_id}
             onChange={onChange}
             className="input w-full"
           >
@@ -133,7 +137,7 @@ export default function DerivarIngreso() {
         </div>
 
         <div>
-          <label className="block text-sm mb-1">Fecha derivacin</label>
+          <label className="block text-sm mb-1">Fecha derivación</label>
           <input
             type="date"
             name="fecha_deriv"

@@ -437,7 +437,7 @@ class WorkUpgradeAPITest(TestCase):
                 INSERT INTO ingresos(device_id, estado, presupuesto_estado, motivo, fecha_ingreso, fecha_creacion, ubicacion_id, asignado_a)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [derivado_device, "derivado", "no_aplica", "reparación", now - dt.timedelta(days=12), now - dt.timedelta(days=12), taller_id, cls.tecnico.id],
+                [derivado_device, "ingresado", "no_aplica", "reparación", now - dt.timedelta(days=12), now - dt.timedelta(days=12), taller_id, cls.tecnico.id],
             )
             cur.execute(
                 "INSERT INTO equipos_derivados(ingreso_id, proveedor_id, fecha_deriv, fecha_entrega, estado) VALUES (%s,%s,%s,%s,%s)",
@@ -538,6 +538,11 @@ class WorkUpgradeAPITest(TestCase):
         self.assertIn("presupuesto_sin_aprobar", alert_keys)
         self.assertIn("liberado_sin_entregar", alert_keys)
         self.assertIn("derivado_sin_devolucion", alert_keys)
+        wip_alert = next(row for row in resp.data["alerts"] if row["key"] == "wip_critico")
+        self.assertNotIn(
+            self.derivado_ingreso_id,
+            {row.get("ingreso_id") for row in wip_alert.get("items", [])},
+        )
         prioridad_ids = {row["ingreso_id"] for row in resp.data["prioridades"] if row.get("ingreso_id")}
         self.assertIn(self.old_ingreso_id, prioridad_ids)
         kpi_keys = {row["key"] for row in resp.data["kpis"]}

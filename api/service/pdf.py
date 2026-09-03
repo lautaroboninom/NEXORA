@@ -184,6 +184,68 @@ def _warranty_expiry_select(alias: str = "garantia_vence") -> str:
     return f"NULL::date AS {alias}"
 
 
+def _has_original_customer() -> bool:
+    return _has_table_column("ingresos", "cliente_original_id")
+
+
+def _original_customer_select() -> str:
+    """Datos del cliente que tenía el equipo antes de que pasara a ser nuestro.
+
+    El cliente del papel sale de `devices.customer_id`, y tomar un equipo en parte de pago
+    lo pasa a MG BIO: sin esto, la orden de salida que firma el cliente salía a nombre de
+    MG BIO. Para un particular alcanzaba con `propietario_nombre`, pero un cliente empresa
+    no deja nombre ahí.
+    """
+    if not _has_original_customer():
+        return (
+            "'' AS cliente_original, '' AS cliente_original_cuit, "
+            "'' AS cliente_original_contacto"
+        )
+    return (
+        "COALESCE(co.razon_social,'') AS cliente_original, "
+        "COALESCE(co.cuit,'') AS cliente_original_cuit, "
+        "COALESCE(co.contacto,'') AS cliente_original_contacto"
+    )
+
+
+def _original_customer_join() -> str:
+    if not _has_original_customer():
+        return ""
+    return "LEFT JOIN customers co ON co.id = t.cliente_original_id"
+
+
+def _apply_owner_display(head: dict) -> None:
+    """Reemplaza el cliente contenedor por el dueño real, para los papeles de la OS.
+
+    'Particular' y 'MG BIO' son contenedores: el papel tiene que decir de quién es el
+    equipo. Se prefiere el propietario cargado en el ingreso y, si no hay (típico de un
+    cliente empresa), el cliente que lo trajo antes de que lo tomáramos en parte de pago.
+    """
+    try:
+        cliente_norm = (head.get("cliente") or "").strip().lower()
+        es_mgbio = "mg" in cliente_norm and "bio" in cliente_norm
+        es_particular = cliente_norm == "particular"
+        if not (es_mgbio or es_particular):
+            return
+        propietario = (head.get("propietario_nombre") or "").strip()
+        if propietario:
+            head["cliente"] = propietario
+            if (head.get("propietario_doc") or "").strip():
+                head["cliente_cuit"] = (head.get("propietario_doc") or "").strip()
+            if (head.get("propietario_contacto") or "").strip():
+                head["cliente_contacto"] = (head.get("propietario_contacto") or "").strip()
+            return
+        original = (head.get("cliente_original") or "").strip()
+        if original:
+            head["cliente"] = original
+            if (head.get("cliente_original_cuit") or "").strip():
+                head["cliente_cuit"] = (head.get("cliente_original_cuit") or "").strip()
+            if (head.get("cliente_original_contacto") or "").strip():
+                head["cliente_contacto"] = (head.get("cliente_original_contacto") or "").strip()
+    except Exception:
+        pass
+
+
 def _latest_quote_row(ingreso_id: int):
     return _q(
         """
@@ -224,6 +286,7 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
             COALESCE(c.telefono, '') AS cliente_telefono,
             COALESCE(c.telefono_2, '') AS cliente_telefono_2,
             COALESCE(c.email, '') AS cliente_email,
+            {_original_customer_select()},
             COALESCE(d.propietario_nombre, d.propietario, '') AS propietario_nombre,
             COALESCE(d.propietario_contacto, '') AS propietario_contacto,
             COALESCE(d.propietario_doc, '') AS propietario_doc,
@@ -254,6 +317,7 @@ def _get_data(ingreso_id: int, quote_id: int | None = None):
         FROM ingresos t
         JOIN devices d ON d.id=t.device_id
         JOIN customers c ON c.id=d.customer_id
+        {_original_customer_join()}
         LEFT JOIN marcas b ON b.id=d.marca_id
         LEFT JOIN models m ON m.id=d.model_id
         LEFT JOIN quotes q ON q.id=%s AND q.ingreso_id=t.id
@@ -983,20 +1047,7 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
 
     
     # Ajustes de cliente/propietario para visualizacion (MGBIO y Particular)
-    try:
-        _cliente_rs = (head.get('cliente') or '').strip()
-        _cl_norm = _cliente_rs.lower()
-        _is_mgbio = ('mg' in _cl_norm and 'bio' in _cl_norm)
-        _is_particular = (_cl_norm == 'particular')
-        _has_owner = bool((head.get('propietario_nombre') or '').strip())
-        if (_is_mgbio or _is_particular) and _has_owner:
-            head['cliente'] = head.get('propietario_nombre') or head.get('cliente')
-            if (head.get('propietario_doc') or '').strip():
-                head['cliente_cuit'] = (head.get('propietario_doc') or '').strip()
-            if (head.get('propietario_contacto') or '').strip():
-                head['cliente_contacto'] = (head.get('propietario_contacto') or '').strip()
-    except Exception:
-        pass
+    _apply_owner_display(head)
 
     cliente_display = _customer_display_name(head)
     title = f"{os_version_title(head.get('ingreso_id'), head.get('quote_version_num'))} {cliente_display}".strip()
@@ -1338,20 +1389,7 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     head["presupuesto_rechazado_summary"] = rejected_quote
 
         # Ajustes de cliente/propietario para visualizacion (MGBIO y Particular)
-    try:
-        _cliente_rs = (head.get('cliente') or '').strip()
-        _cl_norm = _cliente_rs.lower()
-        _is_mgbio = ('mg' in _cl_norm and 'bio' in _cl_norm)
-        _is_particular = (_cl_norm == 'particular')
-        _has_owner = bool((head.get('propietario_nombre') or '').strip())
-        if (_is_mgbio or _is_particular) and _has_owner:
-            head['cliente'] = head.get('propietario_nombre') or head.get('cliente')
-            if (head.get('propietario_doc') or '').strip():
-                head['cliente_cuit'] = (head.get('propietario_doc') or '').strip()
-            if (head.get('propietario_contacto') or '').strip():
-                head['cliente_contacto'] = (head.get('propietario_contacto') or '').strip()
-    except Exception:
-        pass
+    _apply_owner_display(head)
 
     empresa = _get_empresa_facturar(ingreso_id)
     L1, L2, L3 = _company_header_lines(empresa)
@@ -1569,7 +1607,16 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         r3_x3 = r3_x2 + r3_w2 + r3_gap
         r3_x4 = r3_x3 + r3_w3 + r3_gap
 
-        label_value(r3_x1, y - ROW_H, r3_w1, ROW_H, "Número Serie | Número interno", serial_comp, fsz=6.8, label_fsz=6.2)
+        # En un cambio de equipo este campo mostraba sólo el equipo que ingresó, que es
+        # justamente el que NO se lleva el cliente. Se muestran los dos, con la etiqueta
+        # diciendo cuál es cuál.
+        serial_label = "Número Serie | Número interno"
+        if (head.get("resolucion") or "").strip().lower() == "cambio":
+            entregado = (head.get("serial_cambio") or "").strip()
+            if entregado:
+                serial_label = "Recibido | Entregado"
+                serial_comp = f"{serial_comp}  ->  {entregado}"
+        label_value(r3_x1, y - ROW_H, r3_w1, ROW_H, serial_label, serial_comp, fsz=6.8, label_fsz=6.2)
         label_value(r3_x2, y - ROW_H, r3_w2, ROW_H, "Motivo", head.get("motivo"))
         garantia_txt = "Sí" if head.get("garantia") else "No"
         label_value(r3_x3, y - ROW_H, r3_w3, ROW_H, "Garantía", garantia_txt)
@@ -1586,7 +1633,15 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
             if (head.get("resolucion") or "").strip().lower() == "cambio":
                 sc_val = (head.get("serial_cambio") or "").strip()
                 if sc_val:
-                    obs_txt = f"Serie (Cambio): {sc_val}\n\n" + obs_txt
+                    recibido = _compose_serial_internal(
+                        head.get("numero_serie"), head.get("numero_interno")
+                    )
+                    # El cliente se lleva otro equipo y el suyo queda acá: conviene que el
+                    # papel que firma lo diga con todas las letras.
+                    aviso = f"Cambio de equipo. Se entrega: {sc_val}."
+                    if recibido:
+                        aviso += f" El equipo recibido ({recibido}) queda en SEPID."
+                    obs_txt = f"{aviso}\n\n" + obs_txt
         except Exception:
             pass
         paragraph_in_box(inner_x, y - obs_h, inner_w, obs_h, "Observaciones", obs_txt)

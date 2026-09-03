@@ -42,6 +42,7 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     # hace adentro se apoya en que los modelos ya estén separados por tipo.
     ("apply_devices_ns_tipo_unique_schema", {}),
     ("apply_ingreso_open_conflicts_schema", {}),
+    ("apply_derivation_workflow_schema", {}),
     # Estaba excluido como "parche histórico ya aplicado" y resultó no estarlo: sin sus columnas,
     # rechazar un presupuesto devolvía 400. Es idempotente (ADD COLUMN / CREATE INDEX IF NOT EXISTS
     # y la constraint bajo IF NOT EXISTS), así que corre en cada arranque sin costo.
@@ -51,6 +52,11 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     # mismo request. Es un ALTER TYPE ... ADD VALUE IF NOT EXISTS, así que corre en cada arranque
     # sin costo.
     ("apply_quote_anulacion_schema", {}),
+    # Vincula el equipo entregado en un cambio (permuta / parte de pago). Tiene que estar
+    # aplicado ANTES de que corra el código: sin `device_cambio_id` la hoja de servicio pide
+    # una columna que no existe. Es ADD COLUMN / CREATE INDEX IF NOT EXISTS más un UPDATE
+    # con guarda por NULL, así que corre en cada arranque sin costo.
+    ("apply_device_swap_schema", {}),
 )
 
 
@@ -105,24 +111,81 @@ class Command(BaseCommand):
         "bloqueo PostgreSQL. Es el único lugar donde vive la lista de esquemas a aplicar."
     )
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--strict",
+            action="store_true",
+            dest="strict",
+            help=(
+                "Aborta en el primer esquema que falle en vez de seguir con el resto. "
+                "Para correrlo a mano cuando querés que la falla se note con exit code."
+            ),
+        )
+
     def handle(self, *args, **options):
+        strict = bool(options.get("strict"))
         self.stdout.write("Esperando el bloqueo exclusivo de preparación de esquema...")
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_lock(%s)", [SCHEMA_LOCK_ID])
 
+        fallidos: list[tuple[str, str]] = []
         try:
             self.stdout.write("Preparando la base de datos...")
+            # `migrate` sí es fatal: sin las migraciones de Django no hay base sobre la que
+            # aplicar nada, y seguir sería aplicar esquemas a ciegas.
             call_command("migrate", interactive=False)
             for name, kwargs in SCHEMA_COMMANDS:
-                call_command(name, **kwargs)
+                # Cada esquema va aislado: en el compose de producción este comando está
+                # encadenado con `&&` antes de gunicorn, así que si uno solo levanta
+                # CommandError la API entera no arranca. Y hay comandos que fallan por
+                # datos preexistentes perfectamente legales —`apply_derivation_workflow_schema`
+                # aborta si hay dos derivaciones activas para la misma OS, algo que el
+                # índice viejo permitía—: dejar la API caída por un índice que no se pudo
+                # crear es mucho peor que levantar sin ese índice y avisarlo fuerte.
+                try:
+                    call_command(name, **kwargs)
+                except Exception as exc:  # noqa: BLE001 - se reporta entero más abajo
+                    if strict:
+                        raise
+                    fallidos.append((name, str(exc)))
+                    self.stderr.write(self.style.ERROR(f"FALLÓ {name}: {exc}"))
             self._collectstatic()
         finally:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_unlock(%s)", [SCHEMA_LOCK_ID])
 
+        if fallidos:
+            self._report_failures(fallidos)
+            return
+
         self.stdout.write(
             self.style.SUCCESS("Preparación de esquema completada de forma serializada.")
         )
+
+    def _report_failures(self, fallidos: list[tuple[str, str]]) -> None:
+        """Deja el fallo a la vista sin tumbar el arranque.
+
+        No se devuelve exit code distinto de cero a propósito: el compose corta la cadena
+        antes de gunicorn y el remedio para un esquema que no aplicó nunca es dejar el
+        sistema caído. Para que se note igual, el resumen va a stderr y repite los nombres.
+        """
+        borde = "!" * 78
+        self.stderr.write(self.style.ERROR(borde))
+        self.stderr.write(
+            self.style.ERROR(
+                f"ESQUEMAS QUE NO SE APLICARON ({len(fallidos)}). La app arranca igual, "
+                "pero estos cambios NO están en la base:"
+            )
+        )
+        for name, error in fallidos:
+            self.stderr.write(self.style.ERROR(f"  - {name}: {error}"))
+        self.stderr.write(
+            self.style.ERROR(
+                "Resolvé la causa y volvé a correr `python manage.py prepare_production_schema "
+                "--strict` para confirmar que quedan aplicados."
+            )
+        )
+        self.stderr.write(self.style.ERROR(borde))
 
     def _collectstatic(self) -> None:
         # STATIC_ROOT solo está definido en settings_prod/settings_internet. Con los settings de

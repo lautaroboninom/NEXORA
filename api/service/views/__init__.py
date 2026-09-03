@@ -63,6 +63,8 @@ from .ingresos_views import (
     EntregarIngresoView,
     DarBajaIngresoView,
     DarAltaIngresoView,
+    IngresoCambioEquipoCandidatosView,
+    IngresoCambioEquipoView,
     IngresoConvertirPropioMgView,
     IngresoCorreccionesHistoricasView,
     GarantiaReparacionCheckView,
@@ -255,6 +257,7 @@ from .scan_views import (
 # Motivos catálogo (propio de views/)
 from .motivos_view import CatalogoMotivosView
 from .warranty_views import WarrantyRulesView, WarrantyRuleDetailView
+from .colas_views import ColasNovedadesView
 from .work_views import (
     WorkResumenView,
     WorkObjectivesView,
@@ -403,6 +406,8 @@ __all__ = [
     "EntregarIngresoView",
     "DarBajaIngresoView",
     "DarAltaIngresoView",
+    "IngresoCambioEquipoCandidatosView",
+    "IngresoCambioEquipoView",
     "IngresoConvertirPropioMgView",
     "IngresoCorreccionesHistoricasView",
     "GarantiaReparacionCheckView",

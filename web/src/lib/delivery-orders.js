@@ -34,6 +34,31 @@ export function deliveryOrderItemPriceCurrency(item, orderOrCurrency = "ARS") {
   return clean(item?.priceCurrency).toUpperCase() === "USD" ? "USD" : fallback === "USD" ? "USD" : "ARS";
 }
 
+// Espejo de service/delivery_orders.remito_profile_for_type: cada tipo de entrega sale de un
+// depósito distinto. Las reparaciones salen de STC (ST liberados) y no del depósito central:
+// asumir VAL hace que la serie del equipo reparado no aparezca nunca en el stock consultado.
+const DEPOSIT_BY_DELIVERY_TYPE = {
+  sale: "VAL",
+  demo: "VAL",
+  rental: "STL",
+  service_release: "STC",
+};
+
+/** Acepta el tipo de entrega o la orden entera, para no repetir el `order?.deliveryType`. */
+export function deliveryOrderDefaultDeposit(deliveryTypeOrOrder) {
+  const deliveryType =
+    typeof deliveryTypeOrOrder === "string" ? deliveryTypeOrOrder : deliveryTypeOrOrder?.deliveryType;
+  return DEPOSIT_BY_DELIVERY_TYPE[clean(deliveryType).toLowerCase()] || "VAL";
+}
+
+/** En una reparación la partida es la serie del equipo del cliente: no es intercambiable por
+ * otra partida del mismo artículo, así que el stock del depósito no se ofrece como sugerencia. */
+export function deliveryOrderPartidaIsFixedEquipment(deliveryTypeOrOrder) {
+  const deliveryType =
+    typeof deliveryTypeOrOrder === "string" ? deliveryTypeOrOrder : deliveryTypeOrOrder?.deliveryType;
+  return clean(deliveryType).toLowerCase() === "service_release";
+}
+
 export function deliveryOrderItemRequiresPartida(item) {
   const value = item?.articleRequiresPartida ?? item?.requiresPartida;
   if (value === true || value === false) return value;

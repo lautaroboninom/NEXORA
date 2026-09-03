@@ -5,6 +5,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import _fetchall_dicts, _set_audit_user, exec_void, exec_returning, q, require_roles
+from ..derivations import attach_active_derivations
+from ..serializers import IngresoListItemSerializer
 
 
 class CatalogoAccesoriosView(APIView):
@@ -149,15 +151,21 @@ class BuscarAccesorioPorReferenciaView(APIView):
         like = "%" + (request.GET.get("ref") or "").strip() + "%"
         if not like or like == "%%":
             return Response([])
+        # El dueño va por el helper y no escrito a mano: `propietario_nombre` es una columna
+        # de compat y sin la guarda de esquema este endpoint tira 500 en una base donde el
+        # bloque de `sql/schema.sql` no corrió, mientras el resto degrada limpio.
+        from .ingresos_views import _owner_list_select_sql
+
         with connection.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                   t.id,
                   t.estado AS estado,
                   t.presupuesto_estado,
                   t.motivo,
                   c.razon_social,
+                  {_owner_list_select_sql()}
                   b.nombre AS marca,
                   m.nombre AS modelo,
                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
@@ -178,7 +186,7 @@ class BuscarAccesorioPorReferenciaView(APIView):
             """,
                 [like])
             rows = _fetchall_dicts(cur)
-        from ..serializers import IngresoListItemSerializer
+        attach_active_derivations(rows)
         return Response(IngresoListItemSerializer(rows, many=True).data)
 
 

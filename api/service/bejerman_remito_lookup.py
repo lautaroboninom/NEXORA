@@ -7,7 +7,9 @@ registraron 19 alquileres con el número puesto y sin ningún equipo vinculado.
 Acá se da vuelta la búsqueda: se pregunta por la serie y Bejerman contesta qué remitos
 la citan. Tres reglas filtran lo que no puede ser esa entrega:
 
-- **Tipo**: RSS para entregas de Servicio Técnico, RTA para altas de alquiler.
+- **Tipo**: RSS para entregas de Servicio Técnico, RTA para altas de alquiler, RT para las
+  salidas que se cerraron por venta (el equipo se factura y sale por el circuito comercial,
+  no por el de servicio).
 - **Fecha**: un remito anterior al ingreso del equipo no puede ser su salida.
 - **No repetido para el mismo NS**: si ese número ya quedó asociado a esa misma serie,
   no se vuelve a ofrecer. El mismo remito **sí** puede aparecer para otra OS: un
@@ -39,6 +41,8 @@ from .bejerman_sdk import BEJERMAN_OCCASIONAL_CUSTOMER_CODE, OCCASIONAL_CUSTOMER
 REMITO_TYPES_BY_FLOW = {
     "service_release": ("RSS",),
     "rental": ("RTA",),
+    # "RT" es match exacto contra `spvtco_Cod`, así que no arrastra RTA/RTN.
+    "sale": ("RT",),
 }
 SEARCH_LIMIT = 50
 # El detalle de cada comprobante multiplica las filas: se acota el total que viaja por SSH

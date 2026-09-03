@@ -541,6 +541,55 @@ class BejermanSyncTest(TestCase):
                 )
                 """
             )
+            # La condicion de derivado vive en su propia tabla y hoy la consulta cualquier
+            # entrega (`get_active_derivation` prevalida antes de liberar), asi que sin esto
+            # todo modulo que entregue un equipo revienta con un error de esquema que parece
+            # del codigo. El comando `apply_derivation_workflow_schema` no alcanza: crea el
+            # indice unico, no la tabla, que en el producto viene de `sql/schema.sql`.
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'deriv_estado') THEN
+                    CREATE TYPE deriv_estado AS ENUM
+                      ('derivado','en_servicio','devuelto','entregado_cliente');
+                  END IF;
+                END $$;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS proveedores_externos (
+                    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    nombre TEXT NOT NULL,
+                    contacto TEXT,
+                    telefono TEXT,
+                    email TEXT,
+                    direccion TEXT,
+                    notas TEXT,
+                    CONSTRAINT uq_prov_ext_nombre UNIQUE (nombre)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS equipos_derivados (
+                    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    ingreso_id INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+                    -- En produccion es NOT NULL, pero `test_work_upgrade` simula un esquema
+                    -- legacy donde la columna es nullable y su `CREATE TABLE IF NOT EXISTS`
+                    -- es un no-op contra esta. El sembrado existe para que el codigo corra,
+                    -- no para replicar las constraints.
+                    proveedor_id INTEGER NULL
+                        REFERENCES proveedores_externos(id) ON DELETE RESTRICT,
+                    remit_deriv TEXT,
+                    fecha_deriv DATE NOT NULL DEFAULT CURRENT_DATE,
+                    fecha_entrega DATE,
+                    estado deriv_estado NOT NULL DEFAULT 'derivado',
+                    comentarios TEXT
+                )
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ingreso_baja_requests (

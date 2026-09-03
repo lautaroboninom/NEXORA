@@ -100,6 +100,7 @@ from service.bejerman_sdk import (
     BejermanPdfPendingError,
     BejermanPdfReference,
     BejermanSdkResponseError,
+    BejermanSdkTransportUnavailable,
     BejermanSdkUnavailable,
     build_article_description_map,
     build_article_filters,
@@ -3818,6 +3819,61 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
         client_cls.assert_called_once_with(company_key="MGBIO", actor_user_id=1152, allow_system_credentials=True)
         self.assertFalse(result["unavailable"])
         self.assertEqual([item["code"] for item in result["items"]], ["VAL", "STL"])
+
+    def test_bejerman_depositos_reusa_el_ultimo_listado_bueno_si_el_servicio_se_cae(self):
+        """Un corte momentáneo de Bejerman no puede recortar el selector a VAL/STL:
+        los depósitos que contestó hace un rato son el dato real."""
+
+        class FakeDepositClient:
+            def __init__(self, records):
+                self.records = records
+
+            def obtener_depositos(self):
+                return {
+                    "DatosJSON": [
+                        {"Deposito_Codigo": code, "Deposito_Descripcion": name}
+                        for code, name in self.records
+                    ]
+                }
+
+        good = FakeDepositClient([("VAL", "Ventas"), ("STR", "Reparación"), ("DES", "Descarte")])
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=good):
+            list_bejerman_depositos("SEPID")
+
+        class FakeDownClient:
+            def obtener_depositos(self):
+                raise BejermanSdkTransportUnavailable(
+                    "Error HTTP Bejerman 500: System.ServiceModel.ServiceActivationException"
+                )
+
+        caido = FakeDownClient()
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient", return_value=caido),
+            override_settings(BEJERMAN_DEPOSITS_CACHE_SECONDS=0),
+        ):
+            result = list_bejerman_depositos("SEPID")
+
+        self.assertTrue(result["unavailable"])
+        self.assertEqual([item["code"] for item in result["items"]], ["VAL", "STR", "DES"])
+        self.assertIn("últimos depósitos conocidos", result["warning"])
+        # El detalle técnico queda en el log, no en la pantalla del operador.
+        self.assertNotIn("ServiceActivationException", result["warning"])
+
+    def test_bejerman_depositos_cae_al_listado_fijo_sin_nada_cacheado(self):
+        class FakeDownClient:
+            company_key = "SEPID"
+
+            def obtener_depositos(self):
+                raise BejermanSdkTransportUnavailable("servicio caído")
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=FakeDownClient()):
+            result = list_bejerman_depositos("SEPID")
+
+        self.assertTrue(result["unavailable"])
+        # STC entra en el listado fijo porque es el depósito del que sale el remito de una
+        # reparación: sin él, una caída del catálogo deja esas órdenes sin depósito elegible.
+        self.assertEqual([item["code"] for item in result["items"]], ["VAL", "STL", "STC"])
+        self.assertIn("depósitos estándar", result["warning"])
 
     def test_article_stock_helper_filters_deposit_and_zero_stock(self):
         stock_rows = build_stock_rows(FakeArticleStockClient().obtener_stock_deposito("VAL"))

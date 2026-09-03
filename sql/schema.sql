@@ -11,6 +11,8 @@ CREATE EXTENSION IF NOT EXISTS citext;
 -- =============================
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ticket_state') THEN
+    -- `derivado` se conserva sólo por compatibilidad con el historial. Las nuevas
+    -- operaciones representan la condición de derivado en `equipos_derivados`.
     CREATE TYPE ticket_state AS ENUM (
       'ingresado','diagnosticado','presupuestado','reparar','controlado_sin_defecto','no_se_repara','reparado','entregado','baja','derivado','liberado','alquilado','vendido_pendiente_entrega','vendido_entregado'
     );
@@ -493,6 +495,9 @@ CREATE TABLE IF NOT EXISTS ingresos (
   propietario_doc      TEXT,
   descripcion_problema  TEXT,
   trabajos_realizados   TEXT,
+  -- Snapshot de texto de la serie entregada en un cambio de equipo. La relación real
+  -- es `device_cambio_id`; esta columna se mantiene sincronizada porque el PDF, la
+  -- verificación de entrega y los cambios históricos (anteriores a la FK) la leen.
   serial_cambio         TEXT,
   resolucion           TEXT NULL
 );
@@ -501,6 +506,34 @@ ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_cobro_neto N
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_quote_id INTEGER;
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS empresa_bejerman TEXT NOT NULL DEFAULT 'SEPID';
 ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS empresa_facturar TEXT NOT NULL DEFAULT 'SEPID';
+
+-- Cambio de equipo (permuta / parte de pago): el cliente trae un equipo, se le entrega
+-- otro y el suyo queda para SEPID. `device_id` sigue siendo el equipo que INGRESÓ;
+-- `device_cambio_id` es el que SALIÓ. Ver apply_device_swap_schema.
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS device_cambio_id INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL;
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS cambio_destino_viejo TEXT NULL;
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS cambio_fecha TIMESTAMPTZ NULL;
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS cambio_registrado_por INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
+-- Parte de pago sin permuta: tomamos el equipo y no entregamos ninguno. Va acá y no sólo
+-- en el comando porque `_has_device_swap_schema()` exige las dos columnas: si falta, el
+-- circuito del cambio queda apagado y la entrega deja de verificar la serie.
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS cambio_sin_entrega BOOLEAN NOT NULL DEFAULT FALSE;
+-- El cliente que tenía el equipo antes de que pasara a ser nuestro. Los papeles de la OS
+-- resuelven el cliente por `devices.customer_id`, y al tomar el equipo en parte de pago ese
+-- campo pasa a MG BIO: sin este snapshot, la orden de salida que firma el cliente salía a
+-- nombre de MG BIO. Lo escriben el cambio de equipo y la conversión manual a propio.
+ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS cliente_original_id INTEGER NULL REFERENCES customers(id) ON DELETE SET NULL;
+-- El destino dice qué se hace con el equipo que queda: 'pendiente' no define nada y los
+-- otros tres son razones por las que pasa a propiedad de SEPID ('venta' lo manda al
+-- depósito VAL, 'desguace' a DES). Se recrea siempre: agregar un destino cambia la lista
+-- y un IF NOT EXISTS dejaría la constraint vieja rechazando el valor nuevo.
+ALTER TABLE ingresos DROP CONSTRAINT IF EXISTS chk_ingresos_cambio_destino_viejo;
+ALTER TABLE ingresos
+  ADD CONSTRAINT chk_ingresos_cambio_destino_viejo
+  CHECK (cambio_destino_viejo IS NULL
+         OR cambio_destino_viejo IN ('pendiente','mg','venta','desguace'));
+CREATE INDEX IF NOT EXISTS idx_ingresos_device_cambio ON ingresos(device_cambio_id)
+  WHERE device_cambio_id IS NOT NULL;
 
 -- Compat de schema para bases legacy (evita parches manuales fase 1/2)
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS numero_interno TEXT;
@@ -2516,10 +2549,34 @@ CREATE TABLE IF NOT EXISTS equipos_derivados (
   comentarios   TEXT
 );
 
--- Evitar mas de una derivacion "abierta" por ingreso a la vez
+-- `ingresos.estado` conserva exclusivamente la etapa operativa. La condición de
+-- derivado vive en esta tabla y está activa mientras no tenga entrega y
+-- su estado sea `derivado` o `en_servicio`.
+DO $$
+DECLARE
+  current_predicate TEXT;
+BEGIN
+  SELECT pg_get_expr(index_definition.indpred, index_definition.indrelid)
+    INTO current_predicate
+    FROM pg_index index_definition
+    JOIN pg_class index_class ON index_class.oid = index_definition.indexrelid
+   WHERE index_class.relname = 'uq_equipos_derivados_ingreso_abierto';
+
+  IF current_predicate IS NOT NULL
+     AND POSITION('en_servicio' IN LOWER(current_predicate)) = 0 THEN
+    DROP INDEX uq_equipos_derivados_ingreso_abierto;
+  END IF;
+END
+$$;
+
+-- Evitar más de una derivación activa por ingreso a la vez.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_equipos_derivados_ingreso_abierto
   ON equipos_derivados(ingreso_id)
-  WHERE estado = 'derivado' AND fecha_entrega IS NULL;
+  WHERE fecha_entrega IS NULL
+    AND estado IN ('derivado','en_servicio');
+
+COMMENT ON INDEX uq_equipos_derivados_ingreso_abierto IS
+  'Una sola derivación activa por OS; el estado operativo vive en ingresos.estado.';
 
 CREATE TABLE IF NOT EXISTS handoffs (
   id                     INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -3432,5 +3489,3 @@ DO $$ BEGIN
     FOR EACH ROW EXECUTE FUNCTION audit.log_row_change();
   END IF;
 END $$;
-
-

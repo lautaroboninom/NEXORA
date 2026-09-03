@@ -1,3 +1,5 @@
+import { RESOLUCION } from "./constants.js";
+import { getDeviceSwapState } from "./device-swap.js";
 import { getReleaseFlow } from "./release-flow.js";
 import { ingresoIdOf } from "./ui-helpers.js";
 
@@ -51,6 +53,21 @@ export function classifyReleaseSelection(rows, { canManageResolution = false } =
         row,
         flow,
         reason: "Todavía falta cerrar la reparación o definir una resolución de salida.",
+      });
+      continue;
+    }
+    // Mismo corte que el modal de una sola OS: una resolución 'cambio' sin el equipo
+    // vinculado no se libera. Sin esto, el lote —que sale del mismo botón— era la vía
+    // para liberar un cambio a medio registrar.
+    if (
+      String(row?.resolucion || "").toLowerCase() === RESOLUCION.CAMBIO &&
+      !getDeviceSwapState(row, { canSwap: true }).hasSwap
+    ) {
+      blocked.push({
+        id,
+        row,
+        flow,
+        reason: "Registrá el cambio de equipo: falta elegir el equipo que se entrega.",
       });
       continue;
     }

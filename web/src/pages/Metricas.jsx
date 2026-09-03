@@ -323,7 +323,9 @@ export default function Metricas() {
 
   function exportSeriesExcel(kind) {
     const src = kind === 'yearly' ? (series?.yearly || []) : (series?.monthly || []);
-    const header = ["period","entregados","mttr_dias","sla_diag_24h","t_emitir_horas","t_aprobar_horas","ext_derivados","ext_devueltos","ext_t_deriv_a_dev_dias"];
+    // Sin las tres columnas de externo: el backend arma el bloque `derivaciones` sólo en el
+    // resumen, no por período, así que `m.externo` nunca existe y salían siempre vacías.
+    const header = ["period","entregados","mttr_dias","sla_diag_24h","t_emitir_horas","t_aprobar_horas"];
     const rows = [header];
     src.forEach(m => {
       rows.push([
@@ -333,9 +335,6 @@ export default function Metricas() {
         m.sla_diag_24h ? (m.sla_diag_24h.cumplimiento * 100).toFixed(0) + "%" : "",
         m.aprob_presupuestos?.t_emitir_horas != null ? m.aprob_presupuestos.t_emitir_horas.toFixed(2) : "",
         m.aprob_presupuestos?.t_aprobar_horas != null ? m.aprob_presupuestos.t_aprobar_horas.toFixed(2) : "",
-        m.externo?.derivados ?? "",
-        m.externo?.devueltos ?? "",
-        m.externo?.t_deriv_a_devuelto_dias != null ? m.externo.t_deriv_a_devuelto_dias.toFixed(2) : "",
       ]);
     });
     exportExcel(`metricas_series_${kind}_${desdeClamped}_${hasta}.xls`, rows);
@@ -720,9 +719,9 @@ export default function Metricas() {
               help="Suma por técnico"
             />
             <StatCard
-              label="Derivados externos (WIP)"
+              label="Derivados (WIP)"
               value={formatNumber(data?.derivaciones?.wip_externo ?? 0)}
-              help="Estado derivado/en_servicio"
+              help="Derivaciones activas"
             />
           </div>
 
@@ -1007,7 +1006,7 @@ export default function Metricas() {
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
                     <MiniSpark title="T emitir presupuesto (h)" values={monthlySeries.map(m=>m.aprob_presupuestos?.t_emitir_horas||0)} fmt={(v)=>formatNumber(v, 1)} />
                     <MiniSpark title="T aprobar presupuesto (h)" values={monthlySeries.map(m=>m.aprob_presupuestos?.t_aprobar_horas||0)} fmt={(v)=>formatNumber(v, 1)} />
-                    <MiniSpark title="Derivados externos (mensual)" values={monthlySeries.map(m=>m.externo?.derivados||0)} fmt={(v)=>formatNumber(v)} />
+                    <MiniSpark title="Derivados (mensual)" values={monthlySeries.map(m=>m.externo?.derivados||0)} fmt={(v)=>formatNumber(v)} />
                   </div>
                 </>
               )}

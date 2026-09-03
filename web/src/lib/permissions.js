@@ -30,6 +30,7 @@ export const PERMISSION_CODES = {
   ACTION_INGRESO_EDIT_LOCATION: "action.ingreso.edit_location",
   ACTION_INGRESO_EDIT_DELIVERY: "action.ingreso.edit_delivery",
   ACTION_INGRESO_REPAIR_TRANSITIONS: "action.ingreso.repair_transitions",
+  ACTION_INGRESO_DEVICE_SWAP: "action.ingreso.device_swap",
   ACTION_INGRESO_MANAGE_DERIVATIONS: "action.ingreso.manage_derivations",
   ACTION_INGRESO_BAJA_ALTA: "action.ingreso.baja_alta",
   ACTION_INGRESO_FORCE_HISTORICAL: "action.ingreso.force_historical",
@@ -108,6 +109,7 @@ const ROLE_DEFAULT_PERMISSIONS = {
     PERMISSION_CODES.ACTION_INGRESO_EDIT_LOCATION,
     PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY,
     PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS,
+    PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP,
     PERMISSION_CODES.ACTION_INGRESO_MANAGE_DERIVATIONS,
     PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA,
     PERMISSION_CODES.ACTION_INGRESO_FORCE_HISTORICAL,
@@ -200,6 +202,7 @@ const ROLE_DEFAULT_PERMISSIONS = {
     PERMISSION_CODES.ACTION_INGRESO_EDIT_LOCATION,
     PERMISSION_CODES.ACTION_INGRESO_EDIT_DELIVERY,
     PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS,
+    PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP,
     PERMISSION_CODES.ACTION_INGRESO_MANAGE_DERIVATIONS,
     PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA,
     PERMISSION_CODES.ACTION_INGRESO_FORCE_HISTORICAL,
@@ -237,6 +240,9 @@ const ROLE_DEFAULT_PERMISSIONS = {
     PERMISSION_CODES.PAGE_ROUTE_SHEET,
     PERMISSION_CODES.PAGE_BEJERMAN_PURCHASE_ENTRIES,
     PERMISSION_CODES.ACTION_INGRESO_CREATE,
+    // Recepción registra el cambio de equipo desde el mostrador sin tener
+    // repair_transitions ni acceso a la pestaña de diagnóstico.
+    PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP,
     PERMISSION_CODES.ACTION_INGRESO_EMIT_INGRESS_ORDER,
     PERMISSION_CODES.ACTION_INGRESO_FIX_RIS_PREFLIGHT,
     PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE,
@@ -284,6 +290,47 @@ export function normalizePermissionsMap(raw) {
     out[String(code)] = !!value;
   });
   return out;
+}
+
+export function hasCustomPermissions(user) {
+  if (!user) return false;
+  const role = normalizeRole(user.rol);
+  if (!role || role === "jefe") return false;
+  const defaultSet = ROLE_DEFAULT_PERMISSIONS[role];
+  if (!defaultSet) return false;
+
+  // El backend manda el detalle en `custom_permissions` ({code: "allow" | "deny"}).
+  // Sólo un `allow` sobre un permiso que el rol no trae de fábrica amplía lo que el
+  // usuario puede abrir. Un `deny` le SACA una pantalla: contarlo como
+  // "personalizado" devolvía el menú completo justo cuando el usuario tiene menos
+  // permisos que el rol base, que es exactamente al revés.
+  const overrides =
+    user.custom_permissions && typeof user.custom_permissions === "object"
+      ? user.custom_permissions
+      : {};
+  const overrideCodes = Object.keys(overrides);
+  if (overrideCodes.length > 0) {
+    return overrideCodes.some(
+      (code) =>
+        String(overrides[code] ?? "").trim().toLowerCase() === "allow" && !defaultSet.has(code),
+    );
+  }
+
+  // Respuestas viejas que sólo traen el contador: no dicen si el override suma o
+  // resta, y sin ese dato el lado seguro es el menú completo.
+  if (user.has_custom_permissions) return true;
+  if (Number(user.permisos_personalizados || 0) > 0) return true;
+
+  // Último recurso: comparar el mapa efectivo contra el default del rol. Sólo cuenta
+  // lo que el usuario tiene DE MÁS; que le falte un permiso del rol no agranda el menú.
+  const userMap = normalizePermissionsMap(user.permissions);
+  for (const code of Object.values(PERMISSION_CODES)) {
+    if (defaultSet.has(code)) continue;
+    if (Object.prototype.hasOwnProperty.call(userMap, code) && Boolean(userMap[code])) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function hasRoleFallbackPermission(user, code) {

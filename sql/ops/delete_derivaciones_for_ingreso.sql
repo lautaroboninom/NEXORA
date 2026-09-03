@@ -16,9 +16,8 @@ TABLE (
 -- Borrar derivaciones del ingreso
 DELETE FROM equipos_derivados WHERE ingreso_id = :ingreso_id;
 
--- Si el ingreso quedó marcado como 'derivado', volver a 'ingresado'
-UPDATE ingresos
-   SET estado = 'ingresado'
- WHERE id = :ingreso_id AND estado = 'derivado';
+-- La derivación no modifica el estado operativo de `ingresos`. Si esta OS aún
+-- conserva el estado histórico `derivado`, resolverla mediante la vista previa
+-- y el comando `reconcile_legacy_derived_states`; este script no debe adivinarlo.
 
 COMMIT;

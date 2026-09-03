@@ -10,7 +10,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..activity_audit import classify_read_path
+from ..activity_audit import classify_activity_path
 from ..rejected_budget import has_rejected_budget_charge_schema
 from .helpers import (
     WORKDAY_END_HOUR,
@@ -825,7 +825,7 @@ def _normalize_event_row(row, ingreso_context_map):
     title = f"Registró evento de {_activity_state_label(state_to)}"
     if state_to == "derivado":
         activity_type = "derivacion"
-        title = "Registró derivación externa"
+        title = "Marcó el equipo como derivado"
     elif "devolucion de externo" in comment_key or ("devol" in comment_key and state_to == "ingresado"):
         activity_type = "devolucion_derivacion"
         title = "Registró devolución de derivación"
@@ -881,7 +881,7 @@ def _normalize_repuesto_row(row, ingreso_context_map, repuesto_context_map):
 
 
 def _normalize_audit_log_row(row, ingreso_context_map):
-    info = classify_read_path(row.get("path"))
+    info = classify_activity_path(row.get("path"), row.get("method"))
     if not info:
         return None
     ingreso_id = info.get("ingreso_id")
@@ -902,6 +902,7 @@ def _normalize_audit_log_row(row, ingreso_context_map):
         meta={
             "method": row.get("method"),
             "status_code": row.get("status_code"),
+            "derivacion_id": info.get("derivacion_id"),
         },
     )
 
@@ -1224,7 +1225,18 @@ def _load_audit_log_activity_rows(since, until, tecnico_id=None):
         FROM audit_log al
         LEFT JOIN users u ON u.id = al.user_id
         WHERE al.ts BETWEEN %s AND %s
-          AND UPPER(COALESCE(al.method, '')) = 'GET'
+          AND (
+                UPPER(COALESCE(al.method, '')) = 'GET'
+                OR (
+                     UPPER(COALESCE(al.method, '')) = 'POST'
+                     AND (
+                          al.path LIKE '/api/ingresos/%%/derivar/'
+                          OR al.path LIKE '/api/ingresos/%%/derivar'
+                          OR al.path LIKE '/api/ingresos/%%/derivaciones/%%/devolver/'
+                          OR al.path LIKE '/api/ingresos/%%/derivaciones/%%/devolver'
+                         )
+                   )
+              )
           AND COALESCE(al.status_code, 0) BETWEEN 200 AND 399
           AND LOWER(COALESCE(NULLIF(TRIM(al.role), ''), COALESCE(u.rol, ''))) IN ({role_clause})
           {tecnico_where}
@@ -2062,7 +2074,7 @@ class MetricasActividadTecnicosView(APIView):
             if row.get("repuesto_id") is not None:
                 repuesto_ids.add(int(row["repuesto_id"]))
         for row in audit_rows:
-            info = classify_read_path(row.get("path"))
+            info = classify_activity_path(row.get("path"), row.get("method"))
             if info and info.get("ingreso_id") is not None:
                 ingreso_ids.add(int(info["ingreso_id"]))
 
@@ -2233,6 +2245,7 @@ class MetricasResumenView(APIView):
             "JOIN locations loc ON loc.id=i.ubicacion_id\n"
             "LEFT JOIN users u ON u.id=i.asignado_a\n"
             "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','no_se_repara','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
+            "  AND NOT EXISTS (SELECT 1 FROM equipos_derivados active_ed WHERE active_ed.ingreso_id=i.id AND active_ed.fecha_entrega IS NULL AND active_ed.estado IN ('derivado','en_servicio'))\n"
             "  AND LOWER(loc.nombre) = LOWER(%s)"
             f"{(' AND ' + where_i[5:]) if where_i else ''}\n"
             "GROUP BY i.asignado_a, tecnico_nombre\n"
@@ -2247,6 +2260,7 @@ class MetricasResumenView(APIView):
             f"{join_dm}\n"
             "JOIN locations loc ON loc.id=i.ubicacion_id\n"
             "WHERE i.estado NOT IN ('diagnosticado','presupuestado','reparado','controlado_sin_defecto','no_se_repara','entregado','liberado','alquilado','baja','derivado','vendido_pendiente_entrega','vendido_entregado')\n"
+            "  AND NOT EXISTS (SELECT 1 FROM equipos_derivados active_ed WHERE active_ed.ingreso_id=i.id AND active_ed.fecha_entrega IS NULL AND active_ed.estado IN ('derivado','en_servicio'))\n"
             "  AND LOWER(loc.nombre) = LOWER(%s)"
             f"{where_i}\n"
         ), ["taller", *where_params]) or []

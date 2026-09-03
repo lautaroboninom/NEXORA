@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   deliveryOrderBejermanCustomerLabel,
+  deliveryOrderDefaultDeposit,
+  deliveryOrderPartidaIsFixedEquipment,
   deliveryOrderIsOccasionalCustomer,
   deliveryOrderOccasionalCustomerDocument,
   deliveryOrderOccasionalCustomerReady,
@@ -87,4 +89,23 @@ test("excluye de las sugerencias las partidas usadas arriba para el mismo articu
     [...deliveryOrderUsedPartidaKeys(items, 1, 0, "VAL")],
     ["d1-1489"],
   );
+});
+
+test("cada tipo de entrega sale de su propio deposito", () => {
+  // Espejo de remito_profile_for_type: una reparación sale de STC, no del depósito de venta.
+  assert.equal(deliveryOrderDefaultDeposit("service_release"), "STC");
+  assert.equal(deliveryOrderDefaultDeposit("rental"), "STL");
+  assert.equal(deliveryOrderDefaultDeposit("sale"), "VAL");
+  assert.equal(deliveryOrderDefaultDeposit("demo"), "VAL");
+  // Acepta la orden entera y cae en el depósito central si el tipo no se conoce.
+  assert.equal(deliveryOrderDefaultDeposit({ deliveryType: "service_release" }), "STC");
+  assert.equal(deliveryOrderDefaultDeposit(""), "VAL");
+  assert.equal(deliveryOrderDefaultDeposit(undefined), "VAL");
+});
+
+test("solo la reparacion tiene la partida atada al equipo del cliente", () => {
+  assert.equal(deliveryOrderPartidaIsFixedEquipment("service_release"), true);
+  assert.equal(deliveryOrderPartidaIsFixedEquipment({ deliveryType: "service_release" }), true);
+  assert.equal(deliveryOrderPartidaIsFixedEquipment("sale"), false);
+  assert.equal(deliveryOrderPartidaIsFixedEquipment("rental"), false);
 });

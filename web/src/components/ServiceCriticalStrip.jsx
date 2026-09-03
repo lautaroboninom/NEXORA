@@ -1,5 +1,6 @@
 import StatusChip from "./StatusChip.jsx";
 import {
+  deviceCustomerTitle,
   deviceIdentifierPartsOf,
   formatDateOnly,
   formatOS,
@@ -61,8 +62,11 @@ export default function ServiceCriticalStrip({ data, isCotizacion = false }) {
   return (
     <div className="sticky top-0 z-20 mb-4 rounded border bg-white/95 p-3 shadow-sm backdrop-blur">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5 xl:grid-cols-[0.65fr_1.8fr_1.8fr_0.95fr_0.85fr_0.95fr_1fr_1fr_1.1fr_1fr]">
-        <Field label="OS">{formatOS(data)}</Field>
-        <Field label="Cliente">{data?.razon_social || data?.cliente || "-"}</Field>
+        {/* El chip Derivado vive en el título de la hoja: acá la columna es angosta. */}
+        <Field label="OS" truncateValue={false}>{formatOS(data)}</Field>
+        {/* El dueño real, no el cliente contenedor: la fila del listado decía "Juan Pérez" y
+            el encabezado de la hoja a la que lleva decía "Particular". */}
+        <Field label="Cliente" title={deviceCustomerTitle(data)}>{deviceCustomerTitle(data)}</Field>
         <Field label="Tipo de equipo" title={tipoEquipo}>{tipoEquipo}</Field>
         <Field label="Marca" title={marca}>{marca}</Field>
         <Field label="Modelo" title={modelo}>{modelo}</Field>

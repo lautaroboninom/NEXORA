@@ -29,10 +29,16 @@ class RemitosSalidaBulkTests(SimpleTestCase):
         self.factory = RequestFactory()
         self.view = RemitosSalidaBulkPdfView()
 
-    def _get(self, query: str, single_side_effect):
+    def _get(self, query: str, single_side_effect, derivacion=None):
         request = self.factory.get(f"/api/ingresos/remitos-salida/?{query}")
         with (
             patch("service.views.reportes_views.require_roles", return_value=None),
+            # La view prevalida derivaciones antes de liberar nada, y eso consulta la base:
+            # sin mockearlo, un modulo de `SimpleTestCase` explota con DatabaseOperationForbidden.
+            patch(
+                "service.views.reportes_views.get_active_derivation",
+                return_value=derivacion,
+            ),
             patch(
                 "service.views.reportes_views.RemitoSalidaPdfView.get",
                 side_effect=single_side_effect,
@@ -116,3 +122,22 @@ class RemitosSalidaBulkTests(SimpleTestCase):
             response = self.view.get(request)
 
         self.assertEqual(response.status_code, 400)
+
+    def test_una_os_derivada_corta_el_lote_antes_de_liberar_ninguna(self):
+        """La prevalidacion existe porque el corte tardio ya habia mutado las OS previas."""
+        emitidas = []
+
+        def _registrar(request, ingreso_id, *args, **kwargs):
+            emitidas.append(ingreso_id)
+            return _pdf(b"no deberia llegar")
+
+        response = self._get(
+            "ids=4,5&skip_errors=1",
+            _registrar,
+            derivacion={"id": 1, "ingreso_id": 4, "estado": "enviado"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "INGRESO_DERIVACION_ACTIVA")
+        self.assertEqual(response.data["ingresos_derivados"], [4, 5])
+        self.assertEqual(emitidas, [])

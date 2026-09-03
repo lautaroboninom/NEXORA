@@ -1,7 +1,9 @@
+from io import StringIO
 from pathlib import Path
 from unittest.mock import call, patch
 
 from django.core.management import get_commands
+from django.core.management.base import CommandError
 from django.test import SimpleTestCase, override_settings
 
 from service.management.commands.prepare_production_schema import (
@@ -99,3 +101,77 @@ class PrepareProductionSchemaHandleTests(SimpleTestCase):
 
         self.assertNotIn(call("collectstatic", interactive=False), call_command.call_args_list)
         self.assertEqual(call_command.call_args_list[0], call("migrate", interactive=False))
+
+
+@override_settings(STATIC_ROOT="/app/staticfiles")
+class PrepareProductionSchemaResilienceTests(SimpleTestCase):
+    """Un esquema que no aplica no puede dejar la API sin arrancar.
+
+    En `docker-compose.prod.yml` el comando esta encadenado con `&&` antes de gunicorn:
+    un CommandError acá se traduce en produccion caida. Y hay comandos que fallan por
+    datos preexistentes legales (`apply_derivation_workflow_schema` aborta si hay dos
+    derivaciones activas para la misma OS), asi que la falla tiene que ser ruidosa,
+    no fatal.
+    """
+
+    PRIMERO = SCHEMA_COMMANDS[0][0]
+
+    def _run(self, failing=None, error="datos duplicados", **options):
+        command = Command(stdout=StringIO(), stderr=StringIO(), no_color=True)
+
+        def fake_call_command(name, *args, **kwargs):
+            if name == failing:
+                raise CommandError(error)
+
+        with (
+            patch("service.management.commands.prepare_production_schema.connection"),
+            patch(
+                "service.management.commands.prepare_production_schema.call_command",
+                side_effect=fake_call_command,
+            ) as call_command,
+        ):
+            command.handle(**options)
+        return command, call_command
+
+    def test_un_esquema_que_falla_no_corta_los_siguientes_ni_collectstatic(self):
+        command, call_command = self._run(failing=self.PRIMERO)
+
+        llamados = [llamada.args[0] for llamada in call_command.call_args_list]
+        for name, _ in SCHEMA_COMMANDS:
+            self.assertIn(name, llamados, f"{name} tendria que haberse intentado igual")
+        self.assertIn(call("collectstatic", interactive=False), call_command.call_args_list)
+
+    def test_el_resumen_nombra_los_esquemas_que_no_aplicaron(self):
+        command, _ = self._run(failing=self.PRIMERO, error="derivaciones activas duplicadas")
+
+        salida = command.stderr._out.getvalue()
+        self.assertIn(self.PRIMERO, salida)
+        self.assertIn("derivaciones activas duplicadas", salida)
+        self.assertIn("NO estan en la base", salida.replace("á", "a").replace("á", "a"))
+
+    def test_el_lock_se_libera_aunque_falle_un_esquema(self):
+        with (
+            patch("service.management.commands.prepare_production_schema.connection") as conn,
+            patch(
+                "service.management.commands.prepare_production_schema.call_command",
+                side_effect=lambda name, *a, **k: (_ for _ in ()).throw(CommandError("x"))
+                if name == self.PRIMERO
+                else None,
+            ),
+        ):
+            Command(stdout=StringIO(), stderr=StringIO(), no_color=True).handle()
+
+        ejecutados = [
+            llamada.args[0]
+            for llamada in conn.cursor.return_value.__enter__.return_value.execute.call_args_list
+        ]
+        self.assertIn("SELECT pg_advisory_unlock(%s)", ejecutados)
+
+    def test_strict_vuelve_a_abortar_en_el_primero(self):
+        with self.assertRaises(CommandError):
+            self._run(failing=self.PRIMERO, strict=True)
+
+    def test_migrate_sigue_siendo_fatal(self):
+        # Sin migraciones no hay base sobre la que aplicar esquemas: seguir seria a ciegas.
+        with self.assertRaises(CommandError):
+            self._run(failing="migrate")

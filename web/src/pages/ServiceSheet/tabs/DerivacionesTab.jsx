@@ -21,14 +21,18 @@ export default function DerivacionesTab({ id, canManage = false, setErr, refresh
     })();
   }, [id, setErr]);
 
-  const hayDerivAbierta = Array.isArray(derivs) && derivs.find(d => !d.fecha_entrega);
+  const esDerivacionActiva = (derivacion) => (
+    !derivacion?.fecha_entrega
+    && ["derivado", "en_servicio"].includes(String(derivacion?.estado || "").toLowerCase())
+  );
+  const hayDerivAbierta = Array.isArray(derivs) && derivs.find(esDerivacionActiva);
   return (
     <div className="border rounded p-4"> 
       <div className="flex items-center gap-3 mb-3">
         <h2 className="font-semibold">Derivaciones</h2>
         {canManage && (
           <div className="ml-auto flex items-center gap-2">
-            <Link to={`/ingresos/${id}/derivar`} className="bg-neutral-800 text-white px-3 py-2 rounded">Derivar a externo</Link>
+            <Link to={`/ingresos/${id}/derivar`} className="bg-neutral-800 text-white px-3 py-2 rounded">Derivar</Link>
             {hayDerivAbierta && (
             <>
               <input
@@ -43,7 +47,7 @@ export default function DerivacionesTab({ id, canManage = false, setErr, refresh
                 disabled={savingDev}
                 onClick={async () => {
                   try {
-                    const abierta = derivs.find(d => !d.fecha_entrega);
+                    const abierta = derivs.find(esDerivacionActiva);
                     if (!abierta) return;
                     setSavingDev(true);
                     await postDerivacionDevuelto(id, abierta.id, { fecha_entrega: fechaDevStr || null });

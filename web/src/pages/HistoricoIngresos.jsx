@@ -6,7 +6,9 @@ import { ingresoIdOf, formatOS, formatDateTime, tipoEquipoOf, resolveFechaIngres
 import useQueryState from "../hooks/useQueryState";
 import useDebouncedValue from "../hooks/useDebouncedValue";
 import StatusChip from "../components/StatusChip.jsx";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
 import { ingresoSortOptions } from "../lib/ingreso-list-sort";
@@ -339,9 +341,12 @@ export default function HistoricoIngresos() {
                   aria-label={deleted ? `${formatOS(row)} eliminado` : `Abrir hoja de servicio de ${formatOS(row)}`}
                   data-testid={`row-mobile-${rowKey(row)}`}
                 >
-                  <div className={`font-semibold text-gray-900 ${deleted ? "" : "underline"}`}>{formatOS(row)}</div>
+                  <div className={`font-semibold text-gray-900 ${deleted ? "" : "underline"}`}>
+                    {formatOS(row)}
+                    <DerivadoMark row={row} className="ml-1.5 align-middle" />
+                  </div>
                   <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
-                    <MobileDataField label="Cliente" value={row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"} />
+                    <MobileDataField label="Cliente"><CustomerCell row={row} /></MobileDataField>
                     <MobileDataField label="Equipo" value={[tipoEquipoOf(row), row?.marca ?? row?.equipo?.marca, row?.modelo ?? row?.equipo?.modelo].filter(Boolean).join(" · ") || "-"} />
                     <MobileDataField label="Variante" value={row?.equipo_variante ?? row?.variante ?? row?.modelo_variante ?? "-"} />
                     <MobileDataField label="Estado">
@@ -581,9 +586,12 @@ export default function HistoricoIngresos() {
                     aria-label={deleted ? `${formatOS(row)} eliminado` : `Abrir hoja de servicio de ${formatOS(row)}`}
                     data-testid={`row-${rowKey(row)}`}
                   >
-                    <td className={`p-2 ${deleted ? "font-medium" : "underline"}`}>{formatOS(row)}</td>
+                    <td className={`p-2 ${deleted ? "font-medium" : "underline"}`}>
+                      {formatOS(row)}
+                      <DerivadoMark row={row} className="ml-1.5 align-middle" />
+                    </td>
                     <td className="p-2">
-                      {row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-"}
+                      <CustomerCell row={row} />
                     </td>
                     <td className="p-2">{tipoEquipoOf(row)}</td>
                     <td className="p-2">{row?.marca ?? row?.equipo?.marca ?? "-"}</td>

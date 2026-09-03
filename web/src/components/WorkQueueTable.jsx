@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 
+import CustomerCell from "./CustomerCell.jsx";
 import DataChip from "./DataChip.jsx";
 import StatusChip from "./StatusChip.jsx";
 import DeviceIdentifier from "./DeviceIdentifier.jsx";
+import { DerivadoMark } from "./DerivadoBadge.jsx";
 import IngresoTable from "./IngresoTable.jsx";
 import {
   formatDateOnly,
@@ -15,7 +17,6 @@ import {
 import {
   WORK_QUEUE_SORT_COLUMNS,
   workQueueAgeDays,
-  workQueueNextAction,
   workQueuePriority,
   workQueueProperty,
   workQueueTechnician,
@@ -51,6 +52,7 @@ function OsCell({ row }) {
   return (
     <>
       {formatOS(row)}
+      <DerivadoMark row={row} className="ml-1.5 align-middle" />
       {isMotivoCotizacionEquipo(row?.motivo) && (
         <span className="ml-2 inline-block px-2 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800 align-middle">
           Cotización
@@ -99,7 +101,13 @@ export default function WorkQueueTable({
         render: (row) => <OsCell row={row} />,
         filter: "text",
       },
-      { field: "cliente", label: "Cliente", cellClassName: "min-w-44", filter: "text" },
+      {
+        field: "cliente",
+        label: "Cliente",
+        cellClassName: "min-w-44",
+        render: (row) => <CustomerCell row={row} />,
+        filter: "text",
+      },
       { field: "propiedad", label: "Propiedad", cellClassName: "whitespace-nowrap", filter: "select" },
       {
         field: "tipo",
@@ -151,13 +159,6 @@ export default function WorkQueueTable({
         render: (row) => <StatusChip value={row?.presupuesto_estado} />,
         filter: "select",
         filterLabel: (value) => estadoLabel(value),
-      },
-      {
-        field: "accion",
-        label: "Próxima acción",
-        cellClassName: "min-w-44 text-gray-700",
-        render: (row) => workQueueNextAction(row),
-        filter: "select",
       }
     );
 

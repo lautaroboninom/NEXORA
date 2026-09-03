@@ -38,6 +38,20 @@ export function risRemitoFrom(source = {}) {
   return risRemitoNumbersFrom(source)[0] || "";
 }
 
+/**
+ * El backend guarda el número completo ("RIS R 00004-00004359"), que ya arranca con el
+ * tipo de comprobante. Anteponerle el nombre del documento lo repetía: "RIS RIS R 00004-...".
+ */
+export function risRemitoWithDocumentName(remitoNumber, documentName) {
+  const numero = normalizedRemitoNumber(remitoNumber);
+  const nombre = String(documentName || "").trim();
+  if (!numero) return nombre;
+  if (!nombre) return numero;
+  const escapado = nombre.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`^${escapado}\\b`, "i").test(numero)) return numero;
+  return `${nombre} ${numero}`;
+}
+
 export function risDocumentTypeFrom(source = {}) {
   const ris = source?.ris || source || {};
   const profile =

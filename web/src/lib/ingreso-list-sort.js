@@ -1,5 +1,6 @@
 import {
   catalogEquipmentLabel,
+  ingresoCustomerName,
   ingresoIdOf,
   resolveFechaCreacion,
   resolveFechaIngreso,
@@ -14,7 +15,7 @@ import { resolutionLabel } from "./constants.js";
 
 export const INGRESO_LIST_SORT_COLUMNS = {
   os: { accessor: ingresoIdOf, type: "number" },
-  cliente: { accessor: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre },
+  cliente: { accessor: ingresoCustomerName },
   equipo: { accessor: catalogEquipmentLabel },
   propiedad: { accessor: workQueueProperty },
   tipo: { accessor: tipoEquipoOf },

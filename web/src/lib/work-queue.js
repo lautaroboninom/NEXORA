@@ -1,12 +1,11 @@
 import {
   catalogEquipmentLabel,
   formatOS,
-  hasMgCode,
+  ingresoCustomerName,
   ingresoIdOf,
-  isMgInactiveBySale,
-  isMgOwned,
   norm,
   parseDateLocal,
+  propiedadEquipoLabelOf,
   resolveFechaCreacion,
   resolveFechaIngreso,
   tipoEquipoOf,
@@ -50,25 +49,10 @@ export function workQueuePriority(row) {
   return { label: "Normal", tone: "gray", rank: 9, value: "normal" };
 }
 
-export function workQueueNextAction(row) {
-  const estado = String(row?.estado || "").toLowerCase();
-  const presupuesto = String(row?.presupuesto_estado || "").toLowerCase();
-  if (row?.next_action) return row.next_action;
-  if (row?.derivado_devuelto) return "Revisar devolución";
-  if (!row?.asignado_a && !workQueueTechnician(row) && estado !== "liberado") return "Asignar técnico";
-  if (estado === "ingresado") return "Diagnosticar";
-  if (presupuesto === "presupuestado") return "Seguimiento del presupuesto";
-  if (presupuesto === "aprobado" || estado === "reparar") return "Reparar";
-  if (["reparado", "controlado_sin_defecto", "no_se_repara"].includes(estado)) return "Liberar o entregar";
-  if (estado === "liberado") return "Coordinar entrega";
-  if (estado === "vendido_pendiente_entrega") return "Confirmar entrega de venta";
-  return "Actualizar avance";
-}
-
+// Delega en el helper único: era una copia a mano que se quedó sin la rama de devolución de
+// demo, así que la misma OS decía "Cliente" en la cola de trabajo y "MG BIO" en la hoja.
 export function workQueueProperty(row) {
-  if (hasMgCode(row) && isMgInactiveBySale(row)) return "Cliente (MG histórico)";
-  if (isMgOwned(row)) return "MG BIO";
-  return "Cliente";
+  return propiedadEquipoLabelOf(row);
 }
 
 export function workQueueIdentifier(row) {
@@ -116,12 +100,12 @@ export function matchesWorkQueueFilters(row, filters = {}) {
     motivo,
     estado,
     presupuesto,
-    accion,
   } = filters;
   const needle = norm(q);
   if (needle) {
     const fields = [
       formatOS(row),
+      ingresoCustomerName(row),
       row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
       row?.marca ?? row?.equipo?.marca,
       catalogEquipmentLabel(row),
@@ -133,14 +117,13 @@ export function matchesWorkQueueFilters(row, filters = {}) {
       row?.presupuesto_estado,
       row?.numero_serie,
       row?.numero_interno,
-      workQueueNextAction(row),
     ];
     if (!fields.some((field) => norm(field).includes(needle))) return false;
   }
   if (prioridad && workQueuePriority(row).value !== prioridad) return false;
   if (os && !norm(formatOS(row)).includes(norm(os))) return false;
   if (!matchesQueueAge(row, antiguedad)) return false;
-  if (cliente && !norm(row?.razon_social ?? row?.cliente ?? row?.cliente_nombre).includes(norm(cliente))) return false;
+  if (cliente && !norm(ingresoCustomerName(row)).includes(norm(cliente))) return false;
   if (!matchesQueueSelect(workQueueProperty(row), propiedad)) return false;
   if (!matchesQueueSelect(tipoEquipoOf(row), tipo)) return false;
   if (!matchesQueueSelect(row?.marca ?? row?.equipo?.marca, marca)) return false;
@@ -155,7 +138,6 @@ export function matchesWorkQueueFilters(row, filters = {}) {
   if (!matchesQueueSelect(row?.motivo, motivo)) return false;
   if (!matchesQueueSelect(row?.estado, estado)) return false;
   if (!matchesQueueSelect(row?.presupuesto_estado, presupuesto)) return false;
-  if (!matchesQueueSelect(workQueueNextAction(row), accion)) return false;
   return true;
 }
 
@@ -165,7 +147,7 @@ export const WORK_QUEUE_SORT_COLUMNS = {
   prioridad: { accessor: (row) => workQueuePriority(row).rank, type: "number" },
   os: { accessor: (row) => ingresoIdOf(row), type: "number" },
   antiguedad: { accessor: workQueueAgeDays, type: "number" },
-  cliente: { accessor: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre },
+  cliente: { accessor: ingresoCustomerName },
   propiedad: { accessor: workQueueProperty },
   tipo: { accessor: tipoEquipoOf },
   marca: { accessor: (row) => row?.marca ?? row?.equipo?.marca },
@@ -179,5 +161,4 @@ export const WORK_QUEUE_SORT_COLUMNS = {
   motivo: { accessor: (row) => row?.motivo },
   estado: { accessor: (row) => row?.estado },
   presupuesto: { accessor: (row) => row?.presupuesto_estado },
-  accion: { accessor: workQueueNextAction },
 };

@@ -7,10 +7,15 @@ import { normalizePermissionsMap } from "@/lib/permissions";
 function sanitizeUser(u) {
   if (!u) return null;
   const rol = String(u.rol ?? "").trim().toLowerCase();
+  const customPermissions = u.custom_permissions || {};
+  const customCount = Number(u.permisos_personalizados || Object.keys(customPermissions).length || 0);
   return {
     ...u,
     rol,
     permissions: normalizePermissionsMap(u.permissions),
+    custom_permissions: customPermissions,
+    has_custom_permissions: Boolean(u.has_custom_permissions || customCount > 0),
+    permisos_personalizados: customCount,
   };
 }
 

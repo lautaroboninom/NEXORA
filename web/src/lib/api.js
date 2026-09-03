@@ -936,6 +936,8 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const getAprobadosYReparados = () =>
     api.get("/api/ingresos/aprobados-reparados/");
   export const getLiberados = () => api.get("/api/ingresos/liberados/");
+  // Sólo los ids de cada cola, para el indicador de novedades del menú.
+  export const getColasNovedades = () => api.get("/api/colas/novedades/");
   export const getTecnicos = () => api.get("/api/catalogos/tecnicos/");
 
   export const getWorkResumen = (params = {}) => {
@@ -1558,6 +1560,23 @@ export const postModelo = (brandId, payloadOrNombre) => {
     // body = { resolucion: "reparado" | "no_reparado" | "no_se_encontro_falla" | "presupuesto_rechazado" | "cambio", serial_cambio?: string }
     return api.post(`/api/ingresos/${id}/cerrar/`, body);
   }
+
+  // Cambio de equipo (permuta / parte de pago): se entrega otro equipo y el que trajo el
+  // cliente queda para SEPID. Vincula el equipo entregado de verdad, no una serie suelta.
+  // Lista el stock real de Bejerman (partidas de artículos de equipo), no la tabla local
+  // de equipos: lo que se entrega en un cambio es una unidad vendible.
+  export const getCambioEquipoCandidatos = (ingresoId, term = "", deposito = "") =>
+    api.get(
+      `/api/ingresos/${ingresoId}/cambio-equipo/candidatos/?q=${encodeURIComponent(term || "")}` +
+        `&deposito=${encodeURIComponent(deposito || "")}`
+    );
+
+  // body = { device_id } o { partida, article_code } + destino_viejo y numero_interno_mg
+  export const postCambioEquipo = (ingresoId, body) =>
+    api.post(`/api/ingresos/${ingresoId}/cambio-equipo/`, body);
+
+  export const deleteCambioEquipo = (ingresoId) =>
+    api.del(`/api/ingresos/${ingresoId}/cambio-equipo/`);
 
   // Marcar controlado sin defecto (equipos propios revisados sin falla)
   export async function postMarcarControladoSinDefecto(id) {

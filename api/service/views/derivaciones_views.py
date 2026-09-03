@@ -6,6 +6,12 @@ from rest_framework import permissions
 import logging
 
 from .helpers import _email_append_footer_text, _set_audit_user, exec_void, q
+from ..derivations import (
+    ACTIVE_DERIVATION_STATES,
+    CLOSED_INGRESO_STATES,
+    active_derivation_payload,
+    get_active_derivation,
+)
 from ..permissions import require_any_permission, require_permission
 from ..notifications import notify_derivacion_devuelta
 logger = logging.getLogger(__name__)
@@ -25,50 +31,42 @@ class DerivarIngresoView(APIView):
             pass
 
         data = request.data or {}
+        # `external_service_id` queda sólo como alias de compatibilidad para
+        # clientes anteriores; las escrituras nuevas usan `proveedor_id`.
         proveedor_id = data.get("proveedor_id") or data.get("external_service_id")
         if not proveedor_id:
             return Response({"detail": "proveedor_id requerido"}, status=400)
 
-        ing = q("SELECT id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
-        if not ing:
-            return Response({"detail": "Ingreso no encontrado"}, status=404)
-
-        prov = q("SELECT id FROM proveedores_externos WHERE id=%s", [proveedor_id], one=True)
-        if not prov:
-            return Response({"detail": "Proveedor externo inválido"}, status=400)
-
-        # Regla: no puede existir mas de una derivacion ABIERTA por ingreso
-        open_any = q(
-            "SELECT id FROM equipos_derivados WHERE ingreso_id=%s AND estado='derivado' AND fecha_entrega IS NULL ORDER BY id DESC LIMIT 1",
+        ing = q(
+            "SELECT id, estado::text AS estado FROM ingresos WHERE id=%s FOR UPDATE",
             [ingreso_id],
             one=True,
         )
-        if open_any and open_any.get("id"):
-            return Response({"detail": "Ya existe una derivacion abierta para este ingreso", "deriv_id": int(open_any["id"])}, status=409)
+        if not ing:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        estado_operativo = str(ing.get("estado") or "").strip().lower()
+        if estado_operativo in CLOSED_INGRESO_STATES:
+            return Response(
+                {"detail": "No se puede derivar una OS liberada, entregada o cerrada."},
+                status=409,
+            )
 
-        # Idempotency: si ya existe una derivacion igual (misma combinacion) abierta, devolver esa
-        data_norm = {
-            "remit": (data.get("remit_deriv") or "").strip(),
-            "fecha": data.get("fecha_deriv"),
-            "coment": (data.get("comentarios") or "").strip(),
-        }
-        existing = q(
-            """
-            SELECT id
-              FROM equipos_derivados
-             WHERE ingreso_id=%s AND proveedor_id=%s
-               AND COALESCE(TRIM(remit_deriv),'') = COALESCE(TRIM(%s),'')
-               AND fecha_deriv = COALESCE(%s, CURRENT_DATE)
-               AND COALESCE(TRIM(comentarios),'') = COALESCE(TRIM(%s),'')
-               AND estado = 'derivado' AND fecha_entrega IS NULL
-             ORDER BY id DESC
-             LIMIT 1
-            """,
-            [ingreso_id, proveedor_id, data_norm["remit"], data_norm["fecha"], data_norm["coment"]],
-            one=True,
-        )
-        if existing and existing.get("id"):
-            return Response({"ok": True, "deriv_id": int(existing["id"])})
+        prov = q("SELECT id FROM proveedores_externos WHERE id=%s", [proveedor_id], one=True)
+        if not prov:
+            return Response({"detail": "Proveedor inválido"}, status=400)
+
+        # Regla: no puede existir más de una derivación activa por ingreso.
+        open_any = get_active_derivation(ingreso_id, for_update=True)
+        if open_any:
+            payload = active_derivation_payload(open_any)
+            return Response(
+                {
+                    "detail": "Ya existe una derivación activa para este ingreso.",
+                    "deriv_id": int(payload["derivacion_id"]),
+                    **payload,
+                },
+                status=409,
+            )
 
         from .helpers import exec_returning
         new_id = exec_returning(
@@ -80,8 +78,16 @@ class DerivarIngresoView(APIView):
             [ingreso_id, proveedor_id, data.get("remit_deriv"), data.get("fecha_deriv"), data.get("comentarios")],
         )
 
-        exec_void("UPDATE ingresos SET estado='derivado' WHERE id=%s AND estado <> 'derivado'", [ingreso_id])
-        return Response({"ok": True, "deriv_id": new_id})
+        derivacion = get_active_derivation(ingreso_id)
+        payload = active_derivation_payload(derivacion)
+        return Response(
+            {
+                "ok": True,
+                "deriv_id": new_id,
+                "estado": estado_operativo,
+                **payload,
+            }
+        )
 
 
 class DevolverDerivacionView(APIView):
@@ -93,16 +99,43 @@ class DevolverDerivacionView(APIView):
         _set_audit_user(request)
 
         row = q(
-            "SELECT id FROM equipos_derivados WHERE id=%s AND ingreso_id=%s",
+            """
+            SELECT ed.id,
+                   ed.estado::text AS estado,
+                   ed.fecha_entrega,
+                   ed.proveedor_id,
+                   COALESCE(pe.nombre, '') AS proveedor
+              FROM equipos_derivados ed
+              LEFT JOIN proveedores_externos pe ON pe.id = ed.proveedor_id
+             WHERE ed.id=%s AND ed.ingreso_id=%s
+             FOR UPDATE OF ed
+            """,
             [deriv_id, ingreso_id],
             one=True,
         )
         if not row:
             try:
-                logger.warning(f"Devuelto: derivacion no encontrada ingreso_id={ingreso_id} deriv_id={deriv_id}")
+                logger.warning(f"Devuelto: derivación no encontrada ingreso_id={ingreso_id} deriv_id={deriv_id}")
             except Exception:
                 pass
-            return Response({"detail": "Derivacion no encontrada"}, status=404)
+            return Response({"detail": "Derivación no encontrada"}, status=404)
+
+        ingreso = q(
+            "SELECT estado::text AS estado FROM ingresos WHERE id=%s FOR UPDATE",
+            [ingreso_id],
+            one=True,
+        ) or {}
+        estado_operativo = str(ingreso.get("estado") or "").strip().lower()
+        estado_derivacion = str(row.get("estado") or "").strip().lower()
+        if row.get("fecha_entrega") is not None or estado_derivacion not in ACTIVE_DERIVATION_STATES:
+            return Response(
+                {
+                    "ok": True,
+                    "already_returned": True,
+                    "estado": estado_operativo,
+                    **active_derivation_payload(None),
+                }
+            )
 
         data = request.data or {}
         fecha = data.get("fecha_entrega") or None
@@ -113,26 +146,11 @@ class DevolverDerivacionView(APIView):
                SET fecha_entrega = COALESCE(%s, CURRENT_DATE),
                    estado = 'devuelto'
              WHERE id = %s
+               AND fecha_entrega IS NULL
+               AND estado IN ('derivado','en_servicio')
             """,
             [fecha, deriv_id],
         )
-
-        exec_void("UPDATE ingresos SET estado='ingresado' WHERE id=%s AND estado <> 'ingresado'", [ingreso_id])
-        try:
-            exec_void(
-                """
-                UPDATE ingreso_events SET comentario='Devolucion de externo'
-                WHERE id = (
-                  SELECT id FROM ingreso_events
-                   WHERE ingreso_id=%s AND a_estado='ingresado'
-                   ORDER BY ts DESC, id DESC
-                   LIMIT 1
-                )
-                """,
-                [ingreso_id],
-            )
-        except Exception:
-            pass
 
         try:
             info = q(
@@ -160,10 +178,10 @@ class DevolverDerivacionView(APIView):
                 ns_text = " ".join(
                     p for p in [info.get("numero_interno", ""), info.get("numero_serie", "")] if p
                 ).strip()
-                subj = f"Aviso: equipo devuelto de externo - OS #{ingreso_id}"
+                subj = f"Aviso: equipo derivado devuelto - OS #{ingreso_id}"
                 txt = (
                     f"Hola {info.get('tech_nombre','')},\n\n"
-                    f"El equipo derivado fue devuelto del servicio externo y se reencoló como 'ingresado'.\n\n"
+                    f"El equipo derivado fue devuelto y conserva el estado operativo '{estado_operativo}'.\n\n"
                     f"Cliente: {info.get('razon_social','')}\n"
                     f"Equipo: {info.get('marca','')} {info.get('modelo','')}\n"
                     f"Número de serie: {ns_text}\n\n"
@@ -185,7 +203,13 @@ class DevolverDerivacionView(APIView):
         except Exception:
             pass
 
-        return Response({"ok": True})
+        return Response(
+            {
+                "ok": True,
+                "estado": estado_operativo,
+                **active_derivation_payload(None),
+            }
+        )
 
 
 class DerivacionesPorIngresoView(APIView):
@@ -219,8 +243,13 @@ class EquiposDerivadosView(APIView):
 
     def get(self, request):
         require_permission(request, "page.logistics")
+        # El dueño va por el helper y no escrito a mano: `propietario_nombre` es una columna
+        # de compat y sin la guarda de esquema este endpoint tira 500 en una base donde el
+        # bloque de `sql/schema.sql` no corrió, mientras el resto degrada limpio.
+        from .ingresos_views import _owner_list_select_sql
+
         rows = q(
-            """
+            f"""
             SELECT ed.id AS deriv_id,
                    ed.ingreso_id,
                    ed.proveedor_id,
@@ -228,8 +257,15 @@ class EquiposDerivadosView(APIView):
                    ed.remit_deriv,
                    ed.fecha_deriv,
                    ed.fecha_entrega,
-                   ed.estado,
+                   t.estado::text AS estado,
+                   ed.estado::text AS derivacion_estado,
+                   TRUE AS derivacion_activa,
+                   ed.id AS derivacion_id,
+                   ed.proveedor_id AS derivacion_proveedor_id,
+                   pe.nombre AS derivacion_proveedor,
+                   ed.fecha_deriv AS derivacion_fecha,
                    c.razon_social,
+                   {_owner_list_select_sql()}
                    d.numero_serie,
                    COALESCE(b.nombre,'') AS marca,
                    COALESCE(m.nombre,'') AS modelo,
@@ -243,7 +279,7 @@ class EquiposDerivadosView(APIView):
             LEFT JOIN marcas b ON b.id = d.marca_id
             LEFT JOIN models m ON m.id = d.model_id
             LEFT JOIN proveedores_externos pe ON pe.id = ed.proveedor_id
-            WHERE ed.estado = 'derivado' AND ed.fecha_entrega IS NULL
+            WHERE ed.estado IN ('derivado','en_servicio') AND ed.fecha_entrega IS NULL
             ORDER BY ed.fecha_deriv DESC, ed.id DESC
             """
         ) or []

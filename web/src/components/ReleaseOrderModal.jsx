@@ -3,12 +3,14 @@ import { AlertTriangle, CheckCircle2, Printer, X } from "lucide-react";
 
 import StatusChip from "./StatusChip.jsx";
 import DeviceIdentifier from "./DeviceIdentifier.jsx";
+import DeviceSwapModal from "./DeviceSwapModal.jsx";
 import { ResponsiveModalOverlay, ResponsiveModalPanel } from "./Responsive.jsx";
 import { getBlob, postCerrarReparacion } from "../lib/api";
 import { openPrintablePdf } from "../lib/pdf";
 import { RESOLUCION, RESOLUCION_OPTIONS, resolutionLabel } from "../lib/constants";
-import { catalogEquipmentLabel, formatOS, ingresoIdOf } from "../lib/ui-helpers";
+import { catalogEquipmentLabel, deviceCustomerTitle, formatOS, ingresoIdOf } from "../lib/ui-helpers";
 import { getReleaseFlow, normalizeReleaseValue, releaseResolutionSuggestion } from "../lib/release-flow";
+import { describeSwapSummary, getDeviceSwapState } from "../lib/device-swap.js";
 
 function errorMessage(error, fallback) {
   const raw = error?.data?.detail || error?.message || String(error || "");
@@ -37,13 +39,19 @@ export default function ReleaseOrderModal({
   open,
   row,
   canManageResolution = false,
+  canSwapDevice = false,
   onClose,
   onReleased,
+  onSwapChanged,
 }) {
   const ingresoId = ingresoIdOf(row);
 
   const [resolution, setResolution] = useState("");
-  const [serialCambio, setSerialCambio] = useState("");
+  // El cambio ya no se escribe acá: se registra vinculando un equipo real. Este estado
+  // guarda lo que devuelve el modal del cambio para no mostrar datos viejos mientras el
+  // refresco del listado vuelve.
+  const [swapOverride, setSwapOverride] = useState(undefined);
+  const [swapModalOpen, setSwapModalOpen] = useState(false);
   const [charge, setCharge] = useState("");
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState("");
@@ -62,7 +70,8 @@ export default function ReleaseOrderModal({
   useEffect(() => {
     if (!open) return;
     setResolution(releaseResolutionSuggestion(row));
-    setSerialCambio(String(row?.serial_cambio || ""));
+    setSwapOverride(undefined);
+    setSwapModalOpen(false);
     setCharge(String(row?.presupuesto_rechazado_cobro_neto ?? ""));
     setLocalError("");
     setManualPrint(null);
@@ -102,7 +111,28 @@ export default function ReleaseOrderModal({
   const chargeValid = normalizedCharge !== "" && Number.isFinite(chargeNumber) && chargeNumber >= 0;
   const needsCharge = selectedResolution === RESOLUCION.PRESUPUESTO_RECHAZADO;
   const needsSerial = selectedResolution === RESOLUCION.CAMBIO;
-  const serialValue = String(serialCambio || "").trim();
+  // El cambio se registra vinculando un equipo real; acá sólo se comprueba que exista.
+  // Al sobreescribir hay que pisar también las columnas planas: los listados traen el
+  // cambio ahí y, si sólo se limpiara `cambio_equipo`, un cambio deshecho seguiría vivo.
+  const swapRow =
+    swapOverride === undefined
+      ? row
+      : {
+        ...row,
+        cambio_equipo: swapOverride,
+        serial_cambio: swapOverride?.serial_cambio ?? "",
+        device_cambio_id: swapOverride?.device_cambio_id ?? null,
+        cambio_destino_viejo: swapOverride?.destino_viejo ?? "",
+        cambio_sin_entrega: swapOverride?.sin_entrega ?? false,
+      };
+  const swapState = getDeviceSwapState(
+    { ...swapRow, resolucion: selectedResolution || swapRow?.resolucion },
+    { canSwap: canSwapDevice }
+  );
+  const swapSummary = describeSwapSummary({
+    ...swapRow,
+    resolucion: selectedResolution || swapRow?.resolucion,
+  });
   const validationError = flow.blockedReason
     ? ""
     : resolutionBlockedByPermission
@@ -111,8 +141,8 @@ export default function ReleaseOrderModal({
       ? "Seleccioná la resolución de reparación."
       : needsCharge && !chargeValid
         ? "Ingresá el importe neto del presupuesto rechazado."
-        : needsSerial && !serialValue
-          ? "Ingresá la serie del cambio."
+        : needsSerial && !swapState.hasSwap
+          ? "Registrá el cambio de equipo: falta elegir el equipo que se entrega."
           : "";
   const canConfirm = Boolean(flow.canSubmit && !validationError && !saving && !manualPrint?.blob);
 
@@ -127,10 +157,11 @@ export default function ReleaseOrderModal({
       setLocalError("");
       setManualPrint(null);
 
-      if (shouldPersistResolution) {
+      // El cambio de equipo ya dejó puesta la resolución al vincular el equipo, así que no
+      // se vuelve a pasar por `cerrar/`: hacerlo sólo reescribiría el mismo snapshot.
+      if (shouldPersistResolution && !needsSerial) {
         const payload = { resolucion: selectedResolution };
         if (needsCharge) payload.presupuesto_rechazado_cobro_neto = normalizedCharge;
-        if (needsSerial) payload.serial_cambio = serialValue;
         await postCerrarReparacion(ingresoId, payload);
       }
 
@@ -191,7 +222,7 @@ export default function ReleaseOrderModal({
         <div className="space-y-4 px-4 py-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <Detail label="OS">{formatOS(row)}</Detail>
-            <Detail label="Cliente">{row?.razon_social ?? row?.cliente ?? row?.cliente_nombre}</Detail>
+            <Detail label="Cliente">{deviceCustomerTitle(row)}</Detail>
             <Detail label="Serie"><DeviceIdentifier row={row} /></Detail>
             <Detail label="Estado"><StatusChip value={row?.estado} /></Detail>
             <Detail label="Presupuesto"><StatusChip value={row?.presupuesto_estado} /></Detail>
@@ -229,16 +260,33 @@ export default function ReleaseOrderModal({
               </label>
 
               {needsSerial ? (
-                <label className="block">
-                  <div className="mb-1 text-sm text-gray-600">Serie del cambio</div>
-                  <input
-                    className="w-full rounded border p-2"
-                    value={serialCambio}
-                    onChange={(event) => setSerialCambio(event.target.value)}
-                    disabled={saving || (!canManageResolution && !row?.serial_cambio)}
-                    placeholder="Serie del equipo entregado"
-                  />
-                </label>
+                <div className="sm:col-span-2">
+                  <div className="mb-1 text-sm text-gray-600">Cambio de equipo</div>
+                  <div className="rounded border bg-gray-50 p-3 text-sm">
+                    {swapState.hasSwap ? (
+                      <div className="text-gray-900">{swapSummary}</div>
+                    ) : (
+                      <div className="text-amber-800">
+                        Todavía no está registrado qué equipo se entrega.
+                      </div>
+                    )}
+                    {canSwapDevice ? (
+                      <button
+                        type="button"
+                        className="mt-2 rounded border px-3 py-1.5 text-sm hover:bg-white disabled:opacity-60"
+                        onClick={() => setSwapModalOpen(true)}
+                        disabled={saving}
+                      >
+                        {swapState.hasSwap ? "Ver / editar cambio" : "Registrar cambio de equipo"}
+                      </button>
+                    ) : (
+                      <div className="mt-1 text-xs text-gray-600">
+                        No tenés permiso para registrarlo: lo carga recepción, administración o
+                        jefatura.
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : null}
 
               {needsCharge ? (
@@ -304,6 +352,22 @@ export default function ReleaseOrderModal({
                   : "Liberar e imprimir"}
           </button>
         </div>
+
+        {swapModalOpen ? (
+          <DeviceSwapModal
+            open={swapModalOpen}
+            row={swapRow}
+            ingresoId={ingresoId}
+            canSwap={canSwapDevice}
+            onClose={() => setSwapModalOpen(false)}
+            onDone={async ({ cambio } = {}) => {
+              // El listado que abrió este modal todavía tiene la fila vieja: se guarda el
+              // cambio recién registrado para no pedir liberar con datos desactualizados.
+              setSwapOverride(cambio ?? null);
+              await onSwapChanged?.();
+            }}
+          />
+        ) : null}
       </ResponsiveModalPanel>
     </ResponsiveModalOverlay>
   );

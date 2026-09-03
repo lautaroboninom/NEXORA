@@ -2,10 +2,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getPendientesPresupuesto } from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
+import { ingresoCustomerName, ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, resolveFechaIngreso, catalogEquipmentLabel } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
 import StatusChip from "../components/StatusChip.jsx";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
 import ListToolbar from "../components/ListToolbar.jsx";
 import IngresoTable from "../components/IngresoTable.jsx";
@@ -15,16 +17,29 @@ import {
   columnFilterOptions,
   matchesColumnFilters,
 } from "../lib/ingreso-list-filters";
+import { QUEUE_KEYS } from "../lib/queue-badges";
+import { useMarkQueueSeen } from "../hooks/useQueueBadges";
 
 
 const SCROLL_STORAGE_KEY = "nexora:pendientes-presupuesto:scroll-y";
 
 const COLUMNS = [
-  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "os",
+    label: "OS",
+    cellClassName: "underline",
+    render: (row) => (
+      <>
+        {formatOS(row)}
+        <DerivadoMark row={row} className="ml-1.5" />
+      </>
+    ),
+    filter: "text",
+  },
   {
     field: "cliente",
     label: "Cliente",
-    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    render: (row) => <CustomerCell row={row} />,
     filter: "text",
   },
   {
@@ -61,6 +76,8 @@ const COLUMNS = [
 ];
 
 export default function PendientesPresupuesto() {
+  // Abrir la pantalla apaga el indicador de novedades del menú.
+  useMarkQueueSeen(QUEUE_KEYS.PENDIENTES_PRESUPUESTO);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -136,6 +153,7 @@ export default function PendientesPresupuesto() {
       if (!needle) return true;
       const campos = [
         formatOS(row),
+        ingresoCustomerName(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
         row?.marca ?? row?.equipo?.marca,
         catalogEquipmentLabel(row),

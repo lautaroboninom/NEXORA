@@ -42,6 +42,22 @@ test("bloquea lo que todavía no se puede liberar y explica por qué", () => {
   assert.match(blocked[3].reason, /identificar la OS/);
 });
 
+test("bloquea una OS lista mientras continúa derivada", () => {
+  const { ready, blocked } = classifyReleaseSelection([
+    {
+      id: 44,
+      estado: "reparado",
+      resolucion: "reparado",
+      derivacion_activa: true,
+      derivacion_proveedor: "Laboratorio externo",
+    },
+  ]);
+
+  assert.equal(ready.length, 0);
+  assert.equal(blocked.length, 1);
+  assert.match(blocked[0].reason, /sigue derivado/i);
+});
+
 test("una resolución ya cargada alcanza aunque el estado no sea final", () => {
   const rows = [{ id: 7, estado: "reparar", resolucion: "no_reparado" }];
   const { ready } = classifyReleaseSelection(rows);
@@ -105,4 +121,23 @@ test("con una sola OS usa el endpoint individual", () => {
     "/api/ingresos/remitos-salida/?ids=42%2C43&skip_errors=1"
   );
   assert.equal(bulkReleasePath([]), "");
+});
+
+// El lote sale del mismo botón que el modal de una sola OS, pero no tenía su gate: una
+// resolución 'cambio' sin el equipo vinculado se liberaba igual.
+test("bloquea un cambio de equipo sin el equipo elegido", () => {
+  const { ready, blocked } = classifyReleaseSelection([
+    { id: 7, estado: "reparado", resolucion: "cambio" },
+  ]);
+  assert.equal(ready.length, 0);
+  assert.match(blocked[0].reason, /cambio de equipo/i);
+});
+
+test("deja pasar el cambio ya registrado y la parte de pago", () => {
+  const { ready, blocked } = classifyReleaseSelection([
+    { id: 8, estado: "reparado", resolucion: "cambio", serial_cambio: "NS-123", device_cambio_id: 5 },
+    { id: 9, estado: "reparado", resolucion: "cambio", cambio_sin_entrega: true },
+  ]);
+  assert.deepEqual(ready.map((item) => item.id), [8, 9]);
+  assert.equal(blocked.length, 0);
 });

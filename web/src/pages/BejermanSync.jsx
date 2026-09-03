@@ -1296,13 +1296,35 @@ function RemitoReference({ row }) {
     );
   }
   const orders = Array.isArray(row?.orders) ? row.orders : [];
-  const orderLabel = orders.map((order) => order.orderNumber || order.id).filter(Boolean).slice(0, 3).join(", ");
-  const firstOrderId = orders[0]?.id;
-  const target = firstOrderId ? `/ordenes-entrega?orderId=${encodeURIComponent(firstOrderId)}` : "/ordenes-entrega";
+  const shown = orders.filter((order) => order?.orderNumber || order?.id).slice(0, 3);
+  if (!shown.length) {
+    return (
+      <Link className="font-semibold text-blue-700 hover:underline" to="/ordenes-entrega">
+        {row?.display_id || row?.group_id || row?.id || "-"}
+      </Link>
+    );
+  }
   return (
-    <Link className="font-semibold text-blue-700 hover:underline" to={target}>
-      {orderLabel || row?.display_id || row?.group_id || row?.id || "-"}
-    </Link>
+    <span className="inline-flex flex-wrap items-center gap-x-1">
+      {shown.map((order, index) => {
+        // Una orden de liberación se numera con su propia OS ("OS-29660"), así que el link
+        // tiene que abrir la hoja de servicio: mandarlo al listado de órdenes de entrega se
+        // lee como un error. El resto (OE-xxxxx) sí va a la orden.
+        const target = order.ingresoId
+          ? `/ingresos/${order.ingresoId}`
+          : order.id
+            ? `/ordenes-entrega?orderId=${encodeURIComponent(order.id)}`
+            : "/ordenes-entrega";
+        return (
+          <Fragment key={order.id || order.orderNumber}>
+            {index > 0 && <span className="text-gray-400">,</span>}
+            <Link className="font-semibold text-blue-700 hover:underline" to={target}>
+              {order.orderNumber || order.id}
+            </Link>
+          </Fragment>
+        );
+      })}
+    </span>
   );
 }
 

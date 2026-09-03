@@ -60,9 +60,20 @@ class IngresoListItemSerializer(serializers.Serializer):
     estado = serializers.CharField()
     presupuesto_estado = serializers.CharField(allow_null=True, required=False)
     resolucion = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+    # Cambio de equipo: el modal de salida se abre desde estos listados y necesita saber
+    # qué equipo se entregó, no sólo que la resolución fue 'cambio'.
+    serial_cambio = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+    device_cambio_id = serializers.IntegerField(allow_null=True, required=False)
+    cambio_destino_viejo = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+    # Una parte de pago no tiene equipo entregado: sin esta marca el listado la muestra
+    # como si el cambio no estuviera registrado.
+    cambio_sin_entrega = serializers.BooleanField(required=False, default=False)
     motivo = serializers.CharField(required=False, allow_blank=True)
     fecha_ingreso = serializers.DateTimeField(required=False, allow_null=True)
     razon_social = serializers.CharField(allow_blank=True, required=False)
+    # 'Particular' y 'MG BIO' son clientes contenedores: sin el dueño, la columna
+    # Cliente de los listados no dice de quién es el equipo.
+    propietario_nombre = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     numero_serie = serializers.CharField(allow_blank=True, required=False)
     numero_interno = serializers.CharField(allow_blank=True, required=False)
     marca = serializers.CharField(allow_blank=True, required=False)
@@ -88,6 +99,14 @@ class IngresoListItemSerializer(serializers.Serializer):
     tecnico = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     tecnico_nombre = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
+    # Condición de derivado separada del estado operativo de la OS.
+    derivacion_activa = serializers.BooleanField(required=False, default=False)
+    derivacion_id = serializers.IntegerField(required=False, allow_null=True)
+    derivacion_estado = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    derivacion_proveedor_id = serializers.IntegerField(required=False, allow_null=True)
+    derivacion_proveedor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    derivacion_fecha = serializers.DateField(required=False, allow_null=True)
+
     # Campos opcionales para búsquedas por accesorios
     accesorio_nombre = serializers.CharField(required=False, allow_blank=True)
     referencia = serializers.CharField(required=False, allow_blank=True)
@@ -111,6 +130,12 @@ class IngresoDetailSerializer(serializers.Serializer):
     permite_reparacion = serializers.BooleanField(required=False)
     estado = serializers.CharField()
     presupuesto_estado = serializers.CharField(allow_null=True)
+    derivacion_activa = serializers.BooleanField(required=False, default=False)
+    derivacion_id = serializers.IntegerField(required=False, allow_null=True)
+    derivacion_estado = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    derivacion_proveedor_id = serializers.IntegerField(required=False, allow_null=True)
+    derivacion_proveedor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    derivacion_fecha = serializers.DateField(required=False, allow_null=True)
     presupuesto_rechazado_cobro_neto = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
     presupuesto_rechazado_quote_id = serializers.IntegerField(allow_null=True, required=False)
     fecha_ingreso = serializers.DateTimeField()
@@ -188,6 +213,9 @@ class IngresoDetailSerializer(serializers.Serializer):
 
     resolucion = serializers.CharField(allow_null=True, allow_blank=True)
     serial_cambio = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+    # Detalle completo del cambio: equipo entregado, destino del que quedó y quién lo
+    # registró. `serial_cambio` sigue siendo el snapshot de texto.
+    cambio_equipo = serializers.DictField(allow_null=True, required=False)
 
     # Solicitud de asignación (opcional, calculado desde logs/tabla auxiliar)
     tecnico_solicitado_id = serializers.IntegerField(allow_null=True, required=False)

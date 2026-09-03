@@ -19,7 +19,8 @@ import {
 } from "../lib/ris-print";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
-import { formatOS } from "../lib/ui-helpers";
+import { deviceCustomerTitle, formatOS } from "../lib/ui-helpers";
+import { getDeviceSwapState, swapConfirmMatches } from "../lib/device-swap.js";
 import DeviceIdentifier from "./DeviceIdentifier.jsx";
 import RisProgressModal, {
   waitForRisProgressMinimum,
@@ -424,7 +425,17 @@ export default function QrScanCard({
   const ingresoEnCurso = Boolean(ingreso?.ingreso_en_curso);
   const isLiberado = estado === "liberado" || estado === "vendido_pendiente_entrega";
   const isEntregado = estado === "entregado" || estado === "vendido_entregado";
-  const requiereSerial = String(ingreso?.resolucion || "").toLowerCase() === "cambio";
+  const swapState = getDeviceSwapState(ingreso || {}, { canSwap: true });
+  // Qué equipo hay que entregar de verdad. Antes el mostrador tipeaba una serie a ciegas
+  // y sólo se enteraba del error cuando el backend devolvía 409.
+  const swapEsperado = swapState.deliveredLabel;
+  // Bajo un cambio no se emite RSS. No alcanza con `resolucion`: una parte de pago
+  // sobrevive a que el técnico marque 'reparado', igual que en el backend.
+  const requiereSerial =
+    swapState.hasSwap || String(ingreso?.resolucion || "").toLowerCase() === "cambio";
+  // En una parte de pago no sale ningún equipo: no hay serie que verificar, y pedirla igual
+  // dejaba la OS sin poder entregarse desde el mostrador. Mismo criterio que PrincipalTab.
+  const verificaSerial = requiereSerial && Boolean(swapEsperado);
   const hoyLabel = new Date().toLocaleDateString("es-AR");
   const canRegisterDelivery = !!ingreso?.id && isLiberado && !isEntregado && canEditDelivery;
   const canPrintIngreso = !!ingreso?.id && canPrintBarcode;
@@ -481,8 +492,12 @@ export default function QrScanCard({
       setDeliverErr("Persona que retira requerida.");
       return;
     }
-    if (requiereSerial && !serialConfirm) {
+    if (verificaSerial && !serialConfirm) {
       setDeliverErr("Serie requerida para cambio.");
+      return;
+    }
+    if (verificaSerial && !swapConfirmMatches(serialConfirm, swapEsperado)) {
+      setDeliverErr(`La serie no coincide con el equipo del cambio (${swapEsperado}).`);
       return;
     }
     setSaving(true);
@@ -493,9 +508,10 @@ export default function QrScanCard({
       await postEntregarIngreso(ingreso.id, {
         remito_salida: remito,
         retira_persona: retira,
-        ...(requiereSerial ? { serial_confirm: serialConfirm } : {}),
+        ...(verificaSerial ? { serial_confirm: serialConfirm } : {}),
       });
-      setDeliverOk("Entrega registrada con RSS.");
+      // En un cambio no se emite RSS: el equipo que sale va por su propia orden de venta.
+      setDeliverOk(requiereSerial ? "Entrega registrada." : "Entrega registrada con RSS.");
       onDelivered?.();
       setResult((prev) => {
         if (!prev || !prev.ingreso) return prev;
@@ -843,7 +859,9 @@ export default function QrScanCard({
                       <div>OS: {formatOS(ingreso)}</div>
                       <div>Estado: {estadoLabel(ingreso.estado)}</div>
                       <div>Fecha de ingreso: {formatFecha(ingreso.fecha_ingreso)}</div>
-                      <div>Cliente: {safeText(ingreso.razon_social)}</div>
+                      {/* El dueño real: detrás de 'Particular' o 'MG BIO' el mostrador no
+                          veía de quién era el equipo que está entregando. */}
+                      <div>Cliente: {safeText(deviceCustomerTitle(ingreso))}</div>
                       <div>Equipo: {safeText(ingreso.marca)} {safeText(ingreso.modelo)}</div>
                       <div>Serie: <DeviceIdentifier row={ingreso} /></div>
                       <div>Tipo: {safeText(ingreso.tipo_equipo)}</div>
@@ -937,7 +955,7 @@ export default function QrScanCard({
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") {
                                   e.preventDefault();
-                                  if (requiereSerial) {
+                                  if (verificaSerial) {
                                     serialConfirmInputRef.current?.focus();
                                     serialConfirmInputRef.current?.select();
                                   } else {
@@ -947,9 +965,14 @@ export default function QrScanCard({
                               }}
                             />
                           </label>
-                          {requiereSerial && (
+                          {verificaSerial && (
                             <label className="block md:col-span-2">
-                              <div className="text-sm text-gray-700 mb-1">Serie confirmación (cambio)</div>
+                              <div className="text-sm text-gray-700 mb-1">
+                                Serie confirmación (cambio)
+                                <span className="ml-1 font-medium text-gray-900">
+                                  - se entrega {swapEsperado}
+                                </span>
+                              </div>
                               <input
                                 ref={serialConfirmInputRef}
                                 className="border rounded p-2 w-full"

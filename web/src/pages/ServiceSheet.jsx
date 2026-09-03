@@ -36,6 +36,7 @@ import {
   openRisPrintablePdf,
   reserveRisPrintWindow,
   risRemitoFrom,
+  risRemitoWithDocumentName,
   waitForRisPdfBlob,
 } from "../lib/ris-print";
 import {
@@ -61,6 +62,7 @@ import {
 import { estadoLabel } from "../lib/constants";
 import { canActAsTech, hasAnyRole, isJefe, ROLES } from "../lib/authz";
 import { can, canAny, PERMISSION_CODES } from "../lib/permissions";
+import { getDeviceSwapState, swapActionLabel } from "../lib/device-swap.js";
 import ArchivosTab from "./ServiceSheet/tabs/ArchivosTab";
 import HistorialTab from "./ServiceSheet/tabs/HistorialTab";
 import PresupuestoTab from "./ServiceSheet/tabs/PresupuestoTab";
@@ -69,9 +71,11 @@ import TestTab from "./ServiceSheet/tabs/TestTab";
 import PrincipalTab from "./ServiceSheet/tabs/PrincipalTab";
 import DerivacionesTab from "./ServiceSheet/tabs/DerivacionesTab";
 import ServiceCriticalStrip from "../components/ServiceCriticalStrip.jsx";
+import DerivadoBadge from "../components/DerivadoBadge.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import ActionMenu from "../components/ActionMenu.jsx";
 import DeviceBajaModal from "../components/DeviceBajaModal.jsx";
+import DeviceSwapModal from "../components/DeviceSwapModal.jsx";
 import { canRequestDeviceBaja, describeBejermanStockJob } from "../lib/device-actions.js";
 import RisProgressModal, {
   waitForRisProgressMinimum,
@@ -605,6 +609,7 @@ export default function ServiceSheet() {
   const [barcodeBusy, setBarcodeBusy] = useState(false);
   const [savingBaja, setSavingBaja] = useState(false);
   const [bajaModalOpen, setBajaModalOpen] = useState(false);
+  const [swapModalOpen, setSwapModalOpen] = useState(false);
   const [bajaModalMode, setBajaModalMode] = useState("baja");
   const [rejectingBajaRequest, setRejectingBajaRequest] = useState(false);
   const [mgModalOpen, setMgModalOpen] = useState(false);
@@ -904,12 +909,16 @@ export default function ServiceSheet() {
     }
   }
 
+  // Devuelve el ingreso recién leído: quien refresca a veces necesita el dato al toque
+  // (el modal de salida, para no quedarse con la fila anterior al cambio de equipo).
   async function refreshIngreso(params) {
     try {
       const ing = await getIngreso(id, params || undefined);
       setData(ing);
+      return ing;
     } catch (e) {
       setErr(e?.message || "No se pudo refrescar el ingreso");
+      return null;
     }
   }
 
@@ -1956,8 +1965,12 @@ export default function ServiceSheet() {
   const canEditDiag = canEditDiagPermission && (canAssignTecnico || assignedToMe);
   const canManagePhotos = canEditDiag;
   const canMarkReparado = canRepairTransitions && (canAssignTecnico || assignedToMe);
-  const canResolve = canRepairTransitions && isJefe(user);
+  // El combo de resolución estaba clavado a jefe aunque admin y jefe_veedor ya tienen el
+  // permiso que el backend realmente exige (action.ingreso.repair_transitions).
+  const canResolve = canRepairTransitions;
   const canAutorizarReparar = canRepairTransitions && isJefe(user);
+  const canSwapDevice = can(user, PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP);
+  const deviceSwapState = getDeviceSwapState(data || {}, { canSwap: canSwapDevice });
   const canDarBaja = Boolean(canBajaAltaPermission && isOwnedByMgCustomer);
   const canDarAlta = Boolean(canBajaAltaPermission && estadoLower === "baja");
   // La lista de permisos que habilitan la solicitud vive en device-actions.js,
@@ -1993,7 +2006,7 @@ export default function ServiceSheet() {
   const hasGeneratedRis = Boolean(!isRegisteredRis && data?.ris?.status === "generated" && data?.ris?.remito_number);
   const showRisErrorBanner = Boolean(!isRegisteredRis && data?.ris?.available && (data?.ris?.status === "failed" || data?.ris?.pdf_status === "failed"));
   const risBannerTitle = hasGeneratedRis && data?.ris?.pdf_status === "failed"
-    ? `${ingressDocumentName} ${data.ris.remito_number} emitido; PDF no disponible`
+    ? `${risRemitoWithDocumentName(data.ris.remito_number, ingressDocumentName)} emitido; PDF no disponible`
     : `${ingressDocumentName} pendiente`;
   const risBannerMessage = data?.ris?.last_error || (
     hasGeneratedRis
@@ -2050,6 +2063,20 @@ export default function ServiceSheet() {
       }
       : null,
     canConvertToOwnMg ? { key: "alta_mg", label: "Alta de MG", tone: "success" } : null,
+    // Este menú lo ve cualquiera que pueda abrir la hoja, recepción incluida: es el punto
+    // de entrada al cambio que no pasa por la pestaña de diagnóstico.
+    deviceSwapState.canRegister || deviceSwapState.hasSwap
+      ? {
+        key: "cambio_equipo",
+        label: swapActionLabel(deviceSwapState),
+        tone: "accent",
+        // Con `hasSwap && !canRegister` el ítem se muestra para dejar ver que hay un cambio,
+        // pero no se puede tocar: antes esta condición era la negación exacta de la de
+        // arriba, o sea siempre false, y abría un modal donde sólo había un cartel de bloqueo.
+        disabled: !deviceSwapState.canRegister,
+        title: deviceSwapState.canRegister ? undefined : deviceSwapState.blockedReason,
+      }
+      : null,
     (canDarBaja || canDarAlta)
       ? (estadoLower === "baja"
         ? { key: "dar_alta", label: "Dar ALTA al equipo", tone: "success" }
@@ -2087,6 +2114,10 @@ export default function ServiceSheet() {
         break;
       case "alta_mg":
         abrirAltaMg();
+        break;
+      case "cambio_equipo":
+        setErr("");
+        setSwapModalOpen(true);
         break;
       case "dar_baja":
         setBajaModalMode("baja");
@@ -2133,17 +2164,24 @@ export default function ServiceSheet() {
         open={Boolean(releaseOrderRow)}
         row={releaseOrderRow}
         canManageResolution={canResolve}
+        canSwapDevice={canSwapDevice}
         onClose={() => setReleaseOrderRow(null)}
         onReleased={handleReleaseOrderDone}
+        onSwapChanged={async () => {
+          const fresh = await refreshIngreso({ strong: 1 });
+          if (fresh) setReleaseOrderRow(fresh);
+        }}
       />
       <button type="button" onClick={() => navigate(-1)} className="mb-3 inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800">
         Volver
       </button>
       <div className="flex items-start justify-between gap-3 mb-2">
-        <div>
+        <div className="flex min-w-0 items-start gap-2">
           <h1 className="text-2xl font-bold">
             Hoja de servicio - OS: {formatOSHelper(data, id)} - NS/MG: {serialLabel}
           </h1>
+          {/* Arriba a la derecha del N/S: en la franja de datos la columna OS lo truncaba. */}
+          <DerivadoBadge row={data} className="mt-1 shrink-0" />
         </div>
         <ActionMenu
           items={menuActions}
@@ -2298,6 +2336,10 @@ export default function ServiceSheet() {
           savingDiag={savingDiag}
           canManagePhotos={canManagePhotos}
           onOpenReleaseModal={openReleaseOrderModal}
+          onOpenSwapModal={() => {
+            setErr("");
+            setSwapModalOpen(true);
+          }}
         />
       )}
 
@@ -2444,6 +2486,19 @@ export default function ServiceSheet() {
           onDone={async () => {
             await refreshIngreso({ strong: 1 });
             setTabPersisted("principal");
+          }}
+        />
+      )}
+
+      {swapModalOpen && (
+        <DeviceSwapModal
+          open={swapModalOpen}
+          row={data}
+          ingresoId={id}
+          canSwap={canSwapDevice}
+          onClose={() => setSwapModalOpen(false)}
+          onDone={async () => {
+            await refreshIngreso({ strong: 1 });
           }}
         />
       )}

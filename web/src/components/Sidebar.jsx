@@ -2,11 +2,19 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { can, canAny, PERMISSION_CODES } from "../lib/permissions";
 import { canActAsTech } from "../lib/authz";
+import { techSidebarSections, usesTechMenu } from "../lib/sidebar-menu.js";
+import { badgeLabel, QUEUE_BY_PATH } from "../lib/queue-badges";
+import { useQueueBadges } from "../hooks/useQueueBadges";
 
+// La progresión del flujo de servicio técnico va de naranja a verde:
+// ámbar (pendiente) → lima (presupuestado/en reparación) → verde (listo para
+// liberar) → esmeralda (liberado). `green` y `emerald` son dos pasos distintos,
+// no sinónimos: si se colapsan, las dos últimas pestañas dejan de distinguirse.
 const VARIANT_BORDER = {
   amber: "border-amber-500",
-  green: "border-emerald-500",
   lime: "border-lime-500",
+  green: "border-green-500",
+  emerald: "border-emerald-500",
   blue: "border-blue-500",
   indigo: "border-indigo-500",
   cyan: "border-cyan-500",
@@ -22,20 +30,20 @@ function variantOfPath(to) {
   if (p === "/pendientes-por-tecnico") return "amber";
   if (p === "/pendientes-presupuesto") return "amber";
   if (p === "/presupuestados") return "lime";
-  if (p === "/aprobados") return "lime";
+  if (p === "/pendientes-reparacion") return "lime";
   if (p === "/derivados") return "cyan";
-  if (p === "/reparados") return "lime";
-  if (p === "/listos") return "green";
-  if (p === "/alquiler/stock") return "indigo";
+  if (p === "/listos-para-liberar") return "green";
+  if (p === "/listos") return "emerald";
   if (p === "/recepcion") return "blue";
   if (p.startsWith("/ingresos/nuevo")) return "blue";
   if (p === "/administracion/ordenes-entrega") return "indigo";
-  if (p === "/cobranzas/facturacion") return "green";
-  if (p === "/cobranzas/remitos") return "green";
+  if (p === "/cobranzas/facturacion") return "emerald";
+  if (p === "/cobranzas/remitos") return "emerald";
+  // `/depositos` cae acá a propósito: es el final del listado, sin chip.
   return null;
 }
 
-const LinkItem = ({ to, children, variant, onClick }) => (
+const LinkItem = ({ to, children, variant, onClick, badge = "" }) => (
   <NavLink
     to={to}
     onClick={onClick}
@@ -47,7 +55,17 @@ const LinkItem = ({ to, children, variant, onClick }) => (
       return `${base} ${border}${active}`;
     }}
   >
-    {children}
+    <span className="flex items-center justify-between gap-2">
+      <span>{children}</span>
+      {badge ? (
+        <span
+          className="shrink-0 rounded-full bg-blue-600 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-white"
+          title={`${badge} sin ver desde la última vez que abriste esta pestaña`}
+        >
+          {badge}
+        </span>
+      ) : null}
+    </span>
   </NavLink>
 );
 
@@ -60,6 +78,14 @@ const Section = ({ title, children }) => (
 
 export default function Sidebar({ mobileOpen = false, onClose }) {
   const { user } = useAuth();
+  // El hook va antes del corte por usuario: React exige que se llame siempre.
+  // Sin ninguna de las dos colas visibles no tiene sentido consultar el contador.
+  const queueBadges = useQueueBadges({
+    enabled:
+      Boolean(user) &&
+      (can(user, PERMISSION_CODES.PAGE_WORK_QUEUES) ||
+        can(user, PERMISSION_CODES.PAGE_BUDGET_QUEUES)),
+  });
   if (!user) return null;
 
   const techLike = canActAsTech(user);
@@ -119,6 +145,13 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
   };
   const linkProps = onClose ? { onClick: handleNavigate } : {};
 
+  // El técnico ve un menú corto, con sus colas y nada más. El recorte vive en
+  // `sidebar-menu.js` y es sólo visual: los permisos del rol no cambian, así que
+  // cualquier pantalla que le pasen por link le sigue abriendo igual.
+  const techSections = usesTechMenu(user) ? techSidebarSections(user) : null;
+  // Las rutas que no son una cola devuelven "" y no dibujan nada.
+  const badgeFor = (to) => badgeLabel(queueBadges[QUEUE_BY_PATH[to]] || 0);
+
   return (
     <>
       <div
@@ -162,187 +195,198 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
           />
         </div>
         <div className="space-y-3 px-3 pb-3">
-          {showRecepcion && (
-            <Section title="Recepción y entregas">
-              {showDeliveryOrdersInRecepcion && (
-                <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
-                  Órdenes de entrega
-                </LinkItem>
-              )}
-              {canBejermanPurchases && (
-                <LinkItem to="/ingresos/nuevo?tab=mercaderia" {...linkProps}>
-                  Ingreso de mercadería
-                </LinkItem>
-              )}
-              {canRouteSheet && (
-                <LinkItem to="/hoja-de-ruta" {...linkProps}>
-                  Hoja de ruta
-                </LinkItem>
-              )}
-            </Section>
-          )}
+          {techSections
+            ? techSections.map((section) => (
+              <Section key={section.title} title={section.title}>
+                {section.items.map((item) => (
+                  <LinkItem key={item.to} to={item.to} badge={badgeFor(item.to)} {...linkProps}>
+                    {item.label}
+                  </LinkItem>
+                ))}
+              </Section>
+            ))
+            : (
+              <>
+                {showRecepcion && (
+                  <Section title="Recepción y entregas">
+                    {showDeliveryOrdersInRecepcion && (
+                      <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
+                        Órdenes de entrega
+                      </LinkItem>
+                    )}
+                    {canBejermanPurchases && (
+                      <LinkItem to="/ingresos/nuevo?tab=mercaderia" {...linkProps}>
+                        Ingreso de mercadería
+                      </LinkItem>
+                    )}
+                    {canRouteSheet && (
+                      <LinkItem to="/hoja-de-ruta" {...linkProps}>
+                        Hoja de ruta
+                      </LinkItem>
+                    )}
+                  </Section>
+                )}
 
-          {showServicioTecnico && (
-            <Section title="Servicio técnico">
-              {canWorkQueues && (
-                <LinkItem to="/pendientes" {...linkProps}>
-                  Pendientes general
-                </LinkItem>
-              )}
-              {canWorkQueues && techLike && (
-                <LinkItem to="/tecnico" {...linkProps}>
-                  Mis pendientes
-                </LinkItem>
-              )}
-              {canWorkQueues && (
-                <LinkItem to="/pendientes-por-tecnico" {...linkProps}>
-                  Pendientes por técnico
-                </LinkItem>
-              )}
-              {canBudgetQueues && (
-                <>
-                  <LinkItem to="/pendientes-presupuesto" {...linkProps}>
-                    Pendientes de presupuesto
-                  </LinkItem>
-                  <LinkItem to="/presupuestados" {...linkProps}>
-                    Presupuestados
-                  </LinkItem>
-                </>
-              )}
-              {canWorkQueues && (
-                <>
-                  <LinkItem to="/aprobados" {...linkProps}>
-                    Aprobados
-                  </LinkItem>
-                  <LinkItem to="/reparados" {...linkProps}>
-                    Reparados
-                  </LinkItem>
-                </>
-              )}
-              {canLiberados && (
-                <LinkItem to="/listos" {...linkProps}>
-                  Liberados
-                </LinkItem>
-              )}
-              {canLogistics && (
-                <>
-                  <LinkItem to="/derivados" {...linkProps}>
-                    Derivados
-                  </LinkItem>
-                  <LinkItem to="/alquiler/stock" {...linkProps}>
-                    Stock de alquiler
-                  </LinkItem>
-                  <LinkItem to="/depositos" {...linkProps}>
-                    Depósitos/Bajas
-                  </LinkItem>
-                </>
-              )}
-            </Section>
-          )}
+                {showServicioTecnico && (
+                  <Section title="Servicio técnico">
+                    {canWorkQueues && (
+                      <LinkItem to="/pendientes" badge={badgeFor("/pendientes")} {...linkProps}>
+                        Pendientes general
+                      </LinkItem>
+                    )}
+                    {canWorkQueues && techLike && (
+                      <LinkItem to="/tecnico" badge={badgeFor("/tecnico")} {...linkProps}>
+                        Mis pendientes
+                      </LinkItem>
+                    )}
+                    {canWorkQueues && (
+                      <LinkItem to="/pendientes-por-tecnico" {...linkProps}>
+                        Pendientes por técnico
+                      </LinkItem>
+                    )}
+                    {canBudgetQueues && (
+                      <>
+                        <LinkItem to="/pendientes-presupuesto" badge={badgeFor("/pendientes-presupuesto")} {...linkProps}>
+                          Pendientes de presupuesto
+                        </LinkItem>
+                        <LinkItem to="/presupuestados" {...linkProps}>
+                          Presupuestados
+                        </LinkItem>
+                      </>
+                    )}
+                    {canWorkQueues && (
+                      <>
+                        <LinkItem to="/pendientes-reparacion" {...linkProps}>
+                          Pendientes de reparación
+                        </LinkItem>
+                        <LinkItem to="/listos-para-liberar" badge={badgeFor("/listos-para-liberar")} {...linkProps}>
+                          Listos para liberar
+                        </LinkItem>
+                      </>
+                    )}
+                    {canLiberados && (
+                      <LinkItem to="/listos" {...linkProps}>
+                        Liberados
+                      </LinkItem>
+                    )}
+                    {canLogistics && (
+                      <>
+                        <LinkItem to="/derivados" {...linkProps}>
+                          Derivados
+                        </LinkItem>
+                        <LinkItem to="/depositos" {...linkProps}>
+                          Stock / Depósitos
+                        </LinkItem>
+                      </>
+                    )}
+                  </Section>
+                )}
 
-          {showAdministracion && (
-            <Section title="Administración">
-              {showDeliveryOrdersInAdministracion && (
-                <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
-                  Órdenes de entrega
-                </LinkItem>
-              )}
-              {canGeneralCliente && (
-                <LinkItem to="/clientes" {...linkProps}>
-                  General por cliente
-                </LinkItem>
-              )}
-              {canHistory && (
-                <LinkItem to="/ingresos/historico" {...linkProps}>
-                  Histórico ingresos
-                </LinkItem>
-              )}
-              {canDevices && (
-                <LinkItem to="/equipos" {...linkProps}>
-                  Equipos
-                </LinkItem>
-              )}
-              {canHome && (
-                <>
-                  <LinkItem to="/buscar-ns" {...linkProps}>
-                    Buscar NS
-                  </LinkItem>
-                  <LinkItem to="/buscar-accesorio" {...linkProps}>
-                    Buscar accesorio
-                  </LinkItem>
-                </>
-              )}
-            </Section>
-          )}
+                {showAdministracion && (
+                  <Section title="Administración">
+                    {showDeliveryOrdersInAdministracion && (
+                      <LinkItem to="/administracion/ordenes-entrega" {...linkProps}>
+                        Órdenes de entrega
+                      </LinkItem>
+                    )}
+                    {canGeneralCliente && (
+                      <LinkItem to="/clientes" {...linkProps}>
+                        General por cliente
+                      </LinkItem>
+                    )}
+                    {canHistory && (
+                      <LinkItem to="/ingresos/historico" {...linkProps}>
+                        Histórico ingresos
+                      </LinkItem>
+                    )}
+                    {canDevices && (
+                      <LinkItem to="/equipos" {...linkProps}>
+                        Equipos
+                      </LinkItem>
+                    )}
+                    {canHome && (
+                      <>
+                        <LinkItem to="/buscar-ns" {...linkProps}>
+                          Buscar NS
+                        </LinkItem>
+                        <LinkItem to="/buscar-accesorio" {...linkProps}>
+                          Buscar accesorio
+                        </LinkItem>
+                      </>
+                    )}
+                  </Section>
+                )}
 
-          {showCobranzas && (
-            <Section title="Cobranzas">
-              <LinkItem to="/cobranzas/facturacion" {...linkProps}>
-                Facturación
-              </LinkItem>
-              {canDeliveryOrders && (
-                <LinkItem to="/cobranzas/remitos" {...linkProps}>
-                  Remitos
-                </LinkItem>
-              )}
-            </Section>
-          )}
+                {showCobranzas && (
+                  <Section title="Cobranzas">
+                    <LinkItem to="/cobranzas/facturacion" {...linkProps}>
+                      Facturación
+                    </LinkItem>
+                    {canDeliveryOrders && (
+                      <LinkItem to="/cobranzas/remitos" {...linkProps}>
+                        Remitos
+                      </LinkItem>
+                    )}
+                  </Section>
+                )}
 
-          {showSistema && (
-            <Section title="Sistema">
-              {canMetrics && (
-                <LinkItem to="/metricas" {...linkProps}>
-                  Métricas
-                </LinkItem>
-              )}
-              {canUsers && (
-                <LinkItem to="/usuarios" {...linkProps}>
-                  Usuarios
-                </LinkItem>
-              )}
-              {canCustomerCatalog && (
-                <LinkItem to="/catalogo/clientes" {...linkProps}>
-                  Clientes
-                </LinkItem>
-              )}
-              {canCatalogs && (
-                <>
-                  <LinkItem to="/catalogo/tipos-equipo" {...linkProps}>
-                    Tipos de equipo
-                  </LinkItem>
-                  <LinkItem to="/catalogo/accesorios" {...linkProps}>
-                    Accesorios
-                  </LinkItem>
-                  <LinkItem to="/catalogo/marcas" {...linkProps}>
-                    Marcas y modelos
-                  </LinkItem>
-                  <LinkItem to="/catalogo/proveedores" {...linkProps}>
-                    Proveedores externos
-                  </LinkItem>
-                </>
-              )}
-              {canSpareParts && (
-                <LinkItem to="/catalogo/repuestos" {...linkProps}>
-                  Repuestos
-                </LinkItem>
-              )}
-              {canWarranty && (
-                <LinkItem to="/garantias" {...linkProps}>
-                  Garantías
-                </LinkItem>
-              )}
-              {canBejerman && (
-                <LinkItem to="/bejerman" {...linkProps}>
-                  Bejerman
-                </LinkItem>
-              )}
-              {canManageTestProtocols && (
-                <LinkItem to="/sistema/protocolos-test" {...linkProps}>
-                  Protocolos de test
-                </LinkItem>
-              )}
-            </Section>
-          )}
+                {showSistema && (
+                  <Section title="Sistema">
+                    {canMetrics && (
+                      <LinkItem to="/metricas" {...linkProps}>
+                        Métricas
+                      </LinkItem>
+                    )}
+                    {canUsers && (
+                      <LinkItem to="/usuarios" {...linkProps}>
+                        Usuarios
+                      </LinkItem>
+                    )}
+                    {canCustomerCatalog && (
+                      <LinkItem to="/catalogo/clientes" {...linkProps}>
+                        Clientes
+                      </LinkItem>
+                    )}
+                    {canCatalogs && (
+                      <>
+                        <LinkItem to="/catalogo/tipos-equipo" {...linkProps}>
+                          Tipos de equipo
+                        </LinkItem>
+                        <LinkItem to="/catalogo/accesorios" {...linkProps}>
+                          Accesorios
+                        </LinkItem>
+                        <LinkItem to="/catalogo/marcas" {...linkProps}>
+                          Marcas y modelos
+                        </LinkItem>
+                        <LinkItem to="/catalogo/proveedores" {...linkProps}>
+                          Proveedores externos
+                        </LinkItem>
+                      </>
+                    )}
+                    {canSpareParts && (
+                      <LinkItem to="/catalogo/repuestos" {...linkProps}>
+                        Repuestos
+                      </LinkItem>
+                    )}
+                    {canWarranty && (
+                      <LinkItem to="/garantias" {...linkProps}>
+                        Garantías
+                      </LinkItem>
+                    )}
+                    {canBejerman && (
+                      <LinkItem to="/bejerman" {...linkProps}>
+                        Bejerman
+                      </LinkItem>
+                    )}
+                    {canManageTestProtocols && (
+                      <LinkItem to="/sistema/protocolos-test" {...linkProps}>
+                        Protocolos de test
+                      </LinkItem>
+                    )}
+                  </Section>
+                )}
+              </>
+            )}
         </div>
       </aside>
     </>

@@ -654,6 +654,13 @@ def _alert_rows_wip_critico(request, rule):
         {COMMON_INGRESO_JOINS}
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
            AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM equipos_derivados active_ed
+                  WHERE active_ed.ingreso_id = t.id
+                    AND active_ed.fecha_entrega IS NULL
+                    AND active_ed.estado IN ('derivado','en_servicio')
+               )
            AND CAST(COALESCE(t.fecha_ingreso, t.fecha_creacion) AS DATE) <= CURRENT_DATE - %s::int
            {scope_sql}
          ORDER BY dias_espera DESC, t.id ASC
@@ -814,6 +821,13 @@ def _active_work_count(request):
           LEFT JOIN locations loc ON loc.id = t.ubicacion_id
          WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
            AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM equipos_derivados active_ed
+                  WHERE active_ed.ingreso_id = t.id
+                    AND active_ed.fecha_entrega IS NULL
+                    AND active_ed.estado IN ('derivado','en_servicio')
+               )
            {scope_sql}
         """,
         [TALLER_LOCATION, *scope_params],

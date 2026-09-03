@@ -1,7 +1,6 @@
 import { norm, tipoEquipoOf } from "./ui-helpers.js";
 import {
   WORK_QUEUE_EMPTY_FILTER,
-  workQueueNextAction,
   workQueueTechnician,
 } from "./work-queue.js";
 
@@ -66,6 +65,5 @@ export function workQueueFilterOptions(rows) {
     motivo: uniqueOptions(rows, (row) => row?.motivo),
     estado: uniqueOptions(rows, (row) => row?.estado),
     presupuesto: uniqueOptions(rows, (row) => row?.presupuesto_estado, "Sin presupuesto"),
-    accion: uniqueOptions(rows, workQueueNextAction),
   };
 }

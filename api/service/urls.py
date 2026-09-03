@@ -12,6 +12,8 @@ from .views import (
     MarcarReparadoView, MarcarParaRepararView, QuitarRepararView, MarcarControladoSinDefectoView, MarcarNoSeReparaView, QuitarEstadoFinalReparacionView, EntregarIngresoView, GarantiaReparacionCheckView, GarantiaFabricaCheckView,
     HabilitarReparacionCotizacionView,
     DarBajaIngresoView, DarAltaIngresoView,
+    IngresoCambioEquipoCandidatosView,
+    IngresoCambioEquipoView,
     IngresoConvertirPropioMgView,
     IngresoCorreccionesHistoricasView,
     ListosParaRetiroView,
@@ -79,6 +81,7 @@ from .views import (
     CatalogoMotivosView,
     WarrantyRulesView, WarrantyRuleDetailView, DevicesMergeView,
     WorkResumenView, WorkObjectivesView, WorkAlertRulesView, GlobalSearchView,
+    ColasNovedadesView,
     BejermanIngressCompaniesView, BejermanPdfOutputSettingsView, BejermanJobsView, BejermanJobRetryView,
     BejermanPdfQueueStatusView, BejermanPdfQueueRetryView,
     BejermanRemitoProcessesView, BejermanRemitoProcessRetryView, BejermanArticleMappingsView, BejermanArticlesView,
@@ -310,6 +313,11 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/baja/", DarBajaIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/alta/", DarAltaIngresoView.as_view()),
     path("ingresos/<int:ingreso_id>/convertir-propio-mg/", IngresoConvertirPropioMgView.as_view()),
+    path("ingresos/<int:ingreso_id>/cambio-equipo/", IngresoCambioEquipoView.as_view()),
+    path(
+        "ingresos/<int:ingreso_id>/cambio-equipo/candidatos/",
+        IngresoCambioEquipoCandidatosView.as_view(),
+    ),
     path("ingresos/<int:ingreso_id>/correcciones-historicas/", IngresoCorreccionesHistoricasView.as_view()),
 
     # presupuestos
@@ -326,6 +334,8 @@ urlpatterns = [
     # listados operativos
     path("clientes/", CustomersListView.as_view()),
     path("trabajo/resumen/", WorkResumenView.as_view()),
+    # Contador de novedades del sidebar: sólo ids, lo consulta un poll.
+    path("colas/novedades/", ColasNovedadesView.as_view()),
     path("trabajo/objetivos/", WorkObjectivesView.as_view()),
     path("trabajo/reglas-alerta/", WorkAlertRulesView.as_view()),
     path("notificaciones/", NotificacionesView.as_view()),

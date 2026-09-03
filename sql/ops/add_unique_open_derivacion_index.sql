@@ -3,5 +3,5 @@
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_equipos_derivados_ingreso_abierto
   ON equipos_derivados(ingreso_id)
-  WHERE estado = 'derivado' AND fecha_entrega IS NULL;
-
+  WHERE fecha_entrega IS NULL
+    AND estado IN ('derivado','en_servicio');

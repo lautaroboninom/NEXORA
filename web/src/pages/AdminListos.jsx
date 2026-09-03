@@ -2,9 +2,11 @@
 import { useEffect, useMemo, useState } from "react";
 import api, { getBlob } from "../lib/api";
 import { useNavigate } from "react-router-dom";
-import { ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
+import { ingresoCustomerName, ingresoIdOf, formatOS, formatDateOnly, norm, tipoEquipoOf, catalogEquipmentLabel } from "../lib/ui-helpers";
 import StatusChip from "../components/StatusChip.jsx";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
 import ListToolbar from "../components/ListToolbar.jsx";
 import IngresoTable from "../components/IngresoTable.jsx";
@@ -23,11 +25,22 @@ import {
 const ENDPOINT = "/api/listos-para-retiro/";
 
 const COLUMNS = [
-  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "os",
+    label: "OS",
+    cellClassName: "underline",
+    render: (row) => (
+      <>
+        {formatOS(row)}
+        <DerivadoMark row={row} className="ml-1.5" />
+      </>
+    ),
+    filter: "text",
+  },
   {
     field: "cliente",
     label: "Cliente",
-    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    render: (row) => <CustomerCell row={row} />,
     filter: "text",
   },
   {
@@ -77,7 +90,8 @@ export default function AdminListos() {
       setLoading(true);
       const data = await api.get(ENDPOINT);
       const list = Array.isArray(data) ? data : [];
-      const clientNameOf = (row) => (row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "").trim();
+      // Agrupa por dueño real: si no, todos los particulares caen juntos bajo "Particular".
+      const clientNameOf = (row) => ingresoCustomerName(row);
       const readyTime = (row) =>
         new Date(
           row?.fecha_entrega ?? row?.fecha_listo ?? row?.fecha_reparado ?? row?.fecha_estado ?? row?.estado_fecha ?? 0,
@@ -107,6 +121,7 @@ export default function AdminListos() {
       if (!needle) return true;
       const campos = [
         formatOS(row),
+        ingresoCustomerName(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
         row?.marca ?? row?.equipo?.marca,
         catalogEquipmentLabel(row),

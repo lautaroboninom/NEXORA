@@ -136,10 +136,27 @@ export const isMgOwned = (row) => {
   return hasMgCode(row);
 };
 
+// El enum de motivos convivió con y sin tilde (hay un comando de corrección de etiquetas
+// para eso), así que se aceptan las dos escrituras en vez de depender de cuál quedó.
+const DEMO_RETURN_MOTIVOS = new Set(["devolución demo", "devolucion demo"]);
+
+/** ¿El equipo entró por una devolución de demo? */
+export const isDemoReturn = (row) => {
+  if (!row) return false;
+  if (row?.es_devolucion_demo === true || row?.equipo?.es_devolucion_demo === true) return true;
+  return [row?.motivo, row?.equipo?.motivo, row?.motivo_ingreso].some((value) =>
+    DEMO_RETURN_MOTIVOS.has(cleanText(value).toLowerCase())
+  );
+};
+
 export const propiedadEquipoLabelOf = (row) => {
   if (!row) return "-";
   if (hasMgCode(row) && isMgInactiveBySale(row)) return "Cliente (MG histórico)";
   if (isMgOwned(row)) return "MG BIO";
+  // Un equipo que vuelve de una demo es nuestro, aunque el ingreso siga mostrando al
+  // cliente que lo devolvió: por eso su stock vuelve a VAL y no al depósito del cliente.
+  // Si ya se vendió, la propiedad pasó al comprador y vuelve a leerse como "Cliente".
+  if (isDemoReturn(row) && !isMgInactiveBySale(row)) return "MG BIO";
   return "Cliente";
 };
 
@@ -218,16 +235,45 @@ const isOwnerDisplayCustomer = (value) => {
 };
 
 // `razon_social` cubre el detalle de ingreso; las filas de equipo traen
-// last_customer_nombre / customer_nombre.
+// last_customer_nombre / customer_nombre y algunos listados, `cliente`.
 const deviceCustomerName = (row) =>
-  String(row?.last_customer_nombre || row?.customer_nombre || row?.razon_social || "").trim();
+  String(
+    row?.last_customer_nombre ||
+      row?.customer_nombre ||
+      row?.razon_social ||
+      row?.cliente ||
+      row?.cliente_nombre ||
+      ""
+  ).trim();
 
-export const deviceCustomerTitle = (row) => {
+/**
+ * Nombre a mostrar en la columna Cliente de los listados de ingresos.
+ *
+ * Devuelve cadena vacía si no hay nada, para que los filtros puedan ofrecer
+ * "(sin dato)". Para mostrarlo directo usar `deviceCustomerTitle`.
+ */
+export const ingresoCustomerName = (row) => {
   const customer = deviceCustomerName(row);
   const owner = String(row?.propietario_nombre || "").trim();
   if (owner && isOwnerDisplayCustomer(customer)) return owner;
-  return customer || owner || "-";
+  return customer;
 };
+
+/**
+ * Nombre del cliente contenedor cuando quedó tapado por el del dueño.
+ *
+ * Devuelve "" si el título ya es el cliente. En los listados sólo interesa este
+ * caso: `deviceCustomerSubtitle` además avisa "Dueño: X" sobre clientes reales,
+ * y eso, fila por fila, es ruido.
+ */
+export const ingresoCustomerBaseName = (row) => {
+  const customer = deviceCustomerName(row);
+  const owner = String(row?.propietario_nombre || "").trim();
+  return owner && isOwnerDisplayCustomer(customer) ? customer : "";
+};
+
+export const deviceCustomerTitle = (row) =>
+  ingresoCustomerName(row) || String(row?.propietario_nombre || "").trim() || "-";
 
 export const deviceCustomerSubtitle = (row) => {
   const customer = deviceCustomerName(row);

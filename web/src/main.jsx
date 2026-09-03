@@ -23,13 +23,12 @@ import Accesorios from "./pages/Accesorios.jsx";
 import Repuestos from "./pages/Repuestos.jsx";
 import ProtectedRoute from "./components/ProtectedRoute";
 import PendientesGeneral from "./pages/PendientesGeneral.jsx";
-import Aprobados from "./pages/Aprobados.jsx";
-import Reparados from "./pages/Reparados.jsx";
+import PendientesReparacion from "./pages/PendientesReparacion.jsx";
+import ListosParaLiberar from "./pages/ListosParaLiberar.jsx";
 import HistoricoIngresos from "./pages/HistoricoIngresos.jsx";
 import ServiceSheet from "./pages/ServiceSheet";
 import PendientesPorTecnico from "./pages/PendientesPorTecnico.jsx";
 import DerivarIngreso from "./pages/DerivarIngreso.jsx";
-import StockAlquiler from "./pages/StockAlquiler.jsx";
 import WorkDashboard from "./pages/WorkDashboard.jsx";
 import BuscarNS from "./pages/BuscarNS.jsx";
 import BuscarAccesorio from "./pages/BuscarAccesorio.jsx";
@@ -212,21 +211,26 @@ const router = createBrowserRouter([
         ),
       },
       {
-        path: "aprobados",
+        path: "pendientes-reparacion",
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_WORK_QUEUES}>
-            <Aprobados />
+            <PendientesReparacion />
           </ProtectedRoute>
         ),
       },
       {
-        path: "reparados",
+        path: "listos-para-liberar",
         element: (
           <ProtectedRoute permissions={PERMISSION_CODES.PAGE_WORK_QUEUES}>
-            <Reparados />
+            <ListosParaLiberar />
           </ProtectedRoute>
         ),
       },
+      // Las dos colas se llamaban "Aprobados" y "Reparados". Los nombres viejos
+      // siguen vivos en favoritos y en links pegados por chat: quedan como
+      // redirect, no como rutas duplicadas (que se desincronizarían).
+      { path: "aprobados", element: <Navigate to="/pendientes-reparacion" replace /> },
+      { path: "reparados", element: <Navigate to="/listos-para-liberar" replace /> },
       {
         path: "derivados",
         element: (
@@ -244,12 +248,10 @@ const router = createBrowserRouter([
         ),
       },
       {
+        // Stock de alquiler pasó a ser una opción de Stock / Depósitos. La ruta
+        // vieja queda como redirect para no romper los enlaces guardados.
         path: "alquiler/stock",
-        element: (
-          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_LOGISTICS}>
-            <StockAlquiler />
-          </ProtectedRoute>
-        ),
+        element: <Navigate to="/depositos?ubicacion_id=alquiler" replace />,
       },
       {
         path: "depositos",

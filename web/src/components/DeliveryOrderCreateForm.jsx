@@ -11,8 +11,10 @@ import {
 } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import {
+  deliveryOrderDefaultDeposit,
   deliveryOrderItemCanOmitPartida,
   deliveryOrderItemRequiresPartida,
+  deliveryOrderPartidaIsFixedEquipment,
   deliveryOrderUsedPartidaKeys,
 } from "../lib/delivery-orders";
 
@@ -41,11 +43,13 @@ const REMITO_PROFILE_BY_TYPE = {
   sale: "RT / MC / VAL",
   rental: "RTA / ALQ / STL",
   demo: "RTN / DEMO / VAL",
+  service_release: "RSS / REP / STC",
 };
 const QUANTITY_TOLERANCE = 0.0001;
 const FALLBACK_DEPOSITS = [
   { code: "VAL", label: "VAL" },
   { code: "STL", label: "STL" },
+  { code: "STC", label: "STC" },
 ];
 const PLANNING_STATUS_LABELS = {
   pendiente_stock: "Pendiente de stock",
@@ -196,7 +200,7 @@ function sellerFromOrder(order) {
 }
 
 function defaultDepositForDeliveryType(deliveryType) {
-  return clean(deliveryType) === "rental" ? "STL" : "VAL";
+  return deliveryOrderDefaultDeposit(deliveryType);
 }
 
 function normalizeDepositOption(item) {
@@ -255,12 +259,12 @@ function lotLabel(lot) {
   return pieces.filter(Boolean).join(" - ");
 }
 
-function lotDraft(lot, assignedQuantity = "1") {
+function lotDraft(lot, assignedQuantity = "1", fallbackDeposit = "") {
   return {
     partida: clean(lot?.partida),
     assignedQuantity: String(assignedQuantity),
     partidaExpirationDate: lotExpiration(lot),
-    stockDepositCode: clean(lot?.stockDepositCode || lot?.depositCode) || "VAL",
+    stockDepositCode: clean(lot?.stockDepositCode || lot?.depositCode) || clean(fallbackDeposit) || "VAL",
     stockAvailableQuantity: String(lotAvailableQuantity(lot)),
     stockCheckedAt: clean(lot?.stockCheckedAt),
   };
@@ -530,6 +534,9 @@ export default function DeliveryOrderCreateForm({
   const [error, setError] = useState("");
   const effectiveCompanyKey = useMemo(() => normalizeCompanyKey(form.companyKey), [form.companyKey]);
   const isRental = form.deliveryType === "rental";
+  // En una reparación la partida es la serie del equipo del cliente: no se puede reemplazar
+  // por otra del mismo artículo sin entregarle a alguien el equipo equivocado.
+  const isFixedEquipmentPartida = deliveryOrderPartidaIsFixedEquipment(form.deliveryType);
   // El equipo dado de alta con su MG no tiene OS: la clave del atajo sigue al equipo,
   // si no todos los equipos sin OS comparten la clave vacía y el atajo esconde de más.
   const rentalEquipmentKey = (option) =>
@@ -946,7 +953,7 @@ export default function DeliveryOrderCreateForm({
     const available = lotAvailableQuantity(matchingLot);
     const assignedQuantity = Math.min(1, remaining, available > 0 ? available : 1);
     const nextRows = rows.map((row, rowIndex) =>
-      rowIndex === partidaIndex ? { ...row, ...lotDraft(matchingLot, assignedQuantity) } : row
+      rowIndex === partidaIndex ? { ...row, ...lotDraft(matchingLot, assignedQuantity, depositCode) } : row
     );
     const remainingAfterScan = remaining - assignedQuantity;
     let nextFocusIndex = partidaIndex;
@@ -989,7 +996,7 @@ export default function DeliveryOrderCreateForm({
       return;
     }
     const assignedQuantity = clean(row.assignedQuantity) || "1";
-    updatePartida(itemIndex, partidaIndex, lotDraft(matchingLot, assignedQuantity));
+    updatePartida(itemIndex, partidaIndex, lotDraft(matchingLot, assignedQuantity, depositCode));
     clearPartidaScanWarning(itemIndex, partidaIndex);
   };
 
@@ -1294,7 +1301,7 @@ export default function DeliveryOrderCreateForm({
     const remaining = Math.max(0, requested - assignedOther);
     const available = lotAvailableQuantity(lot);
     const assigned = available > 0 ? Math.min(remaining || requested, available) : remaining || requested;
-    updatePartida(itemIndex, partidaIndex, lotDraft(lot, assigned));
+    updatePartida(itemIndex, partidaIndex, lotDraft(lot, assigned, depositCode));
   };
 
   const buildPartidasPayloadForItem = (item) =>
@@ -1348,7 +1355,7 @@ export default function DeliveryOrderCreateForm({
         seenPartidas.add(rowPartidaKey);
         const stockState = articleStock[index];
         const stockLots = Array.isArray(stockState?.items) ? stockState.items : [];
-        if (clean(item.articleCode) && stockState && !stockState.loading && !stockState.unavailable && stockLots.length) {
+        if (clean(item.articleCode) && stockState && !stockState.loading && !stockState.unavailable) {
           const matchingLot = stockLots.find((lot) => partidaMatchKey(lot?.partida) === rowPartidaKey);
           if (!matchingLot) {
             return isRental
@@ -2064,7 +2071,13 @@ export default function DeliveryOrderCreateForm({
                         {!stockState?.loading && stockState?.warning && (
                           <div className="mt-2 text-xs text-amber-800">{stockState.warning}</div>
                         )}
-                        {!stockState?.loading && visibleStockLots.length > 0 && (
+                        {!stockState?.loading && isFixedEquipmentPartida && (
+                          <div className="mt-2 text-xs text-sky-800">
+                            La partida de una reparación es la serie del equipo del cliente: no se
+                            reemplaza por otra del depósito.
+                          </div>
+                        )}
+                        {!stockState?.loading && !isFixedEquipmentPartida && visibleStockLots.length > 0 && (
                           <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                             {visibleStockLots.slice(0, 12).map((lot) => (
                               <button
@@ -2080,7 +2093,7 @@ export default function DeliveryOrderCreateForm({
                             ))}
                           </div>
                         )}
-                        {!stockState?.loading && stockLots.length > 0 && visibleStockLots.length === 0 && (
+                        {!stockState?.loading && !isFixedEquipmentPartida && stockLots.length > 0 && visibleStockLots.length === 0 && (
                           <div className="mt-2 text-xs text-sky-800">
                             {suggestedRowResolved
                               ? `${isRental ? "El NS" : "La partida"} de este renglón ya está tomado del stock.`

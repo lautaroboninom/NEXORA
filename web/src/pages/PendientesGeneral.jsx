@@ -9,10 +9,14 @@ import useColumnFilters from "../hooks/useColumnFilters";
 import { ingresoIdOf, resolveFechaCreacion } from "../lib/ui-helpers";
 import { matchesWorkQueueFilters } from "../lib/work-queue";
 import { workQueueFilterOptions } from "../lib/work-queue-filter-options";
+import { QUEUE_KEYS } from "../lib/queue-badges";
+import { useMarkQueueSeen } from "../hooks/useQueueBadges";
 
 const ENDPOINT = "/api/ingresos/pendientes/";
 
 export default function PendientesGeneral() {
+  // Abrir la pantalla apaga el indicador de novedades del menú.
+  useMarkQueueSeen(QUEUE_KEYS.PENDIENTES_GENERAL);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");

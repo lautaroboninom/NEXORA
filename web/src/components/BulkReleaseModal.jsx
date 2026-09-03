@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, Printer, X } from "lucide-react";
 import { ResponsiveModalOverlay, ResponsiveModalPanel } from "./Responsive.jsx";
 import { getBlobWithMeta } from "../lib/api";
 import { reservePdfWindow } from "../lib/pdf";
-import { catalogEquipmentLabel, formatOS, ingresoIdOf } from "../lib/ui-helpers";
+import { catalogEquipmentLabel, deviceCustomerTitle, formatOS, ingresoIdOf } from "../lib/ui-helpers";
 import {
   BULK_RELEASE_MAX_IDS,
   bulkReleaseFailuresFromError,
@@ -24,9 +24,8 @@ function errorMessage(error, fallback) {
   return raw;
 }
 
-function clienteOf(row) {
-  return row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-";
-}
+// La orden de salida se imprime a nombre del dueño, no del cliente contenedor.
+const clienteOf = deviceCustomerTitle;
 
 function RowLine({ row, id, tone, detail }) {
   const Icon = tone === "ok" ? CheckCircle2 : AlertTriangle;

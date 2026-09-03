@@ -17,6 +17,7 @@ import {
 } from "../lib/delivery-remito-job";
 import {
   deliveryOrderBejermanCustomerLabel,
+  deliveryOrderDefaultDeposit,
   deliveryOrderEquipmentContext,
   deliveryOrderCompanyKey,
   deliveryOrderCompanyLabel,
@@ -83,7 +84,7 @@ function suppressEnterSubmit(event) {
 }
 
 function defaultDepositForOrder(order) {
-  return clean(order?.deliveryType) === "rental" ? "STL" : "VAL";
+  return deliveryOrderDefaultDeposit(order);
 }
 
 function itemStockDeposit(order, item) {
@@ -115,14 +116,14 @@ function lotLabel(lot) {
     .join(" - ");
 }
 
-function lotDraft(lot, assignedQuantity = "1") {
+function lotDraft(lot, assignedQuantity = "1", fallbackDeposit = "") {
   return {
     ingresoId: "",
     deviceId: "",
     partida: clean(lot?.partida),
     assignedQuantity: String(assignedQuantity),
     partidaExpirationDate: lotExpiration(lot),
-    stockDepositCode: clean(lot?.stockDepositCode || lot?.depositCode) || "VAL",
+    stockDepositCode: clean(lot?.stockDepositCode || lot?.depositCode) || clean(fallbackDeposit) || "VAL",
     stockAvailableQuantity: String(lotAvailableQuantity(lot)),
     stockCheckedAt: clean(lot?.stockCheckedAt),
   };
@@ -334,7 +335,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
       setStock(null);
       return;
     }
-    setStock({ loading: true, items: [], warning: "", unavailable: false, depositCode: "VAL" });
+    setStock({ loading: true, items: [], warning: "", unavailable: false, depositCode: itemStockDeposit(order, item) });
     setSelectedLot(null);
     try {
       const data = await getDeliveryOrderBejermanArticleStock({
@@ -352,7 +353,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
           unavailable ? "No se pudieron consultar las partidas de Bejerman. Reintentá en unos minutos." : ""
         ),
         unavailable,
-        depositCode: clean(data?.depositCode) || "VAL",
+        depositCode: clean(data?.depositCode) || itemStockDeposit(order, item),
       });
     } catch (err) {
       setStock({
@@ -360,7 +361,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
         items: [],
         warning: bejermanLookupErrorMessage(err, "No se pudieron consultar las partidas de Bejerman."),
         unavailable: true,
-        depositCode: "VAL",
+        depositCode: itemStockDeposit(order, item),
       });
     }
   };
@@ -395,6 +396,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
               Math.max(numberOf(item.quantity, 1), 1),
               lotAvailableQuantity(selectedLot) || Math.max(numberOf(item.quantity, 1), 1),
             ),
+            itemStockDeposit(order, item),
           )
         : null;
       const updated = await patchDeliveryOrderItemArticle(order.id, item.id, {
@@ -480,7 +482,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
         <div className="mt-3 rounded border border-amber-200 bg-white p-2">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-xs font-medium uppercase text-amber-900">Partidas disponibles</div>
-            <div className="text-xs text-amber-800">Depósito {stock?.depositCode || "VAL"}</div>
+            <div className="text-xs text-amber-800">Depósito {stock?.depositCode || itemStockDeposit(order, item)}</div>
           </div>
           {stock?.loading && <div className="text-xs text-amber-800">Consultando stock...</div>}
           {!stock?.loading && stock?.warning && <div className="text-xs text-amber-800">{stock.warning}</div>}
@@ -619,7 +621,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
       return undefined;
     }
     let active = true;
-    setStock({ loading: true, items: [], warning: "", unavailable: false, depositCode: "VAL" });
+    setStock({ loading: true, items: [], warning: "", unavailable: false, depositCode: itemStockDeposit(order, item) });
     getDeliveryOrderBejermanArticleStock({
       articleCode,
       limit: 100,
@@ -637,7 +639,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
             unavailable ? "No se pudieron consultar las partidas de Bejerman. Reintentá en unos minutos." : ""
           ),
           unavailable,
-          depositCode: clean(data?.depositCode) || "VAL",
+          depositCode: clean(data?.depositCode) || itemStockDeposit(order, item),
         });
       })
       .catch((err) => {
@@ -647,7 +649,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
           items: [],
           warning: bejermanLookupErrorMessage(err, "No se pudieron consultar las partidas de Bejerman."),
           unavailable: true,
-          depositCode: "VAL",
+          depositCode: itemStockDeposit(order, item),
         });
       });
     return () => {
@@ -676,7 +678,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
   const chooseStockLot = (lot) => {
     const available = lotAvailableQuantity(lot);
     const assignedQuantity = Math.min(Math.max(numberOf(item.quantity, 1), 1), available || Math.max(numberOf(item.quantity, 1), 1));
-    const nextRow = lotDraft(lot, assignedQuantity);
+    const nextRow = lotDraft(lot, assignedQuantity, itemStockDeposit(order, item));
     const firstEmptyIndex = rows.findIndex((row) => !clean(row.partida));
     applyRows(
       firstEmptyIndex < 0
@@ -694,7 +696,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
       setError("La partida no figura para este artículo en el depósito seleccionado.");
       return;
     }
-    const nextRow = lotDraft(matchingLot, clean(row.assignedQuantity) || "1");
+    const nextRow = lotDraft(matchingLot, clean(row.assignedQuantity) || "1", itemStockDeposit(order, item));
     applyRows(rows.map((current, rowIndex) => (rowIndex === index ? nextRow : current)));
   };
 
@@ -795,7 +797,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
         <div className="mb-3 rounded border border-sky-200 bg-white p-2">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-xs font-medium uppercase text-sky-900">Partidas disponibles</div>
-            <div className="text-xs text-sky-800">Depósito {stock?.depositCode || "VAL"}</div>
+            <div className="text-xs text-sky-800">Depósito {stock?.depositCode || itemStockDeposit(order, item)}</div>
           </div>
           {stock?.loading && <div className="text-xs text-sky-800">Consultando stock...</div>}
           {!stock?.loading && stock?.warning && (

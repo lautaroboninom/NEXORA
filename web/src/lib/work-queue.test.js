@@ -50,3 +50,12 @@ test("intersecta filtros y reconoce técnico y presupuesto vacíos", () => {
     propiedad: "Cliente",
   }), false);
 });
+
+// La cola de trabajo tenía su propia copia de la regla de propiedad, y esa copia se quedó
+// sin la rama de devolución de demo: la misma OS decía "Cliente" acá y "MG BIO" en la hoja
+// de servicio. Ahora delega en `propiedadEquipoLabelOf`.
+test("una devolución de demo también figura como MG BIO en la cola", () => {
+  const row = { numero_serie: "MA26040480026", motivo: "devolución demo", estado: "controlado_sin_defecto" };
+  assert.equal(workQueueProperty(row), "MG BIO");
+  assert.equal(workQueueProperty({ ...row, estado: "vendido_entregado" }), "Cliente");
+});

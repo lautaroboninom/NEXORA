@@ -28,12 +28,14 @@ READ_AUDIT_EXACT_RULES = [
     {
         "path": "/api/ingresos/aprobados-para-reparar/",
         "activity_type": "apertura_cola",
-        "title": "Abrió aprobados para reparar",
+        # El endpoint conserva el nombre viejo; el título sigue al rótulo de la
+        # pestaña, que es lo que el usuario reconoce al leer la auditoría.
+        "title": "Abrió pendientes de reparación",
     },
     {
         "path": "/api/ingresos/aprobados-reparados/",
         "activity_type": "apertura_cola",
-        "title": "Abrió reparados",
+        "title": "Abrió listos para liberar",
     },
     {
         "path": "/api/ingresos/liberados/",
@@ -95,6 +97,23 @@ READ_AUDIT_REGEX_RULES = [
     },
 ]
 
+WRITE_ACTIVITY_REGEX_RULES = [
+    {
+        "pattern": re.compile(r"^/api/ingresos/(?P<ingreso_id>\d+)/derivar/?$"),
+        "method": "POST",
+        "activity_type": "derivacion",
+        "title": "Marcó el equipo como derivado",
+    },
+    {
+        "pattern": re.compile(
+            r"^/api/ingresos/(?P<ingreso_id>\d+)/derivaciones/(?P<derivacion_id>\d+)/devolver/?$"
+        ),
+        "method": "POST",
+        "activity_type": "devolucion_derivacion",
+        "title": "Marcó el derivado como devuelto",
+    },
+]
+
 
 def should_audit_read_request(path, query_params=None) -> bool:
     path_value = str(path or "").strip()
@@ -146,4 +165,35 @@ def classify_read_path(path):
                 pass
         return data
 
+    return None
+
+
+def classify_activity_path(path, method=None):
+    """Clasifica aperturas auditadas y escrituras operativas relevantes."""
+    method_value = str(method or "").strip().upper()
+    if not method_value or method_value == "GET":
+        read_info = classify_read_path(path)
+        if read_info:
+            return read_info
+
+    path_value = str(path or "").strip()
+    for rule in WRITE_ACTIVITY_REGEX_RULES:
+        if method_value and method_value != rule["method"]:
+            continue
+        match = rule["pattern"].match(path_value)
+        if not match:
+            continue
+        data = {
+            "activity_type": rule["activity_type"],
+            "title": rule["title"],
+            "path": path_value,
+        }
+        for key, value in (match.groupdict() or {}).items():
+            if value is None:
+                continue
+            try:
+                data[key] = int(value)
+            except (TypeError, ValueError):
+                data[key] = value
+        return data
     return None

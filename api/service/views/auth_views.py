@@ -31,7 +31,7 @@ from ..bejerman_user_credentials import (
 )
 from ..ip_utils import get_client_ip
 from ..models import User
-from ..permissions import resolve_effective_permissions
+from ..permissions import _fetch_overrides, resolve_effective_permissions
 from .helpers import (
     COOLDOWN_MIN,
     TOKEN_TTL_MIN,
@@ -123,22 +123,29 @@ def _bejerman_seller_code_status(user_id: int | None, role: str | None) -> dict:
 
 
 def _auth_user_payload(user, permissions_map=None) -> tuple[dict, dict]:
+    uid = getattr(user, "id", None)
+    role = getattr(user, "rol", "")
+    overrides = _fetch_overrides(uid) if uid else {}
     permissions_map = permissions_map if permissions_map is not None else resolve_effective_permissions(
-        user_id=getattr(user, "id", None),
-        role=getattr(user, "rol", ""),
+        user_id=uid,
+        role=role,
+        overrides=overrides,
     )
-    bejerman_credentials = user_bejerman_credentials_status(getattr(user, "id", None))
+    bejerman_credentials = user_bejerman_credentials_status(uid)
     bejerman_seller_code = _bejerman_seller_code_status(
-        getattr(user, "id", None),
-        getattr(user, "rol", ""),
+        uid,
+        role,
     )
     return (
         {
             "id": user.id,
             "nombre": getattr(user, "nombre", ""),
-            "rol": _normalize_role(getattr(user, "rol", "")),
+            "rol": _normalize_role(role),
             "email": getattr(user, "email", ""),
             "permissions": permissions_map,
+            "custom_permissions": overrides,
+            "has_custom_permissions": bool(overrides),
+            "permisos_personalizados": len(overrides),
             "bejermanCredentials": bejerman_credentials,
             "bejermanSellerCode": bejerman_seller_code,
         },

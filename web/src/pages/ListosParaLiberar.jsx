@@ -1,21 +1,22 @@
-// web/src/pages/Aprobados.jsx
+// web/src/pages/ListosParaLiberar.jsx
 import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
-import { useAuth } from "../context/AuthContext";
-import { can, PERMISSION_CODES } from "../lib/permissions";
-import { isJefe } from "../lib/authz";
 import { useNavigate } from "react-router-dom";
 import {
+  ingresoCustomerName,
   ingresoIdOf,
   formatOS,
   formatDateOnly,
   norm,
   tipoEquipoOf,
+  resolveFechaIngreso,
   catalogEquipmentLabel,
 } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
-import StatusChip from "../components/StatusChip.jsx";
+import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
+import StatusChip from "../components/StatusChip.jsx";
 import ReleaseOrderModal from "../components/ReleaseOrderModal.jsx";
 import BulkReleaseModal from "../components/BulkReleaseModal.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
@@ -24,20 +25,37 @@ import IngresoTable from "../components/IngresoTable.jsx";
 import useQueryState from "../hooks/useQueryState";
 import useRowSelection from "../hooks/useRowSelection";
 import useColumnFilters from "../hooks/useColumnFilters";
+import { useAuth } from "../context/AuthContext";
+import { can, PERMISSION_CODES } from "../lib/permissions";
 import {
   columnFilterOptions,
   matchesColumnFilters,
 } from "../lib/ingreso-list-filters";
+import { QUEUE_KEYS } from "../lib/queue-badges";
+import { useMarkQueueSeen } from "../hooks/useQueueBadges";
 
-// Endpoint combinado del backend
-const ENDPOINT = "/api/ingresos/aprobados/";
+const ENDPOINT = "/api/ingresos/aprobados-reparados/";
 
+// Mismo orden que el resto de las colas (OS · Cliente · Equipo · Estado · Serie ·
+// fechas): el operador barre las listas de arriba abajo buscando siempre el
+// cliente en la misma columna.
 const COLUMNS = [
-  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "os",
+    label: "OS",
+    cellClassName: "underline",
+    render: (row) => (
+      <>
+        {formatOS(row)}
+        <DerivadoMark row={row} className="ml-1.5" />
+      </>
+    ),
+    filter: "text",
+  },
   {
     field: "cliente",
     label: "Cliente",
-    render: (row) => row?.razon_social ?? row?.cliente ?? row?.cliente_nombre ?? "-",
+    render: (row) => <CustomerCell row={row} />,
     filter: "text",
   },
   {
@@ -60,20 +78,25 @@ const COLUMNS = [
     filter: "text",
   },
   {
-    field: "fecha_aprobado",
-    label: "Fecha aprob.",
+    field: "fecha_ingreso",
+    label: "Fecha ingreso",
+    cellClassName: "whitespace-nowrap",
+    render: (row) => formatDateOnly(resolveFechaIngreso(row)),
+  },
+  {
+    field: "fecha_reparado",
+    label: "Fecha reparación",
     cellClassName: "whitespace-nowrap",
     render: (row) =>
       formatDateOnly(
-        row?.fecha_aprobado ||
-          row?.presupuesto_fecha_aprobacion ||
-          row?.fecha_reparado ||
-          row?.fecha_reparacion
+        row?.fecha_reparado ?? row?.fecha_reparacion ?? row?.reparado_fecha ?? row?.estado_fecha
       ),
   },
 ];
 
-export default function Aprobados() {
+export default function ListosParaLiberar() {
+  // Abrir la pantalla apaga el indicador de novedades del menú.
+  useMarkQueueSeen(QUEUE_KEYS.LISTOS_PARA_LIBERAR);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -87,6 +110,9 @@ export default function Aprobados() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const release = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_EXIT_ORDER);
+  // El backend exige `repair_transitions` para cerrar la reparación, no el rol jefe.
+  const canRepairTransitions = can(user, PERMISSION_CODES.ACTION_INGRESO_REPAIR_TRANSITIONS);
+  const canSwapDevice = can(user, PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP);
 
   async function load() {
     try {
@@ -95,7 +121,7 @@ export default function Aprobados() {
       const data = await api.get(ENDPOINT);
       setRows(Array.isArray(data) ? data : []);
     } catch (e) {
-      setErr(e?.message || "No se pudieron cargar los aprobados");
+      setErr(e?.message || "No se pudieron cargar los listos para liberar");
       setRows([]);
     } finally {
       setLoading(false);
@@ -113,12 +139,12 @@ export default function Aprobados() {
       if (!needle) return true;
       const campos = [
         formatOS(row),
+        ingresoCustomerName(row),
         row?.razon_social ?? row?.cliente ?? row?.cliente_nombre,
         row?.marca ?? row?.equipo?.marca,
         catalogEquipmentLabel(row),
         tipoEquipoOf(row),
         row?.estado,
-        row?.resolucion,
         row?.numero_serie,
         row?.numero_interno,
       ];
@@ -165,7 +191,12 @@ export default function Aprobados() {
     <button
       className="btn"
       type="button"
-      title="Revisar salida"
+      title={
+        row?.derivacion_activa
+          ? "El equipo sigue derivado. Marcá la derivación como devuelta antes de liberarlo."
+          : "Revisar salida"
+      }
+      disabled={Boolean(row?.derivacion_activa)}
       onClick={() => {
         setErr("");
         setReleaseRow(row);
@@ -180,18 +211,20 @@ export default function Aprobados() {
       <ReleaseOrderModal
         open={Boolean(releaseRow)}
         row={releaseRow}
-        canManageResolution={isJefe(user)}
+        canManageResolution={canRepairTransitions}
+        canSwapDevice={canSwapDevice}
         onClose={() => setReleaseRow(null)}
         onReleased={load}
+        onSwapChanged={load}
       />
       <BulkReleaseModal
         open={Boolean(bulkRows)}
         rows={bulkRows || []}
-        canManageResolution={isJefe(user)}
+        canManageResolution={canRepairTransitions}
         onClose={() => setBulkRows(null)}
         onDone={onBulkDone}
       />
-      <div className="h1 mb-3">Aprobados</div>
+      <div className="h1 mb-3">Listos para liberar</div>
 
       <AlertBanner tone="error">{err}</AlertBanner>
       <AlertBanner tone="info">{bulkResultMsg}</AlertBanner>
@@ -200,7 +233,7 @@ export default function Aprobados() {
         q={q}
         onQChange={setQ}
         searchPlaceholder="Filtrar por OS, cliente, marca, equipo, serie"
-        searchLabel="Filtrar aprobados"
+        searchLabel="Filtrar listos para liberar"
         onReload={load}
         loading={loading}
         showFilterToggle
@@ -238,7 +271,7 @@ export default function Aprobados() {
         filterOptions={filterOptions}
         showFilters={filtersOpen}
         loading={loading}
-        emptyText="No hay aprobados que coincidan con el filtro."
+        emptyText="No hay equipos listos para liberar que coincidan con el filtro."
         totalCount={rows.length}
       />
     </div>

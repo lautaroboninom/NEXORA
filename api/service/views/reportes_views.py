@@ -17,6 +17,7 @@ from ..bejerman_sync import (
     ingreso_is_internal_equipment,
 )
 from ..delivery_orders import ensure_service_release_order_for_ingreso
+from ..derivations import active_derivation_block_payload, get_active_derivation
 from ..pdf import render_remito_salida_pdf, render_remito_derivacion_pdf
 from ..notifications import notify_ingreso_liberado
 from ..repair_ready_notifications import resolve_remito_pending_notifications
@@ -88,17 +89,31 @@ def _merge_pdf_documents(documents: list[bytes]) -> bytes:
 class RemitoSalidaPdfView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @transaction.atomic
     def get(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "admin", "recepcion","jefe_veedor"])
         _set_audit_user(request)
 
-        cur_row = q("SELECT resolucion, estado FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        cur_row = q(
+            "SELECT resolucion, estado FROM ingresos WHERE id=%s FOR UPDATE",
+            [ingreso_id],
+            one=True,
+        )
         if not cur_row:
             return Response(status=404)
         estado_actual = (cur_row["estado"] or "").lower()
         reprint_requested = str(request.query_params.get("reprint") or "").strip().lower() in {"1", "true", "yes"}
         if reprint_requested:
-            if estado_actual not in {"liberado", "entregado", "alquilado", "baja", "vendido_entregado"}:
+            # `vendido_pendiente_entrega` va acá igual que en el resto del método (ver los
+            # cortes de más abajo): la orden ya se emitió, así que reimprimirla es válido.
+            if estado_actual not in {
+                "liberado",
+                "entregado",
+                "alquilado",
+                "baja",
+                "vendido_pendiente_entrega",
+                "vendido_entregado",
+            }:
                 return Response(
                     {"detail": "La orden de salida solo puede reimprimirse después de haber sido emitida."},
                     status=409,
@@ -108,7 +123,21 @@ class RemitoSalidaPdfView(APIView):
             resp["Content-Disposition"] = f'inline; filename="{fname}"'
             return resp
 
+        derivacion_activa = get_active_derivation(ingreso_id)
+        if derivacion_activa:
+            return Response(active_derivation_block_payload(derivacion_activa), status=409)
+
         es_venta_pendiente = estado_actual == "vendido_pendiente_entrega"
+        # Cambio de equipo: bajo esta OS no sale nada para el cliente. El equipo que trajo
+        # queda en SEPID (parte de pago) y el que se lleva sale por su propia orden de
+        # entrega, con remito RT y factura. Por eso no se mueve el stock al cliente ni se
+        # emite el RSS: antes se hacían las dos cosas con la serie del equipo equivocado.
+        # No alcanza con mirar `resolucion`: la parte de pago sin permuta sobrevive a que
+        # el técnico marque 'reparado' (al equipo tomado se lo repara igual), y si el corte
+        # se perdiera esta OS emitiría un RSS por un equipo que ya es nuestro.
+        from .ingresos_views import ingreso_tiene_cambio_de_equipo
+
+        es_cambio_de_equipo = ingreso_tiene_cambio_de_equipo(ingreso_id)
         resolution_by_state = {
             "reparado": "reparado",
             "controlado_sin_defecto": "no_se_encontro_falla",
@@ -179,7 +208,12 @@ class RemitoSalidaPdfView(APIView):
             # No bloquear la impresión del remito si falla la auditoría de eventos
             pass
 
-        if estado_actual not in ("entregado", "baja", "vendido_pendiente_entrega", "vendido_entregado"):
+        if not es_cambio_de_equipo and estado_actual not in (
+            "entregado",
+            "baja",
+            "vendido_pendiente_entrega",
+            "vendido_entregado",
+        ):
             try:
                 with transaction.atomic():
                     uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
@@ -213,7 +247,7 @@ class RemitoSalidaPdfView(APIView):
             )
 
         try:
-            if not es_venta_pendiente:
+            if not es_venta_pendiente and not es_cambio_de_equipo:
                 with transaction.atomic():
                     ensure_service_release_order_for_ingreso(ingreso_id, getattr(getattr(request, "user", None), "id", None))
         except Exception:
@@ -247,6 +281,25 @@ class RemitosSalidaBulkPdfView(APIView):
             ingreso_ids = _parse_ingreso_ids(request.GET.get("ids") or "")
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
+
+        # Prevalidar el lote completo antes de liberar la primera OS. Si la
+        # derivada apareciera más adelante en el lote, la ejecución secuencial
+        # anterior ya habría mutado las OS previas y el 409 llegaría tarde.
+        derivaciones_activas = []
+        for ingreso_id in ingreso_ids:
+            derivacion = get_active_derivation(ingreso_id)
+            if derivacion:
+                derivaciones_activas.append((ingreso_id, derivacion))
+        if derivaciones_activas:
+            ingreso_id, derivacion = derivaciones_activas[0]
+            payload = active_derivation_block_payload(derivacion)
+            payload.update(
+                {
+                    "ingreso_id": ingreso_id,
+                    "ingresos_derivados": [item[0] for item in derivaciones_activas],
+                }
+            )
+            return Response(payload, status=409)
 
         # Con skip_errors la OS que falla se saltea en vez de cortar el lote. Sin
         # el flag el comportamiento es el de siempre (fail-fast), porque liberar
@@ -314,7 +367,7 @@ class RemitoDerivacionPdfView(APIView):
             one=True,
         )
         if not row:
-            return Response({"detail": "Derivacion no encontrada"}, status=404)
+            return Response({"detail": "Derivación no encontrada"}, status=404)
 
         pdf_bytes, fname = render_remito_derivacion_pdf(ingreso_id, deriv_id, printed_by=getattr(request.user, "nombre", ""))
         resp = HttpResponse(pdf_bytes, content_type="application/pdf")
