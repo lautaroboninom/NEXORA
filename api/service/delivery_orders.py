@@ -572,7 +572,9 @@ def _validate_delivery_partidas_stock(
     delivery_type: str,
     actor_user_id: int | None,
 ) -> None:
-    if delivery_type not in {"sale", "demo"}:
+    # Las reparaciones tambien se validan: el RSS sale de STC y una partida que no esta
+    # ahi no falla al guardar, falla recien al emitir el remito con la orden ya cerrada.
+    if delivery_type not in {"sale", "demo", "service_release"}:
         return
 
     default_deposit = remito_profile_for_type(delivery_type).deposit_code
@@ -599,6 +601,12 @@ def _validate_delivery_partidas_stock(
                 continue
             article_code = _optional_text(item.get("articleCode"))
             if not article_code:
+                if delivery_type == "service_release":
+                    # La orden de una reparación se crea sola al liberar el equipo y su modelo
+                    # puede no tener todavía artículo mapeado. Sin artículo no hay stock contra
+                    # el cual comparar la partida, y el remito lo exige igual antes de emitir:
+                    # bloquear acá dejaría al operador sin poder ni editar la orden.
+                    continue
                 raise DeliveryOrderError(
                     "DELIVERY_ORDER_PARTIDA_ARTICLE_REQUIRED",
                     f"Seleccione un artículo Bejerman antes de cargar partidas en el renglón {item_index}.",
@@ -642,12 +650,17 @@ def _validate_delivery_partidas_stock(
                 }
             lot = lots_by_key[lookup_key].get(request["partida"].casefold())
             if not lot or _stock_quantity(lot.get("availableQuantity")) <= 0:
+                detail = (
+                    f"La partida {request['partida']} no figura con stock positivo para el artículo "
+                    f"{request['articleCode']} en el depósito {request['depositCode']}."
+                )
+                if delivery_type == "service_release":
+                    # El equipo entra a STC recién cuando corre el job de stock que dispara
+                    # "liberado": si todavía no terminó, la partida existe pero sigue en STR.
+                    detail += " Revise que haya terminado la sincronización de stock del equipo liberado."
                 raise DeliveryOrderError(
                     "DELIVERY_ORDER_PARTIDA_NOT_FOUND",
-                    (
-                        f"La partida {request['partida']} no figura con stock positivo para el artículo "
-                        f"{request['articleCode']} en el depósito {request['depositCode']}."
-                    ),
+                    detail,
                     status_code=409,
                 )
             request["lot"] = lot
@@ -657,6 +670,13 @@ def _validate_delivery_partidas_stock(
         raise
     except Exception as exc:
         logger.warning("delivery_order_partida_stock_validation_failed", exc_info=True)
+        if delivery_type == "service_release":
+            # En una venta el operador elige la partida contra el stock, así que sin stock no
+            # hay nada que elegir. En una reparación la partida ya está fijada por la serie del
+            # equipo: si Bejerman no responde, bloquear también dejaría al operador sin poder
+            # editar el cliente o los comentarios de la orden. El chequeo de fondo es el
+            # preflight del remito.
+            return
         raise DeliveryOrderError(
             "DELIVERY_ORDER_PARTIDA_STOCK_UNAVAILABLE",
             "No se pudo verificar stock Bejerman para validar las partidas.",
@@ -1113,7 +1133,11 @@ _ENTREGA_SOURCE_ESTADOS = ("liberado", "vendido_pendiente_entrega")
 
 
 def _sync_service_release_ingresos_delivery(
-    ingreso_ids: list[int], remito: str, actor_user_id: int | None
+    ingreso_ids: list[int],
+    remito: str,
+    actor_user_id: int | None,
+    *,
+    fecha_entrega: Any = None,
 ) -> list[int]:
     """Refleja en `ingresos` la entrega ya registrada en una orden de entrega.
 
@@ -1121,6 +1145,11 @@ def _sync_service_release_ingresos_delivery(
     de entregar en vez de facturar. Solo toca ingresos que todavia estan en
     un estado "de partida" (liberado / vendido pendiente de entrega) y nunca
     pisa un remito_salida que ya haya sido cargado por otra via.
+
+    `fecha_entrega` existe para el backfill: en el circuito la entrega esta pasando ahora,
+    pero al corregir una que quedo atras hay que sellar cuando paso de verdad. La garantia
+    de reparacion se calcula con `MAX(fecha_entrega)` a 90 dias, asi que poner hoy haria
+    pasar por reciente una entrega de junio.
     """
     ids: list[int] = []
     for ingreso_id in ingreso_ids:
@@ -1151,14 +1180,14 @@ def _sync_service_release_ingresos_delivery(
 
         synced_ids: list[int] = []
         for ingreso_id in eligible_ids:
-            deteccion = resolve_ingreso_entrega_estado(ingreso_id)
+            deteccion = resolve_ingreso_entrega_estado(ingreso_id, remito_salida=remito)
             estado_to = deteccion["estado_to"]
             sets = [
                 "estado = %s",
                 "remito_salida = COALESCE(NULLIF(remito_salida, ''), %s)",
-                "fecha_entrega = COALESCE(fecha_entrega, CURRENT_TIMESTAMP)",
+                "fecha_entrega = COALESCE(fecha_entrega, %s, CURRENT_TIMESTAMP)",
             ]
-            params: list[Any] = [estado_to, remito]
+            params: list[Any] = [estado_to, remito, fecha_entrega]
             if deteccion["set_alquilado"]:
                 sets.append("alquilado = true")
             if deteccion["clear_alquilado"]:
@@ -3193,7 +3222,9 @@ def get_delivery_order(
 
 
 @transaction.atomic
-def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) -> dict[str, Any]:
+def create_delivery_order(
+    payload: dict[str, Any], actor_user_id: int | None, *, validate_partida_stock: bool = True
+) -> dict[str, Any]:
     delivery_type = normalize_delivery_type(payload.get("deliveryType") or payload.get("delivery_type"))
     company_key = normalize_company_key(payload.get("companyKey") or payload.get("company_key"))
     status = normalize_status(payload.get("status") or "pendiente_armado")
@@ -3246,7 +3277,7 @@ def create_delivery_order(payload: dict[str, Any], actor_user_id: int | None) ->
         )
         rental_header = rental_header_from_contexts(rental_contexts)
         equipment_serial = rental_header.get("equipmentSerial")
-    else:
+    elif validate_partida_stock:
         _validate_delivery_partidas_stock(items, company_key, delivery_type, actor_user_id)
     payload_has_seller_code = "sellerCode" in payload or "seller_code" in payload
     payload_seller_code = payload.get("sellerCode") if "sellerCode" in payload else payload.get("seller_code")
@@ -5926,6 +5957,9 @@ def _service_release_item_payload(row: dict[str, Any], mapping: dict[str, Any] |
         "quantity": 1,
         "sourceText": equipment_detail,
         "partida": _optional_text(row.get("equipment_serial")) or "",
+        # Sin esto el renglón queda sin depósito y el modal de edición asume VAL, que es el
+        # depósito de venta: la serie del equipo reparado vive en STC y nunca la encuentra.
+        "stockDepositCode": remito_profile_for_type("service_release").deposit_code,
     }
 
 
@@ -6082,6 +6116,11 @@ def _upsert_service_release_order_item(
     ingreso_id = _optional_int(item.get("ingresoId"))
     article_code = _optional_text(item.get("articleCode"))
     partida = _optional_text(item.get("partida"))
+    # La cantidad y la fecha del chequeo sí se limpian (son una foto de stock que envejece),
+    # pero el depósito es configuración del circuito: si se anula, el modal vuelve a VAL.
+    deposit_code = _optional_text(item.get("stockDepositCode")) or remito_profile_for_type(
+        "service_release"
+    ).deposit_code
     cur.execute(
         """
         SELECT doi.id
@@ -6127,7 +6166,7 @@ def _upsert_service_release_order_item(
                    source_text = %s,
                    partida = %s,
                    partida_expiration_date = NULL,
-                   stock_deposit_code = NULL,
+                   stock_deposit_code = %s,
                    stock_available_quantity = NULL,
                    stock_checked_at = NULL
              WHERE id = %s
@@ -6140,6 +6179,7 @@ def _upsert_service_release_order_item(
                 item["description"],
                 item["sourceText"],
                 partida,
+                deposit_code,
                 item_id,
             ],
         )
@@ -6155,7 +6195,7 @@ def _upsert_service_release_order_item(
           description, quantity, unit_price, price_currency, discount_percent, source_text, partida,
           partida_expiration_date, stock_deposit_code, stock_available_quantity, stock_checked_at, sort_order
         )
-        VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, 1, NULL, 'ARS', 0, %s, %s, NULL, NULL, NULL, NULL, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, 1, NULL, 'ARS', 0, %s, %s, NULL, %s, NULL, NULL, %s)
         """,
         [
             item_id,
@@ -6167,6 +6207,7 @@ def _upsert_service_release_order_item(
             item["description"],
             item["sourceText"],
             partida,
+            deposit_code,
             sort_order,
         ],
     )
@@ -6266,7 +6307,10 @@ def ensure_service_release_order_for_ingreso(ingreso_id: int, actor_user_id: int
 
     payload = _service_release_order_payload(ingreso_id, row, mapping)
     try:
-        return create_delivery_order(payload, actor_user_id)
+        # El alta es automática al liberar el equipo y el movimiento de stock a STC puede
+        # estar todavía en curso, así que acá no se consulta Bejerman. La partida se valida
+        # cuando un operador guarda la orden desde el modal.
+        return create_delivery_order(payload, actor_user_id, validate_partida_stock=False)
     except IntegrityError:
         existing_id = _existing_service_release_order_id(ingreso_id)
         if existing_id:

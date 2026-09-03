@@ -28,12 +28,14 @@ from typing import Any, Callable
 from django.conf import settings
 
 from .bejerman_sdk import (
+    BejermanSdkResponseError,
     PartidaIndex,
     article_search_blob,
     build_article_description_map,
     build_partida_rows,
     build_stock_rows,
     map_article_items,
+    records_from_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_ARTICLES_TTL = 300
 DEFAULT_PARTIDAS_TTL = 60
 DEFAULT_STOCK_TTL = 30
+# Los depósitos son un maestro que en la práctica no cambia: alcanza con
+# refrescarlo cada tanto y no en cada apertura del armado de una orden.
+DEFAULT_DEPOSITS_TTL = 300
 
 
 def _ttl(setting_name: str, default: int) -> int:
@@ -87,6 +92,16 @@ class _TTLCache:
             return False, None
         return True, value
 
+    def stale(self, key: str) -> tuple[bool, Any]:
+        """La última entrada guardada, aunque haya vencido.
+
+        Sólo se guardan producciones exitosas, así que esto es siempre el último
+        valor bueno: sirve para seguir mostrando algo real cuando Bejerman deja
+        de contestar, en vez de degradar a un listado fijo."""
+        with self._entries_lock:
+            entry = self._entries.get(key)
+        return (True, entry[1]) if entry else (False, None)
+
     def get_or_set(
         self,
         key: str,
@@ -125,6 +140,7 @@ _article_responses_cache = _TTLCache()
 _articles_cache = _TTLCache()
 _partidas_cache = _TTLCache()
 _stock_cache = _TTLCache()
+_deposits_cache = _TTLCache()
 
 
 def _company(company_key: Any) -> str:
@@ -289,6 +305,35 @@ def stock_rows(client: Any, company_key: Any, deposit_code: Any, *, force_refres
     )
 
 
+def _non_empty_deposit_response(response: dict[str, Any]) -> dict[str, Any]:
+    if not records_from_response(response):
+        raise BejermanSdkResponseError("Bejerman no devolvió depósitos.")
+    return response
+
+
+def deposit_response(client: Any, company_key: Any = None, *, force_refresh: bool = False) -> dict[str, Any]:
+    """Respuesta cruda de ObtenerDepositos, cacheada por empresa.
+
+    Una respuesta sin registros no se guarda: fijarla por todo el TTL dejaría al
+    usuario sin depósitos aunque Bejerman ya se hubiera recuperado."""
+    return _deposits_cache.get_or_set(
+        _client_company(client, company_key),
+        _ttl("BEJERMAN_DEPOSITS_CACHE_SECONDS", DEFAULT_DEPOSITS_TTL),
+        lambda: _non_empty_deposit_response(client.obtener_depositos()),
+        force_refresh=force_refresh,
+    )
+
+
+def last_good_deposit_response(company_key: Any) -> dict[str, Any] | None:
+    """El último listado de depósitos que Bejerman contestó bien, aunque esté vencido.
+
+    Es el reemplazo del listado fijo VAL/STL cuando el servicio se cae un rato:
+    los depósitos reales de hace unos minutos son un dato mucho más fiel que
+    recortar el selector a dos códigos."""
+    hit, value = _deposits_cache.stale(_company(company_key))
+    return value if hit else None
+
+
 def invalidate_stock(company_key: Any = None) -> None:
     """Descarta el stock cacheado después de un movimiento que lo modifica.
 
@@ -303,8 +348,13 @@ def invalidate_stock(company_key: Any = None) -> None:
     _partidas_cache.invalidate(company)
 
 
+def invalidate_deposits() -> None:
+    _deposits_cache.invalidate()
+
+
 def invalidate_all() -> None:
     _article_responses_cache.invalidate()
     _articles_cache.invalidate()
     _partidas_cache.invalidate()
     _stock_cache.invalidate()
+    _deposits_cache.invalidate()

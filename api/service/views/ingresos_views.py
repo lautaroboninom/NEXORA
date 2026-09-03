@@ -1,4 +1,5 @@
 ﻿from django.db import connection, transaction
+import re
 import time
 import json
 import logging
@@ -47,12 +48,18 @@ from ..rejected_budget import (
     get_stored_rejected_budget_fields,
     has_rejected_budget_charge_schema,
 )
+from ..derivations import (
+    active_derivation_block_payload,
+    attach_active_derivations,
+    get_active_derivation,
+)
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
     enqueue_demo_ready_transfer_for_ingreso,
     enqueue_stock_alta_for_ingreso,
     enqueue_stock_baja_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
+    enqueue_stock_venta_for_ingreso,
     ingreso_is_demo_return,
     ingreso_is_internal_equipment,
 )
@@ -78,6 +85,12 @@ from ..serializers import (
 )
 from ..permissions import require_any_permission, user_has_any_permission, user_has_permission
 from ..warranty import compute_warranty_from_sale_date
+from ..bejerman_catalog_cache import (
+    article_descriptions,
+    deposit_response as cached_deposit_response,
+    last_good_deposit_response,
+    stock_rows as cached_stock_rows,
+)
 from ..bejerman_sales import find_latest_remito_by_serial, find_latest_sale_by_serial
 from ..bejerman_companies import require_company
 from ..bejerman_ris import (
@@ -119,7 +132,7 @@ from ..repair_ready_notifications import (
 SALE_TICKET_STATES = ("vendido_pendiente_entrega", "vendido_entregado")
 TECH_FINAL_REPAIR_STATES = ("reparado", "controlado_sin_defecto", "no_se_repara")
 REPAIR_CLOSE_STATES = ("liberado", "entregado", "alquilado", "baja", *SALE_TICKET_STATES)
-RESTOREABLE_REPAIR_STATES = ("diagnosticado", "presupuestado", "reparar", "derivado")
+RESTOREABLE_REPAIR_STATES = ("diagnosticado", "presupuestado", "reparar")
 
 
 def _compute_factory_warranty_from_bejerman_sale(
@@ -456,6 +469,138 @@ def _has_mg_sale_extended_schema() -> bool:
     )
 
 
+def _swap_list_select_sql(alias: str = "t") -> str:
+    """Columnas del cambio de equipo para los listados de ingresos.
+
+    Sin esto, el modal de salida abierto desde Reparados/Aprobados recibía
+    `serial_cambio === undefined` y dejaba el campo del cambio muerto.
+    """
+    if _has_table_column("ingresos", "serial_cambio"):
+        base = f"COALESCE({alias}.serial_cambio,'') AS serial_cambio,"
+    else:
+        base = "'' AS serial_cambio,"
+    if _has_device_swap_schema():
+        # `cambio_sin_entrega` no es opcional acá: una parte de pago no tiene equipo
+        # entregado, así que sin esta columna el listado la ve como "sin registrar" y el
+        # modal de salida bloquea la liberación pidiendo un cambio que ya está cargado.
+        return f"""
+          {base}
+          {alias}.device_cambio_id AS device_cambio_id,
+          COALESCE({alias}.cambio_destino_viejo,'') AS cambio_destino_viejo,
+          COALESCE({alias}.cambio_sin_entrega, FALSE) AS cambio_sin_entrega,
+        """
+    return f"""
+      {base}
+      NULL::int AS device_cambio_id,
+      '' AS cambio_destino_viejo,
+      FALSE AS cambio_sin_entrega,
+    """
+
+
+def _owner_list_select_sql(ingreso_alias: str = "t", device_alias: str = "d") -> str:
+    """Nombre del dueño real para los listados de ingresos.
+
+    'Particular' y 'MG BIO' son clientes contenedores: la columna Cliente de las
+    listas mostraba el contenedor y el operador no veía de quién es el equipo.
+    El dato vive en el ingreso y se replica al equipo, así que se toma el del
+    ingreso y se cae al del equipo para los ingresos viejos.
+    """
+    return f"{_owner_name_expr(ingreso_alias, device_alias)} AS propietario_nombre,"
+
+
+def _owner_name_expr(ingreso_alias: str = "t", device_alias: str = "d") -> str:
+    """La misma expresión, sin alias, para usar en WHERE y ORDER BY.
+
+    El listado mostraba el dueño pero se buscaba y se ordenaba por la razón social del
+    cliente contenedor: escribías en el buscador el nombre que estabas viendo en pantalla
+    y no aparecía nada.
+    """
+    parts = []
+    if _has_table_column("ingresos", "propietario_nombre"):
+        parts.append(f"NULLIF({ingreso_alias}.propietario_nombre,'')")
+    if _has_table_column("devices", "propietario_nombre"):
+        parts.append(f"NULLIF({device_alias}.propietario_nombre,'')")
+    if _has_table_column("ingresos", "cliente_original_id"):
+        # Último recurso, para el equipo que tomamos en parte de pago: su `customer_id` ya
+        # es MG BIO, y un cliente empresa no deja nombre en `propietario_nombre`. Va por
+        # subconsulta y no por JOIN para no tocar el FROM de cada listado.
+        parts.append(
+            "NULLIF((SELECT co.razon_social FROM customers co"
+            f" WHERE co.id = {ingreso_alias}.cliente_original_id), '')"
+        )
+    if not parts:
+        return "''"
+    return f"COALESCE({', '.join(parts)}, '')"
+
+
+def _salida_taller_lateral_sql(ingreso_alias: str = "t") -> str:
+    """JOIN que trae cuándo se liberó el ingreso, para acompañar a `_salida_taller_expr`."""
+    return f"""
+      LEFT JOIN LATERAL (
+        SELECT MAX(ev.ts) AS ts
+          FROM ingreso_events ev
+         WHERE ev.ingreso_id = {ingreso_alias}.id
+           AND ev.a_estado = 'liberado'
+      ) {ingreso_alias}_lib ON TRUE
+    """
+
+
+def _salida_taller_expr(ingreso_alias: str = "t") -> str:
+    """Cuándo salió el equipo del taller.
+
+    `fecha_entrega` sólo se escribe cuando se emite el RSS o cuando alguien marca
+    entregado a mano; imprimir la orden de salida deja el ingreso en 'liberado' y
+    nada más (ver `reportes_views.RemitoSalidaPdfView`). Como la mayoría de las
+    entregas se cierran así, mirar sólo `fecha_entrega` daba por "nunca salido" a
+    casi todo lo liberado, y con eso se perdían la garantía de reparación automática
+    y los trabajos del último servicio.
+    """
+    return f"COALESCE({ingreso_alias}.fecha_entrega, {ingreso_alias}_lib.ts)"
+
+
+def _customer_search_expr(customer_alias: str = "c", ingreso_alias: str = "t", device_alias: str = "d") -> str:
+    """Lo que la columna Cliente muestra de verdad: el dueño si lo hay, si no el cliente.
+
+    Espeja `_ingreso_customer_label`, que es la que decide en Python. Se usa para buscar,
+    filtrar y ordenar, así que lo que se ve en pantalla es lo que se puede tipear.
+    """
+    owner = _owner_name_expr(ingreso_alias, device_alias)
+    if owner == "''":
+        return f"COALESCE({customer_alias}.razon_social,'')"
+    # El dueño sólo desplaza al cliente cuando el cliente es un contenedor ('Particular' /
+    # 'MG BIO'); para un cliente real la razón social sigue mandando.
+    # Con STRPOS y no con LIKE '%mg%': el '%' hay que escaparlo como '%%' para psycopg2 y
+    # esta expresión se interpola en consultas que a veces corren sin parámetros.
+    razon = f"LOWER(COALESCE({customer_alias}.razon_social,''))"
+    contenedor = (
+        f"(TRIM({razon}) = 'particular'"
+        f" OR (STRPOS({razon}, 'mg') > 0 AND STRPOS({razon}, 'bio') > 0))"
+    )
+    return (
+        f"CASE WHEN {contenedor} AND NULLIF({owner},'') IS NOT NULL"
+        f" THEN {owner} ELSE COALESCE({customer_alias}.razon_social,'') END"
+    )
+
+
+def _is_owner_display_customer(name: str) -> bool:
+    """'Particular' y 'MG BIO' son clientes contenedores, no el dueño del equipo."""
+    normalized = (name or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized == "particular":
+        return True
+    return "mg" in normalized and "bio" in normalized
+
+
+def _ingreso_customer_label(row: dict) -> str:
+    """Nombre a mostrar en la columna Cliente de listados y exports."""
+    customer = (row.get("razon_social") or row.get("cliente") or "").strip()
+    owner = (row.get("propietario_nombre") or "").strip()
+    if owner and _is_owner_display_customer(customer):
+        return owner
+    return customer or owner
+
+
 def _mg_list_select_sql(alias: str = "d") -> str:
     alt_sql = (
         f"COALESCE({alias}.mg_venta_numero_alternativo,'') AS mg_venta_numero_alternativo,"
@@ -658,6 +803,9 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
         for key in (
             "id",
             "razon_social",
+            # El dueño real, por el mismo motivo que en el WHERE del SQL: es el nombre que
+            # muestra la columna Cliente.
+            "propietario_nombre",
             "marca",
             "modelo",
             "tipo_equipo",
@@ -692,8 +840,17 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
         elif not contains(str(row.get("id") or ""), os_raw):
             return False
 
+    # El filtro de la columna Cliente mira el dueño además de la razón social, igual que el
+    # WHERE del SQL: si no, una OS eliminada de un particular no se encuentra por el nombre
+    # que la propia columna muestra.
+    cliente_filtro = filters.get("cliente_raw")
+    if cliente_filtro and not (
+        contains(row.get("razon_social"), cliente_filtro)
+        or contains(row.get("propietario_nombre"), cliente_filtro)
+    ):
+        return False
+
     checks = [
-        ("razon_social", "cliente_raw"),
         ("tipo_equipo", "tipo_equipo_raw"),
         ("marca", "marca_raw"),
         ("modelo", "modelo_raw"),
@@ -711,7 +868,8 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
 def _historico_python_sort_value(row: dict, field: str):
     accessors = {
         "os": lambda item: int(item.get("id") or 0),
-        "cliente": lambda item: item.get("razon_social"),
+        # Mismo criterio que el ORDER BY del SQL: el nombre que muestra la columna.
+        "cliente": _ingreso_customer_label,
         "tipo": lambda item: item.get("tipo_equipo"),
         "marca": lambda item: item.get("marca"),
         "modelo": lambda item: item.get("modelo"),
@@ -1163,32 +1321,160 @@ def _service_release_remito_salida_for_ingreso(ingreso_id: int) -> str:
         return ""
 
 
+def _estado_actual_txt(ingreso_id: int) -> str:
+    """Estado actual de la OS en minúsculas, o '' si no se pudo leer."""
+    try:
+        row = q("SELECT estado::text AS estado FROM ingresos WHERE id=%s", [ingreso_id], one=True) or {}
+        return (row.get("estado") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+# Valores válidos del enum `ticket_state`. `de_estado` es informativo, así que cualquier
+# cosa fuera de esta lista (p. ej. el 'asignado' legacy, que nunca entró al enum) se
+# guarda como NULL en vez de hacer fallar el INSERT.
+TICKET_STATES = frozenset(
+    (
+        "ingresado", "diagnosticado", "presupuestado", "reparar", "controlado_sin_defecto",
+        "no_se_repara", "reparado", "entregado", "baja", "derivado", "liberado", "alquilado",
+        "vendido_pendiente_entrega", "vendido_entregado",
+    )
+)
+
+
+def registrar_ingreso_event(
+    ingreso_id: int,
+    a_estado: str,
+    *,
+    de_estado: str | None = None,
+    usuario_id=None,
+    comentario: str = "",
+) -> None:
+    """Deja la traza del cambio de estado en `ingreso_events`.
+
+    Los hitos del panel de la hoja de servicio y las métricas de tiempos se calculan
+    desde esta tabla, así que todo endpoint que mueva `ingresos.estado` tiene que
+    pasar por acá. La escritura va en su propio savepoint y nunca propaga el error:
+    perder la traza es feo, pero no puede tumbar la operación que sí se hizo.
+    """
+    if not _table_exists("ingreso_events"):
+        return
+    de_estado_txt = (de_estado or "").strip().lower()
+    if de_estado_txt not in TICKET_STATES:
+        de_estado_txt = ""
+    try:
+        with transaction.atomic():
+            exec_void(
+                """
+                INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, comentario)
+                VALUES (%s, NULLIF(%s,'')::ticket_state, %s::ticket_state, %s, %s)
+                """,
+                [ingreso_id, de_estado_txt, a_estado, usuario_id, comentario or None],
+            )
+        return
+    except Exception:
+        pass
+    # Fallback para esquemas donde las columnas son TEXT (sin el enum `ticket_state`).
+    try:
+        with transaction.atomic():
+            exec_void(
+                """
+                INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, comentario)
+                VALUES (%s, %s, %s, %s)
+                """,
+                [ingreso_id, a_estado, usuario_id, comentario or None],
+            )
+    except Exception:
+        logger.exception(
+            "No se pudo registrar el evento de estado",
+            extra={"ingreso_id": ingreso_id, "a_estado": a_estado},
+        )
+
+
 def _ingreso_event_date_hitos(ingreso_id: int) -> dict:
     if not _table_exists("ingreso_events"):
         return {}
     where_parts = []
-    params = []
+    where_params = []
     if _has_table_column("ingreso_events", "ingreso_id"):
         where_parts.append("ingreso_id = %s")
-        params.append(ingreso_id)
+        where_params.append(ingreso_id)
     if _has_table_column("ingreso_events", "ticket_id"):
         where_parts.append("ticket_id = %s")
-        params.append(ingreso_id)
+        where_params.append(ingreso_id)
     if not where_parts:
         return {}
     try:
+        # La etapa de reparación cierra por cualquiera de los tres estados finales del
+        # técnico, igual que en la cola de Reparados: quedarse sólo con 'reparado' dejaba
+        # sin fecha a todo equipo controlado sin defecto o que no se repara.
+        # El placeholder de la lista de estados va primero: está en el SELECT, antes del WHERE.
         return q(
             f"""
             SELECT
-              MIN(CASE WHEN a_estado = 'diagnosticado' THEN ts END) AS fecha_diagnosticado,
-              MIN(CASE WHEN a_estado = 'reparado' THEN ts END) AS fecha_reparado,
-              MAX(CASE WHEN a_estado = 'liberado' THEN ts END) AS fecha_liberacion
+              MIN(CASE WHEN CAST(a_estado AS TEXT) = 'diagnosticado' THEN ts END) AS fecha_diagnosticado,
+              MIN(CASE WHEN CAST(a_estado AS TEXT) = ANY(%s) THEN ts END) AS fecha_reparado,
+              MAX(CASE WHEN CAST(a_estado AS TEXT) = 'liberado' THEN ts END) AS fecha_liberacion
               FROM ingreso_events
              WHERE {" OR ".join(where_parts)}
             """,
-            params,
+            [list(TECH_FINAL_REPAIR_STATES), *where_params],
             one=True,
         ) or {}
+    except Exception:
+        try:
+            transaction.set_rollback(False)
+        except Exception:
+            pass
+        return {}
+
+
+def _ingreso_quote_date_hitos(ingreso_id: int) -> dict:
+    """Fechas del presupuesto de la OS: cuándo se emitió, se aprobó y se rechazó.
+
+    Se toma el valor más reciente **de cada fecha** entre las versiones no anuladas, en
+    vez de las fechas de la última versión. El motivo: versionar un presupuesto clona la
+    fila con `fecha_emitido`, `fecha_aprobado` y `fecha_rechazado` en NULL
+    (`_clone_quote_version`), así que mirar sólo la última dejaba el hito "Presupuestado"
+    en blanco en toda OS re-versionada, como si nunca se hubiera presupuestado.
+
+    Si todas están anuladas se cae al mismo cálculo sobre todas las versiones, para no
+    perder el dato.
+    """
+    if not (
+        _has_table("quotes")
+        and _has_table_column("quotes", "ingreso_id")
+        and _has_table_column("quotes", "fecha_emitido")
+    ):
+        return {}
+    estado_ok = _has_table_column("quotes", "estado")
+    hitos_sql = """
+        SELECT MAX(fecha_emitido)   AS fecha_emitido,
+               MAX(fecha_aprobado)  AS fecha_aprobado,
+               MAX(fecha_rechazado) AS fecha_rechazado
+          FROM quotes
+         WHERE ingreso_id=%s
+    """
+    try:
+        row = None
+        if estado_ok:
+            row = q(
+                f"{hitos_sql} AND LOWER(COALESCE(estado::text,'')) <> 'anulado'",
+                [ingreso_id],
+                one=True,
+            )
+        # El agregado siempre devuelve una fila: si las versiones vivas no tienen ninguna
+        # fecha (todas anuladas, o ninguna emitida todavía) se reintenta sobre todas.
+        if not row or not any(
+            row.get(k) for k in ("fecha_emitido", "fecha_aprobado", "fecha_rechazado")
+        ):
+            row = q(hitos_sql, [ingreso_id], one=True)
+        row = row or {}
+        return {
+            "fecha_presupuestado": row.get("fecha_emitido"),
+            "fecha_presupuesto_aprobado": row.get("fecha_aprobado"),
+            "fecha_presupuesto_rechazado": row.get("fecha_rechazado"),
+        }
     except Exception:
         try:
             transaction.set_rollback(False)
@@ -1341,6 +1627,7 @@ class MisPendientesView(APIView):
     def get(self, request):
         require_roles(request, ["jefe", "tecnico", "jefe_veedor"])
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -1350,6 +1637,7 @@ class MisPendientesView(APIView):
                        t.presupuesto_estado,
                        t.motivo,
                        c.razon_social,
+                       {owner_list_sql}
                        d.numero_serie,
                        COALESCE(d.numero_interno,'') AS numero_interno,
                        {mg_list_sql}
@@ -1391,6 +1679,7 @@ class MisPendientesView(APIView):
                 ],
             )
             data = _fetchall_dicts(cur)
+        attach_active_derivations(data)
         return Response(IngresoListItemSerializer(data, many=True).data)
 
 
@@ -1398,12 +1687,14 @@ class PendientesPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
                 f"""
                 SELECT t.id, t.estado, t.presupuesto_estado,
                        c.razon_social,
+                       {owner_list_sql}
                        d.numero_serie,
                        COALESCE(d.numero_interno,'') AS numero_interno,
                        {mg_list_sql}
@@ -1434,6 +1725,7 @@ class PendientesPresupuestoView(APIView):
                 ["taller"],
             )
             data = _fetchall_dicts(cur)
+        attach_active_derivations(data)
         return Response(IngresoListItemSerializer(data, many=True).data)
 
 
@@ -1441,6 +1733,7 @@ class PresupuestadosView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -1454,6 +1747,7 @@ class PresupuestadosView(APIView):
                     ELSE q.estado::text
                   END AS presupuesto_estado,
                   c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -1495,7 +1789,9 @@ class PresupuestadosView(APIView):
                 """,
                 ["taller"],
             )
-            return Response(_fetchall_dicts(cur))
+            data = _fetchall_dicts(cur)
+        attach_active_derivations(data)
+        return Response(data)
 
 
 class PresupuestadosExportView(APIView):
@@ -1512,6 +1808,7 @@ class PresupuestadosExportView(APIView):
 
     def get(self, request):
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         ids_raw = (request.GET.get("ids") or "").strip()
         if not ids_raw:
             return Response({"detail": "Parámetro 'ids' requerido"}, status=400)
@@ -1533,6 +1830,7 @@ class PresupuestadosExportView(APIView):
                 SELECT
                   t.id,
                   c.razon_social AS cliente,
+                  {owner_list_sql}
                   COALESCE(b.nombre,'') AS marca,
                   COALESCE(m.nombre,'') AS modelo,
                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
@@ -1588,7 +1886,7 @@ class PresupuestadosExportView(APIView):
 
             ws.append([
                 os_txt,
-                r.get("cliente") or "-",
+                _ingreso_customer_label(r) or "-",
                 equipo,
                 ns_val,
                 float(monto) if (monto is not None) else None,
@@ -1680,7 +1978,16 @@ class MarcarReparadoView(APIView):
             _prev_estado = ""
             _prev_presu = ""
         _set_audit_user(request)
-        exec_void("UPDATE ingresos SET estado='reparado', resolucion='reparado' WHERE id=%s", [ingreso_id])
+        sets = sets_con_limpieza_de_cambio("estado='reparado'", "resolucion='reparado'")
+        exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
+        if _prev_estado != "reparado":
+            registrar_ingreso_event(
+                ingreso_id,
+                "reparado",
+                de_estado=_prev_estado,
+                usuario_id=getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None),
+                comentario="Marcado como reparado",
+            )
 
         # Movimiento automático a Estantería de Alquiler si el equipo es propio.
         auto_moved = False
@@ -1828,6 +2135,17 @@ class MarcarParaRepararView(APIView):
         except Exception:
             exec_void("UPDATE ingresos SET estado='reparar' WHERE id=%s", [ingreso_id])
 
+        # El MTTR arranca acá. Sin este evento el JOIN de `metricas_views` contra
+        # `a_estado='reparar'` no matchea nada y la métrica queda en cero para siempre.
+        if estado_cur != "reparar":
+            registrar_ingreso_event(
+                ingreso_id,
+                "reparar",
+                de_estado=estado_cur,
+                usuario_id=getattr(getattr(request, "user", None), "id", None)
+                or getattr(request, "user_id", None),
+            )
+
         if presu_cur == "presupuestado":
             try:
                 qid_row = q(
@@ -1961,12 +2279,12 @@ class QuitarRepararView(APIView):
             )
 
         _set_audit_user(request)
+        # Al anular la resolución hay que soltar también el cambio de equipo: si no, la OS
+        # queda arrastrando la serie de un cambio que ya no existe.
         exec_void(
-            """
+            f"""
             UPDATE ingresos
-               SET estado=%s,
-                   resolucion=NULL,
-                   presupuesto_estado=%s
+               SET {sets_con_limpieza_de_cambio('estado=%s', 'resolucion=NULL', 'presupuesto_estado=%s')}
              WHERE id=%s
             """,
             [estado_next, presupuesto_next, ingreso_id],
@@ -2042,22 +2360,49 @@ class HabilitarReparacionCotizacionView(APIView):
         )
 
 
-def resolve_ingreso_entrega_estado(ingreso_id: int) -> dict:
+# Un remito de venta cierra la OS como vendida: el equipo salió por el circuito comercial
+# (RT), no por el de servicio técnico (RSS) ni por el de alquiler (RTA). El tipo va al
+# principio del número guardado ("RT R 00001-00024051"), y `\b` evita que RTA/RTN entren.
+_SALE_EXIT_REMITO_RE = re.compile(r"^\s*RT\b", re.IGNORECASE)
+
+
+def is_sale_exit_remito(remito) -> bool:
+    """¿El remito de salida es una venta (RT)?
+
+    Es el único dato que distingue una entrega de servicio de una venta: el equipo se
+    factura y sale por comercial, así que la OS no cierra como 'entregado' sino como
+    'vendido_entregado', y NEXORA no mueve stock (el RT ya lo movió en Bejerman).
+    """
+    return bool(_SALE_EXIT_REMITO_RE.match(str(remito or "")))
+
+
+def resolve_ingreso_entrega_estado(ingreso_id: int, remito_salida=None) -> dict:
     """Determina a que estado debe pasar un ingreso al entregarse.
 
     Replica la deteccion de alquiler/MG/venta pendiente que usa
     EntregarIngresoView, para que cualquier otro flujo que registre una
     entrega (p.ej. la sincronizacion desde ordenes de entrega) aplique
     exactamente las mismas reglas.
+
+    `remito_salida` es opcional para no romper a los llamadores que no lo tienen a mano;
+    cuando viene y es un RT manda por encima de la heurística de alquiler/MG.
     """
-    estado_to = "entregado"
+    # El tipo de comprobante no depende de la base: si la lectura de abajo falla, la venta
+    # tiene que seguir cerrando como venta y no caerse a 'entregado'.
+    es_venta = is_sale_exit_remito(remito_salida)
+    estado_to = "vendido_entregado" if es_venta else "entregado"
     set_alquilado = False
-    clear_alquilado = False
+    clear_alquilado = es_venta
     try:
+        sin_entrega_sql = (
+            "COALESCE(t.cambio_sin_entrega, FALSE)" if _has_device_swap_schema() else "FALSE"
+        )
         info = q(
-            """
+            f"""
             SELECT t.alquilado,
                    t.estado,
+                   LOWER(COALESCE(t.resolucion,'')) AS resolucion,
+                   {sin_entrega_sql} AS cambio_sin_entrega,
                    COALESCE(d.numero_serie,'') AS numero_serie,
                    COALESCE(d.numero_interno,'') AS numero_interno,
                    COALESCE(d.mg_estado,'activo') AS mg_estado,
@@ -2070,9 +2415,20 @@ def resolve_ingreso_entrega_estado(ingreso_id: int) -> dict:
             [ingreso_id],
             one=True,
         ) or {}
+        # En un cambio de equipo el que queda acá es el equipo del cliente, no uno que se
+        # alquila. Si además se lo convirtió en MG, la heurística de abajo lo marcaría
+        # 'alquilado' y quedaría figurando en poder de un cliente que ya no lo tiene.
+        #
+        # La parte de pago se chequea por su marca y no por la resolución: al equipo tomado
+        # se lo repara, y ahí la resolución pasa a 'reparado'.
+        if (info.get("resolucion") or "") == "cambio" or info.get("cambio_sin_entrega"):
+            return {"estado_to": "entregado", "set_alquilado": False, "clear_alquilado": False}
+        # Una venta cierra la OS aunque el equipo sea MG o venga de la estantería: el RT ya
+        # lo sacó del patrimonio, así que no puede quedar marcado como alquilado.
+        if es_venta:
+            return {"estado_to": "vendido_entregado", "set_alquilado": False, "clear_alquilado": True}
         ns = (info.get("numero_serie") or "").strip()
         ni = (info.get("numero_interno") or "").strip()
-        import re
         pat = re.compile(r"\bMG \d{4}\b", re.IGNORECASE)
         is_mg = bool(pat.search(ns) or pat.search(ni)) or (
             ns.strip().upper().startswith("MG ") or ni.strip().upper().startswith("MG ")
@@ -2095,8 +2451,15 @@ def resolve_ingreso_entrega_estado(ingreso_id: int) -> dict:
 
 class EntregarIngresoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    @transaction.atomic
     def post(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "jefe_veedor", "admin", "recepcion"])
+        ingreso = q("SELECT id FROM ingresos WHERE id=%s FOR UPDATE", [ingreso_id], one=True)
+        if not ingreso:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        derivacion_activa = get_active_derivation(ingreso_id, for_update=True)
+        if derivacion_activa:
+            return Response(active_derivation_block_payload(derivacion_activa), status=409)
         data = request.data or {}
         remito = (data.get("remito_salida") or "").strip()
         if not remito:
@@ -2107,41 +2470,40 @@ class EntregarIngresoView(APIView):
         estado_to = "entregado"
         set_alquilado = False
         clear_alquilado = False
-        # Si es CAMBIO, verificar serie contra la cargada al cerrar
+        # Si es CAMBIO, verificar la serie contra el equipo vinculado al cerrar.
+        #
+        # Antes esto vivía dentro de un `try/except Exception: pass`, así que cualquier
+        # error de lectura dejaba pasar la entrega sin verificar nada: justo lo contrario
+        # de lo que la verificación existe para evitar (entregar el equipo equivocado).
         serial_confirm = (data.get("serial_confirm") or "").strip()
-        try:
-            if not _has_table_column("ingresos", "resolucion"):
-                raise RuntimeError("columna resolucion no disponible")
-            with connection.cursor() as cur:
-                cur.execute(
-                    "SELECT resolucion FROM ingresos WHERE id=%s",
-                    [ingreso_id],
-                )
-                row = cur.fetchone()
-                cur_resol = (row[0] if row else None) or ""
-                if cur_resol == "cambio":
-                    cur.execute(
-                        """
-                        SELECT 1 FROM information_schema.columns
-                         WHERE table_name='ingresos' AND column_name='serial_cambio'
-                           AND table_schema = ANY(current_schemas(true))
-                         LIMIT 1
-                        """
-                    )
-                    has_col = cur.fetchone() is not None
-                    if has_col:
-                        cur.execute("SELECT serial_cambio FROM ingresos WHERE id=%s", [ingreso_id])
-                        r2 = cur.fetchone()
-                        db_serial = ((r2[0] if r2 else None) or "").strip()
-                        if db_serial:
-                            if not serial_confirm:
-                                return Response({"detail": "serial_confirm requerido para entregar con resolucion 'cambio'"}, status=400)
-                            if (serial_confirm or "").strip().upper() != db_serial.upper():
-                                return Response({"detail": "La serie de confirmación no coincide con la Serie (Cambio)"}, status=409)
-        except Exception:
-            # fallback: no bloquear la entrega por errores de verificacion
-            pass
-        deteccion = resolve_ingreso_entrega_estado(ingreso_id)
+        es_cambio_de_equipo = False
+        if _has_table_column("ingresos", "resolucion"):
+            # El helper también reconoce la parte de pago, que sobrevive a que la
+            # resolución pase a 'reparado'. Si acá se mirara sólo `resolucion`, la entrega
+            # volvería a mover stock al cliente por un equipo que ya es nuestro.
+            es_cambio_de_equipo = ingreso_tiene_cambio_de_equipo(ingreso_id)
+            if es_cambio_de_equipo and _has_table_column("ingresos", "serial_cambio"):
+                swap = get_ingreso_device_swap(ingreso_id) or {}
+                db_serial = (swap.get("equipo_entregado") or "").strip()
+                if db_serial:
+                    if not serial_confirm:
+                        return Response(
+                            {"detail": "Verificá la serie del equipo que se entrega."},
+                            status=400,
+                        )
+                    # El snapshot puede venir como "NS | MG 0001": alcanza con que la serie
+                    # tipeada coincida con alguna de las dos partes.
+                    partes = {p.strip().upper() for p in db_serial.split("|") if p.strip()}
+                    if serial_confirm.upper() not in partes:
+                        return Response(
+                            {
+                                "detail": (
+                                    f"La serie no coincide con el equipo del cambio ({db_serial})."
+                                )
+                            },
+                            status=409,
+                        )
+        deteccion = resolve_ingreso_entrega_estado(ingreso_id, remito_salida=remito)
         estado_to = deteccion["estado_to"]
         set_alquilado = deteccion["set_alquilado"]
         clear_alquilado = deteccion["clear_alquilado"]
@@ -2208,17 +2570,23 @@ class EntregarIngresoView(APIView):
         except Exception:
             # No bloquear la entrega si falla la auditoria de eventos
             pass
-        try:
-            with transaction.atomic():
-                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                if ingreso_is_internal_equipment(ingreso_id):
-                    enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
-                elif ingreso_is_demo_return(ingreso_id):
-                    enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
-                else:
-                    enqueue_client_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
-        except Exception:
-            logger.exception("No se pudo encolar la transferencia Bejerman", extra={"ingreso_id": ingreso_id})
+        # En un cambio de equipo el que ingresó se queda en SEPID: no hay movimiento de
+        # stock hacia el cliente. El que se lleva sale por su propia orden de entrega.
+        #
+        # En una venta tampoco: el RT lo emitió comercial y ya movió el stock en Bejerman.
+        # Encolar acá una transferencia más dejaría el depósito en negativo.
+        if not es_cambio_de_equipo and not is_sale_exit_remito(remito):
+            try:
+                with transaction.atomic():
+                    user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+                    if ingreso_is_internal_equipment(ingreso_id):
+                        enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+                    elif ingreso_is_demo_return(ingreso_id):
+                        enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+                    else:
+                        enqueue_client_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+            except Exception:
+                logger.exception("No se pudo encolar la transferencia Bejerman", extra={"ingreso_id": ingreso_id})
         return Response({"ok": True})
 
 
@@ -2381,6 +2749,99 @@ class DarAltaIngresoView(APIView):
         )
 
 
+def find_mg_numero_interno_conflict(device_id, numero_interno: str):
+    """Devuelve el device que ya ocupa ese número interno MG, o None.
+
+    El número se compara normalizado a 'XX ####' igual que el índice único
+    `uq_devices_numint_norm`, para que 'MG 12' y 'MG 0012' no convivan.
+    """
+    if connection.vendor == "postgresql":
+        return q(
+            """
+            SELECT id
+              FROM devices
+             WHERE id <> %s
+               AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
+               AND UPPER(REGEXP_REPLACE(numero_interno,
+                   '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
+                   UPPER(REGEXP_REPLACE(%s,
+                   '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+             LIMIT 1
+            """,
+            [device_id, numero_interno],
+            one=True,
+        )
+    return q(
+        "SELECT id FROM devices WHERE id <> %s AND numero_interno = %s LIMIT 1",
+        [device_id, numero_interno],
+        one=True,
+    )
+
+
+def convertir_device_a_propio_mg(
+    device_id: int, numero_interno: str, mg_owner_id: int, *, ingreso_id: int | None = None
+) -> None:
+    """Pasa un equipo al patrimonio de MG BIO.
+
+    Lo comparten la conversión manual desde la hoja de servicio
+    (`IngresoConvertirPropioMgView`) y el cambio de equipo, donde el equipo que trajo
+    el cliente queda para nosotros como parte de pago.
+
+    **El número interno es opcional**: lo que define el patrimonio es el `customer_id`, no
+    el código MG. `resolve_mg_flags` ya trata como propio a todo equipo del cliente MG BIO,
+    así que un equipo tomado en parte de pago queda como nuestro y habilita el circuito de
+    baja a Desguace aunque nunca se le asigne un MG.
+
+    Con `ingreso_id` se guarda antes quién era el dueño: los papeles de la OS resuelven el
+    cliente por `devices.customer_id`, así que sin ese snapshot la orden de salida que firma
+    el cliente pasaba a decir 'MG BIO S.R.L.'.
+
+    No valida el duplicado de número interno: eso lo hace el llamador con
+    `find_mg_numero_interno_conflict`, porque cada uno arma su propia respuesta de error.
+    """
+    if ingreso_id and _has_table_column("ingresos", "cliente_original_id"):
+        # Sólo si el equipo todavía no era nuestro, y sin pisar un snapshot anterior: una
+        # segunda conversión no puede reescribir al cliente que trajo el equipo.
+        exec_void(
+            """
+            UPDATE ingresos t
+               SET cliente_original_id = d.customer_id
+              FROM devices d
+             WHERE t.id = %s
+               AND d.id = %s
+               AND t.cliente_original_id IS NULL
+               AND d.customer_id IS DISTINCT FROM %s
+            """,
+            [ingreso_id, device_id, mg_owner_id],
+        )
+    sets = ["customer_id = %s"]
+    params = [mg_owner_id]
+    if (numero_interno or "").strip():
+        sets.append("numero_interno = %s")
+        params.append(numero_interno)
+    if _has_mg_schema():
+        sets.append("mg_estado = 'activo'")
+    if _has_table_column("devices", "mg_inactivo_desde"):
+        sets.append("mg_inactivo_desde = NULL")
+    for column_name in (
+        "mg_venta_fecha",
+        "mg_venta_factura_numero",
+        "mg_venta_remito_numero",
+        "mg_venta_observaciones",
+        "mg_venta_usuario_id",
+        "mg_venta_customer_id",
+        "mg_venta_numero_alternativo",
+    ):
+        if _has_table_column("devices", column_name):
+            sets.append(f"{column_name} = NULL")
+    if _has_table_column("devices", "alquilado"):
+        sets.append("alquilado = FALSE")
+    if _has_table_column("devices", "alquiler_a"):
+        sets.append("alquiler_a = NULL")
+    params.append(device_id)
+    exec_void(f"UPDATE devices SET {', '.join(sets)} WHERE id=%s", params)
+
+
 class IngresoConvertirPropioMgView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -2470,28 +2931,7 @@ class IngresoConvertirPropioMgView(APIView):
                 status=400,
             )
 
-        if connection.vendor == "postgresql":
-            conflict = q(
-                """
-                SELECT id
-                  FROM devices
-                 WHERE id <> %s
-                   AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                   AND UPPER(REGEXP_REPLACE(numero_interno,
-                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                       UPPER(REGEXP_REPLACE(%s,
-                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
-                 LIMIT 1
-                """,
-                [device_id, numero_interno],
-                one=True,
-            )
-        else:
-            conflict = q(
-                "SELECT id FROM devices WHERE id <> %s AND numero_interno = %s LIMIT 1",
-                [device_id, numero_interno],
-                one=True,
-            )
+        conflict = find_mg_numero_interno_conflict(device_id, numero_interno)
         if conflict:
             return Response(
                 {
@@ -2503,35 +2943,7 @@ class IngresoConvertirPropioMgView(APIView):
                 status=400,
             )
 
-        sets = [
-            "customer_id = %s",
-            "numero_interno = %s",
-        ]
-        params = [mg_owner_id, numero_interno]
-        if has_mg_schema:
-            sets.append("mg_estado = 'activo'")
-        if _has_table_column("devices", "mg_inactivo_desde"):
-            sets.append("mg_inactivo_desde = NULL")
-        for column_name in (
-            "mg_venta_fecha",
-            "mg_venta_factura_numero",
-            "mg_venta_remito_numero",
-            "mg_venta_observaciones",
-            "mg_venta_usuario_id",
-            "mg_venta_customer_id",
-            "mg_venta_numero_alternativo",
-        ):
-            if _has_table_column("devices", column_name):
-                sets.append(f"{column_name} = NULL")
-        if _has_table_column("devices", "alquilado"):
-            sets.append("alquilado = FALSE")
-        if _has_table_column("devices", "alquiler_a"):
-            sets.append("alquiler_a = NULL")
-        params.append(device_id)
-        exec_void(
-            f"UPDATE devices SET {', '.join(sets)} WHERE id=%s",
-            params,
-        )
+        convertir_device_a_propio_mg(device_id, numero_interno, mg_owner_id, ingreso_id=ingreso_id)
 
         mg_estado_sql = "COALESCE(d.mg_estado,'activo') AS mg_estado," if _has_mg_schema() else "'activo' AS mg_estado,"
         row = q(
@@ -2568,6 +2980,858 @@ class IngresoConvertirPropioMgView(APIView):
                 "patrimonial_email": patrimonial_email,
             }
         )
+
+
+# ---- Cambio de equipo (permuta / parte de pago) ----
+#
+# El cliente trae su equipo, se le entrega otro y el suyo queda para SEPID. Son dos
+# movimientos patrimoniales, no un campo de texto: `ingresos.device_id` sigue siendo el
+# equipo que INGRESÓ y `ingresos.device_cambio_id` es el que SALIÓ.
+#
+# Bajo esta OS no sale nada para el cliente: el equipo nuevo se factura por su propia
+# orden de entrega (remito RT) y el viejo se queda. Por eso el cambio corta el movimiento
+# de stock STR->STC y la emisión del remito RSS; ver `RemitoSalidaPdfView`.
+
+# Qué se hace con el equipo que el cliente deja. 'pendiente' es el único que NO define
+# nada: el resto son las razones por las que el equipo **pasa a propiedad de SEPID**, y se
+# diferencian en dónde termina la unidad en Bejerman.
+#
+#   pendiente -> sigue siendo del cliente hasta que alguien decida; no mueve nada.
+#   mg        -> propio de SEPID, queda en el parque (alquiler/uso interno). Sin movimiento.
+#   venta     -> propio de SEPID y se pone a la venta: se transfiere al depósito VAL.
+#   desguace  -> propio de SEPID y se desarma para repuestos: se transfiere a DES.
+DEVICE_SWAP_DESTINOS = ("pendiente", "mg", "venta", "desguace")
+
+# Los destinos que mueven patrimonio: pasan el equipo a nuestro nombre y, en 'venta' y
+# 'desguace', además mueven stock real en Bejerman. Piden más permiso que registrar el
+# cambio; recepción registra con 'pendiente' y jefatura define el destino.
+DEVICE_SWAP_DESTINOS_PATRIMONIALES = ("mg", "venta", "desguace")
+DEVICE_SWAP_DESTINO_PERMISOS = ("action.ingreso.baja_alta", "action.devices_preventivos.manage")
+
+# Destinos que además de pasar el equipo a nuestro patrimonio lo mueven de depósito en
+# Bejerman. El job se encola después de escribir el cambio, nunca antes.
+#
+# Se guarda el NOMBRE y no la función: el módulo la resuelve en el momento de usarla, así
+# `patch("...ingresos_views.enqueue_stock_baja_for_ingreso")` sigue interceptando la
+# llamada. Con la referencia directa el diccionario se quedaba con la función original y
+# los tests salían a Bejerman de verdad.
+DEVICE_SWAP_DESTINOS_CON_MOVIMIENTO = {
+    "venta": ("enqueue_stock_venta_for_ingreso", "Pase a Ventas (VAL)"),
+    "desguace": ("enqueue_stock_baja_for_ingreso", "Pase a Desguace"),
+}
+
+# Estados en los que la OS ya se cerró: ni se registra un cambio ni se deshace uno. El
+# `delete` no lo miraba y le borraba la resolución a una orden ya entregada.
+#
+# `vendido_pendiente_entrega` entra acá aunque la OS todavía no esté entregada: el corte por
+# cambio de `resolve_ingreso_entrega_estado` se evalúa **antes** que el de la venta, así que
+# registrar un cambio sobre una venta pendiente la cerraba como 'entregado' y le borraba el
+# ticket de venta.
+DEVICE_SWAP_ESTADOS_CERRADOS = (
+    "entregado",
+    "baja",
+    "vendido_entregado",
+    "vendido_pendiente_entrega",
+    "alquilado",
+)
+
+# Estados en los que el equipo está comprometido y no se puede entregar: o está dentro de
+# otra reparación abierta, o ya está en poder de un cliente, o fue dado de baja.
+DEVICE_SWAP_BLOCKING_STATES = (
+    "ingresado",
+    "diagnosticado",
+    "presupuestado",
+    "reparar",
+    "alquilado",
+    "vendido_pendiente_entrega",
+    "baja",
+)
+
+
+def _has_device_swap_schema() -> bool:
+    # Las dos columnas llegan juntas en `apply_device_swap_schema`: si falta alguna, el
+    # esquema está a medio aplicar y conviene decirlo con el 500 explicativo antes de
+    # que una consulta reviente por una columna inexistente.
+    return _has_table_column("ingresos", "device_cambio_id") and _has_table_column(
+        "ingresos", "cambio_sin_entrega"
+    )
+
+
+def _device_swap_schema_missing_response():
+    return Response(
+        {
+            "detail": (
+                "Schema de cambio de equipo no aplicado. "
+                "Ejecuta apply_device_swap_schema."
+            )
+        },
+        status=500,
+    )
+
+
+def _device_label(row) -> str:
+    """Etiqueta corta de un equipo: N/S y número interno, lo que haya."""
+    row = row or {}
+    ns = (row.get("numero_serie") or "").strip()
+    ni = (row.get("numero_interno") or "").strip()
+    if ns and ni:
+        return f"{ns} | {ni}"
+    return ns or ni or ""
+
+
+def _swap_equipment_article_prefix() -> str:
+    """Prefijo de los códigos de artículo que son equipos completos.
+
+    En Bejerman los equipos arrancan con '11'; el resto del maestro son repuestos,
+    accesorios e insumos, que no se entregan en un cambio.
+    """
+    return str(getattr(settings, "BEJERMAN_EQUIPMENT_ARTICLE_PREFIX", "") or "11").strip()
+
+
+def _swap_source_deposits() -> list[str]:
+    """Depósitos donde se busca el equipo que se entrega.
+
+    Por defecto VAL (el depósito de ventas, que es de donde sale un equipo vendido).
+    Configurable porque puede haber unidades entregables en otros depósitos.
+    """
+    raw = getattr(settings, "BEJERMAN_SWAP_SOURCE_DEPOSITS", "") or "VAL"
+    if isinstance(raw, (list, tuple)):
+        codes = list(raw)
+    else:
+        codes = str(raw).split(",")
+    out = [str(c).strip().upper() for c in codes if str(c).strip()]
+    return out or ["VAL"]
+
+
+def _swap_article_model_map(article_codes) -> dict:
+    """Artículo de Bejerman -> modelo de NEXORA, para poder fichar el equipo.
+
+    Si el artículo no está mapeado se devuelve vacío y el equipo se carga igual con lo
+    que sabe Bejerman: trabar el mostrador por un mapeo faltante sería peor.
+    """
+    codes = sorted({str(c).strip().upper() for c in (article_codes or []) if str(c).strip()})
+    if not codes:
+        return {}
+    rows = q(
+        """
+        SELECT
+          UPPER(TRIM(am.article_code)) AS article_code,
+          am.model_id,
+          COALESCE(am.variante,'')     AS variante,
+          COALESCE(m.nombre,'')        AS modelo,
+          COALESCE(m.tipo_equipo,'')   AS tipo_equipo,
+          m.marca_id,
+          COALESCE(b.nombre,'')        AS marca
+        FROM bejerman_article_mappings am
+        JOIN models m ON m.id = am.model_id
+        LEFT JOIN marcas b ON b.id = m.marca_id
+        WHERE UPPER(TRIM(am.article_code)) = ANY(%s)
+        """,
+        [codes],
+    ) or []
+    # Un artículo puede tener varias variantes mapeadas; alcanza con la primera para
+    # identificar marca/modelo/tipo, que es lo único que se usa para fichar el equipo.
+    out = {}
+    for row in rows:
+        out.setdefault(row["article_code"], row)
+    return out
+
+
+def _swap_known_devices(serials) -> dict:
+    """Serie normalizada -> device ya fichado en NEXORA.
+
+    Sirve para reusar la ficha existente en vez de crear un duplicado, con la misma
+    normalización que el índice único `uq_devices_ns_tipo_norm`.
+    """
+    keys = sorted({_norm_serial_key(s) for s in (serials or []) if _norm_serial_key(s)})
+    if not keys:
+        return {}
+    rows = q(
+        """
+        SELECT
+          UPPER(REPLACE(REPLACE(COALESCE(d.numero_serie,''), ' ', ''), '-', '')) AS clave,
+          d.id,
+          COALESCE(d.numero_serie,'')   AS numero_serie,
+          COALESCE(d.numero_interno,'') AS numero_interno,
+          COALESCE(d.tipo_equipo,'')    AS tipo_equipo,
+          COALESCE(d.alquilado,false)   AS alquilado,
+          COALESCE(ult.estado,'')       AS ultimo_estado,
+          COALESCE(ult.derivacion_activa, FALSE) AS derivacion_activa
+        FROM devices d
+        LEFT JOIN LATERAL (
+          SELECT i.estado::text AS estado,
+                 EXISTS (
+                   SELECT 1
+                     FROM equipos_derivados active_ed
+                    WHERE active_ed.ingreso_id = i.id
+                      AND active_ed.fecha_entrega IS NULL
+                      AND active_ed.estado IN ('derivado','en_servicio')
+                 ) AS derivacion_activa
+            FROM ingresos i
+           WHERE i.device_id = d.id
+           ORDER BY COALESCE(i.fecha_ingreso, i.fecha_creacion) DESC, i.id DESC
+           LIMIT 1
+        ) ult ON TRUE
+        WHERE UPPER(REPLACE(REPLACE(COALESCE(d.numero_serie,''), ' ', ''), '-', '')) = ANY(%s)
+        """,
+        [keys],
+    ) or []
+    out = {}
+    for row in rows:
+        out.setdefault(row["clave"], row)
+    return out
+
+
+def _norm_serial_key(value) -> str:
+    return (str(value or "")).upper().replace(" ", "").replace("-", "").strip()
+
+
+def _swap_stock_candidates(company_key: str, actor_user_id, depositos, term: str, limit: int = 40):
+    """Unidades entregables según el stock real de Bejerman.
+
+    Antes esto listaba la tabla `devices` de NEXORA, que es el registro local de equipos:
+    mostraba unidades de otros clientes y equipos en el taller, sin mirar disponibilidad.
+    Un cambio entrega un equipo **vendido**, así que la fuente correcta es el stock del
+    depósito de ventas, filtrado a artículos de equipo.
+    """
+    prefix = _swap_equipment_article_prefix()
+    needle = (term or "").strip().lower()
+
+    client = BejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id)
+    filas = []
+    for deposito in depositos:
+        for row in cached_stock_rows(client, company_key, deposito) or []:
+            article_code = as_string(row.get("articleCode")).strip()
+            partida = as_string(row.get("partida")).strip()
+            if not partida or not article_code.upper().startswith(prefix.upper()):
+                continue
+            disponible = row.get("availableQuantity")
+            if disponible is None:
+                disponible = row.get("realQuantity")
+            if disponible is None or disponible <= 0:
+                continue
+            filas.append(
+                {
+                    "article_code": article_code,
+                    "partida": partida,
+                    "deposito": as_string(row.get("depositCode")).strip().upper() or deposito,
+                    "cantidad": disponible,
+                }
+            )
+
+    descripciones = {}
+    try:
+        descripciones = article_descriptions(
+            client, [f["article_code"] for f in filas], company_key
+        ) or {}
+    except Exception:
+        # `article_descriptions` no levanta por diseño, pero el catálogo es opcional:
+        # sin él la fila se muestra igual con el código.
+        logger.exception("No se pudieron leer las descripciones de artículos")
+
+    mapeos = _swap_article_model_map([f["article_code"] for f in filas])
+    fichados = _swap_known_devices([f["partida"] for f in filas])
+
+    salida = []
+    for fila in filas:
+        code_key = fila["article_code"].upper()
+        mapeo = mapeos.get(code_key) or {}
+        ficha = fichados.get(_norm_serial_key(fila["partida"])) or {}
+        descripcion = (descripciones.get(fila["article_code"]) or "").strip()
+        item = {
+            **fila,
+            "descripcion": descripcion,
+            "marca": mapeo.get("marca") or "",
+            "modelo": mapeo.get("modelo") or "",
+            "tipo_equipo": mapeo.get("tipo_equipo") or ficha.get("tipo_equipo") or "",
+            "model_id": mapeo.get("model_id"),
+            "mapeado": bool(mapeo),
+            # Si la unidad ya tiene ficha en NEXORA se reusa en vez de duplicarla.
+            "device_id": ficha.get("id"),
+            "numero_interno": ficha.get("numero_interno") or "",
+        }
+        # Bejerman puede tener stock de una unidad que en NEXORA está dentro de otra OS
+        # abierta o figura alquilada. Se avisa acá y no al confirmar, que es donde el
+        # backend la rechaza.
+        estado_local = (ficha.get("ultimo_estado") or "").strip().lower()
+        if ficha.get("alquilado"):
+            item["motivo_no_disponible"] = "En NEXORA figura alquilado a un cliente"
+        elif ficha.get("derivacion_activa"):
+            item["motivo_no_disponible"] = "En NEXORA figura como derivado"
+        elif estado_local in DEVICE_SWAP_BLOCKING_STATES:
+            item["motivo_no_disponible"] = f"En NEXORA tiene un ingreso en estado {estado_local}"
+        else:
+            item["motivo_no_disponible"] = ""
+        item["disponible"] = not item["motivo_no_disponible"]
+        if needle:
+            blob = " ".join(
+                [
+                    item["partida"],
+                    item["article_code"],
+                    descripcion,
+                    item["marca"],
+                    item["modelo"],
+                    item["numero_interno"],
+                ]
+            ).lower()
+            if needle not in blob:
+                continue
+        salida.append(item)
+
+    salida.sort(key=lambda i: (not i["mapeado"], i["article_code"], i["partida"]))
+    return salida[:limit]
+
+
+def _fichar_device_desde_stock(*, partida: str, article_code: str, customer_id) -> int:
+    """Devuelve el `devices.id` de una unidad de stock, fichándola si hace falta.
+
+    En Bejerman la unidad es una partida (la serie); en NEXORA hace falta una fila en
+    `devices` porque el cambio la referencia por FK. Si el artículo no está mapeado a un
+    modelo, el equipo se ficha igual con la serie: trabar el mostrador por un mapeo
+    faltante sería peor que una ficha incompleta, que después se completa desde Equipos.
+    """
+    serie = (partida or "").strip()
+    if not serie:
+        raise ValidationError("Falta la partida del equipo que se entrega.")
+
+    mapeo = (_swap_article_model_map([article_code]) or {}).get((article_code or "").strip().upper()) or {}
+    tipo_equipo = (mapeo.get("tipo_equipo") or "").strip()
+
+    # La identidad del equipo es serie + tipo (ver uq_devices_ns_tipo_norm).
+    existente = q(
+        """
+        SELECT id FROM devices
+         WHERE UPPER(REPLACE(REPLACE(COALESCE(numero_serie,''), ' ', ''), '-', '')) = %s
+           AND LOWER(COALESCE(TRIM(tipo_equipo),'')) = LOWER(%s)
+         LIMIT 1
+        """,
+        [_norm_serial_key(serie), tipo_equipo],
+        one=True,
+    )
+    if existente:
+        return int(existente["id"])
+
+    if not customer_id:
+        raise ValidationError("El ingreso no tiene cliente: no se puede fichar el equipo entregado.")
+
+    creado = q(
+        """
+        INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, tipo_equipo)
+        VALUES (%s, %s, %s, %s, NULLIF(%s,''))
+        RETURNING id
+        """,
+        [customer_id, mapeo.get("marca_id"), mapeo.get("model_id"), serie, tipo_equipo],
+        one=True,
+    )
+    return int(creado["id"])
+
+
+def _load_swap_target_device(device_id: int):
+    return q(
+        """
+        SELECT
+          d.id,
+          COALESCE(d.numero_serie,'')   AS numero_serie,
+          COALESCE(d.numero_interno,'') AS numero_interno,
+          COALESCE(d.alquilado,false)   AS alquilado,
+          COALESCE(ult.estado,'')       AS ultimo_estado,
+          COALESCE(ult.derivacion_activa, FALSE) AS derivacion_activa
+        FROM devices d
+        LEFT JOIN LATERAL (
+          SELECT i.estado::text AS estado,
+                 EXISTS (
+                   SELECT 1
+                     FROM equipos_derivados active_ed
+                    WHERE active_ed.ingreso_id = i.id
+                      AND active_ed.fecha_entrega IS NULL
+                      AND active_ed.estado IN ('derivado','en_servicio')
+                 ) AS derivacion_activa
+            FROM ingresos i
+           WHERE i.device_id = d.id
+           ORDER BY COALESCE(i.fecha_ingreso, i.fecha_creacion) DESC, i.id DESC
+           LIMIT 1
+        ) ult ON TRUE
+        WHERE d.id = %s
+        """,
+        [device_id],
+        one=True,
+    )
+
+
+def get_ingreso_device_swap(ingreso_id: int):
+    """Datos del cambio de equipo de una OS, o None si no tiene.
+
+    Lo usan la vista de detalle, el PDF de la orden de salida y los cortes de stock.
+    """
+    if not _has_device_swap_schema():
+        return None
+    row = q(
+        """
+        SELECT
+          i.device_cambio_id,
+          COALESCE(i.serial_cambio,'')          AS serial_cambio,
+          COALESCE(i.cambio_destino_viejo,'')   AS destino_viejo,
+          COALESCE(i.cambio_sin_entrega, FALSE) AS sin_entrega,
+          i.cambio_fecha,
+          COALESCE(u.nombre,'')                 AS registrado_por,
+          COALESCE(d.numero_serie,'')           AS numero_serie,
+          COALESCE(d.numero_interno,'')         AS numero_interno,
+          COALESCE(b.nombre,'')                 AS marca,
+          COALESCE(m.nombre,'')                 AS modelo
+        FROM ingresos i
+        LEFT JOIN devices d ON d.id = i.device_cambio_id
+        LEFT JOIN marcas b  ON b.id = d.marca_id
+        LEFT JOIN models m  ON m.id = d.model_id
+        LEFT JOIN users u   ON u.id = i.cambio_registrado_por
+        WHERE i.id = %s
+          AND (LOWER(COALESCE(i.resolucion,'')) = 'cambio'
+               OR COALESCE(i.cambio_sin_entrega, FALSE))
+        """,
+        [ingreso_id],
+        one=True,
+    )
+    if not row:
+        return None
+    # Los cambios anteriores a la FK sólo tienen el texto; se devuelven igual para que la
+    # pantalla y el PDF los sigan mostrando.
+    row["equipo_entregado"] = _device_label(row) or (row.get("serial_cambio") or "")
+    row["vinculado"] = bool(row.get("device_cambio_id"))
+    # En una parte de pago sin permuta no sale ningún equipo: `equipo_entregado` queda
+    # vacío a propósito y esta marca es lo que la distingue de un cambio a medio cargar.
+    row["sin_entrega"] = bool(row.get("sin_entrega"))
+    return row
+
+
+def ingreso_tiene_cambio_de_equipo(ingreso_id: int) -> bool:
+    """True si la OS se resolvió con un cambio de equipo o una parte de pago.
+
+    Corta el movimiento de stock al cliente y la emisión del remito RSS: bajo una OS así
+    no sale nada para el cliente (si hay equipo de reemplazo, va por su propia venta) y el
+    equipo que trajo queda en SEPID. Vale igual para la parte de pago sin permuta, donde
+    directamente no se entrega nada.
+
+    **La parte de pago no depende de `resolucion`.** Tomar el equipo es un hecho
+    patrimonial, no un resultado de la reparación: al equipo tomado se lo repara igual, y
+    marcar 'reparado' pisa la resolución. Si el corte dependiera sólo de `resolucion`, esa
+    OS volvería a mover stock al cliente y a emitir un RSS por un equipo que es nuestro.
+    """
+    try:
+        sin_entrega_sql = (
+            "COALESCE(cambio_sin_entrega, FALSE)" if _has_device_swap_schema() else "FALSE"
+        )
+        row = q(
+            f"""
+            SELECT LOWER(COALESCE(resolucion,'')) AS resolucion,
+                   {sin_entrega_sql} AS sin_entrega
+              FROM ingresos WHERE id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
+        if not row:
+            return False
+        return (row.get("resolucion") or "") == "cambio" or bool(row.get("sin_entrega"))
+    except Exception:
+        logger.exception("No se pudo leer la resolución del ingreso", extra={"ingreso_id": ingreso_id})
+        return False
+
+
+def clear_device_swap_sql_sets(preservar_parte_de_pago: bool = True) -> list[str]:
+    """Fragmentos SET para limpiar el cambio cuando se pisa o se anula la resolución.
+
+    Sin esto queda una OS 'reparada' arrastrando la serie de un cambio que ya no existe.
+
+    `preservar_parte_de_pago` es el modo por defecto para las vistas que **pisan** la
+    resolución (marcar reparado / no se repara / controlado sin defecto): una parte de pago
+    no es un resultado de la reparación, así que reparar el equipo tomado no puede borrar
+    el registro de que lo tomamos —y menos dejar sueltos el pase a MG BIO y el movimiento a
+    Desguace, que no se revierten—. El deshacer explícito pasa `False` y limpia todo.
+    """
+    tiene_swap = _has_device_swap_schema()
+    columnas = ["serial_cambio"] if _has_table_column("ingresos", "serial_cambio") else []
+    if not tiene_swap:
+        return [f"{col} = NULL" for col in columnas]
+    columnas += ["device_cambio_id", "cambio_destino_viejo", "cambio_fecha", "cambio_registrado_por"]
+    if not preservar_parte_de_pago:
+        return [f"{col} = NULL" for col in columnas] + ["cambio_sin_entrega = FALSE"]
+    guarda = "COALESCE(cambio_sin_entrega, FALSE)"
+    return [f"{col} = CASE WHEN {guarda} THEN {col} ELSE NULL END" for col in columnas]
+
+
+def sets_con_limpieza_de_cambio(*sets: str) -> str:
+    """Arma la cláusula SET sumándole la limpieza del cambio de equipo.
+
+    Lo usan las vistas que pisan o anulan `resolucion`. Los fragmentos que recibe no
+    llevan parámetros propios más allá de los que ya pasa el llamador: la limpieza son
+    todos `= NULL` o `CASE` sin placeholders, así que no altera su orden.
+
+    La parte de pago se conserva: ver `clear_device_swap_sql_sets`.
+    """
+    return ", ".join([*sets, *clear_device_swap_sql_sets()])
+
+
+class IngresoCambioEquipoCandidatosView(APIView):
+    """Unidades entregables, tomadas del stock real de Bejerman.
+
+    No alcanza con `DevicesListView`: pide `page.devices_preventivos` (que recepción no
+    tiene) y además lista el parque local de equipos, sin mirar stock ni disponibilidad.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, ingreso_id: int):
+        require_permission(request, "action.ingreso.device_swap")
+        term = (request.GET.get("q") or "").strip()
+
+        row = q(
+            "SELECT empresa_bejerman, empresa_facturar FROM ingresos WHERE id=%s",
+            [ingreso_id],
+            one=True,
+        )
+        if not row:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        try:
+            company_key = require_company(
+                row.get("empresa_bejerman") or row.get("empresa_facturar") or "SEPID"
+            ).key
+        except ValueError:
+            return Response({"detail": "Empresa Bejerman no válida"}, status=400)
+
+        disponibles = _swap_source_deposits()
+        pedido = (request.GET.get("deposito") or "").strip().upper()
+        depositos = [pedido] if pedido else disponibles
+
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        try:
+            items = _swap_stock_candidates(company_key, actor_user_id, depositos, term)
+        except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
+            # Sin Bejerman no hay lista posible: se dice por qué, en vez de mostrar vacío.
+            return Response({"detail": str(exc), "conflict_type": "BEJERMAN_UNAVAILABLE"}, status=502)
+
+        return Response(
+            {
+                "items": items,
+                "depositos": disponibles,
+                "deposito": depositos[0] if len(depositos) == 1 else "",
+                "prefijo_articulo": _swap_equipment_article_prefix(),
+            }
+        )
+
+
+class IngresoCambioEquipoView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, ingreso_id: int):
+        require_permission(request, "action.ingreso.device_swap")
+        return Response(get_ingreso_device_swap(ingreso_id) or {})
+
+    @transaction.atomic
+    def post(self, request, ingreso_id: int):
+        require_permission(request, "action.ingreso.device_swap")
+        if not _has_device_swap_schema():
+            return _device_swap_schema_missing_response()
+        _set_audit_user(request)
+
+        data = request.data or {}
+        destino = (data.get("destino_viejo") or "pendiente").strip().lower()
+        if destino not in DEVICE_SWAP_DESTINOS:
+            return Response(
+                {"detail": f"destino_viejo inválido: {', '.join(DEVICE_SWAP_DESTINOS)}"},
+                status=400,
+            )
+        # Registrar el cambio es del mostrador, pero decidir el destino firme no: 'mg' pasa el
+        # equipo al patrimonio de MG BIO y 'desguace' además mueve stock real en Bejerman.
+        # Esa misma conversión, por su endpoint propio (`IngresoConvertirPropioMgView`), exige
+        # estos permisos; sin este chequeo el cambio de equipo era la puerta de atrás.
+        # Recepción registra con 'pendiente' y el destino lo define después quien puede.
+        if destino in DEVICE_SWAP_DESTINOS_PATRIMONIALES:
+            require_any_permission(request, list(DEVICE_SWAP_DESTINO_PERMISOS))
+
+        ingreso = q(
+            """
+            SELECT i.id,
+                   i.device_id,
+                   i.estado::text AS estado,
+                   d.customer_id,
+                   COALESCE(d.numero_serie,'')   AS numero_serie,
+                   COALESCE(d.numero_interno,'') AS numero_interno
+              FROM ingresos i
+              LEFT JOIN devices d ON d.id = i.device_id
+             WHERE i.id = %s
+            """,
+            [ingreso_id],
+            one=True,
+        )
+        if not ingreso:
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        estado_actual = (ingreso.get("estado") or "").strip().lower()
+        if estado_actual in DEVICE_SWAP_ESTADOS_CERRADOS:
+            return Response(
+                {
+                    "detail": (
+                        f"La orden ya está en estado {estado_actual}: no se puede registrar "
+                        "un cambio de equipo."
+                    )
+                },
+                status=400,
+            )
+
+        # Parte de pago sin permuta: tomamos el equipo del cliente y no entregamos ninguno.
+        # Es explícito y no se deduce de que falte el equipo, porque "no vino el device_id"
+        # también es lo que pasa cuando la pantalla se olvidó de mandarlo.
+        sin_entrega = bool(data.get("sin_entrega"))
+
+        device_id = data.get("device_id")
+        try:
+            device_id = int(device_id) if device_id not in (None, "") else 0
+        except (TypeError, ValueError):
+            return Response({"detail": "device_id inválido"}, status=400)
+
+        target = None
+        if sin_entrega:
+            if device_id or (data.get("partida") or "").strip():
+                return Response(
+                    {
+                        "detail": (
+                            "Una parte de pago sin entrega no lleva equipo de salida: "
+                            "sacá el equipo elegido o destildá la opción."
+                        )
+                    },
+                    status=400,
+                )
+            device_id = 0
+        else:
+            # El equipo se elige del stock de Bejerman, donde la unidad es una partida y puede
+            # no tener ficha en NEXORA todavía. Si no vino un device_id, se ficha acá.
+            partida = (data.get("partida") or "").strip()
+            if not device_id and partida:
+                try:
+                    device_id = _fichar_device_desde_stock(
+                        partida=partida,
+                        article_code=(data.get("article_code") or "").strip(),
+                        customer_id=ingreso.get("customer_id"),
+                    )
+                except ValidationError as exc:
+                    return Response({"detail": str(exc.detail[0] if isinstance(exc.detail, list) else exc.detail)}, status=400)
+
+            if not device_id:
+                return Response({"detail": "Elegí el equipo que se entrega."}, status=400)
+            if device_id == ingreso.get("device_id"):
+                return Response(
+                    {"detail": "El equipo que se entrega tiene que ser distinto al que ingresó."},
+                    status=400,
+                )
+
+            target = _load_swap_target_device(device_id)
+            if not target:
+                return Response({"detail": "El equipo elegido no existe."}, status=404)
+            target_estado = (target.get("ultimo_estado") or "").strip().lower()
+            if target.get("alquilado"):
+                return Response(
+                    {"detail": "El equipo elegido figura alquilado a un cliente."}, status=400
+                )
+            if target.get("derivacion_activa"):
+                return Response(
+                    {"detail": "El equipo elegido continúa derivado."}, status=409
+                )
+            if target_estado in DEVICE_SWAP_BLOCKING_STATES:
+                return Response(
+                    {"detail": f"El equipo elegido tiene un ingreso en estado {target_estado}."},
+                    status=400,
+                )
+
+        # Los destinos que pasan el equipo a nuestro patrimonio se validan antes de escribir
+        # nada, para no dejar el cambio a medias.
+        numero_interno_mg = ""
+        mg_owner_id = None
+        if destino in DEVICE_SWAP_DESTINOS_PATRIMONIALES:
+            mg_owner_id = _mg_owner_customer_id()
+            if not mg_owner_id:
+                return Response(
+                    {
+                        "detail": "No existe el cliente base 'MG BIO'.",
+                        "conflict_type": "MG_OWNER_CUSTOMER_MISSING",
+                    },
+                    status=404,
+                )
+
+        if destino == "mg":
+            # El número interno es OPCIONAL: un equipo tomado en parte de pago es de MG BIO
+            # aunque nunca se le asigne un MG. Si viene, tiene que ser válido y único.
+            numero_interno_raw = (data.get("numero_interno_mg") or "").strip()
+            if numero_interno_raw:
+                numero_interno_mg = normalize_mg(numero_interno_raw)
+                if not numero_interno_mg:
+                    return Response(
+                        {
+                            "detail": "El número interno debe tener formato MG 0001.",
+                            "conflict_type": "MG_NUMERO_INTERNO_INVALIDO",
+                        },
+                        status=400,
+                    )
+                conflict = find_mg_numero_interno_conflict(
+                    ingreso.get("device_id"), numero_interno_mg
+                )
+                if conflict:
+                    return Response(
+                        {
+                            "detail": "El número interno MG ya está asignado a otro equipo.",
+                            "conflict_type": "MG_DUPLICATE",
+                            "conflict_device_id": conflict.get("id"),
+                            "numero_interno_input": numero_interno_mg,
+                        },
+                        status=400,
+                    )
+
+        actor_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        serial_snapshot = _device_label(target) if target else ""
+
+        exec_void(
+            """
+            UPDATE ingresos
+               SET resolucion = 'cambio',
+                   device_cambio_id = %s,
+                   serial_cambio = %s,
+                   cambio_destino_viejo = %s,
+                   cambio_fecha = now(),
+                   cambio_registrado_por = %s,
+                   cambio_sin_entrega = %s
+             WHERE id = %s
+            """,
+            [
+                device_id or None,
+                serial_snapshot or None,
+                destino,
+                actor_id,
+                sin_entrega,
+                ingreso_id,
+            ],
+        )
+
+        # Los dos destinos "firmes" pasan el equipo al patrimonio de MG BIO. Lo que define
+        # la propiedad es el cliente, no el código MG: `resolve_mg_flags` ya trata como
+        # propio a todo equipo de MG BIO, así que a partir de acá el equipo habilita el
+        # circuito de baja/alta aunque no tenga número interno.
+        patrimonial_email = None
+        bejerman_sync_job = None
+        if destino in DEVICE_SWAP_DESTINOS_PATRIMONIALES:
+            convertir_device_a_propio_mg(
+                ingreso.get("device_id"), numero_interno_mg, mg_owner_id, ingreso_id=ingreso_id
+            )
+            patrimonial_email = _notify_estado_patrimonial(request, ingreso_id, "alta_mg")
+
+        encolar = DEVICE_SWAP_DESTINOS_CON_MOVIMIENTO.get(destino)
+        if encolar:
+            # El equipo sale de su depósito actual y va al que corresponde al destino: VAL
+            # si se pone a la venta, Desguace si se desarma. Es el mismo mecanismo que la
+            # baja de un MG. No se toca el estado de la OS: tiene que poder liberarse y
+            # entregarse igual, porque el cliente se lleva el equipo del cambio y necesita
+            # su orden de salida.
+            enqueue_name, etiqueta = encolar
+            try:
+                with transaction.atomic():
+                    bejerman_sync_job = globals()[enqueue_name](
+                        ingreso_id, actor_user_id=actor_id
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "No se pudo encolar el movimiento de stock del cambio",
+                    extra={"ingreso_id": ingreso_id, "destino": destino},
+                )
+                bejerman_sync_job = {
+                    "status": "not_queued",
+                    "detail": f"No se pudo encolar el movimiento en Bejerman ({etiqueta}).",
+                    "error": str(exc),
+                }
+
+        recibido = _device_label(ingreso) or "equipo del cliente"
+        try:
+            # Savepoint propio: si la traza falla, Postgres deja la transacción abortada y
+            # se perdería el cambio que sí se registró bien.
+            #
+            # `a_estado` es NOT NULL y el cambio no mueve el estado de la OS, así que se
+            # repite el actual en vez de inventar una transición. Sin cast explícito: la
+            # columna puede ser el enum `ticket_state` o TEXT según la base.
+            with transaction.atomic():
+                exec_void(
+                    """
+                    INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, comentario)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [
+                        ingreso_id,
+                        estado_actual,
+                        estado_actual,
+                        actor_id,
+                        (
+                            f"Parte de pago: queda en SEPID {recibido}, sin entrega de otro "
+                            f"equipo (destino: {destino})"
+                            if sin_entrega
+                            else f"Cambio de equipo: se entrega {serial_snapshot}, queda en "
+                            f"SEPID {recibido} (destino: {destino})"
+                        ),
+                    ],
+                )
+        except Exception:
+            # El cambio ya quedó registrado; no bloquearlo por la traza de eventos.
+            logger.exception("No se pudo registrar el evento del cambio", extra={"ingreso_id": ingreso_id})
+
+        return Response(
+            {
+                "ok": True,
+                "cambio": get_ingreso_device_swap(ingreso_id),
+                "patrimonial_email": patrimonial_email,
+                "bejerman_sync_job": bejerman_sync_job,
+                # Cómo llamar al movimiento en la pantalla. Viaja desde acá porque el
+                # destino decide a qué depósito va: el front lo tenía escrito como
+                # "Pase a Desguace" y con 'venta' habría mentido.
+                "bejerman_sync_label": encolar[1] if encolar else "",
+            }
+        )
+
+    @transaction.atomic
+    def delete(self, request, ingreso_id: int):
+        """Deshace el cambio.
+
+        Sólo suelta el vínculo y la resolución. **No revierte** el pase del equipo viejo al
+        patrimonio de MG BIO ni el movimiento a Desguace: eso se deshace desde Equipos (dar
+        de alta / reasignar cliente), con su propio circuito y su propia auditoría.
+        """
+        require_permission(request, "action.ingreso.device_swap")
+        if not _has_device_swap_schema():
+            return _device_swap_schema_missing_response()
+        _set_audit_user(request)
+
+        # Acotado a las OS resueltas como cambio: si no, deshacer sobre una OS resuelta de
+        # otra forma le borraría la resolución sin que nadie lo haya pedido.
+        if not ingreso_tiene_cambio_de_equipo(ingreso_id):
+            return Response(
+                {"detail": "La orden no tiene un cambio de equipo registrado."}, status=400
+            )
+
+        # Misma guarda que el `post`: una OS ya cerrada no se toca. Sin esto, deshacer sobre
+        # una orden entregada le borraba la resolución con la que se entregó y la dejaba sin
+        # el dato que explica por qué no salió un RSS.
+        estado_row = q("SELECT estado::text AS estado FROM ingresos WHERE id = %s", [ingreso_id], one=True)
+        estado_actual = ((estado_row or {}).get("estado") or "").strip().lower()
+        if estado_actual in DEVICE_SWAP_ESTADOS_CERRADOS:
+            return Response(
+                {
+                    "detail": (
+                        f"La orden ya está en estado {estado_actual}: no se puede deshacer "
+                        "el cambio de equipo."
+                    )
+                },
+                status=400,
+            )
+
+        # La resolución sólo se suelta si era el cambio: una parte de pago puede convivir
+        # con 'reparado', y borrar esa resolución dejaría la OS sin resultado de taller.
+        sets = [
+            "resolucion = CASE WHEN LOWER(COALESCE(resolucion,'')) = 'cambio' THEN NULL ELSE resolucion END"
+        ] + clear_device_swap_sql_sets(preservar_parte_de_pago=False)
+        exec_void(f"UPDATE ingresos SET {', '.join(sets)} WHERE id = %s", [ingreso_id])
+        return Response({"ok": True})
 
 
 class IngresoCorreccionesHistoricasView(APIView):
@@ -2907,6 +4171,8 @@ class ListosParaRetiroView(APIView):
     def get(self, request):
         require_permission(request, "page.liberados")
         mg_list_sql = _mg_list_select_sql()
+        swap_list_sql = _swap_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             # Fallback sin vista: equipos en 'taller' con estado 'liberado'.
@@ -2920,7 +4186,9 @@ class ListosParaRetiroView(APIView):
                   t.estado,
                   t.presupuesto_estado,
                   t.resolucion,
+                  {swap_list_sql}
                   c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -2949,13 +4217,18 @@ class ListosParaRetiroView(APIView):
                 """,
                 ["taller"],
             )
-            return Response(_fetchall_dicts(cur))
+            rows = _fetchall_dicts(cur)
+        # Sin esto la fila no trae `derivacion_activa` y la marca de derivado del
+        # listado no aparece nunca, sin ningún error que lo delate.
+        attach_active_derivations(rows)
+        return Response(rows)
 
 
 class GeneralPorClienteView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request, customer_id):
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -2965,6 +4238,7 @@ class GeneralPorClienteView(APIView):
                   q.fecha_emitido AS presupuesto_fecha_emision,
                   COALESCE(loc.nombre,'') AS ubicacion_nombre,
                   c.id AS customer_id, c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -2991,7 +4265,9 @@ class GeneralPorClienteView(APIView):
                 """,
                 [customer_id, "taller"],
             )
-            return Response(_fetchall_dicts(cur))
+            rows = _fetchall_dicts(cur)
+        attach_active_derivations(rows)
+        return Response(rows)
 
 
 class GeneralPorClienteExportView(APIView):
@@ -3009,6 +4285,7 @@ class GeneralPorClienteExportView(APIView):
 
     def get(self, request, customer_id):
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         ids_raw = (request.GET.get("ids") or "").strip()
         ids = None
         if ids_raw:
@@ -3026,6 +4303,7 @@ class GeneralPorClienteExportView(APIView):
                     SELECT
                       t.id,
                       c.razon_social AS cliente,
+                      {owner_list_sql}
                       COALESCE(b.nombre,'') AS marca,
                       COALESCE(m.nombre,'') AS modelo,
                       COALESCE(m.tipo_equipo,'') AS tipo_equipo,
@@ -3056,6 +4334,7 @@ class GeneralPorClienteExportView(APIView):
                     SELECT
                       t.id,
                       c.razon_social AS cliente,
+                      {owner_list_sql}
                       COALESCE(b.nombre,'') AS marca,
                       COALESCE(m.nombre,'') AS modelo,
                       COALESCE(m.tipo_equipo,'') AS tipo_equipo,
@@ -3121,7 +4400,7 @@ class GeneralPorClienteExportView(APIView):
 
             ws.append([
                 os_txt,
-                r.get("cliente") or "-",
+                _ingreso_customer_label(r) or "-",
                 equipo,
                 ns_val,
                 estado,
@@ -3155,6 +4434,7 @@ class AprobadosParaRepararView(APIView):
     def get(self, request):
         has_permite_reparacion = _ingresos_has_permite_reparacion_col()
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         filtro_cotizacion = ""
         if has_permite_reparacion:
             filtro_cotizacion = """
@@ -3171,7 +4451,9 @@ class AprobadosParaRepararView(APIView):
                   t.id,
                   t.estado,
                   t.presupuesto_estado,
+                  COALESCE(t.resolucion, '') AS resolucion,
                   c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -3180,7 +4462,9 @@ class AprobadosParaRepararView(APIView):
                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
                   COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
                   t.fecha_ingreso,
-                  q.fecha_aprobado AS fecha_aprobacion
+                  -- El serializer declara `fecha_aprobado`: con el alias viejo
+                  -- (`fecha_aprobacion`) la columna se descartaba en silencio.
+                  q.fecha_aprobado AS fecha_aprobado
                 FROM ingresos t
                 JOIN devices d ON d.id=t.device_id
                 JOIN customers c ON c.id=d.customer_id
@@ -3196,16 +4480,17 @@ class AprobadosParaRepararView(APIView):
                 WHERE LOWER(loc.nombre) = LOWER(%s)
                   AND (
                         (t.presupuesto_estado = 'aprobado'
-                        AND t.estado NOT IN ('reparado','controlado_sin_defecto','no_se_repara','entregado','derivado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado'))
+                        AND t.estado NOT IN ('reparado','controlado_sin_defecto','no_se_repara','entregado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado'))
                         OR t.estado = 'reparar'
                       )
-                  AND t.estado NOT IN ('reparado','controlado_sin_defecto','no_se_repara','entregado','derivado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
+                  AND t.estado NOT IN ('reparado','controlado_sin_defecto','no_se_repara','entregado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                   {filtro_cotizacion}
                 ORDER BY COALESCE(q.fecha_aprobado, t.fecha_ingreso) ASC;
             """,
                 ["taller"],
             )
             data = _fetchall_dicts(cur)
+        attach_active_derivations(data)
         return Response(IngresoListItemSerializer(data, many=True).data)
 
 
@@ -3213,13 +4498,17 @@ class AprobadosYReparadosView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         mg_list_sql = _mg_list_select_sql()
+        swap_list_sql = _swap_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
                 f"""
               SELECT t.id, t.estado, t.presupuesto_estado,
                      COALESCE(t.resolucion, '') AS resolucion,
+                     {swap_list_sql}
                      c.razon_social,
+                     {owner_list_sql}
                      d.numero_serie,
                      COALESCE(d.numero_interno,'') AS numero_interno,
                      {mg_list_sql}
@@ -3248,6 +4537,7 @@ class AprobadosYReparadosView(APIView):
                 ["taller"],
             )
             data = _fetchall_dicts(cur)
+        attach_active_derivations(data)
         return Response(IngresoListItemSerializer(data, many=True).data)
 
 
@@ -3256,6 +4546,8 @@ class AprobadosView(APIView):
 
     def get(self, request):
         mg_list_sql = _mg_list_select_sql()
+        swap_list_sql = _swap_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -3263,7 +4555,10 @@ class AprobadosView(APIView):
                 SELECT
                   t.id, t.estado, t.presupuesto_estado,
                   COALESCE(t.resolucion, '') AS resolucion,
-                  c.razon_social, d.numero_serie,
+                  {swap_list_sql}
+                  c.razon_social,
+                  {owner_list_sql}
+                  d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
                   COALESCE(b.nombre,'') AS marca,
@@ -3295,6 +4590,7 @@ class AprobadosView(APIView):
                 ["taller"],
             )
             data = _fetchall_dicts(cur)
+        attach_active_derivations(data)
         return Response(IngresoListItemSerializer(data, many=True).data)
 
 class LiberadosView(APIView):
@@ -3302,6 +4598,7 @@ class LiberadosView(APIView):
     def get(self, request):
         require_permission(request, "page.liberados")
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -3311,6 +4608,7 @@ class LiberadosView(APIView):
                   t.estado,
                   t.presupuesto_estado,
                   c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -3411,6 +4709,7 @@ class GeneralEquiposView(APIView):
         }
 
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         has_mg_sale_extended = _has_mg_sale_extended_schema()
         with connection.cursor() as cur:
             _set_audit_user(request)
@@ -3492,6 +4791,9 @@ class GeneralEquiposView(APIView):
                         clauses.extend([
                             "t.id::text ILIKE %s",
                             "COALESCE(c.razon_social,'') ILIKE %s",
+                            # El dueño va además de la razón social, no en su lugar: el
+                            # contenedor sigue siendo buscable para quien lo busca a propósito.
+                            f"{_owner_name_expr()} ILIKE %s",
                             *(["COALESCE(c.alias_interno,'') ILIKE %s"] if has_customer_alias else []),
                             "COALESCE(b.nombre,'') ILIKE %s",
                             "COALESCE(m.nombre,'') ILIKE %s",
@@ -3512,7 +4814,7 @@ class GeneralEquiposView(APIView):
                         wh.append("(" + " OR ".join(clauses) + ")")
                         if m_os:
                             params.append(int(m_os.group(1)))
-                        params.extend([like] * (10 + (1 if has_customer_alias else 0)) + [like_ns, like_ns])
+                        params.extend([like] * (11 + (1 if has_customer_alias else 0)) + [like_ns, like_ns])
                         if has_mg_sale_extended:
                             params.extend([like, like_ns])
 
@@ -3528,11 +4830,14 @@ class GeneralEquiposView(APIView):
                 else:
                     wh.append("t.id::text ILIKE %s")
                     params.append(f"%{os_raw}%")
-            if _has_table_column("customers", "alias_interno") and cliente_raw:
-                wh.append("(COALESCE(c.razon_social,'') ILIKE %s OR COALESCE(c.alias_interno,'') ILIKE %s)")
-                params.extend([f"%{cliente_raw}%", f"%{cliente_raw}%"])
-            else:
-                _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
+            if cliente_raw:
+                # El filtro de la columna Cliente busca por lo que la columna muestra: el
+                # dueño real, y también el contenedor y el alias.
+                partes = ["COALESCE(c.razon_social,'') ILIKE %s", f"{_owner_name_expr()} ILIKE %s"]
+                if _has_table_column("customers", "alias_interno"):
+                    partes.append("COALESCE(c.alias_interno,'') ILIKE %s")
+                wh.append("(" + " OR ".join(partes) + ")")
+                params.extend([f"%{cliente_raw}%"] * len(partes))
             _apply_ilike("COALESCE(m.tipo_equipo,'')", tipo_equipo_raw)
             _apply_ilike("COALESCE(b.nombre,'')", marca_raw)
             _apply_ilike("COALESCE(m.nombre,'')", modelo_raw)
@@ -3558,7 +4863,8 @@ class GeneralEquiposView(APIView):
             sort_direction = "DESC" if sort_raw.startswith("-") else "ASC"
             sort_map = {
                 "os": "t.id",
-                "cliente": "NULLIF(LOWER(COALESCE(c.razon_social,'')), '')",
+                # Ordena por el nombre que se ve en la columna, no por el del contenedor.
+                "cliente": f"NULLIF(LOWER({_customer_search_expr()}), '')",
                 "tipo": "NULLIF(LOWER(COALESCE(m.tipo_equipo,'')), '')",
                 "marca": "NULLIF(LOWER(COALESCE(b.nombre,'')), '')",
                 "modelo": "NULLIF(LOWER(COALESCE(m.nombre,'')), '')",
@@ -3592,6 +4898,7 @@ class GeneralEquiposView(APIView):
                   q.fecha_emitido AS presupuesto_fecha_emision,
                   COALESCE(loc.nombre,'') AS ubicacion_nombre,
                   c.id AS customer_id, c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -3630,6 +4937,9 @@ class GeneralEquiposView(APIView):
         for row in rows:
             row.update(resolve_mg_flags(row, mg_owner_id))
             row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
+        # Antes de paginar: las filas borradas del histórico no tienen ingreso vivo y
+        # el helper las deja en `derivacion_activa=False` sin romper.
+        attach_active_derivations(rows)
         # compat: si no hay paginación pedida, seguir devolviendo lista
         if page_size == 0:
             return Response(rows)
@@ -3710,6 +5020,7 @@ class GeneralEquiposExportView(APIView):
         }
 
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
         has_mg_sale_extended = _has_mg_sale_extended_schema()
         with connection.cursor() as cur:
             _set_audit_user(request)
@@ -3793,6 +5104,9 @@ class GeneralEquiposExportView(APIView):
                         clauses.extend([
                             "t.id::text ILIKE %s",
                             "COALESCE(c.razon_social,'') ILIKE %s",
+                            # El dueño va además de la razón social, no en su lugar: el
+                            # contenedor sigue siendo buscable para quien lo busca a propósito.
+                            f"{_owner_name_expr()} ILIKE %s",
                             *(["COALESCE(c.alias_interno,'') ILIKE %s"] if has_customer_alias else []),
                             "COALESCE(b.nombre,'') ILIKE %s",
                             "COALESCE(m.nombre,'') ILIKE %s",
@@ -3813,7 +5127,7 @@ class GeneralEquiposExportView(APIView):
                         wh.append("(" + " OR ".join(clauses) + ")")
                         if m_os:
                             params.append(int(m_os.group(1)))
-                        params.extend([like] * (10 + (1 if has_customer_alias else 0)) + [like_ns, like_ns])
+                        params.extend([like] * (11 + (1 if has_customer_alias else 0)) + [like_ns, like_ns])
                         if has_mg_sale_extended:
                             params.extend([like, like_ns])
 
@@ -3830,11 +5144,14 @@ class GeneralEquiposExportView(APIView):
                     wh.append("t.id::text ILIKE %s")
                     params.append(f"%{os_raw}%")
 
-            if _has_table_column("customers", "alias_interno") and cliente_raw:
-                wh.append("(COALESCE(c.razon_social,'') ILIKE %s OR COALESCE(c.alias_interno,'') ILIKE %s)")
-                params.extend([f"%{cliente_raw}%", f"%{cliente_raw}%"])
-            else:
-                _apply_ilike("COALESCE(c.razon_social,'')", cliente_raw)
+            if cliente_raw:
+                # El filtro de la columna Cliente busca por lo que la columna muestra: el
+                # dueño real, y también el contenedor y el alias.
+                partes = ["COALESCE(c.razon_social,'') ILIKE %s", f"{_owner_name_expr()} ILIKE %s"]
+                if _has_table_column("customers", "alias_interno"):
+                    partes.append("COALESCE(c.alias_interno,'') ILIKE %s")
+                wh.append("(" + " OR ".join(partes) + ")")
+                params.extend([f"%{cliente_raw}%"] * len(partes))
             _apply_ilike("COALESCE(m.tipo_equipo,'')", tipo_equipo_raw)
             _apply_ilike("COALESCE(b.nombre,'')", marca_raw)
             _apply_ilike("COALESCE(m.nombre,'')", modelo_raw)
@@ -3860,6 +5177,7 @@ class GeneralEquiposExportView(APIView):
                   t.id, t.estado, t.presupuesto_estado, t.fecha_ingreso, ev_lib.fecha_liberacion, t.fecha_entrega, t.ubicacion_id,
                   COALESCE(loc.nombre,'') AS ubicacion_nombre,
                   c.id AS customer_id, c.razon_social,
+                  {owner_list_sql}
                   d.numero_serie,
                   COALESCE(d.numero_interno,'') AS numero_interno,
                   {mg_list_sql}
@@ -3916,7 +5234,7 @@ class GeneralEquiposExportView(APIView):
         for r in rows:
             ws.append([
                 os_label(r.get("id")),
-                r.get("razon_social") or "-",
+                _ingreso_customer_label(r) or "-",
                 r.get("tipo_equipo") or "-",
                 r.get("marca") or "-",
                 r.get("modelo") or "-",
@@ -4635,6 +5953,7 @@ class PendientesGeneralView(APIView):
         tecnico_raw = (request.GET.get("tecnico_id") or "").strip()
         tecnico_filter = tecnico_raw.lower()
         mg_list_sql = _mg_list_select_sql()
+        owner_list_sql = _owner_list_select_sql()
 
         with connection.cursor() as cur:
             _set_audit_user(request)
@@ -4647,6 +5966,7 @@ class PendientesGeneralView(APIView):
                        t.presupuesto_estado,
                        t.motivo,
                        c.razon_social,
+                       {owner_list_sql}
                        d.numero_serie,
                        COALESCE(d.numero_interno,'') AS numero_interno,
                        {mg_list_sql}
@@ -4675,7 +5995,7 @@ class PendientesGeneralView(APIView):
                 ) ed ON ed.ingreso_id = t.id AND ed.rn = 1
                 WHERE LOWER(loc.nombre) = LOWER(%s)
                   AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
-            """.format(mg_list_sql=mg_list_sql)
+            """.format(mg_list_sql=mg_list_sql, owner_list_sql=owner_list_sql)
             params = ["taller"]
             if tecnico_raw.isdigit():
                 sql += " AND t.asignado_a = %s"
@@ -4697,6 +6017,7 @@ class PendientesGeneralView(APIView):
             row.update(resolve_mg_flags(row, mg_owner_id))
             row["es_cliente_mg_owner"] = bool(row.get("es_propietario_mg"))
 
+        attach_active_derivations(rows)
         return Response(IngresoListItemSerializer(rows, many=True).data)
 
 
@@ -5743,14 +7064,17 @@ class NuevoIngresoView(APIView):
 
         auto_gar_rep = False
         last_out_candidates = []
+        salida_expr = _salida_taller_expr("t")
+        salida_join = _salida_taller_lateral_sql("t")
         if numero_serie:
             row_last_ns = q(
-                """
-                SELECT MAX(t.fecha_entrega) AS last_out
+                f"""
+                SELECT MAX({salida_expr}) AS last_out
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
+                  {salida_join}
                  WHERE d.numero_serie = %s
-                   AND t.fecha_entrega IS NOT NULL
+                   AND {salida_expr} IS NOT NULL
                 """,
                 [numero_serie],
                 one=True,
@@ -5760,12 +7084,13 @@ class NuevoIngresoView(APIView):
                 last_out_candidates.append(last_ns)
         if numero_interno:
             row_mg = q(
-                """
-                SELECT MAX(t.fecha_entrega) AS last_out
+                f"""
+                SELECT MAX({salida_expr}) AS last_out
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
+                  {salida_join}
                  WHERE d.numero_interno = %s
-                   AND t.fecha_entrega IS NOT NULL
+                   AND {salida_expr} IS NOT NULL
                 """,
                 [numero_interno],
                 one=True,
@@ -6260,15 +7585,18 @@ class GarantiaReparacionCheckView(APIView):
         """
 
         last_out_candidates = []
+        salida_expr = _salida_taller_expr("t")
+        salida_join = _salida_taller_lateral_sql("t")
         if ns:
             row_ns = q(
                 f"""
-                SELECT MAX(t.fecha_entrega) AS last_out
+                SELECT MAX({salida_expr}) AS last_out
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
                   LEFT JOIN models m ON m.id = d.model_id
+                  {salida_join}
                  WHERE d.numero_serie = %s
-                   AND t.fecha_entrega IS NOT NULL
+                   AND {salida_expr} IS NOT NULL
                    {tipo_filter_sql}
                 """,
                 [ns, tipo_key, tipo_key],
@@ -6281,12 +7609,13 @@ class GarantiaReparacionCheckView(APIView):
         if mg:
             row_mg = q(
                 f"""
-                SELECT MAX(t.fecha_entrega) AS last_out
+                SELECT MAX({salida_expr}) AS last_out
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
                   LEFT JOIN models m ON m.id = d.model_id
+                  {salida_join}
                  WHERE d.numero_interno = %s
-                   AND t.fecha_entrega IS NOT NULL
+                   AND {salida_expr} IS NOT NULL
                    {tipo_filter_sql}
                 """,
                 [mg, tipo_key, tipo_key],
@@ -6395,9 +7724,11 @@ def _can_read_ingreso_detail(request, ingreso_id: int) -> bool:
 
 def _bejerman_status_deposit_names(client: BejermanSDKClient) -> dict[str, str]:
     try:
-        response = client.obtener_depositos()
+        response = cached_deposit_response(client)
     except Exception:
-        return {}
+        # Los nombres son decoración del panel: si Bejerman no contesta se
+        # muestran los códigos y el resto del estado igual se arma.
+        response = last_good_deposit_response(getattr(client, "company_key", "")) or {}
     names: dict[str, str] = {}
     for record in records_from_response(response):
         code = as_string(first_value(record, BEJERMAN_STATUS_DEPOSIT_CODE_FIELDS)).upper()
@@ -6870,6 +8201,13 @@ class IngresoDetalleView(APIView):
                     row["serial_cambio"] = (sc[0] if sc else None)
         except Exception:
             pass
+        # Datos completos del cambio de equipo: qué se entregó y qué destino tiene el que
+        # quedó acá. `serial_cambio` de arriba queda como snapshot para los cambios viejos.
+        try:
+            row["cambio_equipo"] = get_ingreso_device_swap(row["id"])
+        except Exception:
+            logger.exception("No se pudo leer el cambio de equipo", extra={"ingreso_id": row.get("id")})
+            row["cambio_equipo"] = None
         try:
             if has_rejected_budget_charge_schema():
                 row.update(get_stored_rejected_budget_fields(row["id"]))
@@ -6882,17 +8220,34 @@ class IngresoDetalleView(APIView):
         # Si está en garantía de reparación, traer trabajos realizados del último servicio entregado
         if row.get("garantia_reparacion"):
             try:
+                salida_expr = _salida_taller_expr("t")
+                # "El último servicio" es la última REPARACIÓN anterior a ésta. Se saltean los
+                # alquileres, ventas, bajas y los "no se reparó": el técnico mira este texto
+                # para decidir si la falla nueva la cubre el trabajo anterior, y un ingreso sin
+                # reparación no le dice nada.
+                # El orden va por cuándo entró el ingreso y no por cuándo se registró la salida:
+                # una entrega cargada tarde no puede convertir a un servicio posterior en "el
+                # anterior".
+                orden_t = "COALESCE(t.fecha_ingreso, t.fecha_creacion)"
+                orden_cur = "COALESCE(cur.fecha_ingreso, cur.fecha_creacion)"
                 prev = q(
-                    """
-                    SELECT id, trabajos_realizados
-                      FROM ingresos
-                     WHERE device_id = %s
-                       AND fecha_entrega IS NOT NULL
-                       AND id <> %s
-                     ORDER BY fecha_entrega DESC, id DESC
+                    f"""
+                    SELECT t.id, t.trabajos_realizados
+                      FROM ingresos t
+                      JOIN ingresos cur ON cur.id = %s
+                      {_salida_taller_lateral_sql("t")}
+                     WHERE t.device_id = cur.device_id
+                       AND t.id <> cur.id
+                       AND t.resolucion::text = 'reparado'
+                       AND {salida_expr} IS NOT NULL
+                       AND (
+                            {orden_t} < {orden_cur}
+                         OR ({orden_t} = {orden_cur} AND t.id < cur.id)
+                       )
+                     ORDER BY {orden_t} DESC, t.id DESC
                      LIMIT 1
                     """,
-                    [row.get("device_id"), row.get("id")],
+                    [row.get("id")],
                     one=True,
                 )
             except Exception:
@@ -6997,10 +8352,15 @@ class IngresoDetalleView(APIView):
             row["baja_solicitada_motivo"] = ""
             row["baja_solicitada_fecha"] = None
         event_hitos = _ingreso_event_date_hitos(ingreso_id)
+        quote_hitos = _ingreso_quote_date_hitos(ingreso_id)
         row["fechas_hitos"] = {
             "fecha_creacion": row.get("fecha_creacion"),
             "fecha_ingreso": row.get("fecha_ingreso"),
-            "fecha_diagnosticado": event_hitos.get("fecha_diagnosticado"),
+            # `fecha_servicio` se auto-setea en la transición ingresado -> diagnosticado y es
+            # editable a mano en la pestaña Diagnóstico: es el dato que el taller realmente
+            # carga, así que manda sobre el evento cuando existe.
+            "fecha_diagnosticado": row.get("fecha_servicio") or event_hitos.get("fecha_diagnosticado"),
+            "fecha_presupuestado": quote_hitos.get("fecha_presupuestado"),
             "fecha_reparado": event_hitos.get("fecha_reparado"),
             "fecha_liberacion": event_hitos.get("fecha_liberacion"),
             "fecha_servicio": row.get("fecha_servicio"),
@@ -7009,6 +8369,7 @@ class IngresoDetalleView(APIView):
             "fecha_venta_mg": row.get("mg_venta_fecha"),
             "fecha_baja_solicitada": row.get("baja_solicitada_fecha"),
         }
+        attach_active_derivations(row)
         return Response(IngresoDetailWithAccesoriosSerializer(row).data)
 
     def patch(self, request, ingreso_id: int):
@@ -7037,6 +8398,11 @@ class IngresoDetalleView(APIView):
             "ubicacion_id", "accesorios", "alquilado", "alquiler_a", "alquiler_remito", "alquiler_fecha",
         }
         delivery_fields = {"remito_salida", "factura_numero", "fecha_entrega"}
+
+        if any(k in d for k in delivery_fields):
+            derivacion_activa = get_active_derivation(ingreso_id)
+            if derivacion_activa:
+                return Response(active_derivation_block_payload(derivacion_activa), status=409)
 
         if any(k in d for k in basic_fields):
             require_permission(request, "action.ingreso.edit_basics")
@@ -7493,6 +8859,13 @@ class IngresoDetalleView(APIView):
                     params_all = list(params_tmp) + [ingreso_id]
                     q(f"UPDATE ingresos SET {', '.join(sets_tmp)} WHERE id=%s", params_all)
                 q("UPDATE ingresos SET estado='diagnosticado' WHERE id=%s AND estado='ingresado'", [ingreso_id])
+            registrar_ingreso_event(
+                ingreso_id,
+                "diagnosticado",
+                de_estado="ingresado",
+                usuario_id=sync_actor_id,
+                comentario="Diagnóstico cargado desde la hoja de servicio",
+            )
             if should_sync_preventivo:
                 sync_result = sync_plan_from_ingreso_fecha_servicio(ingreso_id, sync_actor_id)
                 if (sync_result or {}).get("status") == "error":
@@ -7507,6 +8880,14 @@ class IngresoDetalleView(APIView):
             return Response({"ok": True})
         params_no_estado.append(ingreso_id)
         q(f"UPDATE ingresos SET {', '.join(sets_no_estado)} WHERE id=%s", params_no_estado)
+        if promote_from_asignado:
+            registrar_ingreso_event(
+                ingreso_id,
+                "diagnosticado",
+                de_estado="asignado",
+                usuario_id=sync_actor_id,
+                comentario="Diagnóstico cargado desde la hoja de servicio",
+            )
         if should_sync_preventivo:
             sync_result = sync_plan_from_ingreso_fecha_servicio(ingreso_id, sync_actor_id)
             if (sync_result or {}).get("status") == "error":
@@ -7535,12 +8916,23 @@ class MarcarControladoSinDefectoView(APIView):
             if _rol(request) in ("tecnico", "jefe_veedor"):
                 raise PermissionDenied("Solo el técnico asignado puede marcar como controlado")
 
+        _prev_estado = _estado_actual_txt(ingreso_id)
         _set_audit_user(request)
         # Forzar estado y presupuesto_estado
-        exec_void(
-            "UPDATE ingresos SET estado='controlado_sin_defecto', resolucion='no_se_encontro_falla', presupuesto_estado='no_aplica' WHERE id=%s",
-            [ingreso_id],
+        sets = sets_con_limpieza_de_cambio(
+            "estado='controlado_sin_defecto'",
+            "resolucion='no_se_encontro_falla'",
+            "presupuesto_estado='no_aplica'",
         )
+        exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
+        if _prev_estado != "controlado_sin_defecto":
+            registrar_ingreso_event(
+                ingreso_id,
+                "controlado_sin_defecto",
+                de_estado=_prev_estado,
+                usuario_id=getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None),
+                comentario="Marcado como controlado sin defecto",
+            )
 
         auto_moved = False
         auto_moved_to = None
@@ -7752,12 +9144,12 @@ class QuitarEstadoFinalReparacionView(APIView):
         estado_next, _estado_transition = _estado_previo_a_estado(ingreso_id, estado_cur)
         presupuesto_next = "aprobado" if presupuesto_cur == "no_aplica" and _latest_quote_is_approved(ingreso_id) else presupuesto_actual
         _set_audit_user(request)
+        # Al anular la resolución hay que soltar también el cambio de equipo: si no, la OS
+        # queda arrastrando la serie de un cambio que ya no existe.
         exec_void(
-            """
+            f"""
             UPDATE ingresos
-               SET estado=%s,
-                   resolucion=NULL,
-                   presupuesto_estado=%s
+               SET {sets_con_limpieza_de_cambio('estado=%s', 'resolucion=NULL', 'presupuesto_estado=%s')}
              WHERE id=%s
             """,
             [estado_next, presupuesto_next, ingreso_id],
@@ -7811,11 +9203,22 @@ class MarcarNoSeReparaView(APIView):
                 raise PermissionDenied("Solo el técnico asignado puede marcar como no se repara")
             raise
 
+        _prev_estado = _estado_actual_txt(ingreso_id)
         _set_audit_user(request)
-        exec_void(
-            "UPDATE ingresos SET estado='no_se_repara', resolucion='no_reparado', presupuesto_estado='no_aplica' WHERE id=%s",
-            [ingreso_id],
+        sets = sets_con_limpieza_de_cambio(
+            "estado='no_se_repara'",
+            "resolucion='no_reparado'",
+            "presupuesto_estado='no_aplica'",
         )
+        exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
+        if _prev_estado != "no_se_repara":
+            registrar_ingreso_event(
+                ingreso_id,
+                "no_se_repara",
+                de_estado=_prev_estado,
+                usuario_id=getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None),
+                comentario="Marcado como no se repara",
+            )
 
         # El equipo ya no vuelve al banco: sólo falta la orden de salida.
         try:
@@ -7867,4 +9270,3 @@ __all__ = [
     'IngresoHistorialView',
     'CerrarReparacionView',
 ]
-

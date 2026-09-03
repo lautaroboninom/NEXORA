@@ -89,6 +89,56 @@ class BejermanSdkUnavailable(BejermanSdkError):
     pass
 
 
+class BejermanSdkTransportUnavailable(BejermanSdkUnavailable):
+    """El pedido no llegó a ejecutarse: el servicio no estaba en pie.
+
+    Se distingue del resto de las fallas de red porque no deja ningún efecto en
+    Bejerman (no se abrió la operación del SDK) y porque suele durar segundos,
+    así que es la única que se puede repetir sola sin arriesgar un duplicado.
+    """
+
+
+# `requests.ConnectionError` tapa dos situaciones muy distintas: que la conexión no se
+# haya podido abrir (servicio caído, DNS, puerto cerrado) y que se haya cortado con el
+# pedido **ya en vuelo**. Sólo la primera permite afirmar que la operación no se ejecutó.
+# La segunda puede dejar un comprobante emitido del otro lado, y tratarla como "no pasó
+# nada" hace que se le diga al operador que reintente una emisión que quizá ya entró.
+_IN_FLIGHT_CONNECTION_MARKERS = (
+    "connection aborted",
+    "connection reset",
+    "remotedisconnected",
+    "remote end closed connection",
+    "response ended prematurely",
+    "broken pipe",
+)
+
+
+def _connection_error_was_in_flight(exc: BaseException) -> bool:
+    """¿El corte ocurrió con el pedido ya mandado?
+
+    Se recorre toda la cadena: requests envuelve el error de urllib3 en `args[0]`, no
+    siempre en `__cause__`. Ante la duda devuelve False, que es el comportamiento
+    histórico (reintentable); lo que se busca acá es reconocer los cortes que sí
+    pudieron dejar efecto.
+    """
+    seen: set[int] = set()
+    pending: list[Any] = [exc]
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (ConnectionResetError, BrokenPipeError)):
+            return True
+        texto = str(current).lower()
+        if any(marker in texto for marker in _IN_FLIGHT_CONNECTION_MARKERS):
+            return True
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+        pending.extend(getattr(current, "args", ()))
+    return False
+
+
 class BejermanSdkResponseError(BejermanSdkError):
     pass
 
@@ -185,6 +235,48 @@ _SDK_RETRYABLE_OPERATIONS = {
 def is_bejerman_sdk_race_message(value: Any) -> bool:
     text = remove_accents(as_string(value)).lower()
     return any(marker in text for marker in _SDK_RACE_MARKERS)
+
+
+# El SDK corre como servicio WCF bajo IIS. Cuando el pool se recicla, se queda
+# sin memoria o el host no llega a activarse, IIS contesta un HTTP 500 con
+# `System.ServiceModel.ServiceActivationException` (a veces un 502/503/504 del
+# proxy) *antes* de instanciar el servicio: el pedido nunca se ejecutó. Son
+# fallas de segundos y la única respuesta razonable es reintentar sola.
+_TRANSPORT_TRANSIENT_MARKERS = (
+    "serviceactivationexception",
+    "servertoobusyexception",
+    "serverbusyexception",
+    "service unavailable",
+    "servicio no disponible",
+    "the service is unavailable",
+    "bad gateway",
+    "gateway timeout",
+)
+
+# 502/504 los devuelve un intermediario que nunca entregó el pedido; 503 es el
+# propio IIS avisando que no puede atender. Ninguno llegó a la lógica del SDK.
+_TRANSPORT_TRANSIENT_STATUSES = frozenset({502, 503, 504})
+
+
+def is_bejerman_transport_transient_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _TRANSPORT_TRANSIENT_MARKERS)
+
+
+def is_transient_http_failure(status_code: Any, body: Any = "") -> bool:
+    """Si esa respuesta HTTP es un servicio caído y no un rechazo de Bejerman.
+
+    Un 500 a secas puede ser un error de negocio devuelto como fault, así que
+    sólo cuenta como transitorio cuando el cuerpo nombra una falla de
+    activación o de saturación del host."""
+
+    try:
+        status = int(status_code)
+    except (TypeError, ValueError):
+        return False
+    if status in _TRANSPORT_TRANSIENT_STATUSES:
+        return True
+    return status >= 500 and is_bejerman_transport_transient_message(as_string(body)[:2000])
 
 
 # La consulta interna de WSListarComprobantesJSON está rota en algunas
@@ -286,6 +378,26 @@ def _sdk_race_retry_delay_ms() -> int:
     except (TypeError, ValueError):
         return 1200
     return value if value >= 0 else 1200
+
+
+def _sdk_transport_retry_attempts() -> int:
+    try:
+        value = int(_setting("BEJERMAN_SDK_TRANSPORT_RETRY_ATTEMPTS", 2))
+    except (TypeError, ValueError):
+        return 2
+    return value if value >= 0 else 2
+
+
+def _sdk_transport_retry_delay_ms() -> int:
+    try:
+        value = int(_setting("BEJERMAN_SDK_TRANSPORT_RETRY_DELAY_MS", 700))
+    except (TypeError, ValueError):
+        return 700
+    return value if value >= 0 else 700
+
+
+def is_retryable_sdk_operation(operacion: Any) -> bool:
+    return _clean(operacion).upper() in _SDK_RETRYABLE_OPERATIONS
 
 
 def is_bejerman_success_message(value: Any) -> bool:
@@ -530,7 +642,14 @@ class BejermanSDKClient:
             return resolve_user_bejerman_workstation(int(self.actor_user_id))
         return _clean(_setting("BEJERMAN_WORKSTATION")) or _clean(_setting("BEJERMAN_SERVICE_WORKSTATION"))
 
-    def _post(self, action: str, body: str) -> dict[str, str]:
+    def _post(self, action: str, body: str, *, retry_transport: bool = False) -> dict[str, str]:
+        """Manda el sobre SOAP; con `retry_transport` repite si el servicio no estaba en pie.
+
+        El reintento se pide explícitamente y sólo para operaciones sin efecto
+        (ver `_SDK_RETRYABLE_OPERATIONS` y `register`): repetir una emisión a
+        ciegas podría duplicar un comprobante.
+        """
+
         if not self.endpoint_url:
             raise BejermanSdkConfigError("BEJERMAN_WSDL_URL requerido")
         envelope = (
@@ -538,6 +657,21 @@ class BejermanSDKClient:
             f"<s:Body>{body}</s:Body>"
             "</s:Envelope>"
         )
+        retries = _sdk_transport_retry_attempts() if retry_transport else 0
+        for attempt in range(retries + 1):
+            try:
+                return self._post_once(action, envelope)
+            except BejermanSdkTransportUnavailable as exc:
+                if attempt >= retries:
+                    raise
+                logger.info(
+                    "bejerman_sdk_transport_retry",
+                    extra={"bejerman_action": action, "attempt": attempt + 1, "error": str(exc)[:300]},
+                )
+                time.sleep(_sdk_transport_retry_delay_ms() * (attempt + 1) / 1000)
+        raise BejermanSdkUnavailable("Bejerman no respondió al pedido SOAP")  # inalcanzable
+
+    def _post_once(self, action: str, envelope: str) -> dict[str, str]:
         try:
             response = self._http.post(
                 self.endpoint_url,
@@ -545,6 +679,17 @@ class BejermanSDKClient:
                 headers={"Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": action},
                 timeout=self.timeout,
             )
+        except requests.ConnectionError as exc:
+            # No se llegó a mandar el cuerpo (host caído, conexión cortada al
+            # abrir). Un timeout de lectura no entra acá a propósito: ahí el
+            # pedido sí viajó y repetirlo alarga la espera del usuario.
+            #
+            # Un reset con el pedido en vuelo también llega como ConnectionError, y ese
+            # NO se puede dar por no ejecutado: se degrada a la falla genérica para no
+            # invitar a reintentar una emisión que quizá entró.
+            if _connection_error_was_in_flight(exc):
+                raise BejermanSdkUnavailable(f"Error HTTP Bejerman: {exc}") from exc
+            raise BejermanSdkTransportUnavailable(f"Error HTTP Bejerman: {exc}") from exc
         except requests.RequestException as exc:
             raise BejermanSdkUnavailable(f"Error HTTP Bejerman: {exc}") from exc
         try:
@@ -552,7 +697,10 @@ class BejermanSDKClient:
         except BejermanSdkUnavailable as exc:
             if not response.ok:
                 detail = _response_snippet(response.text) or response.reason or "sin detalle SOAP"
-                raise BejermanSdkUnavailable(f"Error HTTP Bejerman {response.status_code}: {detail}") from exc
+                message = f"Error HTTP Bejerman {response.status_code}: {detail}"
+                if is_transient_http_failure(response.status_code, response.text):
+                    raise BejermanSdkTransportUnavailable(message) from exc
+                raise BejermanSdkUnavailable(message) from exc
             raise
         if not response.ok:
             error = (
@@ -562,6 +710,8 @@ class BejermanSDKClient:
                 or response.reason
                 or "sin detalle SOAP"
             )
+            if is_transient_http_failure(response.status_code, f"{error} {response.text}"):
+                raise BejermanSdkTransportUnavailable(f"Error HTTP Bejerman {response.status_code}: {error}")
             raise BejermanSdkResponseError(f"HTTP {response.status_code} Bejerman: {error}")
         if not is_ok_response(parsed):
             error = parsed.get("ErrorMsg") or parsed.get("Fault") or parsed.get("Resultado") or "Respuesta no OK de Bejerman"
@@ -582,7 +732,10 @@ class BejermanSDKClient:
             f"<xCodSucursal>{escape(_clean(_setting('BEJERMAN_BRANCH')))}</xCodSucursal>"
             "</EFlexSDK_WSRegistro>"
         )
-        response = self._post(REGISTRO_ACTION, body)
+        # El registro es la primera llamada de cada cliente y la que se come el
+        # host recién reciclado. No toca datos —sólo pide un token—, así que
+        # siempre se puede repetir.
+        response = self._post(REGISTRO_ACTION, body, retry_transport=True)
         token = _clean(response.get("Token"))
         if not token:
             raise BejermanSdkResponseError("Bejerman no devolvió token")
@@ -590,7 +743,7 @@ class BejermanSDKClient:
         return token
 
     def execute(self, circuito: str, operacion: str, *, params: list[Any] | None = None, params_json: Any = None) -> dict[str, str]:
-        retries = _sdk_race_retry_attempts() if _clean(operacion).upper() in _SDK_RETRYABLE_OPERATIONS else 0
+        retries = _sdk_race_retry_attempts() if is_retryable_sdk_operation(operacion) else 0
         for attempt in range(retries + 1):
             try:
                 return self._execute_once(circuito, operacion, params=params, params_json=params_json)
@@ -635,7 +788,7 @@ class BejermanSDKClient:
             "</xRequest>"
             "</EFlexSDK_WSEjecutar>"
         )
-        return self._post(EJECUTAR_ACTION, body)
+        return self._post(EJECUTAR_ACTION, body, retry_transport=is_retryable_sdk_operation(operacion))
 
     def list_comprobantes_ventas(self, filters: list[dict[str, Any]], en_mon_ext: str = "N") -> dict[str, str]:
         return self.execute("VENTAS", "WSListarComprobantesJSON", params_json=[_json_param(filters), en_mon_ext])

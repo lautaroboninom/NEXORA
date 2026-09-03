@@ -150,6 +150,15 @@ def _stock_baja_causa_emision() -> str:
     return str(_setting("BEJERMAN_STOCK_BAJA_CAUSA_EMISION", "DES") or "DES").strip() or "DES"
 
 
+def _stock_venta_target_deposit() -> str:
+    """Depósito al que va un equipo que pasó a ser nuestro y se destina a venta.
+
+    VAL es el depósito de ventas: es de donde sale un equipo vendido (el mismo del que
+    salen los equipos del cambio, ver `_swap_source_deposits`).
+    """
+    return str(_setting("BEJERMAN_STOCK_VENTA_TARGET_DEPOSIT", "VAL") or "VAL").strip() or "VAL"
+
+
 def _stock_alta_source_deposit() -> str:
     return str(_setting("BEJERMAN_STOCK_ALTA_SOURCE_DEPOSIT", "DES") or "DES").strip() or "DES"
 
@@ -1183,6 +1192,34 @@ def enqueue_demo_ready_transfer_for_ingreso(
         source_deposit=source_deposit,
         target_deposit=target_deposit,
         trigger="demo_lista_val",
+        ingreso_event_id=ingreso_event_id,
+        actor_user_id=actor_user_id,
+    )
+
+
+def enqueue_stock_venta_for_ingreso(
+    ingreso_id: int,
+    ingreso_event_id: int | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Mueve a VAL el equipo que quedó para SEPID y se destina a venta.
+
+    Es el destino 'venta' del cambio de equipo / parte de pago: el equipo ya pasó a nuestro
+    patrimonio y tiene que quedar en el depósito de ventas para poder venderlo.
+
+    Reusa el tipo de transferencia STR->VAL (el mismo de la demo lista para vender): el
+    origen declarado es STR porque el equipo entró como reparación, pero si Bejerman lo
+    tiene anotado en otro depósito (STC, típicamente, cuando la orden de salida ya se
+    imprimió) `_process_stock_transfer` descuenta del depósito real en vez de frenar.
+    """
+    source_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
+    target_deposit = _stock_venta_target_deposit()
+    return _enqueue_stock_job(
+        ingreso_id=ingreso_id,
+        sync_type=SYNC_TYPE_STOCK_STR_TO_VAL,
+        source_deposit=source_deposit,
+        target_deposit=target_deposit,
+        trigger="parte_de_pago_venta",
         ingreso_event_id=ingreso_event_id,
         actor_user_id=actor_user_id,
     )
