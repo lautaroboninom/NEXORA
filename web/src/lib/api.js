@@ -986,6 +986,11 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postBejermanJobRetry = (jobId) =>
     api.post(`/api/bejerman/jobs/${jobId}/retry/`, {});
 
+  // Cierra una operación que no puede terminar bien nunca (tipo sin implementación,
+  // movimiento que alguien ya hizo a mano en Bejerman). El motivo es obligatorio.
+  export const postBejermanJobCancel = (jobId, reason) =>
+    api.post(`/api/bejerman/jobs/${jobId}/cancel/`, { reason });
+
   export const getBejermanPdfQueueStatus = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/bejerman/pdf-queue/status/${qs ? `?${qs}` : ""}`);

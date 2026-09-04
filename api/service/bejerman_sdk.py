@@ -199,6 +199,11 @@ def parse_soap_response(xml_text: str) -> dict[str, str]:
 
 
 def is_ok_response(response: dict[str, Any]) -> bool:
+    # `Resultado` manda: un ERROR con un texto que suena a éxito no alcanza para
+    # dar el comprobante por emitido (lo fija
+    # test_sdk_acepta_aviso_de_importacion_correcta_como_ok). Pero tampoco es un
+    # rechazo limpio: ver `is_bejerman_imported_but_not_ok`, que es lo que manda
+    # esos casos a revisión en vez de darlos por fallados.
     resultado = _clean(response.get("Resultado")).upper()
     error = _clean(response.get("ErrorMsg"))
     return resultado.startswith("OK") and (not error or is_bejerman_success_message(error))
@@ -341,6 +346,56 @@ def is_bejerman_stock_insuficiente_message(value: Any) -> bool:
     return any(marker in text for marker in _STOCK_INSUFICIENTE_MARKERS)
 
 
+# Bejerman rechaza el comprobante porque ya lo tiene. Dicho de otro modo: el
+# estado que queríamos alcanzar ya está. Tratarlo como fallo es lo que deja
+# procesos reintentándose para siempre contra una pared que en realidad es la
+# meta — y, peor, invita a emitir un duplicado "para destrabarlo".
+#
+# Aparece con dos textos distintos:
+#   - "El comprobante no se importó debido a que ya existe en la empresa."
+#     (comprobantes de venta con número manual: RIS/RDA en modo `register`)
+#   - "El mismo ya existe en la empresa debido a una importación anterior."
+#     (importador de stock: dedupe por `Comprobante_IdOrigen`)
+_ALREADY_IMPORTED_MARKERS = (
+    "ya existe en la empresa",
+    "importacion anterior",
+    "ya fue importado",
+    "ya ha sido importado",
+)
+
+
+def is_bejerman_already_imported_message(value: Any) -> bool:
+    text = remove_accents(as_string(value)).lower()
+    return any(marker in text for marker in _ALREADY_IMPORTED_MARKERS)
+
+
+# Rechazos que NEXORA levanta **armando** el comprobante, antes de que salga
+# ningún pedido al SDK: falta la situación de IVA en la ficha del cliente, el
+# código de vendedor no es válido, el artículo no está resuelto. Saber que son
+# previos al envío importa para una sola cosa, pero central: con estos
+# comprobantes Bejerman nunca se enteró de nada, así que el intento se puede
+# cerrar sin miedo a estar tapando un remito emitido.
+_LOCAL_PRECHECK_FAILURE_CODES = (
+    "BEJERMAN_CUSTOMER_NOT_FOUND",
+    "BEJERMAN_CUSTOMER_VAT_MISSING",
+    "BEJERMAN_CUSTOMER_DOCUMENT_TYPE_MISSING",
+    "BEJERMAN_CUSTOMER_DOCUMENT_MISSING",
+    "BEJERMAN_OCCASIONAL_CUSTOMER_NAME_MISSING",
+    "BEJERMAN_OCCASIONAL_CUSTOMER_DOCUMENT_MISSING",
+    "INVALID_SELLER_CODE",
+    "INVALID_SELLER_CODE_LENGTH",
+    "SERVICE_INGRESS_ARTICLE_REQUIRED",
+    "DELIVERY_ORDERS_REQUIRED",
+    "INCOMPATIBLE_DELIVERY_REMITO_CURRENCY",
+    "DELIVERY_REMITO_EXCHANGE_RATE_REQUIRED",
+)
+
+
+def is_bejerman_local_precheck_failure(value: Any) -> bool:
+    text = as_string(value).upper()
+    return any(code in text for code in _LOCAL_PRECHECK_FAILURE_CODES)
+
+
 # Mismo defecto de bloqueo de tablas que la "carrera expCuotasV" (ver
 # _SDK_RACE_MARKERS) pero con un texto de respuesta distinto: Bejerman
 # devuelve esto cuando el importador no pudo tomar el lock de la tabla
@@ -404,6 +459,25 @@ def is_bejerman_success_message(value: Any) -> bool:
     text = remove_accents(as_string(value)).lower()
     text = re.sub(r"\s+", " ", text).strip()
     return "comprobante se importo correctamente" in text
+
+
+def is_bejerman_imported_but_not_ok(response: dict[str, Any]) -> bool:
+    """Bejerman marcó la respuesta como error y en el mismo mensaje dice que el
+    comprobante entró.
+
+    Pasa con *"El comprobante se importó correctamente. La Fecha de
+    Contabilización se modificó ya que debe ser posterior a la del último cierre
+    del Libro IVA Ventas."*: la advertencia de la fecha ensucia el resultado
+    aunque el alta se hizo. No alcanza para dar el comprobante por emitido —el
+    número no viene— pero tratarlo como un fallo común es peor: el comprobante
+    queda vivo en Bejerman, invisible para NEXORA, y el siguiente intento lo
+    duplica. Es exactamente el caso que existe la revisión manual para atender
+    (OS 28884, 04/08/2026)."""
+
+    if is_ok_response(response):
+        return False
+    error = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado"))
+    return bool(error) and is_bejerman_success_message(error)
 
 
 def parse_json_maybe(raw: Any) -> Any:

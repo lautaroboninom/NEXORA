@@ -2,6 +2,7 @@ import logging
 import time
 
 from django.core.management.base import BaseCommand
+from django.db import close_old_connections
 
 from service.notification_email_outbox import (
     process_notification_email_outbox,
@@ -31,6 +32,11 @@ class Command(BaseCommand):
 
         self.stdout.write(f"Procesando cola de correos cada {interval} segundos.")
         while True:
+            # Reciclar la conexión antes de cada vuelta. Si Postgres se reinicia,
+            # Django deja la conexión rota marcada como rota y no la reemplaza solo
+            # fuera del ciclo de request: el worker quedaba vivo, con el contenedor
+            # en verde, tirando el mismo error para siempre y sin procesar nada.
+            close_old_connections()
             try:
                 result = process_notification_email_outbox(limit=limit)
                 if result["claimed"]:

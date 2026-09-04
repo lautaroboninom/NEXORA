@@ -338,7 +338,29 @@ def _mg_label(r):
         return "-"
 
 
+# Tipear "26" en vez de "2026" en el año da una fecha perfectamente parseable:
+# 0026-08-28. NEXORA la guardaba tal cual y después se la mandaba a Bejerman, que
+# contestaba "Se han detectado inconsistencias en el archivo de texto" — un mensaje
+# que no le dice a nadie que el problema es la fecha. Pasó con la OS 29664 (RDA de
+# ALCLA, 31/08/2026) y con la 29288. Ninguna fecha de este negocio cae fuera de esta
+# ventana, así que fuera de ella es un error de tipeo y hay que rechazarlo en la
+# puerta, no doce pasos más adelante.
+_MIN_PLAUSIBLE_YEAR = 1990
+_MAX_PLAUSIBLE_YEAR_AHEAD = 5
+
+
+def _year_is_plausible(year: int) -> bool:
+    return _MIN_PLAUSIBLE_YEAR <= int(year) <= timezone.localdate().year + _MAX_PLAUSIBLE_YEAR_AHEAD
+
+
 def _parse_datetime_or_date(value):
+    parsed = _parse_datetime_or_date_raw(value)
+    if parsed is not None and not _year_is_plausible(parsed.year):
+        return None
+    return parsed
+
+
+def _parse_datetime_or_date_raw(value):
     if value is None:
         return None
     if isinstance(value, datetime):

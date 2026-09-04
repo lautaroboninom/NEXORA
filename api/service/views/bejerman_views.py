@@ -34,6 +34,8 @@ from ..bejerman_sync import (
     SYNC_TYPE_STOCK_EXIT_RTS,
     apply_article_mapping_to_job,
     article_resolution_for_job_row,
+    cancel_sync_job,
+    is_supported_sync_type,
     article_context_for_ingreso,
     article_context_for_model,
     process_bejerman_jobs,
@@ -87,6 +89,9 @@ def _build_job_filters(params, *, include_status=True):
             """
             NOT (
               (j.status = 'succeeded' AND j.updated_at < NOW() - INTERVAL '7 days')
+              -- Una operación descartada ya fue decidida por una persona: sale de
+              -- la vista de trabajo pendiente y queda en el histórico.
+              OR (j.status = 'cancelled' AND j.updated_at < NOW() - INTERVAL '7 days')
               OR (
                 j.status IN ('failed', 'blocked')
                 AND (
@@ -227,6 +232,14 @@ REMITO_PROCESS_SUCCESS_RETENTION_DAYS = 7
 
 def _remito_process_is_archivable(row):
     status = str(row.get("status") or "").lower()
+    # Un proceso que ya se resolvió —lo cerró un operador como duplicado, o lo
+    # reemplazó un intento posterior— deja de ser trabajo pendiente aunque su
+    # `status` siga diciendo `failed_review`. Sin esto los dos procesos de la
+    # entrega de MARK, resueltos el 13/08/2026, seguían encabezando "Revisión
+    # requerida" tres semanas después, con sus cuatro botones deshabilitados y
+    # ninguna manera de sacarlos de la pantalla.
+    if _clean_filter(row.get("reviewState")) == "superseded":
+        return True
     if status in {"generated", "reconciled"}:
         reference = row.get("generated_at") or row.get("updated_at") or row.get("created_at")
         if not reference:
@@ -872,6 +885,20 @@ class BejermanJobsView(APIView):
             resolution = article_resolution_for_job_row(row)
             row["article_resolution"] = resolution
             row["article_mapping"] = resolution.get("mapping")
+            # Un job cuyo tipo no tiene implementacion no se destraba reintentando:
+            # el panel tiene que decirlo y ofrecer la unica salida real, descartarlo.
+            supported = is_supported_sync_type(row.get("sync_type"))
+            row["supported_sync_type"] = supported
+            row["retryable"] = supported and str(row.get("status") or "") in {"failed", "blocked", "pending"}
+            row["cancellable"] = str(row.get("status") or "") in {"failed", "blocked", "pending"}
+            row["unsupported_reason"] = (
+                ""
+                if supported
+                else (
+                    f"NEXORA no tiene ninguna implementación para «{row.get('sync_type')}». "
+                    "Reintentar vuelve a dar el mismo error: la salida es descartar la operación."
+                )
+            )
 
         counter_where, counter_params = _build_job_filters(request.GET, include_status=False)
         counter_sql = "WHERE " + " AND ".join(counter_where) if counter_where else ""
@@ -999,6 +1026,18 @@ class BejermanJobRetryView(APIView):
             if sync_type in LEGACY_BLOCKED_SYNC_TYPES:
                 detail = NEXORA_STOCK_ENTRY_MESSAGE if sync_type == SYNC_TYPE_STOCK_ENTRY_STR else PORTAL_STOCK_EXIT_MESSAGE
                 return Response({"detail": detail}, status=409)
+            if not is_supported_sync_type(sync_type):
+                return Response(
+                    {
+                        "detail": (
+                            f"NEXORA no tiene ninguna implementación para «{sync_type}», "
+                            "así que reintentar vuelve a dar el mismo error. "
+                            "Descarte la operación indicando el motivo."
+                        ),
+                        "code": "BEJERMAN_SYNC_TYPE_UNSUPPORTED",
+                    },
+                    status=409,
+                )
             # 'pending' entra a proposito: si el worker de sincronizacion no esta corriendo, el job
             # queda encolado para siempre y este es el unico modo de forzarlo desde el panel.
             if status not in ("failed", "blocked", "pending"):
@@ -1035,6 +1074,21 @@ class BejermanJobRetryView(APIView):
             cur.execute("SELECT id, status, attempts, last_error FROM bejerman_sync_jobs WHERE id=%s", [job_id])
             cols = [col[0] for col in cur.description]
             updated = dict(zip(cols, cur.fetchone()))
+        return Response(updated)
+
+
+class BejermanJobCancelView(APIView):
+    """Cierra un job que no puede terminar bien nunca, con motivo escrito."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, job_id: int):
+        require_permission(request, "action.bejerman_sync.manage")
+        reason = str((request.data or {}).get("reason") or "").strip()
+        try:
+            updated = cancel_sync_job(job_id, _actor_id(request), reason)
+        except BejermanBlockedError as exc:
+            return Response({"detail": str(exc)}, status=409)
         return Response(updated)
 
 

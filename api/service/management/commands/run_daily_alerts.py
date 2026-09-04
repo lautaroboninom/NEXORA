@@ -1,11 +1,14 @@
 import logging
 import os
 import time
-from datetime import datetime, time as daily_time, timedelta
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
+from django.db import close_old_connections
 from django.utils import timezone
+
+from service.daily_schedule import already_due_today, next_daily_run
+from service.daily_schedule import parse_daily_time as _parse_daily_time
 
 
 logger = logging.getLogger(__name__)
@@ -20,24 +23,8 @@ DAILY_ALERT_COMMANDS = (
 )
 
 
-def parse_daily_time(value: str) -> daily_time:
-    clean_value = str(value or "").strip()
-    try:
-        return datetime.strptime(clean_value, "%H:%M").time()
-    except ValueError as exc:
-        raise CommandError("DAILY_ALERTS_AT debe tener formato HH:MM.") from exc
-
-
-def next_daily_run(now: datetime, target_time: daily_time) -> datetime:
-    current_timezone = timezone.get_current_timezone()
-    local_now = timezone.localtime(now, current_timezone)
-    candidate = timezone.make_aware(
-        datetime.combine(local_now.date(), target_time),
-        current_timezone,
-    )
-    if candidate <= local_now:
-        candidate += timedelta(days=1)
-    return candidate
+def parse_daily_time(value: str):
+    return _parse_daily_time(value, setting_name="DAILY_ALERTS_AT")
 
 
 class Command(BaseCommand):
@@ -50,6 +37,12 @@ class Command(BaseCommand):
             help="Hora local de ejecución en formato HH:MM (predeterminado: 07:30).",
         )
         parser.add_argument("--once", action="store_true")
+        parser.add_argument(
+            "--no-catchup",
+            action="store_true",
+            dest="no_catchup",
+            help="No correr al arrancar aunque la hora de hoy ya haya pasado.",
+        )
         parser.add_argument(
             "--only",
             default="",
@@ -66,6 +59,12 @@ class Command(BaseCommand):
         return requested
 
     def _run_once(self, commands):
+        # Después de dormir horas, la conexión a Postgres puede estar muerta sin que
+        # nadie lo note: basta que se reinicie el contenedor de la base. Django sólo
+        # recicla conexiones en el ciclo de request, así que en un comando de consola
+        # la conexión rota se queda rota para siempre y el trabajo diario falla todos
+        # los días con el mismo error.
+        close_old_connections()
         for name in commands:
             try:
                 call_command(name, stdout=self.stdout, stderr=self.stderr)
@@ -73,6 +72,7 @@ class Command(BaseCommand):
                 # Un comando que falla no debe dejar sin correr a los otros dos.
                 logger.exception("Falló la alerta diaria", extra={"command": name})
                 self.stderr.write(f"Falló {name}; se sigue con el resto.")
+        close_old_connections()
 
     def handle(self, *args, **opts):
         target_time = parse_daily_time(opts["at"])
@@ -81,6 +81,14 @@ class Command(BaseCommand):
         if opts["once"]:
             self._run_once(commands)
             return
+
+        # Arrancar después de la hora dejaba el día entero sin alertas. Correrlas acá
+        # no duplica nada: las notificaciones se deduplican por día.
+        if not opts.get("no_catchup") and already_due_today(timezone.now(), target_time):
+            self.stdout.write(
+                f"El horario de hoy ({target_time.strftime('%H:%M')}) ya pasó: se corren las alertas ahora."
+            )
+            self._run_once(commands)
 
         while True:
             scheduled_at = next_daily_run(timezone.now(), target_time)

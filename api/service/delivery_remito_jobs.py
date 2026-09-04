@@ -48,6 +48,13 @@ TABLE_NAME = "delivery_remito_jobs"
 # operador que siga esperando: se lo manda a mirar el estado de la orden.
 STALE_SECONDS = 600
 
+# La ventana del barrido es más ancha que la que ve el operador, a propósito: la
+# pestaña deja de esperar a los 10 minutos, pero cerrar la fila es irreversible y el
+# hilo podría seguir vivo. A los 20 no queda nadie atrás. Si por algún motivo el hilo
+# todavía estuviera trabajando, su `_finish_ok`/`_finish_error` pisa esta fila después
+# y gana el resultado real.
+SWEEP_AFTER_SECONDS = STALE_SECONDS * 2
+
 
 class RemitoJobNotFound(DeliveryOrderError):
     def __init__(self, job_id: str):
@@ -186,6 +193,57 @@ def _spawn(job_id: str) -> None:
         daemon=True,
     ).start()
 
+
+
+def sweep_stale_remito_jobs(*, older_than_seconds: int | None = None) -> int:
+    """Cierra las emisiones que quedaron colgadas cuando se fue el proceso.
+
+    El trabajo corre en un hilo del propio contenedor de la API. Si la API se
+    reinicia en el medio —un deploy, un OOM, el reboot del servidor— el hilo se va
+    con ella y la fila queda en `running` para siempre: nadie la vuelve a tomar y
+    nadie la termina. El operador se destraba solo (a los 10 minutos la pestaña le
+    dice que verifique), pero la fila sigue ahí, y el panel se llena de emisiones
+    eternamente "en curso" que no significan nada.
+
+    No las marca como fallidas alegremente: el remito **puede haber salido igual**
+    en Bejerman antes de que se cortara. Por eso el error que se guarda no dice
+    "falló", dice "verificá antes de reintentar", que es la verdad.
+    """
+
+    limite = max(60, int(older_than_seconds or SWEEP_AFTER_SECONDS))
+    payload = _json_param(
+        {
+            "detail": (
+                "La emisión quedó sin respuesta (se reinició el servidor mientras corría). "
+                "El remito puede haber salido igual en Bejerman: verifique el estado de la "
+                "orden antes de reintentar."
+            ),
+            "code": "DELIVERY_REMITO_JOB_STALE",
+            "status": 409,
+            "sweptBy": "sweep_stale_remito_jobs",
+        }
+    )
+    with connection.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE {TABLE_NAME}
+               SET status = 'error',
+                   error_payload = %s::jsonb,
+                   finished_at = clock_timestamp()
+             WHERE status IN ('pending', 'running')
+               AND clock_timestamp() - COALESCE(started_at, created_at)
+                     >= (%s * INTERVAL '1 second')
+            RETURNING id
+            """,
+            [payload, limite],
+        )
+        cerrados = cur.fetchall()
+    if cerrados:
+        logger.info(
+            "delivery_remito_jobs_barridos",
+            extra={"cantidad": len(cerrados), "job_ids": [fila[0] for fila in cerrados]},
+        )
+    return len(cerrados)
 
 def _open_job_for(order_ids: list[str]) -> dict[str, Any] | None:
     """¿Ya hay una emisión en curso para exactamente estas órdenes?

@@ -11,12 +11,13 @@ from xml.sax.saxutils import escape
 
 import requests
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, require_company
 from .bejerman_sync_alerts import queue_stale_blocked_bejerman_job_alerts
 from .bejerman_sdk import (
+    is_bejerman_already_imported_message,
     is_bejerman_sdk_race_message,
     is_bejerman_table_update_transient_message,
 )
@@ -57,6 +58,7 @@ JOB_STATUS_RUNNING = "running"
 JOB_STATUS_SUCCEEDED = "succeeded"
 JOB_STATUS_FAILED = "failed"
 JOB_STATUS_BLOCKED = "blocked"
+JOB_STATUS_CANCELLED = "cancelled"
 
 INTERNAL_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,4}$", re.IGNORECASE)
 TRANSFER_PHASE_SAL_DONE = "sal_done"
@@ -69,6 +71,25 @@ NEXORA_STOCK_ENTRY_MESSAGE = (
 )
 PORTAL_STOCK_EXIT_MESSAGE = "Salida física Bejerman gestionada por Portal; NEXORA no emite salida final"
 LEGACY_BLOCKED_SYNC_TYPES = (SYNC_TYPE_STOCK_ENTRY_STR, SYNC_TYPE_STOCK_EXIT_RTS)
+# Los unicos `sync_type` que el worker sabe ejecutar. Un job con cualquier otro
+# valor -- porque lo creo un script de una sola vez, o porque el tipo se dejo de
+# implementar -- esta muerto al nacer: falla, agota reintentos y se queda en el
+# panel para siempre ofreciendo un "Reintentar" que no puede funcionar. Saberlo
+# de antemano permite decirlo con todas las letras y ofrecer descartarlo.
+SUPPORTED_SYNC_TYPES = (
+    SYNC_TYPE_STOCK_ENTRY_STR,
+    SYNC_TYPE_STOCK_EXIT_RTS,
+    SYNC_TYPE_STOCK_TO_DESGUACE,
+    SYNC_TYPE_STOCK_FROM_DESGUACE,
+    SYNC_TYPE_STOCK_STR_TO_STL,
+    SYNC_TYPE_STOCK_STR_TO_STC,
+    SYNC_TYPE_STOCK_STR_TO_VAL,
+    SYNC_TYPE_STOCK_STR_TO_STCL,
+)
+
+
+def is_supported_sync_type(sync_type: Any) -> bool:
+    return str(sync_type or "").strip() in SUPPORTED_SYNC_TYPES
 RESTORE_TARGET_STOCK_ERROR_PREFIX = "No se pudo restaurar stock en destino"
 TRANSIENT_REOPEN_COUNT_KEY = "transient_reopen_count"
 
@@ -206,6 +227,13 @@ def _is_ok_response(response: dict[str, Any]) -> bool:
 def _is_bejerman_success_message(value: Any) -> bool:
     text = _text_key(value)
     return "comprobante se importo correctamente" in text
+
+
+def _is_already_imported_message(value: Any) -> bool:
+    """Bejerman dice que el comprobante ya está. Ver
+    `bejerman_sdk.is_bejerman_already_imported_message`."""
+
+    return is_bejerman_already_imported_message(value)
 
 
 def _parse_json_maybe(raw: Any) -> Any:
@@ -1359,6 +1387,53 @@ def _finish_job(
     )
 
 
+def cancel_sync_job(job_id: int, actor_user_id: int | None, reason: str) -> dict[str, Any]:
+    """Cierra un job sin ejecutarlo, dejando escrito quién y por qué.
+
+    La salida que le faltaba al panel: hay jobs que no pueden terminar bien nunca
+    —el `sync_type` sin implementación, el movimiento que alguien ya hizo a mano
+    en Bejerman— y hasta ahora la única acción ofrecida era reintentar, que
+    vuelve a fallar. El motivo es obligatorio: un job descartado sin explicación
+    es indistinguible de un movimiento de stock que se perdió.
+    """
+
+    reason = str(reason or "").strip()
+    if not reason:
+        raise BejermanBlockedError("Escriba el motivo por el que se descarta la operación.")
+    row = q(
+        "SELECT id, status, sync_type, response_payload FROM bejerman_sync_jobs WHERE id=%s",
+        [job_id],
+        one=True,
+    )
+    if not row:
+        raise BejermanBlockedError("Operación Bejerman no encontrada")
+    status = str(row.get("status") or "").strip()
+    if status in (JOB_STATUS_SUCCEEDED, JOB_STATUS_CANCELLED):
+        raise BejermanBlockedError("La operación ya está cerrada.")
+    if status == JOB_STATUS_RUNNING:
+        raise BejermanBlockedError("La operación se está ejecutando; espere a que termine.")
+    payload = {
+        **_dict_payload(row.get("response_payload")),
+        "cancellation": {
+            "reason": reason,
+            "actorUserId": actor_user_id,
+            "at": timezone.now().isoformat(),
+            "previousStatus": status,
+        },
+    }
+    _finish_job(
+        job_id,
+        JOB_STATUS_CANCELLED,
+        error=f"Descartada por un operador: {reason}",
+        response_payload=payload,
+    )
+    return q(
+        "SELECT id, status, attempts, last_error FROM bejerman_sync_jobs WHERE id=%s",
+        [job_id],
+        one=True,
+    ) or {}
+
+
 def _retry_job(job: dict[str, Any], error: str, max_attempts: int) -> str:
     attempts = int(job.get("attempts") or 0)
     retryable_sync_error = _is_retryable_sync_message(error)
@@ -2393,7 +2468,13 @@ def _process_stock_to_desguace(job: dict[str, Any], client: BejermanSDKClient) -
             "sal_comprobantes": sal_payload,
         }
         _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
-        sal_response = client.ingresar_lista_comprobantes_json(sal_payload)
+        sal_response = _send_stock_comprobantes(
+            client,
+            sal_payload,
+            phase="baja_sal",
+            job_id=job["id"],
+            verify=lambda: not _stock_present_in_deposit(client, source_deposit, serial, article_code),
+        )
         next_request_payload = {
             **sal_request_payload,
             "sal_done": True,
@@ -2422,7 +2503,13 @@ def _process_stock_to_desguace(job: dict[str, Any], client: BejermanSDKClient) -
         response_payload=next_response_payload,
         article_code=article_code,
     )
-    ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    ent_response = _send_stock_comprobantes(
+        client,
+        ent_payload,
+        phase="baja_ent",
+        job_id=job["id"],
+        verify=lambda: _stock_present_in_deposit(client, target, serial, article_code),
+    )
     _finish_job(
         job["id"],
         JOB_STATUS_SUCCEEDED,
@@ -2579,7 +2666,13 @@ def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient)
             "sal_comprobantes": sal_payload,
         }
         _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
-        sal_response = client.ingresar_lista_comprobantes_json(sal_payload)
+        sal_response = _send_stock_comprobantes(
+            client,
+            sal_payload,
+            phase="alta_sal",
+            job_id=job["id"],
+            verify=lambda: not _stock_present_in_deposit(client, source_deposit, serial, article_code),
+        )
         next_request_payload = {
             **sal_request_payload,
             "sal_done": True,
@@ -2608,7 +2701,13 @@ def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient)
         response_payload=next_response_payload,
         article_code=article_code,
     )
-    ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    ent_response = _send_stock_comprobantes(
+        client,
+        ent_payload,
+        phase="alta_ent",
+        job_id=job["id"],
+        verify=lambda: _stock_present_in_deposit(client, target, serial, article_code),
+    )
     _finish_job(
         job["id"],
         JOB_STATUS_SUCCEEDED,
@@ -2649,6 +2748,86 @@ def _verify_stock_transfer_target(
         f"Bejerman aceptó el ENT pero todavía no se confirmó stock positivo para la partida "
         f"{serial} en el depósito {target}."
     )
+
+
+def _stock_present_in_deposit(
+    client: BejermanSDKClient, deposit: str, serial: str, article_code: str = ""
+) -> bool:
+    """¿Bejerman tiene la partida con cantidad en ese depósito?"""
+
+    try:
+        response = client.stock_by_deposit_partida(deposit, serial)
+    except Exception:
+        return False
+    return bool(
+        _records_for_equipment_article(_records_for_partida(response, serial, deposit), article_code)
+    )
+
+
+def _is_own_id_origen(comprobantes: list[dict[str, Any]]) -> bool:
+    """Todos los renglones llevan un `Comprobante_IdOrigen` armado por NEXORA."""
+
+    items = [item for item in (comprobantes or []) if isinstance(item, dict)]
+    if not items:
+        return False
+    return all(str(item.get("Comprobante_IdOrigen") or "").startswith("NEXORA-OS-") for item in items)
+
+
+def _send_stock_comprobantes(
+    client: BejermanSDKClient,
+    comprobantes: list[dict[str, Any]],
+    *,
+    phase: str,
+    job_id: Any = None,
+    verify: Any = None,
+) -> dict[str, Any]:
+    """Manda un lote de movimientos de stock tolerando el reenvío del mismo lote.
+
+    Bejerman deduplica por `Comprobante_IdOrigen`, que NEXORA arma de forma
+    determinística a partir de la OS y de la fase. Cuando un intento anterior
+    llegó a entrar pero NEXORA no alcanzó a registrarlo (timeout, pestaña caída,
+    reinicio del worker), el reintento vuelve con *"El mismo ya existe en la
+    empresa debido a una importación anterior"*. Eso no es un rechazo: es la
+    confirmación de que el movimiento ya está hecho. Tratarlo como fallo dejaba
+    el job dando vueltas hasta agotar los reintentos y terminar en `blocked`,
+    con el stock ya movido — el caso de la OS 29668 del 02/09/2026.
+
+    Sólo se absorbe cuando el `IdOrigen` es nuestro: si el choque fuera contra un
+    comprobante ajeno, callarlo escondería un problema real. Y nunca se absorbe a
+    ciegas: en la transferencia la red la pone `_verify_stock_transfer_target`,
+    que corre igual después del ENT; donde no hay una verificación posterior, el
+    llamador pasa `verify` y sin esa confirmación el error se vuelve a levantar.
+    """
+
+    try:
+        return client.ingresar_lista_comprobantes_json(comprobantes)
+    except BejermanBlockedError as exc:
+        if not _is_already_imported_message(str(exc)) or not _is_own_id_origen(comprobantes):
+            raise
+        if verify is not None:
+            try:
+                confirmed = bool(verify())
+            except Exception:
+                confirmed = False
+            if not confirmed:
+                # Bejerman dice que ya lo importó pero el stock no está donde
+                # tendría que estar: el "duplicado" no es nuestro movimiento.
+                raise
+        logger.info(
+            "bejerman_stock_comprobante_ya_importado",
+            extra={
+                "job_id": job_id,
+                "phase": phase,
+                "id_origen": [item.get("Comprobante_IdOrigen") for item in comprobantes],
+                "error": str(exc),
+            },
+        )
+        return {
+            "Resultado": "OK",
+            "alreadyImported": True,
+            "alreadyImportedPhase": phase,
+            "alreadyImportedMessage": str(exc),
+        }
 
 
 def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> str:
@@ -2881,7 +3060,7 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
             "sal_comprobantes": sal_payload,
         }
         _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
-        sal_response = client.ingresar_lista_comprobantes_json(sal_payload)
+        sal_response = _send_stock_comprobantes(client, sal_payload, phase="transfer_sal", job_id=job["id"])
         next_request_payload = {
             **sal_request_payload,
             "sal_done": True,
@@ -2910,7 +3089,7 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
         response_payload=next_response_payload,
         article_code=article_code,
     )
-    ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+    ent_response = _send_stock_comprobantes(client, ent_payload, phase="transfer_ent", job_id=job["id"])
     ent_response_payload = {**next_response_payload, "target_stock_entry": ent_response}
     _finish_job(
         job["id"],
@@ -2960,7 +3139,11 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
             SYNC_TYPE_STOCK_STR_TO_STCL,
         ):
             return _process_stock_transfer(job, client)
-        raise BejermanBlockedError(f"Tipo de sincronización no soportado: {sync_type}")
+        raise BejermanBlockedError(
+            f"Tipo de sincronización no soportado: {sync_type}. "
+            "Ninguna versión de NEXORA sabe ejecutar esta operación, así que reintentarla "
+            "no puede funcionar: descártela desde el panel."
+        )
     except BejermanConfigError as exc:
         error = str(exc)
         if BEJERMAN_CREDENTIALS_REQUIRED in error:
@@ -3331,7 +3514,13 @@ def restore_target_stock_for_job(job: dict[str, Any], client: BejermanSDKClient)
         article_code=article_code,
     )
     try:
-        ent_response = client.ingresar_lista_comprobantes_json(ent_payload)
+        ent_response = _send_stock_comprobantes(
+            client,
+            ent_payload,
+            phase="restore_ent",
+            job_id=job["id"],
+            verify=lambda: _stock_present_in_deposit(client, target, serial, article_code),
+        )
     except BejermanBlockedError as exc:
         _finish_job(job["id"], JOB_STATUS_BLOCKED, error=str(exc), article_code=article_code)
         return {
@@ -3460,6 +3649,13 @@ def run_bejerman_sync_loop(
         sale_max,
     )
     while True:
+        # El worker más importante del sistema no puede quedar vivo pero inútil.
+        # Django recicla las conexiones en el ciclo de request; en un loop de consola
+        # nadie lo hace, así que un reinicio de Postgres dejaba esta conexión rota
+        # para siempre: el contenedor seguía en verde, el log repetía el mismo error
+        # cada 30 segundos y ningún job de stock se movía hasta que alguien lo
+        # reiniciaba a mano. Que es exactamente lo que no puede depender de alguien.
+        close_old_connections()
         now = time.monotonic()
         if transient_reopen_interval > 0 and now >= next_transient_reopen_at:
             try:
@@ -3486,6 +3682,19 @@ def run_bejerman_sync_loop(
                     )
             except Exception:
                 logger.exception("bejerman_sync_credential_reopen falló")
+            try:
+                # Las emisiones de remito corren en un hilo del contenedor de la API,
+                # no acá. Pero cuando ese contenedor se reinicia no queda nadie para
+                # cerrar la fila, y este loop es el único proceso que ya está mirando
+                # periódicamente qué quedó a mitad de camino. Import local: sólo para
+                # no atar el módulo de sincronización al de entregas.
+                from .delivery_remito_jobs import sweep_stale_remito_jobs
+
+                barridos = sweep_stale_remito_jobs()
+                if barridos:
+                    logger.info("delivery_remito_jobs_stale_cerrados count=%s", barridos)
+            except Exception:
+                logger.exception("delivery_remito_jobs_sweep falló")
             finally:
                 next_transient_reopen_at = time.monotonic() + transient_reopen_interval
         try:

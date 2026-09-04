@@ -1,0 +1,6 @@
+cliente_cod,cliente,numero_serie,equipo,muestra_la_consulta,stock_nuestro,ultimo_alq_tipo,ultimo_alq_comp,ultimo_alq_fecha,volvio_con,volvio_comp,volvio_fecha,volvio_a
+PRAX,PRAXAIR ARGENTINA S.R.L.,BJD16A31118,Calentador humidificador BMC GI,1,2,RTA,00001-00023972,11/08/2026,ENT, -00129594,13/08/2026,STL
+PRAX,PRAXAIR ARGENTINA S.R.L.,CJD19631180,Calentador humidificador BMC GI,1,2,RTA,00001-00023972,11/08/2026,ENT, -00129593,13/08/2026,STL
+PRAX,PRAXAIR ARGENTINA S.R.L.,H2118A04094,Calentador humidificador BMC H60-GII,1,2,RTA,00001-00023972,11/08/2026,ENT, -00129592,13/08/2026,STL
+PRAX,PRAXAIR ARGENTINA S.R.L.,H2120301236,Calentador humidificador BMC H60-GII,1,2,RTA,00001-00023972,11/08/2026,ENT, -00129591,13/08/2026,STL
+PRAX,PRAXAIR ARGENTINA S.R.L.,MZJ2P00074,Concentrador de oxígeno portátil Longfian JAY-10D,1,1,RTA,00001-00023973,11/08/2026,ENT, -00129590,12/08/2026,STL

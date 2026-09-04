@@ -12,6 +12,7 @@ import {
   Save,
   Search,
   X,
+  XCircle,
 } from "lucide-react";
 import {
   getBejermanArticles,
@@ -21,6 +22,7 @@ import {
   getDeviceEditable,
   patchDeviceEditable,
   postBejermanArticleMapping,
+  postBejermanJobCancel,
   postBejermanJobRetry,
   postBejermanRemitoProcessRetry,
   postIngresoConflictoEvidencia,
@@ -46,6 +48,7 @@ const STATUS_LABELS = {
   failed: "Fallida",
   failed_review: "Revisión requerida",
   blocked: "Bloqueada",
+  cancelled: "Descartada",
 };
 
 const STATUS_CLASS = {
@@ -56,6 +59,7 @@ const STATUS_CLASS = {
   failed: "bg-rose-50 text-rose-700 border-rose-200",
   failed_review: "bg-orange-50 text-orange-800 border-orange-200",
   blocked: "bg-amber-50 text-amber-800 border-amber-200",
+  cancelled: "bg-gray-100 text-gray-600 border-gray-300",
 };
 
 const TYPE_LABELS = {
@@ -65,6 +69,8 @@ const TYPE_LABELS = {
   stock_str_to_stcl: "STR a STCL",
   stock_to_desguace: "Baja a DES",
   stock_from_desguace: "Alta a STR",
+  stock_str_to_val: "STR a VAL",
+  stock_exit_rts: "Salida RTS bloqueada",
 };
 
 const REMITO_SOURCE_LABELS = {
@@ -91,7 +97,7 @@ const PROCESS_SORT_OPTIONS = [
   { value: "seguimiento", label: "Último intento" },
 ];
 
-const PROCESS_STATUSES = ["failed_review", "failed", "blocked", "running", "pending", "generated", "succeeded"];
+const PROCESS_STATUSES = ["failed_review", "failed", "blocked", "running", "pending", "generated", "succeeded", "cancelled"];
 
 const AUTO_REFRESH_MS = 5000;
 
@@ -667,15 +673,21 @@ function ArticleSummary({ row, className = "" }) {
   );
 }
 
-function JobActions({ row, canManage, onEdit, onRetry, retryingJobId, className = "" }) {
+function JobActions({ row, canManage, onEdit, onRetry, onCancel, retryingJobId, className = "" }) {
   const canEdit = canManage && row?.device_id;
   // "En cola" también se puede forzar: si el worker de sincronización no está corriendo, el job
   // queda ahí sin intentos y sin errores, y no hay otra forma de empujarlo.
   const isPending = row?.status === "pending";
-  const canRetry = canManage && (isPending || row?.status === "failed" || row?.status === "blocked");
+  const openStatus = isPending || row?.status === "failed" || row?.status === "blocked";
+  // Un job cuyo tipo NEXORA no sabe ejecutar no se destraba reintentando: el
+  // backend lo marca y acá se esconde el botón que no puede funcionar.
+  const supported = row?.supported_sync_type !== false;
+  const unsupportedReason = trimValue(row?.unsupported_reason);
+  const canRetry = canManage && openStatus && supported;
+  const canCancel = canManage && openStatus && Boolean(onCancel);
   const retrying = retryingJobId === row?.id;
 
-  if (!canEdit && !canRetry) return null;
+  if (!canEdit && !canRetry && !canCancel && !unsupportedReason) return null;
 
   return (
     <div className={`flex flex-wrap items-center gap-2 ${className}`.trim()}>
@@ -701,6 +713,21 @@ function JobActions({ row, canManage, onEdit, onRetry, retryingJobId, className 
           <RotateCcw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} />
           {retrying ? "Procesando..." : isPending ? "Procesar ahora" : "Reintentar"}
         </button>
+      )}
+      {canCancel && (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          onClick={() => onCancel(row)}
+          disabled={retrying}
+          title="Cerrar la operación sin ejecutarla, dejando escrito el motivo"
+        >
+          <XCircle className="h-3.5 w-3.5" />
+          Descartar
+        </button>
+      )}
+      {unsupportedReason && (
+        <div className="w-full text-[11px] leading-snug text-amber-800">{unsupportedReason}</div>
       )}
     </div>
   );
@@ -995,10 +1022,19 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
   const editAllowed = actions?.edit?.allowed ?? (canEditOrders && ["ready_for_correction", "ready_to_reissue"].includes(reviewState));
   const reissueAllowed = actions?.reissue?.allowed ?? (canManage && canGenerateRemito && reviewState === "ready_to_reissue");
   const resolveAllowed = actions?.resolve?.allowed ?? (canManage && needsReview);
+  // El backend ya decide qué acciones tienen sentido para este proceso (`visible`).
+  // Ignorarlo era lo que dejaba los cuatro botones dibujados —y grises— en procesos
+  // que un operador ya había cerrado: la fila parecía tener trabajo pendiente y no
+  // había ninguno.
+  const showVerify = actions?.verify?.visible ?? needsReview;
+  const showEdit = actions?.edit?.visible ?? needsReview;
+  const showResolve = actions?.resolve?.visible ?? needsReview;
+  const showReissue = actions?.reissue?.visible ?? needsReview;
   const actionLoading = Boolean(actionState?.loading);
   const actionError = trimValue(actionState?.error);
   const verifyBlockedReason = !verifyAllowed ? trimValue(actions?.verify?.blockedReason) : "";
-  if (!canRetry && !needsReview && !hasPdfState) return null;
+  const hasReviewActions = showVerify || showEdit || showResolve || showReissue;
+  if (!canRetry && !hasReviewActions && !hasPdfState) return null;
   return (
     <div className={`flex flex-wrap items-center gap-2 ${className}`.trim()}>
       {hasPdfState && <RemitoPdfAction row={row} />}
@@ -1014,7 +1050,7 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           {actionLoading && actionState?.action === "retry" ? "Reintentando..." : "Reintentar"}
         </button>
       )}
-      {needsReview && (
+      {showVerify && (
         <button
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1026,7 +1062,7 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           {actionLoading && actionState?.action === "verify" ? "Verificando..." : "Verificar en Bejerman"}
         </button>
       )}
-      {needsReview && editHref && (editAllowed ? (
+      {showEdit && editHref && (editAllowed ? (
         <Link
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
           to={editHref}
@@ -1046,7 +1082,7 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           Abrir y corregir
         </button>
       ))}
-      {needsReview && onResolve && (
+      {showResolve && onResolve && (
         <button
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1058,7 +1094,7 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
           Resolver revisión
         </button>
       )}
-      {needsReview && (
+      {showReissue && (
         <button
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-orange-300 bg-orange-50 px-2 text-xs text-orange-900 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1976,6 +2012,36 @@ export default function BejermanSync() {
     }
   };
 
+  // Descartar pide el motivo y lo guarda: un job cerrado sin explicación es
+  // indistinguible de un movimiento de stock que se perdió.
+  const cancelJob = async (row) => {
+    if (!row?.id) return;
+    const reason = window.prompt(
+      `Se va a cerrar la operación #${row.id} sin ejecutarla.
+
+` +
+        "Escriba por qué (queda asentado en el historial):",
+      "",
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setErr("Escriba el motivo por el que se descarta la operación.");
+      return;
+    }
+    setErr("");
+    setMsg("");
+    setRetryingJobId(row.id);
+    try {
+      await postBejermanJobCancel(row.id, reason.trim());
+      setMsg("La operación quedó cerrada como descartada.");
+      await load();
+    } catch (e) {
+      setErr(e?.message || "No se pudo descartar la operación.");
+    } finally {
+      setRetryingJobId(null);
+    }
+  };
+
   const retryRemito = async (row, action = "retry", extraPayload = null) => {
     if (!row?.source || !row?.id) return;
     const actionKey = row.process_id || `${row.source}:${row.id}`;
@@ -2456,6 +2522,7 @@ export default function BejermanSync() {
             canManage={canManage}
             onEdit={openEditModal}
             onRetry={retry}
+            onCancel={cancelJob}
             retryingJobId={retryingJobId}
           />
         )}
@@ -2565,6 +2632,7 @@ export default function BejermanSync() {
                 canManage={canManage}
                 onEdit={openEditModal}
                 onRetry={retry}
+                onCancel={cancelJob}
                 retryingJobId={retryingJobId}
                 className="justify-end"
               />

@@ -11,14 +11,18 @@ from service.bejerman_delivery import BillingError, DeliveryOrderError
 from service.delivery_remito_jobs import (
     RemitoJobNotFound,
     STALE_SECONDS,
+    SWEEP_AFTER_SECONDS,
     enqueue_remito_job,
     get_remito_job,
+    sweep_stale_remito_jobs,
     _execute,
 )
 
 
 @skipUnless(connection.vendor == "postgresql", "Los trabajos de emisión requieren PostgreSQL")
-class DeliveryRemitoJobsTests(TransactionTestCase):
+class _TrabajosDeRemitoBase(TransactionTestCase):
+    """Esquema y actor compartidos. Sin tests propios: sólo el andamiaje."""
+
     reset_sequences = False
 
     @classmethod
@@ -59,6 +63,8 @@ class DeliveryRemitoJobsTests(TransactionTestCase):
             )
             self.actor_id = cur.fetchone()[0]
 
+
+class DeliveryRemitoJobsTests(_TrabajosDeRemitoBase):
     # -- encolar ---------------------------------------------------------------
 
     def test_encolar_devuelve_un_trabajo_pendiente_sin_emitir_todavia(self):
@@ -203,3 +209,78 @@ class DeliveryRemitoJobsTests(TransactionTestCase):
 
         nuevo = enqueue_remito_job(["do-1"], self.actor_id, {})
         self.assertNotEqual(viejo["jobId"], nuevo["jobId"])
+
+
+class BarridoDeTrabajosColgadosTests(_TrabajosDeRemitoBase):
+    """El operador ya se destrababa solo; la fila no.
+
+    Cuando la API se reinicia en el medio de una emisión, el hilo se va con ella y
+    la fila queda `running` para siempre. La pestaña deja de esperar a los 10
+    minutos, pero en la base el trabajo sigue figurando en curso: el panel se llena
+    de emisiones eternas y nadie sabe cuáles son reales. Esto lo cierra sin
+    necesidad de que alguien entre a mirar.
+    """
+
+    def _envejecer(self, job_id, segundos, estado="running"):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE delivery_remito_jobs
+                   SET status = %s,
+                       started_at = clock_timestamp() - (%s * INTERVAL '1 second'),
+                       created_at = clock_timestamp() - (%s * INTERVAL '1 second')
+                 WHERE id = %s
+                """,
+                [estado, segundos, segundos, job_id],
+            )
+
+    def _estado_crudo(self, job_id):
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT status, error_payload, finished_at FROM delivery_remito_jobs WHERE id = %s",
+                [job_id],
+            )
+            return cur.fetchone()
+
+    def test_cierra_el_trabajo_que_quedo_corriendo_sin_nadie_atras(self):
+        job = enqueue_remito_job(["do-1"], self.actor_id, {})
+        self._envejecer(job["jobId"], SWEEP_AFTER_SECONDS + 60)
+
+        self.assertEqual(sweep_stale_remito_jobs(), 1)
+
+        status, error, finished_at = self._estado_crudo(job["jobId"])
+        self.assertEqual(status, "error")
+        self.assertIsNotNone(finished_at)
+        payload = error if isinstance(error, dict) else __import__("json").loads(error)
+        self.assertEqual(payload["code"], "DELIVERY_REMITO_JOB_STALE")
+        # El mensaje no puede afirmar que falló: el remito pudo salir igual.
+        self.assertIn("puede haber salido", payload["detail"])
+
+    def test_no_toca_una_emision_que_recien_arranco(self):
+        job = enqueue_remito_job(["do-2"], self.actor_id, {})
+        self._envejecer(job["jobId"], 30)
+
+        self.assertEqual(sweep_stale_remito_jobs(), 0)
+        self.assertEqual(self._estado_crudo(job["jobId"])[0], "running")
+
+    def test_espera_mas_que_la_ventana_que_ve_el_operador(self):
+        # A los 10 minutos la pestaña ya dejó de esperar, pero el hilo podría seguir
+        # vivo: cerrar la fila ahí sería adelantarse.
+        job = enqueue_remito_job(["do-3"], self.actor_id, {})
+        self._envejecer(job["jobId"], STALE_SECONDS + 60)
+
+        self.assertEqual(sweep_stale_remito_jobs(), 0)
+
+    def test_no_pisa_los_que_ya_terminaron(self):
+        job = enqueue_remito_job(["do-4"], self.actor_id, {})
+        self._envejecer(job["jobId"], SWEEP_AFTER_SECONDS + 600, estado="done")
+
+        self.assertEqual(sweep_stale_remito_jobs(), 0)
+        self.assertEqual(self._estado_crudo(job["jobId"])[0], "done")
+
+    def test_correr_el_barrido_dos_veces_no_vuelve_a_contar_lo_mismo(self):
+        job = enqueue_remito_job(["do-5"], self.actor_id, {})
+        self._envejecer(job["jobId"], SWEEP_AFTER_SECONDS + 60)
+
+        self.assertEqual(sweep_stale_remito_jobs(), 1)
+        self.assertEqual(sweep_stale_remito_jobs(), 0)

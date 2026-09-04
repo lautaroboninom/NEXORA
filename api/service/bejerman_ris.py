@@ -44,7 +44,9 @@ from .bejerman_sdk import (
     first_record,
     first_value,
     format_remito_number,
+    is_bejerman_already_imported_message,
     is_bejerman_sales_query_schema_message,
+    is_bejerman_success_message,
     is_occasional_customer_name,
     is_ok_response,
     normalize_serial_for_lookup,
@@ -4194,13 +4196,51 @@ def _register_payload_to_bejerman(
             "numeraFlex": RIS_REGISTER_NUMERA_FLEX,
             "emiteReg": RIS_REGISTER_EMITE_REG,
         }
-        raw_response = client.ingresar_comprobante_ventas_json(
-            comprobante,
-            circuito="VENTAS",
-            operacion=operation,
-            numera_flex=RIS_REGISTER_NUMERA_FLEX,
-            emite_reg=RIS_REGISTER_EMITE_REG,
-        )
+        try:
+            raw_response = client.ingresar_comprobante_ventas_json(
+                comprobante,
+                circuito="VENTAS",
+                operacion=operation,
+                numera_flex=RIS_REGISTER_NUMERA_FLEX,
+                emite_reg=RIS_REGISTER_EMITE_REG,
+            )
+        except BejermanSdkResponseError as exc:
+            if not is_bejerman_already_imported_message(str(exc)):
+                raise
+            # "El comprobante no se importó debido a que ya existe en la empresa."
+            # Registrar es cargar en NEXORA un comprobante que se hizo en Bejerman:
+            # que Bejerman ya lo tenga es el estado deseado, no un rechazo. Pasaba
+            # con los RDA del punto de venta 00001, que recepción emite en el ERP y
+            # después carga acá (OS 29671, 02/09/2026): el import chocaba, la
+            # pantalla decía "Reintentar" y reintentar volvía a chocar, para siempre.
+            #
+            # No se adopta de palabra: se busca el comprobante en Bejerman y sólo si
+            # está se asocia. Si no aparece, el "ya existe" era contra otra cosa y el
+            # error original sigue siendo la respuesta correcta.
+            existing = _remote_ris_duplicate(document, payload["companyKey"], client)
+            if not existing:
+                logger.warning(
+                    "bejerman_ris_register_already_exists_unverified",
+                    extra={
+                        "ingreso_ids": ingreso_ids,
+                        "remito_number": document["remitoNumber"],
+                        "error": str(exc),
+                    },
+                )
+                raise BejermanRisError(
+                    f"Bejerman rechazó el alta porque el número {document['remitoNumber']} ya está usado, "
+                    "pero ese comprobante no aparece al buscarlo. Verifique el número: probablemente "
+                    "pertenezca a otro comprobante."
+                ) from exc
+            logger.info(
+                "bejerman_ris_register_adopted_existing",
+                extra={"ingreso_ids": ingreso_ids, "remito_number": document["remitoNumber"]},
+            )
+            return _registered_document_association_response(
+                payload,
+                document,
+                raw={"source": "bejerman", "existing": existing, "importError": str(exc)},
+            )
         summary = parse_remito_response(raw_response)
         if not _clean(summary.get("comprobanteNumero")):
             summary = {
@@ -4232,6 +4272,34 @@ def _register_payload_to_bejerman(
         raise BejermanRisError(str(exc)) from exc
 
 
+# Bejerman no valida la fecha: la mete en el TXT del importador y devuelve
+# "Se han detectado inconsistencias en el archivo de texto", que no menciona la
+# fecha por ningún lado. Cortarlo acá convierte un misterio en una frase.
+_MIN_PLAUSIBLE_ISSUE_YEAR = 1990
+_MAX_ISSUE_YEARS_AHEAD = 5
+
+
+def _assert_issue_date_plausible(payload: dict[str, Any]) -> None:
+    issue_date = _clean(payload.get("issueDate"))
+    if not issue_date:
+        return
+    try:
+        year = int(issue_date[:4])
+    except (TypeError, ValueError):
+        raise BejermanRisError(
+            f"La fecha del remito ({issue_date}) no tiene un formato válido. "
+            "Corrija la fecha de ingreso de la OS antes de emitir."
+        )
+    limit = timezone.localdate().year + _MAX_ISSUE_YEARS_AHEAD
+    if year < _MIN_PLAUSIBLE_ISSUE_YEAR or year > limit:
+        raise BejermanRisError(
+            f"La fecha del remito quedó en el año {year} ({issue_date}), que no puede ser: "
+            "casi siempre es un año tipeado con dos dígitos en la fecha de ingreso de la OS. "
+            "Corríjala en la orden y vuelva a emitir. Bejerman rechazaría el comprobante con "
+            "un error genérico sobre el archivo de texto."
+        )
+
+
 def _build_service_ingress_request(
     payload: dict[str, Any],
     customer_fields: dict[str, str],
@@ -4240,6 +4308,7 @@ def _build_service_ingress_request(
     numera_flex: str,
     emite_reg: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    _assert_issue_date_plausible(payload)
     built = build_service_ingress_comprobante(payload, customer_fields)
     line_count = _built_service_ingress_print_lines(built)
     max_lines = _ris_max_print_lines()
@@ -4354,6 +4423,42 @@ def _emit_payload_to_bejerman(payload: dict[str, Any], user_id: int | None = Non
         raise BejermanRisError(str(exc)) from exc
 
 
+def _emission_needs_review_instead_of_failure(exc: Exception) -> bool:
+    """El rechazo dice, con todas las letras, que el comprobante entró.
+
+    Bejerman marca la respuesta como error y en el mismo texto avisa "El
+    comprobante se importó correctamente. La Fecha de Contabilización se
+    modificó...". El comprobante existe pero el número no vino. Dejarlo como
+    `failed` pone en pantalla un botón de reintentar que duplicaría el remito;
+    `failed_review` es el estado que pide justamente que alguien lo mire.
+    """
+
+    return is_bejerman_success_message(str(exc))
+
+
+def _uncertain_emission_message(exc: Exception) -> str:
+    return (
+        "Bejerman devolvió un error pero avisa que el comprobante se importó: "
+        f"«{_clean(str(exc))}». El remito puede haberse emitido igual, así que NEXORA no lo "
+        "reintenta solo. Búsquelo en Bejerman: si está, cárguelo con el buscador por número de "
+        "serie; si no está, reintente la emisión."
+    )
+
+
+def _mark_ris_emission_uncertain(
+    ingreso_id: int, exc: Exception, request_payload: dict[str, Any] | None
+) -> None:
+    logger.warning(
+        "bejerman_ris_emit_imported_but_not_ok",
+        extra={"ingreso_id": ingreso_id, "error": str(exc)},
+    )
+    _update_ris_review_required(
+        ingreso_id,
+        _uncertain_emission_message(exc),
+        request_payload=request_payload,
+    )
+
+
 def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_reissue: bool = False) -> dict[str, Any]:
     started_at = time.monotonic()
     _ensure_ris_row(ingreso_id, user_id)
@@ -4448,6 +4553,9 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
         )
         return row
     except BejermanRisError as exc:
+        if _emission_needs_review_instead_of_failure(exc):
+            _mark_ris_emission_uncertain(ingreso_id, exc, request_payload or payload or None)
+            raise BejermanRisReviewRequiredError(_uncertain_emission_message(exc)) from exc
         _update_ris_failure(ingreso_id, str(exc), pdf_error=False, request_payload=request_payload or payload or None)
         raise
     except (BejermanSdkConfigError, BejermanSdkResponseError, BejermanSdkUnavailable, ValueError) as exc:
@@ -4455,6 +4563,9 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
             "bejerman_ris_emit_failed",
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000), "error": str(exc)},
         )
+        if _emission_needs_review_instead_of_failure(exc):
+            _mark_ris_emission_uncertain(ingreso_id, exc, request_payload or payload or None)
+            raise BejermanRisReviewRequiredError(_uncertain_emission_message(exc)) from exc
         _update_ris_failure(ingreso_id, str(exc), pdf_error=False, request_payload=request_payload or payload or None)
         raise BejermanRisError(str(exc)) from exc
 

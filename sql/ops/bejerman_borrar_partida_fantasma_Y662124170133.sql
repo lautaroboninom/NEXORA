@@ -10,6 +10,7 @@
 -- Alcance medido con el barrido de INFORMATION_SCHEMA (%Partida%/%Serie%) el 02/09/2026:
 --   dbo.StockPar.stp_Partida      -> 1 fila
 --   dbo.MovStock.mststp_Partida   -> 1 fila
+--   dbo.CabMovSImport.csicms_ID   -> 1 fila (NEXORA-OS-29648-ENT-STC)
 --   MG BIO (SBDAMGBI)             -> 0 filas
 --   SegDetV / SegDetC             -> 0 filas  (no hay historia comercial que reescribir)
 --
@@ -40,22 +41,32 @@ DECLARE @nStock INT = (SELECT COUNT(*) FROM dbo.StockPar WHERE LTRIM(RTRIM(stp_P
 DECLARE @nMov   INT = (SELECT COUNT(*) FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida);
 DECLARE @nVta   INT = (SELECT COUNT(*) FROM dbo.SegDetV  WHERE LTRIM(RTRIM(sdvstp_Partida)) = @Partida);
 DECLARE @nCmp   INT = (SELECT COUNT(*) FROM dbo.SegDetC  WHERE LTRIM(RTRIM(sdcstp_Partida)) = @Partida);
+DECLARE @cms    INT = (SELECT TOP 1 mstcms_ID FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida);
+DECLARE @nImport INT = (SELECT COUNT(*) FROM dbo.CabMovSImport WHERE csicms_ID = @cms);
 
-IF @nStock <> 1 OR @nMov <> 1 OR @nVta <> 0 OR @nCmp <> 0
+IF @nStock <> 1 OR @nMov <> 1 OR @nVta <> 0 OR @nCmp <> 0 OR @nImport <> 1
 BEGIN
-  RAISERROR('Alcance inesperado (StockPar=%d MovStock=%d SegDetV=%d SegDetC=%d). Abortado.',
-            16, 1, @nStock, @nMov, @nVta, @nCmp);
+  RAISERROR('Alcance inesperado (StockPar=%d MovStock=%d SegDetV=%d SegDetC=%d CabMovSImport=%d). Abortado.',
+            16, 1, @nStock, @nMov, @nVta, @nCmp, @nImport);
   RETURN;
 END
 
 IF @Apply = 0
 BEGIN
-  PRINT 'ENSAYO: alcance correcto (StockPar=1, MovStock=1, sin comprobantes). Poner @Apply=1 para aplicar.';
+  PRINT 'ENSAYO: alcance correcto (StockPar=1, MovStock=1, CabMovSImport=1, sin comprobantes). Poner @Apply=1 para aplicar.';
   RETURN;
 END
 
 -- ---------- BACKUP + BORRADO ----------
 BEGIN TRANSACTION;
+
+  IF OBJECT_ID('dbo.NEXORA_BKP_20260902_Y662124170133_StockPar', 'U') IS NOT NULL
+     OR OBJECT_ID('dbo.NEXORA_BKP_20260902_Y662124170133_MovStock', 'U') IS NOT NULL
+     OR OBJECT_ID('dbo.NEXORA_BKP_20260902_Y662124170133_CabMovS', 'U') IS NOT NULL
+     OR OBJECT_ID('dbo.NEXORA_BKP_20260902_Y662124170133_CabMovSImport', 'U') IS NOT NULL
+  BEGIN
+    RAISERROR('Ya existen tablas de backup NEXORA_BKP_20260902_Y662124170133_*. Revisar antes de continuar.', 16, 1);
+  END;
 
   SELECT * INTO dbo.NEXORA_BKP_20260902_Y662124170133_StockPar
     FROM dbo.StockPar WHERE LTRIM(RTRIM(stp_Partida)) = @Partida;
@@ -67,12 +78,14 @@ BEGIN TRANSACTION;
     FROM dbo.CabMovS c
    WHERE c.cms_ID IN (SELECT mstcms_ID FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida);
 
-  DECLARE @cms INT = (SELECT TOP 1 mstcms_ID FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida);
+  SELECT * INTO dbo.NEXORA_BKP_20260902_Y662124170133_CabMovSImport
+    FROM dbo.CabMovSImport WHERE csicms_ID = @cms;
 
   DELETE FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida;
   DELETE FROM dbo.StockPar WHERE LTRIM(RTRIM(stp_Partida))    = @Partida;
+  DELETE FROM dbo.CabMovSImport WHERE csicms_ID = @cms;
 
-  -- La cabecera solo si quedo sin ningun renglon (el ENT tenia una sola linea).
+  -- La cabecera y su registro de importación solo si quedaron sin ningún renglón.
   DELETE FROM dbo.CabMovS
    WHERE cms_ID = @cms
      AND NOT EXISTS (SELECT 1 FROM dbo.MovStock WHERE mstcms_ID = @cms);
@@ -82,7 +95,8 @@ COMMIT TRANSACTION;
 -- ---------- VERIFICACION ----------
 SELECT
   (SELECT COUNT(*) FROM dbo.StockPar WHERE LTRIM(RTRIM(stp_Partida))    = @Partida) AS resto_stockpar,
-  (SELECT COUNT(*) FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida) AS resto_movstock;
+  (SELECT COUNT(*) FROM dbo.MovStock WHERE LTRIM(RTRIM(mststp_Partida)) = @Partida) AS resto_movstock,
+  (SELECT COUNT(*) FROM dbo.CabMovSImport WHERE csicms_ID = @cms) AS resto_importacion;
 
 -- La partida real debe quedar intacta: 1 unidad de cada articulo en STR.
 SELECT LTRIM(RTRIM(stp_Partida)) AS partida, LTRIM(RTRIM(stpart_CodGen)) AS articulo,
@@ -91,6 +105,7 @@ SELECT LTRIM(RTRIM(stp_Partida)) AS partida, LTRIM(RTRIM(stpart_CodGen)) AS arti
  ORDER BY articulo, deposito;
 
 -- ---------- REVERSION ----------
--- INSERT INTO dbo.CabMovS  SELECT * FROM dbo.NEXORA_BKP_20260902_Y662124170133_CabMovS;
+-- INSERT INTO dbo.CabMovS       SELECT * FROM dbo.NEXORA_BKP_20260902_Y662124170133_CabMovS;
+-- INSERT INTO dbo.CabMovSImport SELECT * FROM dbo.NEXORA_BKP_20260902_Y662124170133_CabMovSImport;
 -- INSERT INTO dbo.StockPar SELECT * FROM dbo.NEXORA_BKP_20260902_Y662124170133_StockPar;
 -- INSERT INTO dbo.MovStock SELECT * FROM dbo.NEXORA_BKP_20260902_Y662124170133_MovStock;

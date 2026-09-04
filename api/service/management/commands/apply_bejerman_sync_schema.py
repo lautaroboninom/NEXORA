@@ -87,6 +87,16 @@ class Command(BaseCommand):
                 cur.execute(
                     "ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS actor_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL"
                 )
+                # Un job cuyo `sync_type` ya no tiene implementacion -- los
+                # `manual_stock_restore_str_audit_20260701` que dejo una auditoria vieja --
+                # no puede terminar nunca: falla, se bloquea y se queda en el panel
+                # ofreciendo un "Reintentar" que vuelve a fallar. `cancelled` es la salida
+                # terminal que faltaba para poder cerrarlos sin borrar el rastro.
+                cur.execute("ALTER TABLE bejerman_sync_jobs DROP CONSTRAINT IF EXISTS chk_bejerman_sync_jobs_status")
+                cur.execute(
+                    "ALTER TABLE bejerman_sync_jobs ADD CONSTRAINT chk_bejerman_sync_jobs_status "
+                    "CHECK (status IN ('pending','running','succeeded','failed','blocked','cancelled'))"
+                )
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS bejerman_article_mappings (

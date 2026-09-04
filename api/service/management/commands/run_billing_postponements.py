@@ -2,6 +2,7 @@ import logging
 import time
 
 from django.core.management.base import BaseCommand
+from django.db import close_old_connections
 
 from service.delivery_orders import process_due_delivery_order_billing_postponements
 
@@ -23,6 +24,11 @@ class Command(BaseCommand):
         once = bool(opts["once"])
         self.stdout.write(f"Procesando postergaciones de facturación cada {interval} segundos.")
         while True:
+            # Reciclar la conexión antes de cada vuelta. Si Postgres se reinicia,
+            # Django deja la conexión rota marcada como rota y no la reemplaza solo
+            # fuera del ciclo de request: el worker quedaba vivo, con el contenedor
+            # en verde, tirando el mismo error para siempre y sin procesar nada.
+            close_old_connections()
             try:
                 result = process_due_delivery_order_billing_postponements(limit=limit)
                 if result["due"]:

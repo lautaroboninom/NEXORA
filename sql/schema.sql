@@ -995,7 +995,7 @@ CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT chk_bejerman_sync_jobs_type CHECK (NULLIF(TRIM(sync_type), '') IS NOT NULL),
-  CONSTRAINT chk_bejerman_sync_jobs_status CHECK (status IN ('pending','running','succeeded','failed','blocked')),
+  CONSTRAINT chk_bejerman_sync_jobs_status CHECK (status IN ('pending','running','succeeded','failed','blocked','cancelled')),
   CONSTRAINT chk_bejerman_sync_jobs_attempts CHECK (attempts >= 0),
   CONSTRAINT chk_bejerman_sync_jobs_deposits CHECK (
     NULLIF(TRIM(source_deposit), '') IS NOT NULL

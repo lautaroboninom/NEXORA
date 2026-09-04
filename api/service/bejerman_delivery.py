@@ -51,6 +51,7 @@ from .bejerman_sdk import (
     is_bejerman_partida_inexistente_message,
     is_bejerman_sdk_race_message,
     is_bejerman_sales_query_schema_message,
+    is_bejerman_local_precheck_failure,
     is_bejerman_stock_insuficiente_message,
     is_bejerman_table_update_transient_message,
     is_ok_response,
@@ -4372,13 +4373,25 @@ def _remito_group_confirms_not_imported(group: dict[str, Any]) -> bool:
         for value in (group.get("last_error"), summary.get("error"), summary.get("detail"), summary.get("message"))
         if _optional_text(value)
     ).casefold()
-    return any(
+    if any(
         marker in detail
         for marker in (
             "no se importó",
             "no se importo",
             "no fue importado",
             "no ha sido importado",
+        )
+    ):
+        return True
+    # Los rechazos que NEXORA levanta armando el comprobante tampoco llegaron a
+    # Bejerman: cuentan como "no se importó" con la misma certeza, y son los que
+    # dejaban diez copias del mismo problema en el panel (OXIGENOTERAPIA LOMAS,
+    # `BEJERMAN_CUSTOMER_VAT_MISSING`, 10-11/08/2026).
+    return is_bejerman_local_precheck_failure(
+        " ".join(
+            _optional_text(value)
+            for value in (group.get("last_error"), summary.get("error"), summary.get("detail"), summary.get("message"))
+            if _optional_text(value)
         )
     )
 
@@ -4491,6 +4504,89 @@ def _patch_remito_review_summary(group_id: str, patch: dict[str, Any]) -> None:
             """,
             [_json_param(patch), group_id],
         )
+
+
+def _supersede_stale_failed_groups(
+    order_ids: list[str],
+    *,
+    keep_group_id: str | None,
+    actor_user_id: int | None,
+    reason: str,
+) -> list[str]:
+    """Cierra los intentos fallidos viejos de las mismas órdenes.
+
+    Cada reintento crea un grupo nuevo. Los anteriores quedaban en `failed` para
+    siempre, así que el panel acumulaba una fila por intento: diez del mismo
+    remito de OXIGENOTERAPIA LOMAS por la ficha de IVA incompleta, cinco de la
+    entrega de MARK. Lo que el operador necesita ver es *un* problema pendiente,
+    no el historial de veces que apretó el botón.
+
+    Sólo se cierran los grupos que Bejerman rechazó **por escrito** ("el
+    comprobante no se importó..."). Un fallo ambiguo —un timeout, una conexión
+    cortada— puede haber emitido igual, y ésos tienen que seguir a la vista hasta
+    que alguien los verifique: son exactamente los que terminan en un remito
+    duplicado si se los tapa. Ver [[nexora-connectionerror-no-es-no-ejecutado]].
+    """
+
+    if not order_ids:
+        return []
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, status, last_error, response_summary
+              FROM bejerman_remito_groups
+             WHERE status = 'failed'
+               AND COALESCE(id, '') <> COALESCE(%s, '')
+               AND EXISTS (
+                     SELECT 1
+                       FROM jsonb_array_elements_text(order_ids) AS o(order_id)
+                      WHERE o.order_id = ANY(%s)
+                   )
+            """,
+            [keep_group_id, list(order_ids)],
+        )
+        columns = [col[0] for col in cur.description]
+        rows = [dict(zip(columns, values)) for values in cur.fetchall()]
+    superseded: list[str] = []
+    for row in rows:
+        summary = _json_object(row.get("response_summary"))
+        if _optional_text(summary.get("reviewState")) == REMITO_REVIEW_STATE_SUPERSEDED:
+            continue
+        if not _remito_group_confirms_not_imported(row):
+            continue
+        group_id = _optional_text(row.get("id"))
+        if not group_id:
+            continue
+        _patch_remito_review_summary(
+            group_id,
+            {
+                "reviewState": REMITO_REVIEW_STATE_SUPERSEDED,
+                "reviewRequired": False,
+                "reconciliationRequired": False,
+                "supersededAt": timezone.now().isoformat(),
+                "supersededReason": reason,
+                "supersededByGroupId": keep_group_id,
+                "blockedReason": (
+                    "Cerrado automáticamente: Bejerman confirmó que este intento no creó ningún "
+                    f"comprobante y la entrega siguió por otro proceso. {reason}"
+                ),
+            },
+        )
+        _record_bejerman_integration_attempt(
+            group_id,
+            list(order_ids),
+            actor_user_id,
+            "auto_supersede",
+            status="superseded",
+            response_payload={"reason": reason, "supersededByGroupId": keep_group_id},
+        )
+        superseded.append(group_id)
+    if superseded:
+        logger.info(
+            "bejerman_remito_groups_superseded",
+            extra={"groupIds": superseded, "keepGroupId": keep_group_id, "reason": reason},
+        )
+    return superseded
 
 
 def _prepare_remito_group_for_correction(
@@ -5091,6 +5187,15 @@ def reserve_remito_group(
                 expected_count=expected_by_order.get(order_id, 1),
                 allocation_status="known",
             )
+        # El intento nuevo reemplaza a los rechazos anteriores de estas mismas
+        # ordenes: sin esto el panel guarda una fila por cada vez que alguien
+        # apreto "Reintentar", y el problema real queda enterrado entre copias.
+        _supersede_stale_failed_groups(
+            order_ids,
+            keep_group_id=group_id,
+            actor_user_id=actor_user_id,
+            reason=f"Reemplazado por el intento {group_id}.",
+        )
         sync_delivery_order_remito_projection(order_ids, actor_user_id)
     _record_bejerman_integration_attempt(
         group_id,
@@ -7075,6 +7180,14 @@ def _finalize_delivery_remito_group(
                     group_id,
                 ],
             )
+        # La entrega ya tiene su remito: los intentos rechazados que quedaron
+        # dando vueltas por estas ordenes son historia, no trabajo pendiente.
+        _supersede_stale_failed_groups(
+            ids,
+            keep_group_id=group_id,
+            actor_user_id=actor_user_id,
+            reason=f"La entrega se completó con el remito {remito_number}.",
+        )
         set_statuses = sync_delivery_order_remito_projection(ids, actor_user_id)
         completed_ids = [order_id for order_id in ids if set_statuses.get(order_id) == "complete"]
         if completed_ids:
@@ -7642,6 +7755,33 @@ def _find_review_candidate(
     return None
 
 
+def _adopted_number_parts(payload: dict[str, Any], group: dict[str, Any], profile: dict[str, Any]) -> tuple[str, str]:
+    """Punto de venta y número de lo que escribió el operador.
+
+    El campo dice "número de comprobante" pero la gente pega lo que ve en
+    Bejerman: `RSS R 00004-00004741`. `_normalized_digits(...).zfill(8)` sobre eso
+    devuelve `0000400004741` —el punto de venta pegado adelante— y así quedó
+    guardada la adopción de la entrega de MARK el 27/08/2026. Antes de quedarnos
+    con los dígitos hay que intentar leerlo como número completo.
+    """
+
+    raw = _optional_text(payload.get("comprobanteNumero") or payload.get("remitoNumber"))
+    point = _optional_text(payload.get("comprobantePtoVenta"))
+    try:
+        parsed = parse_bejerman_remito_number(
+            raw,
+            default_type=_optional_text(group.get("comprobante_tipo")) or _optional_text(profile.get("type")) or "RSS",
+            default_letter=_optional_text(group.get("comprobante_letra")) or "R",
+            allow_number_only=True,
+            default_point=point
+            or _optional_text(group.get("comprobante_pto_venta"))
+            or _optional_text(profile.get("pointOfSale")),
+        )
+    except (ValueError, TypeError):
+        return point, _normalized_digits(raw).zfill(8)
+    return point or parsed.get("point") or "", parsed.get("number") or ""
+
+
 def _adopted_comprobante_record(
     candidate: dict[str, Any] | None,
     payload: dict[str, Any],
@@ -7651,6 +7791,7 @@ def _adopted_comprobante_record(
     """El comprobante que el operador dice que salió, con la forma de Bejerman."""
 
     source = candidate or {}
+    typed_point, typed_number = _adopted_number_parts(payload, group, profile)
     return {
         "Comprobante_ID": _optional_text(source.get("comprobanteId")),
         "Comprobante_Tipo": _optional_text(source.get("comprobanteTipo"))
@@ -7660,12 +7801,14 @@ def _adopted_comprobante_record(
         or _optional_text(group.get("comprobante_letra"))
         or "R",
         "Comprobante_PtoVenta": _optional_text(source.get("comprobantePtoVenta"))
-        or _optional_text(payload.get("comprobantePtoVenta"))
+        or typed_point
         or _optional_text(group.get("comprobante_pto_venta"))
         or _optional_text(profile.get("pointOfSale")),
-        "Comprobante_Numero": _normalized_digits(
-            source.get("comprobanteNumero") or payload.get("comprobanteNumero")
-        ).zfill(8),
+        "Comprobante_Numero": (
+            _normalized_digits(source.get("comprobanteNumero")).zfill(8)
+            if _optional_text(source.get("comprobanteNumero"))
+            else typed_number
+        ),
         "Comprobante_FechaEmision": _optional_text(source.get("fechaEmision")),
         "Comprobante_Mensaje": _optional_text(source.get("mensaje")),
     }
