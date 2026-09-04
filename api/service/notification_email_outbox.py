@@ -519,10 +519,33 @@ def process_notification_email_outbox(
     return result
 
 
-def retry_failed_notification_emails(*, notification_keys: list[str] | None = None) -> int:
+def retry_failed_notification_emails(
+    *,
+    notification_keys: list[str] | None = None,
+    failed_within_hours: float | int | None = None,
+) -> int:
+    """Devuelve a la cola los correos que agotaron sus intentos.
+
+    Doce intentos se reparten en unas 28 horas. Un servidor de correo caído más
+    tiempo que eso —o mal configurado un fin de semana largo— mandaba a `failed`
+    todo lo de esa ventana, y `failed` no lo volvía a mirar nadie: los avisos se
+    perdían en silencio, que es la peor forma de perderlos.
+
+    `failed_within_hours` acota a los que fallaron hace poco. Es lo que evita que
+    reactivar en bucle se convierta en insistirle para siempre a una casilla que
+    no existe: pasada la ventana, el correo queda muerto de verdad y hay que
+    mirarlo a mano.
+    """
+
     clean_keys = sorted({_clean(key) for key in notification_keys or [] if _clean(key)})
-    key_filter = "AND notification_key = ANY(%s)" if clean_keys else ""
-    params: list[Any] = [clean_keys] if clean_keys else []
+    filters = ""
+    params: list[Any] = []
+    if clean_keys:
+        filters += " AND notification_key = ANY(%s)"
+        params.append(clean_keys)
+    if failed_within_hours is not None:
+        filters += " AND updated_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour')"
+        params.append(float(failed_within_hours))
     with connection.cursor() as cur:
         cur.execute(
             f"""
@@ -532,7 +555,7 @@ def retry_failed_notification_emails(*, notification_keys: list[str] | None = No
                    next_attempt_at=CURRENT_TIMESTAMP,
                    last_error=''
              WHERE status='failed'
-               {key_filter}
+               {filters}
             """,
             params,
         )

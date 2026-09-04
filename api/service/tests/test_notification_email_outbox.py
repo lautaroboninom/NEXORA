@@ -9,6 +9,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from service.notification_email_outbox import (
     process_notification_email_outbox,
     queue_notification_email,
+    retry_failed_notification_emails,
 )
 
 
@@ -222,3 +223,92 @@ class RecoverCobranzasEmailNotificationsTests(SimpleTestCase):
         send_delivery.assert_called_once()
         notify_service.assert_called_once_with(100, actor_name="Recuperación automática")
         notify_pdf.assert_called_once()
+
+
+class ReactivarCorreosFallidosTests(TestCase):
+    """Un correo que agota sus doce intentos quedaba muerto sin que nadie lo supiera.
+
+    Los reintentos se reparten en unas 28 horas. Si el servidor de correo está caído
+    más que eso, todo lo de esa ventana pasa a `failed` y ahí se queda: no llega el
+    aviso, y tampoco llega ningún aviso de que el aviso no llegó. Reactivarlos cada
+    tanto lo resuelve, pero acotado: insistirle para siempre a una casilla que no
+    existe es otra forma de romper la cola.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        call_command("apply_notifications_schema", verbosity=0)
+
+    def _correo_fallido(self, *, dedupe_key, fallo_hace_horas):
+        # Se inserta la fila a mano en vez de pasar por `queue_notification_email`:
+        # encolar dispara el envío en un hilo aparte que recicla las conexiones, y
+        # eso le cierra la conexión al test. Acá lo que se prueba es la reactivación,
+        # no el encolado.
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notification_email_outbox
+                       (notification_key, dedupe_key, recipient, subject, body,
+                        status, attempt_count, last_error, updated_at)
+                VALUES ('billing_pending_summary', %s, 'cobranzas@example.com',
+                        'Resumen', 'Pendientes', 'failed', 12, 'smtp caído',
+                        CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour'))
+             RETURNING id
+                """,
+                [dedupe_key, fallo_hace_horas],
+            )
+            return cur.fetchone()[0]
+
+    def _estado(self, delivery_id):
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT status, attempt_count FROM notification_email_outbox WHERE id=%s",
+                [delivery_id],
+            )
+            return cur.fetchone()
+
+    def test_reactiva_el_que_fallo_dentro_de_la_ventana(self):
+        delivery_id = self._correo_fallido(dedupe_key="ventana:reciente", fallo_hace_horas=2)
+
+        self.assertEqual(retry_failed_notification_emails(failed_within_hours=48), 1)
+
+        status, intentos = self._estado(delivery_id)
+        self.assertEqual(status, "retry")
+        # El contador vuelve a cero: si no, entra y sale de failed en el primer intento.
+        self.assertEqual(intentos, 0)
+
+    def test_no_insiste_con_el_que_fallo_hace_mucho(self):
+        delivery_id = self._correo_fallido(dedupe_key="ventana:vieja", fallo_hace_horas=24 * 5)
+
+        self.assertEqual(retry_failed_notification_emails(failed_within_hours=48), 0)
+        self.assertEqual(self._estado(delivery_id)[0], "failed")
+
+    def test_el_pedido_explicito_no_tiene_ventana(self):
+        # Es alguien mirando la cola a mano: ahí sí se reactiva todo.
+        delivery_id = self._correo_fallido(dedupe_key="sin-ventana", fallo_hace_horas=24 * 30)
+
+        self.assertEqual(retry_failed_notification_emails(), 1)
+        self.assertEqual(self._estado(delivery_id)[0], "retry")
+
+    def test_el_worker_reactiva_al_arrancar(self):
+        delivery_id = self._correo_fallido(dedupe_key="arranque", fallo_hace_horas=3)
+
+        salida = StringIO()
+        # El reciclado de conexiones es correcto en producción y letal dentro de un
+        # test: cerraría la conexión que sostiene la transacción del caso.
+        with patch(
+            "service.management.commands.run_notification_email_outbox.close_old_connections"
+        ), patch(
+            "service.management.commands.run_notification_email_outbox."
+            "process_notification_email_outbox"
+        ):
+            call_command(
+                "run_notification_email_outbox",
+                once=True,
+                retry_failed_window_hours=48,
+                stdout=salida,
+            )
+
+        self.assertEqual(self._estado(delivery_id)[0], "retry")
+        self.assertIn("Correos fallidos reactivados: 1", salida.getvalue())
