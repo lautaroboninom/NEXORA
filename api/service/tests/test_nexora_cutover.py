@@ -147,11 +147,21 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         self.assertTrue(permissions["action.devices_preventivos.manage"])
         self.assertEqual(VIEW_PERMISSION_MATRIX["DevicesListView"]["GET"], "page.devices_preventivos")
         self.assertEqual(
-            VIEW_PERMISSION_MATRIX["DeviceDirectCreateView"]["POST"],
-            "action.devices_preventivos.manage",
+            list(VIEW_PERMISSION_MATRIX["DeviceDirectCreateView"]["POST"]),
+            ["action.devices_preventivos.manage", "action.devices_preventivos.create"],
         )
         self.assertIn(MappedPermissionGuard, DevicesListView.permission_classes)
         self.assertIn(MappedPermissionGuard, DeviceDirectCreateView.permission_classes)
+
+    def test_recepcion_da_de_alta_equipos_sin_poder_editarlos(self):
+        # Recepción carga el equipo en el mostrador, pero `devices_preventivos.manage` es
+        # también el permiso patrimonial del cambio de equipo: se queda sin él a propósito.
+        permissions = get_role_defaults("recepcion")
+
+        self.assertTrue(permissions["page.devices_preventivos"])
+        self.assertTrue(permissions["action.devices_preventivos.create"])
+        self.assertFalse(permissions["action.devices_preventivos.manage"])
+        self.assertFalse(permissions["action.ingreso.baja_alta"])
 
     def test_tecnico_does_not_get_administrative_delivery_workspaces(self):
         permissions = get_role_defaults("tecnico")

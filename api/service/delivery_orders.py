@@ -6287,11 +6287,35 @@ def _refresh_service_release_order(order_id: str, row: dict[str, Any], mapping: 
 
 
 @transaction.atomic
+def _ingreso_belongs_to_rental_fleet(ingreso_id: int) -> bool:
+    # Import diferido: bejerman_sync es pesado y delivery_orders se importa desde las views.
+    from .bejerman_sync import ingreso_targets_rental_stock
+
+    try:
+        return bool(ingreso_targets_rental_stock(ingreso_id))
+    except Exception:
+        # Ante la duda no se frena la liberación del equipo: se cae al comportamiento viejo.
+        logger.exception(
+            "No se pudo determinar si el equipo es propio; se sigue con la orden de salida",
+            extra={"ingreso_id": ingreso_id},
+        )
+        return False
+
+
 def ensure_service_release_order_for_ingreso(ingreso_id: int, actor_user_id: int | None = None) -> dict[str, Any] | None:
     row = _service_release_context(ingreso_id)
     if not row:
         return None
     if _clean_text(row.get("estado")).lower() not in {"liberado", "vendido_pendiente_entrega"}:
+        return None
+    # Un equipo propio NO sale por RSS: el RSS es la salida de un equipo de CLIENTE.
+    # Un MG sale por RTA/RTN cuando se alquila, o por RT si se vende, y esos los carga
+    # comercial. Sin esta guarda el RSS pide la partida en STC --donde un MG no puede
+    # estar, ver el deposito del perfil de service_release-- Bejerman la rechaza por
+    # inexistente y el recovery termina dando de alta una unidad fantasma en STC y
+    # reemitiendo con ActualizaStock=N, con lo cual la salida ni siquiera mueve stock.
+    # Caso real: MG 4552 / MZJ5S121776, RSS 00004-00005202 del 04/09/2026.
+    if _ingreso_belongs_to_rental_fleet(ingreso_id):
         return None
 
     mapping = _article_mapping_for_service_release(row)

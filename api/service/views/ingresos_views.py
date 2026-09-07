@@ -62,6 +62,7 @@ from ..bejerman_sync import (
     enqueue_stock_venta_for_ingreso,
     ingreso_is_demo_return,
     ingreso_is_internal_equipment,
+    ingreso_targets_rental_stock,
 )
 from ..bejerman_sdk import (
     BejermanSDKClient,
@@ -2000,7 +2001,18 @@ class MarcarReparadoView(APIView):
             _prev_estado = ""
             _prev_presu = ""
         _set_audit_user(request)
-        sets = sets_con_limpieza_de_cambio("estado='reparado'", "resolucion='reparado'")
+        # El presupuesto rechazado manda sobre el resultado del trabajo. El equipo puede
+        # terminar armado y andando igual (se rechaza con la reparación ya hecha, o el
+        # técnico cierra después del rechazo), pero la OS no se resolvió reparando: pisar
+        # la resolución con 'reparado' hacía salir la orden de salida con "Resolución:
+        # Reparado" sobre un presupuesto que el cliente no aceptó, y de paso hacía que
+        # facturación y métricas tomaran el neto del presupuesto en vez del cobro pactado.
+        resolucion_set = (
+            "resolucion = CASE "
+            "WHEN LOWER(COALESCE(presupuesto_estado::text,'')) = 'rechazado' "
+            "THEN 'presupuesto_rechazado' ELSE 'reparado' END"
+        )
+        sets = sets_con_limpieza_de_cambio("estado='reparado'", resolucion_set)
         exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
         if _prev_estado != "reparado":
             registrar_ingreso_event(
@@ -2033,7 +2045,7 @@ class MarcarReparadoView(APIView):
                 [ingreso_id],
                 one=True,
             ) or {}
-            if ingreso_is_internal_equipment(ingreso_id):
+            if ingreso_targets_rental_stock(ingreso_id):
                 should_enqueue_stl = True
                 # Asegurar existencia de ubicaciones por defecto y buscar ID canónico.
                 try:
@@ -2601,7 +2613,7 @@ class EntregarIngresoView(APIView):
             try:
                 with transaction.atomic():
                     user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                    if ingreso_is_internal_equipment(ingreso_id):
+                    if ingreso_targets_rental_stock(ingreso_id):
                         enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
                     elif ingreso_is_demo_return(ingreso_id):
                         enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
@@ -4554,6 +4566,12 @@ class AprobadosYReparadosView(APIView):
               ) ev ON ev.ingreso_id = t.id
               WHERE LOWER(loc.nombre) = LOWER(%s)
                 AND t.estado IN ('reparado','controlado_sin_defecto','no_se_repara')
+                -- El presupuesto emitido y sin respuesta no está listo para salir: la OS
+                -- espera en "Presupuestados" (esa cola sí incluye los 'reparado') hasta
+                -- que se apruebe o se rechace. El COALESCE es necesario porque el NULL
+                -- de una OS sin presupuesto haría NULL toda la condición y la sacaría de
+                -- la lista.
+                AND COALESCE(t.presupuesto_estado::text, '') <> 'presupuestado'
               ORDER BY (ev.fecha_reparado IS NULL) ASC, ev.fecha_reparado ASC, t.fecha_ingreso ASC;
             """,
                 ["taller"],
@@ -8976,7 +8994,7 @@ class MarcarControladoSinDefectoView(APIView):
                 [ingreso_id],
                 one=True,
             ) or {}
-            if ingreso_is_internal_equipment(ingreso_id):
+            if ingreso_targets_rental_stock(ingreso_id):
                 should_enqueue_stl = True
                 try:
                     ensure_default_locations()

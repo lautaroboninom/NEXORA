@@ -14,7 +14,7 @@ from ..bejerman_sync import (
     enqueue_demo_ready_transfer_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
     ingreso_is_demo_return,
-    ingreso_is_internal_equipment,
+    ingreso_targets_rental_stock,
 )
 from ..delivery_orders import ensure_service_release_order_for_ingreso
 from ..derivations import active_derivation_block_payload, get_active_derivation
@@ -28,6 +28,32 @@ logger = logging.getLogger(__name__)
 # Nombres de los headers con los que el lote informa qué salió y qué no.
 _HEADER_EMITIDOS = "X-Nexora-Remitos-Emitidos"
 _HEADER_FALLIDOS = "X-Nexora-Remitos-Fallidos"
+
+# Estados en los que la orden de salida ya se emitió: volver a pedirla es
+# reimprimir, no liberar, así que los controles previos a liberar no aplican.
+ESTADOS_SALIDA_YA_EMITIDA = frozenset(
+    {
+        "liberado",
+        "entregado",
+        "alquilado",
+        "baja",
+        "vendido_pendiente_entrega",
+        "vendido_entregado",
+    }
+)
+
+
+def presupuesto_bloquea_salida(estado: str | None, presupuesto_estado: str | None) -> bool:
+    """¿Este presupuesto frena la orden de salida?
+
+    Un presupuesto emitido y todavía sin respuesta del cliente ('presupuestado') no
+    habilita liberar: se entregaría -y facturaría- un trabajo que nadie aprobó.
+    Aprobarlo o rechazarlo lo deja en 'aprobado'/'rechazado' y destraba la salida.
+    Sobre una OS cuya orden ya se emitió el corte no aplica: ahí se está reimprimiendo.
+    """
+    if (estado or "").strip().lower() in ESTADOS_SALIDA_YA_EMITIDA:
+        return False
+    return (presupuesto_estado or "").strip().lower() == "presupuestado"
 
 
 def _response_detail(response) -> str:
@@ -95,7 +121,14 @@ class RemitoSalidaPdfView(APIView):
         _set_audit_user(request)
 
         cur_row = q(
-            "SELECT resolucion, estado FROM ingresos WHERE id=%s FOR UPDATE",
+            """
+            SELECT resolucion,
+                   estado,
+                   COALESCE(presupuesto_estado::text, '') AS presupuesto_estado
+              FROM ingresos
+             WHERE id=%s
+               FOR UPDATE
+            """,
             [ingreso_id],
             one=True,
         )
@@ -106,14 +139,7 @@ class RemitoSalidaPdfView(APIView):
         if reprint_requested:
             # `vendido_pendiente_entrega` va acá igual que en el resto del método (ver los
             # cortes de más abajo): la orden ya se emitió, así que reimprimirla es válido.
-            if estado_actual not in {
-                "liberado",
-                "entregado",
-                "alquilado",
-                "baja",
-                "vendido_pendiente_entrega",
-                "vendido_entregado",
-            }:
+            if estado_actual not in ESTADOS_SALIDA_YA_EMITIDA:
                 return Response(
                     {"detail": "La orden de salida solo puede reimprimirse después de haber sido emitida."},
                     status=409,
@@ -126,6 +152,21 @@ class RemitoSalidaPdfView(APIView):
         derivacion_activa = get_active_derivation(ingreso_id)
         if derivacion_activa:
             return Response(active_derivation_block_payload(derivacion_activa), status=409)
+
+        # Este es el único punto por el que pasan todas las liberaciones -el lote delega
+        # en esta misma vista-, así que el corte del presupuesto sin aprobar va acá y no
+        # en cada cola.
+        if presupuesto_bloquea_salida(estado_actual, cur_row.get("presupuesto_estado")):
+            return Response(
+                {
+                    "detail": (
+                        "El presupuesto está emitido y todavía sin aprobar. "
+                        "Aprobalo o rechazalo antes de imprimir la orden de salida."
+                    ),
+                    "code": "presupuesto_sin_aprobar",
+                },
+                status=409,
+            )
 
         es_venta_pendiente = estado_actual == "vendido_pendiente_entrega"
         # Cambio de equipo: bajo esta OS no sale nada para el cliente. El equipo que trajo
@@ -217,7 +258,7 @@ class RemitoSalidaPdfView(APIView):
             try:
                 with transaction.atomic():
                     uid = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                    if ingreso_is_internal_equipment(ingreso_id):
+                    if ingreso_targets_rental_stock(ingreso_id):
                         enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=uid)
                     elif ingreso_is_demo_return(ingreso_id):
                         enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=uid)

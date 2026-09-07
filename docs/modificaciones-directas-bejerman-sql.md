@@ -234,6 +234,26 @@ una reversión ingenua les hubiera roto la partida.
    *"Incorrect syntax near '16'"*.
 4. **Blanco debe ir como `NULL`, no `''`.** En columnas con FK, mandar `''`
    viola la foreign key si `''` no es un código real de la tabla referenciada.
+   Peor todavía cuando la tabla referenciada está **vacía**: ahí *cualquier*
+   valor no nulo falla y sólo `NULL` pasa, porque SQL Server no valida la FK
+   cuando la columna es nula. Pasó el 04/09/2026 insertando en `CabMovS`:
+   *"conflicted with the FOREIGN KEY constraint `FK__CabMovS__cmsape___6DD739FB`
+   ... table `dbo.Apertura`"*, con `Apertura` sin una sola fila. En esa tabla son
+   **diez** las columnas en `NULL` (`cmspvt_CodIN`, `cmscli_Cod`, `cmspro_Cod`,
+   `cmsape_CodIN`, `cmstrn_Cod`, `cmstop_Cod`, `cmscvi_Cod`, `cms_TransfRentas`,
+   `cmscco_codigo`, `cms_NroCAE`) y tres en `MovStock` (`mstcem_Cod`,
+   `mstsec_ID`, `msttpl_Cod`).
+
+   **El volcado de una fila modelo no alcanza para distinguirlas**: el canal
+   devuelve CSV vía PowerShell, donde `NULL` y `''` se ven exactamente igual.
+   Para verlo hay que pedirlo explícito:
+   `CASE WHEN col IS NULL THEN '<NULL>' ELSE '['+col+']' END`.
+
+   **La forma robusta de insertar un comprobante nuevo es no tipear los valores:**
+   `INSERT ... SELECT` desde una fila que Bejerman ya aceptó, pisando sólo lo que
+   cambia (fecha, número, depósito). Así viajan bien hasta las columnas en las
+   que uno no pensó. Ejemplo completo:
+   `sql/ops/bejerman_pasar_stc_a_stl_F1121504012.sql`.
 5. **Columnas `bit`**: mandar `1`/`0` sin comillas.
 6. **Prefijo `N`** en todos los literales de texto: sin él, SQL Server usa el
    codepage no-Unicode de la base y las tildes se guardan como `?`.

@@ -863,7 +863,22 @@ def _clone_current_quote_version_from_rejected(ingreso_id: int) -> int:
             raise ValidationError("Solo se puede crear una nueva versión cuando la vigente está rechazada.")
 
         new_id = _clone_quote_version(current["id"])
-        exec_void("UPDATE ingresos SET presupuesto_estado='pendiente' WHERE id=%s", [ingreso_id])
+        # La nueva versión deja sin efecto el rechazo, así que también se va la resolución
+        # que el rechazo había dejado: si no, la OS seguiría saliendo como "Presupuesto
+        # rechazado" después de aprobar y reparar la versión nueva.
+        exec_void(
+            """
+            UPDATE ingresos
+               SET presupuesto_estado='pendiente',
+                   resolucion = CASE
+                       WHEN LOWER(COALESCE(resolucion,'')) = 'presupuesto_rechazado'
+                           THEN NULL
+                       ELSE resolucion
+                   END
+             WHERE id=%s
+            """,
+            [ingreso_id],
+        )
         return new_id
 
 
@@ -1277,12 +1292,26 @@ class RechazarPresupuestoView(APIView):
                 """,
                 [rechazo_comentario, current["id"]],
             )
+            # Rechazar también resuelve la OS: sale con "Presupuesto rechazado" y se cobra
+            # la revisión, no el presupuesto. Antes el rechazo no tocaba `resolucion`, así
+            # que una OS que ya venía marcada 'reparado' se liberaba con esa etiqueta (el
+            # modal de salida no vuelve a preguntar si ya hay resolución cargada).
+            #
+            # No se pisan las otras resoluciones: 'cambio' es un hecho patrimonial que
+            # corta el stock al cliente y la emisión del RSS, y 'no_reparado' /
+            # 'no_se_encontro_falla' son cierres explícitos por su propio camino, que
+            # conviven con un presupuesto rechazado.
             exec_void(
                 """
                 UPDATE ingresos
                    SET presupuesto_estado='rechazado',
                        presupuesto_rechazado_cobro_neto=%s,
-                       presupuesto_rechazado_quote_id=%s
+                       presupuesto_rechazado_quote_id=%s,
+                       resolucion = CASE
+                           WHEN LOWER(COALESCE(resolucion,'')) IN ('', 'reparado')
+                               THEN 'presupuesto_rechazado'
+                           ELSE resolucion
+                       END
                  WHERE id=%s
                 """,
                 [cobro_neto, current["id"], ingreso_id],

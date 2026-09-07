@@ -48,6 +48,7 @@ export const PERMISSION_CODES = {
   ACTION_SPARE_PARTS_MANAGE: "action.spare_parts.manage",
   ACTION_SPARE_PARTS_MANAGE_24H_PERMISSIONS: "action.spare_parts.manage_24h_permissions",
   ACTION_DEVICES_PREVENTIVOS_MANAGE: "action.devices_preventivos.manage",
+  ACTION_DEVICES_PREVENTIVOS_CREATE: "action.devices_preventivos.create",
   ACTION_METRICS_CONFIGURE: "action.metrics.configure",
   ACTION_BEJERMAN_SYNC_MANAGE: "action.bejerman_sync.manage",
   ACTION_BEJERMAN_PURCHASE_ENTRIES_MANAGE: "action.bejerman_purchase_entries.manage",

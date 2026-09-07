@@ -1,4 +1,4 @@
-import { norm, tipoEquipoOf } from "./ui-helpers.js";
+import { modeloSerieVarianteOf, norm, tipoEquipoOf } from "./ui-helpers.js";
 import {
   WORK_QUEUE_EMPTY_FILTER,
   workQueueTechnician,
@@ -56,7 +56,7 @@ export function workQueueFilterOptions(rows) {
     propiedad: WORK_QUEUE_PROPERTY_OPTIONS,
     tipo: uniqueOptions(rows, tipoEquipoOf),
     marca: uniqueOptions(rows, (row) => row?.marca ?? row?.equipo?.marca),
-    modelo: uniqueOptions(rows, (row) => row?.modelo ?? row?.equipo?.modelo),
+    modelo: uniqueOptions(rows, (row) => modeloSerieVarianteOf(row, "")),
     variante: uniqueOptions(
       rows,
       (row) => row?.equipo_variante ?? row?.variante ?? row?.equipo?.variante

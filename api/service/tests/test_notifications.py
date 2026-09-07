@@ -488,7 +488,7 @@ class NotificationsAPITest(TestCase):
         pdf_mock.assert_called_once_with("do-invoice", actor_user_id=self.recepcion.id)
 
     @patch("service.views.ingresos_views.require_roles", return_value=None)
-    @patch("service.views.ingresos_views.ingreso_is_internal_equipment", return_value=False)
+    @patch("service.views.ingresos_views.ingreso_targets_rental_stock", return_value=False)
     @patch("service.views.ingresos_views.ingreso_is_demo_return", return_value=False)
     @patch("service.views.ingresos_views.notify_repair_ready_for_remito")
     def test_marcar_reparado_con_presupuesto_aprobado_dispara_aviso_de_remito(
@@ -6845,7 +6845,7 @@ class NotificationsAPITest(TestCase):
     @patch("service.views.reportes_views.notify_ingreso_liberado")
     @patch("service.views.reportes_views.enqueue_client_ready_transfer_for_ingreso")
     @patch("service.views.reportes_views.ingreso_is_demo_return", return_value=False)
-    @patch("service.views.reportes_views.ingreso_is_internal_equipment", return_value=False)
+    @patch("service.views.reportes_views.ingreso_targets_rental_stock", return_value=False)
     def test_remito_salida_liberacion_dispara_aviso_os_a_facturar(
         self,
         _mock_internal,

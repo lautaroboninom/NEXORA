@@ -3,6 +3,7 @@ import {
   formatOS,
   ingresoCustomerName,
   ingresoIdOf,
+  modeloSerieVarianteOf,
   norm,
   parseDateLocal,
   propiedadEquipoLabelOf,
@@ -127,7 +128,13 @@ export function matchesWorkQueueFilters(row, filters = {}) {
   if (!matchesQueueSelect(workQueueProperty(row), propiedad)) return false;
   if (!matchesQueueSelect(tipoEquipoOf(row), tipo)) return false;
   if (!matchesQueueSelect(row?.marca ?? row?.equipo?.marca, marca)) return false;
-  if (!matchesQueueSelect(row?.modelo ?? row?.equipo?.modelo, modelo)) return false;
+  if (
+    modelo &&
+    !matchesQueueSelect(modeloSerieVarianteOf(row, ""), modelo) &&
+    !matchesQueueSelect(row?.modelo ?? row?.equipo?.modelo, modelo)
+  ) {
+    return false;
+  }
   if (!matchesQueueSelect(row?.equipo_variante ?? row?.variante ?? row?.equipo?.variante, variante)) return false;
   if (
     identificacion &&
@@ -151,7 +158,7 @@ export const WORK_QUEUE_SORT_COLUMNS = {
   propiedad: { accessor: workQueueProperty },
   tipo: { accessor: tipoEquipoOf },
   marca: { accessor: (row) => row?.marca ?? row?.equipo?.marca },
-  modelo: { accessor: (row) => row?.modelo ?? row?.equipo?.modelo },
+  modelo: { accessor: (row) => modeloSerieVarianteOf(row, "") },
   variante: {
     accessor: (row) =>
       row?.equipo_variante ?? row?.variante ?? row?.equipo?.variante ?? row?.modelo_variante,

@@ -78,15 +78,179 @@ def _exit_order_date_context(head: dict) -> tuple[str, str]:
     return label, date_value
 
 
-def _exit_order_observations(head: dict) -> str:
-    sections = []
+def _exit_order_observation_blocks(head: dict) -> list[dict]:
+    """Secciones de Observaciones, cada una con su título."""
+    blocks = []
     description = str(head.get("descripcion_problema") or "").strip()
     work_done = str(head.get("trabajos_realizados") or "").strip()
     if description:
-        sections.append(f"Descripción del problema:\n{description}")
+        blocks.append({"title": "Descripción del problema:", "body": description})
     if work_done:
-        sections.append(f"Trabajos realizados:\n{work_done}")
+        blocks.append({"title": "Trabajos realizados:", "body": work_done})
+    return blocks
+
+
+def _exit_order_observations(head: dict) -> str:
+    sections = [
+        f"{block['title']}\n{block['body']}"
+        for block in _exit_order_observation_blocks(head)
+    ]
     return "\n\n".join(sections) or "-"
+
+
+# --- Observaciones de la orden de salida ---------------------------------
+# La caja tiene alto fijo y el texto largo libre, así que antes se cortaba en
+# seco a los ~9 renglones: entraba el diagnóstico y los trabajos realizados se
+# perdían. Las medidas son las que ya usaba `paragraph_in_box`.
+OBS_PAD_X = 1.8 * mm
+OBS_PAD_TOP = 3.0 * mm
+OBS_PAD_BOTTOM = 2.0 * mm
+OBS_COL_GAP = 5.0 * mm
+OBS_MIN_FONT = 5.6
+OBS_FONT_STEP = 0.4
+
+
+OBS_BULLET_RE = re.compile(r"^(\s*(?:[-*\u2022\u00b7]|\d+[.)])\s+)")
+
+
+def _observation_body_lines(text, size, max_width):
+    """Corta el cuerpo respetando la viñeta: lo que sigue va sangrado, no al margen.
+
+    Sin esto la segunda mitad de un trabajo largo arranca pegada a la izquierda y
+    se lee como si fuera otro ítem de la lista.
+    """
+    lines = []
+    for raw in str(text or "").replace("\r", "").split("\n"):
+        if not raw.strip():
+            lines.append(("", 0.0))
+            continue
+        match = OBS_BULLET_RE.match(raw)
+        if not match:
+            lines.extend((ln, 0.0) for ln in _wrap_lines(raw, "Helvetica", size, max_width))
+            continue
+        marker = match.group(1)
+        try:
+            indent = pdfmetrics.stringWidth(marker.replace("\t", " "), "Helvetica", size)
+        except Exception:
+            indent = 0.0
+        indent = min(indent, max_width / 3)
+        rest = raw[match.end():]
+        wrapped = _wrap_lines(rest, "Helvetica", size, max(max_width - indent, 1.0)) or [""]
+        lines.append((f"{marker.strip()} {wrapped[0]}".strip(), 0.0))
+        lines.extend((ln, indent) for ln in wrapped[1:])
+    return lines
+
+
+def _observation_block_lines(blocks, size, max_width):
+    """Renglones (texto, negrita, sangría) de los bloques, con uno en blanco entre secciones."""
+    lines = []
+    for block in blocks:
+        title = str(block.get("title") or "").strip()
+        body = str(block.get("body") or "").strip()
+        if not title and not body:
+            continue
+        if lines:
+            lines.append(("", False, 0.0))
+        if title:
+            lines.extend(
+                (ln, True, 0.0)
+                for ln in _wrap_lines(title, "Helvetica-Bold", size, max_width)
+            )
+        if body:
+            lines.extend(
+                (ln, False, indent)
+                for ln, indent in _observation_body_lines(body, size, max_width)
+            )
+    return lines
+
+
+def _observation_columns_by_section(blocks, size, col_w, max_lines):
+    """Reparte las secciones enteras entre las dos columnas, sin partir ninguna."""
+    if len(blocks) < 2:
+        return None
+    best = None
+    for cut in range(1, len(blocks)):
+        left = _observation_block_lines(blocks[:cut], size, col_w)
+        right = _observation_block_lines(blocks[cut:], size, col_w)
+        if len(left) > max_lines or len(right) > max_lines:
+            continue
+        score = max(len(left), len(right))
+        if best is None or score < best[0]:
+            best = (score, [left, right])
+    return best[1] if best else None
+
+
+def _observation_columns_flowed(lines, max_lines):
+    """Texto corrido repartido en dos columnas parejas."""
+    half = max(min((len(lines) + 1) // 2, max_lines), 1)
+    left, right = lines[:half], lines[half:]
+    while right and not right[0][0]:
+        right.pop(0)
+    return [left, right]
+
+
+def _layout_observation_columns(blocks, box_w, box_h, base_size=7.4, base_leading=3.6 * mm):
+    """Acomoda las Observaciones para que entren enteras en la caja.
+
+    Lo que se escribe acá son viñetas cortas de diagnóstico, así que a todo el
+    ancho la mitad derecha quedaba en blanco mientras el final del texto se
+    perdía. Se prueba, en orden: una sección por columna, una sola columna a
+    todo el ancho, dos columnas de texto corrido, y recién ahí achicar la letra.
+    Sólo si nada de eso alcanza se recorta, y marcando el corte.
+
+    Devuelve (columnas, cuerpo, interlínea, ancho_de_columna).
+    """
+    if not blocks:
+        blocks = [{"title": "", "body": "-"}]
+    full_w = max(box_w - 2 * OBS_PAD_X, 1.0)
+    col_w = max((full_w - OBS_COL_GAP) / 2, 1.0)
+    usable_h = max(box_h - OBS_PAD_TOP - OBS_PAD_BOTTOM, 0.0)
+
+    def _fit(size):
+        leading = base_leading * (size / base_size) if base_size else base_leading
+        max_lines = max(int(usable_h // leading) + 1 if leading > 0 else 1, 1)
+        return leading, max_lines
+
+    def _attempt(size):
+        leading, max_lines = _fit(size)
+        # Una sección por columna: el mismo papel se lee siempre igual, con el
+        # problema a la izquierda y lo que se hizo a la derecha.
+        by_section = _observation_columns_by_section(blocks, size, col_w, max_lines)
+        if by_section:
+            return by_section, leading, col_w
+        # Una sola sección larga se lee mejor a todo el ancho que en dos tiras.
+        single = _observation_block_lines(blocks, size, full_w)
+        if len(single) <= max_lines:
+            return [single], leading, full_w
+        flowed = _observation_block_lines(blocks, size, col_w)
+        if len(flowed) <= 2 * max_lines:
+            return _observation_columns_flowed(flowed, max_lines), leading, col_w
+        return None
+
+    size = base_size
+    while True:
+        attempt = _attempt(size)
+        if attempt:
+            columns, leading, width = attempt
+            return columns, size, leading, width
+        if round(size - OBS_FONT_STEP, 2) < OBS_MIN_FONT:
+            break
+        size = round(size - OBS_FONT_STEP, 2)
+
+    # No entra ni con el cuerpo más chico: se recorta, pero avisando.
+    leading, max_lines = _fit(size)
+    flowed = _observation_block_lines(blocks, size, col_w)
+    columns = [flowed[:max_lines], flowed[max_lines:2 * max_lines]]
+    if columns[1]:
+        last, bold, indent = columns[1][-1]
+        columns[1][-1] = (
+            _truncate_text_to_width(
+                f"{last} ...".strip(), "Helvetica", size, max(col_w - indent, 1.0)
+            ),
+            bold,
+            indent,
+        )
+    return columns, size, leading, col_w
 
 
 # --- helpers de formato ---
@@ -1498,20 +1662,32 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         c.setFont(font, draw_fsz)
         c.drawString(x + 1.4 * mm, y + 1.2 * mm, text)
 
-    def paragraph_in_box(x, y, w, h, title, text, fsz=F_FIELD):
+    def observations_box(x, y, w, h, title, blocks, fsz=F_FIELD):
+        """Observaciones a dos columnas: el texto largo ya no se corta a la mitad."""
         c.setFont("Helvetica", F_LABEL); c.setFillColor(colors.grey)
         c.drawString(x, y + h + 1.4 * mm, title)
         c.setFillColor(colors.black)
         box(x, y, w, h)
-        c.setFont("Helvetica", fsz)
-        max_w = w - 3.6 * mm
-        lines = _wrap_lines(text or "-", "Helvetica", fsz, max_w)
-        ty = y + h - 3.0 * mm
-        for ln in lines:
-            if ty < y + 2.0 * mm:
-                break
-            c.drawString(x + 1.8 * mm, ty, ln)
-            ty -= P_LH
+
+        columns, size, leading, col_w = _layout_observation_columns(
+            blocks, w, h, base_size=fsz, base_leading=P_LH
+        )
+        if len(columns) > 1 and columns[1]:
+            # Sin la guía, el salto de la columna izquierda a la derecha no se lee.
+            sep_x = x + OBS_PAD_X + col_w + OBS_COL_GAP / 2
+            c.saveState()
+            c.setStrokeColor(colors.HexColor("#c8c8c8"))
+            c.setLineWidth(0.3)
+            c.line(sep_x, y + 1.6 * mm, sep_x, y + h - 1.6 * mm)
+            c.restoreState()
+        for idx, column in enumerate(columns):
+            cx = x + OBS_PAD_X + idx * (col_w + OBS_COL_GAP)
+            ty = y + h - OBS_PAD_TOP
+            for text, bold, indent in column:
+                if text:
+                    c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+                    c.drawString(cx + indent, ty, text)
+                ty -= leading
 
     def big_title(y_top):
         x = margin + 6 * mm
@@ -1628,7 +1804,7 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
         y -= (ROW_H + ROW_GAP)
 
         # Observaciones (Descripción + Trabajos)
-        obs_txt = _exit_order_observations(head)
+        obs_blocks = _exit_order_observation_blocks(head)
         try:
             if (head.get("resolucion") or "").strip().lower() == "cambio":
                 sc_val = (head.get("serial_cambio") or "").strip()
@@ -1641,10 +1817,10 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
                     aviso = f"Cambio de equipo. Se entrega: {sc_val}."
                     if recibido:
                         aviso += f" El equipo recibido ({recibido}) queda en SEPID."
-                    obs_txt = f"{aviso}\n\n" + obs_txt
+                    obs_blocks.insert(0, {"title": "", "body": aviso})
         except Exception:
             pass
-        paragraph_in_box(inner_x, y - obs_h, inner_w, obs_h, "Observaciones", obs_txt)
+        observations_box(inner_x, y - obs_h, inner_w, obs_h, "Observaciones", obs_blocks)
         y -= (obs_h + 2.6 * mm)
 
         rejected_summary = head.get("presupuesto_rechazado_summary")

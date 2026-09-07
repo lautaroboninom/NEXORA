@@ -52,6 +52,7 @@ PERMISSION_CATALOG = [
     {"code": "action.spare_parts.manage", "label": "Gestionar repuestos y stock", "type": "action", "group": "Repuestos"},
     {"code": "action.spare_parts.manage_24h_permissions", "label": "Gestionar permisos 24h de repuestos", "type": "action", "group": "Repuestos"},
     {"code": "action.devices_preventivos.manage", "label": "Gestionar edicion de equipos/preventivos", "type": "action", "group": "Equipos"},
+    {"code": "action.devices_preventivos.create", "label": "Dar de alta equipos", "type": "action", "group": "Equipos"},
     {"code": "action.metrics.configure", "label": "Configurar metricas", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_sync.manage", "label": "Gestionar sincronización Bejerman", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_purchase_entries.manage", "label": "Gestionar ingresos de mercadería Bejerman", "type": "action", "group": "Sistema"},
@@ -287,6 +288,12 @@ _grant(
     "page.delivery_orders",
     "page.route_sheet",
     "page.bejerman_purchase_entries",
+    # Recepción da de alta el equipo en el mostrador (muchas veces antes de que exista
+    # una orden), así que ve la pestaña Equipos y puede el alta directa. NO se le da
+    # `devices_preventivos.manage`: ese permiso es también el que habilita pasar un equipo
+    # al patrimonio de SEPID desde el cambio de equipo, y esa decisión sigue en jefatura.
+    "page.devices_preventivos",
+    "action.devices_preventivos.create",
     "action.ingreso.create",
     # Recepción está en el mostrador cuando se define el cambio de equipo, así que
     # registra el cambio sin tener `repair_transitions` ni la pestaña de diagnóstico.

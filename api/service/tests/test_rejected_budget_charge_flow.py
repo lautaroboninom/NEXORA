@@ -325,7 +325,7 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
         with (
             patch("service.views.reportes_views.render_remito_salida_pdf", return_value=(b"%PDF-1.4", "remito.pdf")),
             patch("service.views.reportes_views.notify_ingreso_liberado", return_value=0),
-            patch("service.views.reportes_views.ingreso_is_internal_equipment", return_value=False),
+            patch("service.views.reportes_views.ingreso_targets_rental_stock", return_value=False),
             patch("service.views.reportes_views.enqueue_client_ready_transfer_for_ingreso", return_value=None),
         ):
             resp = self.client.get(f"/api/ingresos/{ingreso_id}/remito/")

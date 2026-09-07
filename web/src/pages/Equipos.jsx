@@ -2206,6 +2206,9 @@ export default function Equipos() {
   const canManageDevices = can(user, PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_MANAGE);
   const canPrintEquipmentBarcode = canManageDevices || can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE);
   const canEdit = canManageDevices;
+  // Recepción da de alta equipos en el mostrador sin poder editar ni tocar preventivos.
+  const canCreateDevices =
+    canManageDevices || can(user, PERMISSION_CODES.ACTION_DEVICES_PREVENTIVOS_CREATE);
   const canPlanEdit = canManageDevices;
   const canRevisionMutate = canManageDevices;
   const canBajaAlta = can(user, PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA);
@@ -3114,7 +3117,7 @@ export default function Equipos() {
             Gestión de equipos, mantenimientos preventivos e instituciones.
           </p>
         </div>
-        {canEdit && (
+        {canCreateDevices && (
           <button
             className="btn"
             onClick={() => {

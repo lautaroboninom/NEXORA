@@ -64,6 +64,12 @@ export function getReleaseFlow(row = {}, { canManageResolution = false } = {}) {
     blockedReason = "Es una venta pendiente de entrega. Completá la entrega de venta desde la hoja de servicio.";
   } else if (CLOSED_STATES.has(estado) && !isReprint) {
     blockedReason = `El equipo ya está en estado ${estadoLabel(estado)}.`;
+  } else if (presupuesto === "presupuestado" && !isReprint) {
+    // Mismo corte que el backend (RemitoSalidaPdfView): un presupuesto emitido y
+    // todavía sin respuesta del cliente no se libera. Acá se adelanta el 409 para
+    // que el operador lo vea antes de apretar, tanto en el modal de una OS como en
+    // el lote, que comparte este mismo flujo.
+    blockedReason = "El presupuesto está emitido y todavía sin aprobar. Aprobalo o rechazalo antes de liberar.";
   } else if (needsResolution && !RELEASE_READY_STATES.has(estado)) {
     blockedReason = "Todavía falta cerrar la reparación o definir una resolución de salida.";
   }

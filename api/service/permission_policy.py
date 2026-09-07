@@ -365,7 +365,7 @@ VIEW_PERMISSION_MATRIX = {
         "GET": "page.devices_preventivos",
         "PATCH": "action.devices_preventivos.manage",
     },
-    "DeviceDirectCreateView": {"POST": "action.devices_preventivos.manage"},
+    "DeviceDirectCreateView": {"POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
     "DevicesMergeView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgVentaView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgReactivarView": {"POST": "action.devices_preventivos.manage"},

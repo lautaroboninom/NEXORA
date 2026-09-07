@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   matchesWorkQueueFilters,
   WORK_QUEUE_EMPTY_FILTER,
+  WORK_QUEUE_SORT_COLUMNS,
   workQueueProperty,
 } from "./work-queue.js";
+import { workQueueFilterOptions } from "./work-queue-filter-options.js";
 
 test("distingue las tres categorías de propiedad", () => {
   assert.equal(
@@ -59,3 +61,24 @@ test("una devolución de demo también figura como MG BIO en la cola", () => {
   assert.equal(workQueueProperty(row), "MG BIO");
   assert.equal(workQueueProperty({ ...row, estado: "vendido_entregado" }), "Cliente");
 });
+
+test("unifica modelo y variante en ordenación y opciones de filtro", () => {
+  const rows = [
+    { id: 1, modelo: "AirSense 10", variante: "AutoSet" },
+    { id: 2, modelo: "Stellar 150" },
+  ];
+
+  assert.equal(WORK_QUEUE_SORT_COLUMNS.modelo.accessor(rows[0]), "AirSense 10 AutoSet");
+  assert.equal(WORK_QUEUE_SORT_COLUMNS.modelo.accessor(rows[1]), "Stellar 150");
+
+  assert.equal(matchesWorkQueueFilters(rows[0], { modelo: "AirSense 10 AutoSet" }), true);
+  assert.equal(matchesWorkQueueFilters(rows[0], { modelo: "AirSense 10" }), true);
+  assert.equal(matchesWorkQueueFilters(rows[0], { modelo: "Stellar 150" }), false);
+
+  const options = workQueueFilterOptions(rows);
+  assert.deepEqual(options.modelo, [
+    { value: "AirSense 10 AutoSet", label: "AirSense 10 AutoSet" },
+    { value: "Stellar 150", label: "Stellar 150" },
+  ]);
+});
+

@@ -60,7 +60,11 @@ JOB_STATUS_FAILED = "failed"
 JOB_STATUS_BLOCKED = "blocked"
 JOB_STATUS_CANCELLED = "cancelled"
 
-INTERNAL_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,4}$", re.IGNORECASE)
+# Hasta 6 digitos: el numero interno tambien se carga con ceros a la izquierda
+# ("MG 001678", "MG 002562"). Con el limite en 4 esos equipos no se reconocian
+# como propios y su stock terminaba en STC en vez de STL. Son 13 en produccion.
+INTERNAL_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,6}$", re.IGNORECASE)
+RENTAL_FLEET_MOTIVOS = ("baja alquiler", "reparacion alquiler")
 TRANSFER_PHASE_SAL_DONE = "sal_done"
 TRANSFER_PHASE_ENT_PENDING = "ent_pending"
 TRANSFER_PHASE_DONE = "done"
@@ -1035,6 +1039,27 @@ def ingreso_is_internal_equipment(ingreso_id: int) -> bool:
     )
 
 
+def ingreso_targets_rental_stock(ingreso_id: int) -> bool:
+    """El equipo vuelve al parque de alquiler: su stock va a STL, no a STC.
+
+    El numero interno solo no alcanza. La decision se toma en el instante en que
+    se libera el equipo y depende de un campo que alguien puede estar editando
+    justo entonces: el 11/05/2026 le vaciaron el `numero_interno` a MG 2562
+    veinticuatro segundos antes de imprimir la orden de salida y la unidad se
+    fue a STC, donde sigue. El motivo del ingreso no depende de eso, y un equipo
+    de cliente nunca genera una baja de alquiler.
+
+    La venta sigue mandando: un MG historico ya vendido es del cliente aunque
+    haya vuelto de un alquiler.
+    """
+    if ingreso_is_internal_equipment(ingreso_id):
+        return True
+    row = _ingreso_context(ingreso_id)
+    if _ingreso_has_mg_sale(row):
+        return False
+    return _text_key(row.get("motivo")) in RENTAL_FLEET_MOTIVOS
+
+
 def ingreso_is_demo_return(ingreso_id: int) -> bool:
     row = _ingreso_context(ingreso_id)
     return _text_key(row.get("motivo")) == "devolucion demo"
@@ -1168,8 +1193,8 @@ def enqueue_stock_transfer_for_ingreso(
     ingreso_event_id: int | None = None,
     actor_user_id: int | None = None,
 ) -> dict[str, Any]:
-    if not ingreso_is_internal_equipment(ingreso_id):
-        raise BejermanBlockedError("Solo los equipos MG pueden transferirse de STR a STL")
+    if not ingreso_targets_rental_stock(ingreso_id):
+        raise BejermanBlockedError("Solo los equipos del parque de alquiler pueden transferirse de STR a STL")
     source_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
     target_deposit = str(_setting("BEJERMAN_TARGET_DEPOSIT", "STL") or "STL").strip() or "STL"
     if ingreso_event_id is None:
@@ -2835,7 +2860,7 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
     sync_type = (job.get("sync_type") or "").strip()
     request_payload = _dict_payload(job.get("request_payload"))
     response_payload = _dict_payload(job.get("response_payload"))
-    if sync_type == SYNC_TYPE_STOCK_STR_TO_STL and not ingreso_is_internal_equipment(int(job["ingreso_id"])):
+    if sync_type == SYNC_TYPE_STOCK_STR_TO_STL and not ingreso_targets_rental_stock(int(job["ingreso_id"])):
         _finish_job(
             job["id"],
             JOB_STATUS_SUCCEEDED,

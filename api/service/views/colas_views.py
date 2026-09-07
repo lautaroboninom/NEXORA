@@ -59,6 +59,7 @@ _SQL_LISTOS_PARA_LIBERAR = """
       LEFT JOIN locations loc ON loc.id = t.ubicacion_id
      WHERE LOWER(loc.nombre) = LOWER(%s)
        AND t.estado IN ('reparado','controlado_sin_defecto','no_se_repara')
+       AND COALESCE(t.presupuesto_estado::text, '') <> 'presupuestado'
 """
 
 

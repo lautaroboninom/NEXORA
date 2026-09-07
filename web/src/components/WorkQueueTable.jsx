@@ -11,6 +11,7 @@ import {
   formatOS,
   ingresoIdOf,
   isMotivoCotizacionEquipo,
+  modeloSerieVarianteOf,
   resolveFechaIngreso,
   tipoEquipoOf,
 } from "../lib/ui-helpers";
@@ -117,8 +118,13 @@ export default function WorkQueueTable({
         filter: "select",
       },
       { field: "marca", label: "Marca", cellClassName: "whitespace-nowrap", filter: "select" },
-      { field: "modelo", label: "Modelo", cellClassName: "whitespace-nowrap", filter: "select" },
-      { field: "variante", label: "Variante", cellClassName: "whitespace-nowrap", filter: "select" },
+      {
+        field: "modelo",
+        label: "Modelo + Variante",
+        cellClassName: "whitespace-nowrap",
+        render: (row) => modeloSerieVarianteOf(row, "-"),
+        filter: "select",
+      },
       {
         field: "identificacion",
         label: "N/S o MG",

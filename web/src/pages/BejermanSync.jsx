@@ -1324,19 +1324,28 @@ function RemitoReviewResolveModal({ target, onClose, onSubmit }) {
 }
 
 function RemitoReference({ row }) {
-  if (row?.source === "ingreso" && row?.ingreso_id) {
+  const orders = Array.isArray(row?.orders) ? row.orders : [];
+  const shown = orders.filter((order) => order?.orderNumber || order?.id).slice(0, 3);
+  // Todo proceso que nace de un ingreso (RIS, conflicto de ingreso) se muestra con su OS, así que
+  // el link tiene que abrir la hoja de servicio. Antes sólo se contemplaba source === "ingreso" y
+  // los conflictos caían en el fallback: mostraban "OS-29673" y llevaban al listado de órdenes de
+  // entrega, que no tiene nada que ver con esa referencia.
+  if (!shown.length && row?.ingreso_id) {
     return (
       <Link className="font-semibold text-blue-700 hover:underline" to={`/ingresos/${row.ingreso_id}`}>
-        {formatOS(row.ingreso_id)}
+        {row?.display_id || formatOS(row.ingreso_id, "OS-")}
       </Link>
     );
   }
-  const orders = Array.isArray(row?.orders) ? row.orders : [];
-  const shown = orders.filter((order) => order?.orderNumber || order?.id).slice(0, 3);
   if (!shown.length) {
+    const label = row?.display_id || row?.group_id || row?.id || "-";
+    // Sin OS ni órdenes no hay adónde ir: el listado de entregas sólo aplica a esos procesos.
+    if (row?.source !== "orden_entrega") {
+      return <span className="font-semibold text-gray-900">{label}</span>;
+    }
     return (
       <Link className="font-semibold text-blue-700 hover:underline" to="/ordenes-entrega">
-        {row?.display_id || row?.group_id || row?.id || "-"}
+        {label}
       </Link>
     );
   }

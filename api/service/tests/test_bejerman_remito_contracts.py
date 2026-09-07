@@ -5,6 +5,7 @@ from django.test import SimpleTestCase, override_settings
 
 from service.bejerman_ris import (
     BejermanRisError,
+    _comprobante_import_with_partidas,
     _emit_payload_to_bejerman,
     _register_payload_to_bejerman,
 )
@@ -174,6 +175,7 @@ def _batch_register_payload(serials, *, existing_stock=False):
     BEJERMAN_STOCK_NUMERA_FLEX="N",
     BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=1,
     BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0,
+    BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RD,RDN,RDA",
 )
 class BejermanRemitoContractsTests(SimpleTestCase):
     def test_emision_online_ris_actualiza_stock_s_sin_ent(self):
@@ -257,7 +259,8 @@ class BejermanRemitoContractsTests(SimpleTestCase):
         self.assertEqual(len(fake.stock_comprobantes), 1)
         self.assertEqual(fake.ingresar_calls, 0)
 
-    def test_emision_rda_con_partida_rechazada_cae_a_ent_mas_documento_n(self):
+    @override_settings(BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT=False)
+    def test_emision_rda_con_partida_rechazada_cae_a_ent_mas_documento_n_con_signo_negativo(self):
         payload = _payload(serial="SN-RDA-REJECT")
         payload["documentProfile"] = {
             **payload["documentProfile"],
@@ -286,7 +289,37 @@ class BejermanRemitoContractsTests(SimpleTestCase):
         self.assertEqual(segundo["Comprobante_ActualizaStock"], "N")
         article_lines = [item for item in segundo["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(article_lines[0]["Item_Partida"], "SN-RDA-REJECT")
-        self.assertGreater(article_lines[0]["Item_CantidadUM1"], 0)
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM2"], -1)
+
+    def test_fallback_partida_aplica_el_signo_semantico_del_comprobante(self):
+        for document_type, quantity, expected in (
+            ("RIS", -2, 2),
+            ("RTA", -2, 2),
+            ("RD", 2, -2),
+            ("RDN", 2, -2),
+            ("RDA", 2, -2),
+        ):
+            with self.subTest(document_type=document_type):
+                recovered = _comprobante_import_with_partidas(
+                    {
+                        "Comprobante_Tipo": document_type,
+                        "Comprobante_Items": [
+                            {
+                                "Item_Tipo": "A",
+                                "Item_CantidadUM1": quantity,
+                                "Item_CantidadUM2": quantity,
+                            }
+                        ],
+                    },
+                    _payload(serial=f"SN-{document_type}-SIGN"),
+                    "STR",
+                )
+
+                article_line = recovered["Comprobante_Items"][0]
+                self.assertEqual(recovered["Comprobante_ActualizaStock"], "N")
+                self.assertEqual(article_line["Item_CantidadUM1"], expected)
+                self.assertEqual(article_line["Item_CantidadUM2"], expected)
 
     def test_mgbio_conserva_punto_00007_donde_aplica(self):
         payload = _payload(company_key="MGBIO", bejerman_company="MGBI", point="00007", serial="SN-MGBIO-0007")

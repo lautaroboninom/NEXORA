@@ -469,7 +469,7 @@ class NoSeReparaFlowAPITest(TestCase):
     @patch("service.views.reportes_views.notify_ingreso_liberado")
     @patch("service.views.reportes_views.enqueue_client_ready_transfer_for_ingreso")
     @patch("service.views.reportes_views.ingreso_is_demo_return", return_value=False)
-    @patch("service.views.reportes_views.ingreso_is_internal_equipment", return_value=False)
+    @patch("service.views.reportes_views.ingreso_targets_rental_stock", return_value=False)
     @patch("service.views.reportes_views.render_remito_salida_pdf", return_value=(b"%PDF-1.4 test", "salida.pdf"))
     def test_remito_autocompleta_resolucion_no_reparado_para_no_se_repara(
         self,

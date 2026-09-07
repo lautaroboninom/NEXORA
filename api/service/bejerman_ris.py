@@ -4026,12 +4026,14 @@ def _comprobante_import_with_partidas(
 ) -> dict[str, Any]:
     out = dict(comprobante or {})
     out["Comprobante_ActualizaStock"] = "N"
+    header_document_type = _clean(out.get("Comprobante_Tipo"))
     equipments = _payload_equipment_items(payload)
     article_index = 0
     items: list[dict[str, Any]] = []
     for item in out.get("Comprobante_Items") or []:
         next_item = dict(item)
         if next_item.get("Item_Tipo") == "A":
+            document_type = _clean(next_item.get("Comprobante_Tipo")) or header_document_type
             equipment = equipments[min(article_index, max(len(equipments) - 1, 0))] if equipments else {}
             partida = _clean(resolve_equipment_partida(equipment))
             if partida:
@@ -4040,9 +4042,9 @@ def _comprobante_import_with_partidas(
             for qty_key in ("Item_CantidadUM1", "Item_CantidadUM2"):
                 value = next_item.get(qty_key)
                 if isinstance(value, (int, float)) and value:
-                    next_item[qty_key] = abs(value)
+                    next_item[qty_key] = sdk_signed_article_quantity(document_type, value)
             if not next_item.get("Item_CantidadUM1"):
-                next_item["Item_CantidadUM1"] = 1
+                next_item["Item_CantidadUM1"] = sdk_signed_article_quantity(document_type)
             article_index += 1
         items.append(next_item)
     out["Comprobante_Items"] = items
@@ -4058,21 +4060,18 @@ def _recover_emit_partida_rejection(
     numera_flex: str,
     emite_reg: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Fallback cuando el WS procesa la 'emisión' como importador y rechaza la
-    partida (pasa en MGBIO y también en SEPID según el comprobante).
+    """Recupera una emisión cuando el WS rechaza la partida como importador.
 
-    El ENT existe porque el importador de VENTAS no crea partidas. Pero deja la
-    partida en +1, y por eso el reintento iba con `ActualizaStock=N`: sin eso la
-    unidad se contaba dos veces. El costo de esa decisión era invisible hasta que lo
-    reclamó cobranzas — un comprobante con `ActualizaStock=N` **no genera movimiento
-    de stock**, y los reportes por cliente (trazabilidad de alquiler, N/S por cliente)
-    se arman recorriendo movimientos. Medido el 12/08/2026: los 19 RDA que salieron
-    con `N` no aparecen en ningún reporte; los 27 que no lo mandan, sí.
+    El ENT previo sólo hace que la partida exista en el depósito. La compensación
+    posterior evita duplicar su movimiento físico; es independiente de N/S por
+    cliente, que se construye con ``SegCabV + SegDetV`` y suma
+    ``sdv_CantUM1`` para la operación ALQ.
 
-    Por eso ahora, si el ENT tuvo que crear la partida, se la compensa con una SAL
-    para dejarla existiendo en cero y se reintenta el **mismo comprobante**, con su
-    movimiento de stock y su cliente. Si algo de ese camino falla se repone el ENT y
-    se vuelve al reintento de siempre: el peor caso es el comportamiento anterior.
+    Si la compensación no permite reemitir con ``ActualizaStock=S``, el último
+    recurso conserva ``ActualizaStock=N`` para no duplicar stock. Aun en ese caso
+    el renglón de ventas debe mantener su signo semántico: RDA, RDN y RD son
+    negativos. Convertirlos con ``abs()`` hacía que un RDA de -1 quedara en +1 y
+    N/S lo sumara como una unidad todavía alquilada.
     """
     deposit = _register_target_deposit(payload)
     created_entries = _ensure_register_stock_entries(client, payload, _payload_ingreso_ids(payload))
