@@ -241,6 +241,20 @@ python manage.py limpiar_procesos_bejerman_trabados # sin --apply: simula la lim
 
 Ninguno de los tres escribe nada si no le pasás `--apply`.
 
+**Suplencia temporal** — pone y saca a alguien como reemplazo del jefe. Cambia el rol,
+agrega el permiso de presupuestos y prende las notificaciones de jefatura, guardando
+cómo estaba la persona antes para poder devolverla exactamente ahí:
+
+```bash
+python manage.py suplencia --estado                              # qué hay abierto
+python manage.py suplencia --activar --usuario <mail>            # simula
+python manage.py suplencia --activar --usuario <mail> --apply    # aplica
+python manage.py suplencia --cerrar  --usuario <mail> --apply    # revierte todo
+```
+
+Cerrar no es "volver a poner lo que parecía que tenía": reescribe el estado guardado
+al abrir. Los permisos que la persona ya tenía por su cuenta nunca se le quitan.
+
 Salud del sistema: `https://nexora.tail7bb880.ts.net/api/health/`
 
 Los procesos que corren solos, y cada cuánto:

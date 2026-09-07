@@ -64,6 +64,9 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     # salía nunca. Dar un parche por aplicado no lo aplica; correrlo en cada arranque
     # sí, y no cuesta nada porque es CREATE TABLE/INDEX IF NOT EXISTS de punta a punta.
     ("apply_work_upgrade_schema", {}),
+    # Suplencias temporales: guarda cómo estaba el suplente antes de cubrir a alguien,
+    # que es lo único que permite devolverlo exactamente ahí cuando el titular vuelve.
+    ("apply_suplencias_schema", {}),
 )
 
 
