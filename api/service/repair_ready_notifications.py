@@ -132,7 +132,7 @@ def _remito_audience_user_ids(notification_key, ingreso_id=None, actor_user_id=N
         # Jefatura no entra por la lista de correos, entra si tiene el aviso
         # prendido en el centro de notificaciones.
         for uid in user_ids_subscribed_to(
-            notification_key, ["jefe", "jefe_veedor", "admin", "supervisor"]
+            notification_key, ["jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor"]
         ):
             if uid not in user_ids:
                 user_ids.append(uid)

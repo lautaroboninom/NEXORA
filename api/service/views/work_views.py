@@ -21,8 +21,8 @@ from .helpers import (
 from ..delivery_orders import BILLABLE_REMITO_TYPES, delivery_source_reference, load_items_by_order
 
 
-VIEW_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "tecnico", "recepcion", "cobranzas"]
-MANAGE_ROLES = ["jefe", "admin", "supervisor", "jefe_veedor"]
+VIEW_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente", "tecnico", "recepcion", "cobranzas"]
+MANAGE_ROLES = ["jefe", "admin", "supervisor", "jefe_veedor", "jefe_suplente"]
 TERMINAL_STATES = ("entregado", "alquilado", "baja", "vendido_pendiente_entrega", "vendido_entregado")
 TALLER_LOCATION = "taller"
 

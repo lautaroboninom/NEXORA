@@ -8,6 +8,9 @@ ROLE_CHOICES = [
     ("ventas", "Ventas"),
     ("jefe", "Jefe"),
     ("jefe_veedor", "Jefe veedor"),
+    # Reemplazo temporal de jefatura. No es un puesto: se asigna con
+    # `manage.py suplencia` y se saca al volver el titular.
+    ("jefe_suplente", "Jefe suplente"),
     ("recepcion", "Recepción"),
     ("cobranzas", "Cobranzas"),
     ("logistica", "Logística"),

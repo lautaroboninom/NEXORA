@@ -12,7 +12,7 @@ from io import StringIO
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from unittest import skipUnless
 
 from service.management.commands.suplencia import notificaciones_a_prender
@@ -112,14 +112,25 @@ class SuplenciaTests(TestCase):
 
     # -- activación ----------------------------------------------------------
 
-    def test_activar_cambia_rol_da_permiso_y_prende_avisos(self):
+    def test_activar_cambia_rol_y_prende_avisos(self):
         self._activar(apply=True)
 
-        self.assertEqual(self._rol(), "jefe_veedor")
-        self.assertEqual(self._permisos().get("action.presupuesto.manage"), "allow")
+        self.assertEqual(self._rol(), "jefe_suplente")
         preferencias = self._preferencias()
         self.assertIn("presupuesto_pendiente", preferencias)
         self.assertEqual(preferencias["presupuesto_pendiente"], (True, True))
+
+    def test_el_suplente_sigue_teniendo_todo_lo_de_tecnico(self):
+        # Es el bug que motivó el rol: al reemplazarle el rol por uno de jefatura, un
+        # técnico dejaba de ser asignable y la hoja de servicio tiraba
+        # "400: técnico inválido".
+        from service.permission_catalog import get_role_defaults
+
+        tecnico = get_role_defaults("tecnico")
+        suplente = get_role_defaults("jefe_suplente")
+        perdidos = sorted(c for c, v in tecnico.items() if v and not suplente.get(c))
+
+        self.assertEqual(perdidos, [])
 
     def test_no_se_puede_abrir_dos_veces(self):
         self._activar(apply=True)
@@ -145,9 +156,9 @@ class SuplenciaTests(TestCase):
         self.assertEqual(self._permisos(), {})
         self.assertEqual(self._preferencias(), {})
 
-    def test_cerrar_no_saca_un_permiso_que_ya_tenia(self):
-        # Si la persona ya podía presupuestar por su cuenta, la suplencia no se lo dio
-        # y cerrarla no puede quitárselo.
+    def test_cerrar_no_toca_los_permisos_propios_de_la_persona(self):
+        # Un override que la persona ya tenía por su cuenta no lo puso la suplencia,
+        # así que cerrarla no puede quitárselo.
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -191,7 +202,7 @@ class SuplenciaTests(TestCase):
 
         self._activar(apply=True)
 
-        self.assertEqual(self._rol(), "jefe_veedor")
+        self.assertEqual(self._rol(), "jefe_suplente")
 
     # -- estado --------------------------------------------------------------
 
@@ -205,3 +216,93 @@ class SuplenciaTests(TestCase):
         self.assertIn("Lucas", texto)
         self.assertIn("antes era: recepcion", texto)
         self.assertIn("vacaciones", texto)
+
+
+class RolSuplenteDadoDeAltaEnTodosLadosTests(SimpleTestCase):
+    """El riesgo real de un rol nuevo: olvidarse de darlo de alta en algún lado.
+
+    El código autoriza de dos maneras distintas —por permiso y por listas de roles
+    escritas a mano— y las segundas son las peligrosas: si a una le falta el rol
+    nuevo, el suplente recibe un "No autorizado" en una pantalla suelta, con el
+    titular de vacaciones y sin nadie que pueda diagnosticarlo.
+
+    Estos tests recorren las listas en vez de confiar en que se revisaron todas.
+    """
+
+    ROL = "jefe_suplente"
+
+    def test_toda_coleccion_que_acepta_jefatura_acepta_al_suplente(self):
+        from service import notifications
+        from service.bejerman_user_credentials import TECHNICAL_ROLES
+        from service.views import clientes_views, media_views, preventivos_views, work_views
+        from service.views import ingreso_tests_views, metricas_views
+
+        colecciones = {
+            "MANAGEMENT_NOTIFICATION_ROLES": notifications.MANAGEMENT_NOTIFICATION_ROLES,
+            "TECHNICAL_NOTIFICATION_ROLES": notifications.TECHNICAL_NOTIFICATION_ROLES,
+            "DELIVERY_NOTIFICATION_ROLES": notifications.DELIVERY_NOTIFICATION_ROLES,
+            "BILLING_NOTIFICATION_ROLES": notifications.BILLING_NOTIFICATION_ROLES,
+            "REMITO_PDF_DELIVERY_ROLES": notifications.REMITO_PDF_DELIVERY_ROLES,
+            "REMITO_PDF_INGRESS_ROLES": notifications.REMITO_PDF_INGRESS_ROLES,
+            "TECHNICAL_ROLES": TECHNICAL_ROLES,
+            "CUSTOMER_ADMIN_ROLES": clientes_views.CUSTOMER_ADMIN_ROLES,
+            "CUSTOMER_MANAGE_ROLES": clientes_views.CUSTOMER_MANAGE_ROLES,
+            "MEDIA_VIEW_ROLES": media_views.MEDIA_VIEW_ROLES,
+            "MEDIA_MANAGE_ROLES": media_views.MEDIA_MANAGE_ROLES,
+            "_PLAN_ROLES": preventivos_views._PLAN_ROLES,
+            "_REVISION_ROLES": preventivos_views._REVISION_ROLES,
+            "_VIEW_ROLES(preventivos)": preventivos_views._VIEW_ROLES,
+            "_EDIT_ROLES(tests)": ingreso_tests_views._EDIT_ROLES,
+            "_VIEW_ROLES(tests)": ingreso_tests_views._VIEW_ROLES,
+            "VIEW_ROLES(work)": work_views.VIEW_ROLES,
+            "MANAGE_ROLES(work)": work_views.MANAGE_ROLES,
+            "ACTIVITY_ACTOR_ROLES": metricas_views.ACTIVITY_ACTOR_ROLES,
+        }
+
+        faltantes = [
+            nombre
+            for nombre, valores in colecciones.items()
+            if "jefe" in valores and self.ROL not in valores
+        ]
+
+        self.assertEqual(faltantes, [], f"Listas sin el rol de suplencia: {faltantes}")
+
+    def test_no_quedan_listas_sql_de_tecnicos_sin_el_suplente(self):
+        # La lista de técnicos asignables es la que rompió: un suplente técnico
+        # dejaba de poder recibir equipos.
+        import pathlib
+
+        raiz = pathlib.Path(__file__).resolve().parents[2] / "service"
+        sospechosas = []
+        for archivo in raiz.rglob("*.py"):
+            if "tests" in archivo.parts:
+                continue
+            texto = archivo.read_text(encoding="utf-8", errors="ignore")
+            if "rol IN ('tecnico','jefe')" in texto:
+                sospechosas.append(str(archivo.relative_to(raiz)))
+
+        self.assertEqual(sospechosas, [], f"Consultas de técnicos sin el suplente: {sospechosas}")
+
+    def test_el_suplente_no_puede_configurar_usuarios(self):
+        from service.permission_catalog import SUPLENTE_EXCLUSIONES, get_role_defaults
+
+        suplente = get_role_defaults(self.ROL)
+        for codigo in SUPLENTE_EXCLUSIONES:
+            self.assertFalse(suplente.get(codigo), f"El suplente no debería tener {codigo}")
+
+    def test_el_suplente_tiene_todo_lo_demas(self):
+        from service.permission_catalog import PERMISSION_CODES, SUPLENTE_EXCLUSIONES, get_role_defaults
+
+        suplente = get_role_defaults(self.ROL)
+        faltantes = sorted(
+            codigo
+            for codigo in PERMISSION_CODES
+            if codigo not in SUPLENTE_EXCLUSIONES and not suplente.get(codigo)
+        )
+
+        self.assertEqual(faltantes, [])
+
+    def test_el_rol_figura_en_el_listado_de_roles(self):
+        from service.roles import ROLE_KEYS
+
+        self.assertIn(self.ROL, ROLE_KEYS)

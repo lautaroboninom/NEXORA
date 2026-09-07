@@ -21,7 +21,7 @@ const VARIANT_BORDER = {
   gray: "border-gray-400",
 };
 
-const CUSTOMER_CATALOG_ROLES = new Set(["jefe", "admin", "supervisor", "ventas", "jefe_veedor"]);
+const CUSTOMER_CATALOG_ROLES = new Set(["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente"]);
 
 function variantOfPath(to) {
   const p = String(to || "");

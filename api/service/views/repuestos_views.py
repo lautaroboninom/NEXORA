@@ -26,7 +26,7 @@ FOUR_DEC = Decimal("0.0001")
 
 def _can_view_costs(user) -> bool:
     rol = (getattr(user, "rol", "") or "").strip().lower()
-    return rol in ("jefe", "jefe_veedor", "admin", "supervisor")
+    return rol in ("jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor")
 
 
 def _parse_decimal_field(val, label, allow_none=False):
@@ -78,7 +78,7 @@ def _rol(user) -> str:
 
 
 def _is_manager(user) -> bool:
-    return _rol(user) in ("jefe", "jefe_veedor")
+    return _rol(user) in ("jefe", "jefe_veedor", "jefe_suplente")
 
 
 def _clean_text(val):
@@ -328,7 +328,7 @@ def _get_stock_alert_recipients():
         SELECT DISTINCT LOWER(email) AS email
         FROM users
         WHERE activo
-          AND LOWER(rol) IN ('jefe', 'jefe_veedor')
+          AND LOWER(rol) IN ('jefe', 'jefe_veedor', 'jefe_suplente')
           AND COALESCE(email, '') <> ''
         """,
         [],

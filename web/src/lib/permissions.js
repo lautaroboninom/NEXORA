@@ -69,7 +69,7 @@ export const PERMISSION_CODES = {
   ACTION_BILLING_REGISTER_OS_INVOICE: "action.billing.register_os_invoice",
 };
 
-const ROLE_DEFAULT_PERMISSIONS = {
+export const ROLE_DEFAULT_PERMISSIONS = {
   tecnico: new Set([
     PERMISSION_CODES.PAGE_HOME_SEARCH,
     PERMISSION_CODES.PAGE_GENERAL_CLIENTE,
@@ -282,6 +282,20 @@ ROLE_DEFAULT_PERMISSIONS.supervisor = new Set([
   PERMISSION_CODES.ACTION_ROUTE_SHEET_POSTPONE,
   PERMISSION_CODES.ACTION_DELIVERY_ORDER_CORRECT_COMMERCIAL_TERMS,
 ]);
+
+// jefe_suplente: todo menos la configuración de usuarios. Se define por resta y no
+// enumerando los 62 códigos, porque una lista escrita a mano se desincroniza del
+// backend en cuanto alguien agrega un permiso nuevo, y el síntoma sería una pantalla
+// que el suplente ve en el menú y que después le rebota.
+export const SUPLENTE_EXCLUDED_PERMISSIONS = new Set([
+  PERMISSION_CODES.PAGE_USERS,
+  PERMISSION_CODES.ACTION_USERS_MANAGE,
+  PERMISSION_CODES.ACTION_USERS_MANAGE_PERMISSIONS,
+]);
+
+ROLE_DEFAULT_PERMISSIONS.jefe_suplente = new Set(
+  Object.values(PERMISSION_CODES).filter((code) => !SUPLENTE_EXCLUDED_PERMISSIONS.has(code)),
+);
 
 export function normalizePermissionsMap(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};

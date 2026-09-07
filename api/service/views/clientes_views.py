@@ -20,8 +20,8 @@ from ..permissions import require_any_permission
 from .helpers import exec_void, q, require_roles, _set_audit_user
 
 
-CUSTOMER_ADMIN_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "recepcion"]
-CUSTOMER_MANAGE_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor"]
+CUSTOMER_ADMIN_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente", "recepcion"]
+CUSTOMER_MANAGE_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente"]
 
 
 def _clean(value):

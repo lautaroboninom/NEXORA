@@ -464,6 +464,12 @@ def require_roles(request, roles):
     expanded = set(roles)
     if "jefe" in expanded:
         expanded.add("jefe_veedor")
+    # El suplente entra donde entraba jefatura y donde entraba un tecnico: cubre a
+    # jefatura sin dejar de ser lo que era. Va aca y no en cada llamado porque son
+    # mas de cien, y el que se olvide es un "No autorizado" que nadie va a poder
+    # diagnosticar con el titular de vacaciones.
+    if expanded.intersection({"jefe", "tecnico"}):
+        expanded.add("jefe_suplente")
     if expanded.intersection({"admin", "ventas", "recepcion"}):
         expanded.add("supervisor")
     if r not in expanded:
@@ -484,7 +490,7 @@ def require_roles_strict(request, roles):
 
 
 def require_jefe(request):
-    if _rol(request) not in ("jefe", "jefe_veedor"):
+    if _rol(request) not in ("jefe", "jefe_veedor", "jefe_suplente"):
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("Solo Jefe")
 

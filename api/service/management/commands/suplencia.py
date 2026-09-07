@@ -11,10 +11,13 @@ exacto que se guardó al abrirla.
 
 Qué hace `--activar`:
 
-1. Le pone al suplente el rol de suplencia (`jefe_veedor` por defecto), que ya existe
-   y que a propósito **no** incluye gestión de usuarios ni de permisos.
-2. Le agrega, como override personal, los permisos que ese rol no trae y que el
-   trabajo sí necesita — hoy `action.presupuesto.manage`. Sólo los que no tenía ya.
+1. Le pone el rol `jefe_suplente`, que es la unión de técnico y jefatura menos la
+   configuración de usuarios. La unión importa: si el suplente es un técnico tiene
+   que **seguir siendo asignable y seguir arreglando equipos**. Ponerle un rol de
+   jefatura a secas lo sacaba de las listas de técnicos y dejaba de poder recibir
+   equipos ("400: técnico inválido").
+2. Le agrega los permisos sueltos que la suplencia necesite además del rol. Hoy
+   ninguno: el rol ya los trae todos.
 3. Le prende las notificaciones que el titular recibe por su rol y que el rol de
    suplencia permite pero no trae prendidas.
 
@@ -35,13 +38,14 @@ from service.notifications import (
     _role_default_enabled,
 )
 
-ROL_SUPLENCIA = "jefe_veedor"
+ROL_SUPLENCIA = "jefe_suplente"
 ROL_TITULAR_POR_DEFECTO = "jefe"
 
-# Lo único que le falta al rol de suplencia para poder trabajar de verdad. Que la
-# lista viva acá y no repartida es a propósito: es lo primero que alguien va a
-# querer revisar antes de dar de alta una suplencia.
-PERMISOS_EXTRA = ("action.presupuesto.manage",)
+# El rol `jefe_suplente` ya es la unión de técnico y jefatura menos la
+# configuración de usuarios (ver `permission_catalog.SUPLENTE_EXCLUSIONES`), así que
+# no hace falta agregarle ningún permiso suelto. Queda el mecanismo por si alguna
+# suplencia puntual necesita uno de más.
+PERMISOS_EXTRA = ()
 
 
 def _rows(sql, params=None):

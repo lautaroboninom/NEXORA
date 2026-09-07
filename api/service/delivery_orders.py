@@ -984,7 +984,7 @@ def actor_is_delivery_discount_admin(actor_user_id: int | None) -> bool:
     with connection.cursor() as cur:
         cur.execute("SELECT LOWER(TRIM(COALESCE(rol, ''))) FROM users WHERE id = %s", [actor_user_id])
         row = cur.fetchone()
-    return bool(row and row[0] in {"jefe", "admin", "supervisor", "ventas"})
+    return bool(row and row[0] in {"jefe", "jefe_suplente", "admin", "supervisor", "ventas"})
 
 
 def _assert_item_discounts_allowed(
@@ -1218,6 +1218,95 @@ def _sync_service_release_ingresos_delivery(
                 )
                 """,
                 [ingreso_id, estado_to, actor_user_id, comentario, ingreso_id, estado_to],
+            )
+            synced_ids.append(ingreso_id)
+    return synced_ids
+
+
+# Estados en los que el equipo ya salio por otra puerta: marcarlo alquilado seria mentir.
+_ALQUILER_BLOCKED_ESTADOS = ("baja", "entregado", "vendido_entregado", "vendido_pendiente_entrega")
+
+
+def _sync_rental_ingresos_delivery(
+    ingreso_ids: list[int],
+    remito: str,
+    actor_user_id: int | None,
+    *,
+    alquiler_a: str = "",
+    alquiler_fecha: Any = None,
+) -> list[int]:
+    """Marca alquilado el equipo cuyo RTA quedo registrado solo en la orden de entrega.
+
+    Espejo de `_sync_service_release_ingresos_delivery` para el alquiler y por el mismo
+    motivo: el circuito ya marca el equipo al registrar el remito, pero las ordenes
+    anteriores al 25/08/2026 se quedaron con el numero puesto y el equipo sin marcar, o sea
+    figurando disponible en la Estanteria de Alquiler con el cliente ya usandolo.
+
+    `alquiler_fecha` es la del comprobante, no la de hoy: un alquiler de julio sellado con
+    la fecha del backfill falsea cualquier cuenta de dias alquilados.
+
+    No pisa nada ya cargado —el operador que lo corrigio a mano gana— ni toca un equipo que
+    ya salio por venta o baja. Quien llama decide la elegibilidad del equipo (por ejemplo,
+    descartar los que reingresaron despues del remito): aca solo se escribe.
+    """
+    ids: list[int] = []
+    for ingreso_id in ingreso_ids:
+        _append_unique_int(ids, ingreso_id)
+    remito = _optional_text(remito)
+    if not ids or not remito:
+        return []
+
+    from .bejerman_delivery import _dash_location_id
+
+    dash_id = _dash_location_id()
+    cliente = _clean_text(alquiler_a)
+    synced_ids: list[int] = []
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, estado
+              FROM ingresos
+             WHERE id = ANY(%s)
+             ORDER BY id
+             FOR UPDATE
+            """,
+            [ids],
+        )
+        for row in _rows(cur):
+            if (row.get("estado") or "").strip().lower() in _ALQUILER_BLOCKED_ESTADOS:
+                continue
+            ingreso_id = int(row["id"])
+            sets = [
+                "estado = 'alquilado'",
+                "alquilado = TRUE",
+                "alquiler_a = COALESCE(NULLIF(alquiler_a, ''), NULLIF(%s, ''))",
+                "alquiler_remito = COALESCE(NULLIF(alquiler_remito, ''), %s)",
+                "alquiler_fecha = COALESCE(alquiler_fecha, %s)",
+            ]
+            params: list[Any] = [cliente, remito, alquiler_fecha]
+            if dash_id is not None:
+                # El equipo alquilado no vive en ningun deposito nuestro: ver
+                # `_sync_rental_ingresos_after_remito`, que hace lo mismo en el circuito.
+                sets.append("ubicacion_id = %s")
+                params.append(dash_id)
+            params.append(ingreso_id)
+            cur.execute("UPDATE ingresos SET " + ", ".join(sets) + " WHERE id = %s", params)
+            cur.execute(
+                """
+                INSERT INTO ingreso_events (ticket_id, ingreso_id, a_estado, usuario_id, comentario)
+                SELECT %s, %s, 'alquilado', %s, %s
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM ingreso_events
+                     WHERE ticket_id = %s AND a_estado = 'alquilado'
+                 )
+                """,
+                [
+                    ingreso_id,
+                    ingreso_id,
+                    actor_user_id,
+                    f"Alquiler registrado por RTA Bejerman {remito}",
+                    ingreso_id,
+                ],
             )
             synced_ids.append(ingreso_id)
     return synced_ids
@@ -4133,6 +4222,31 @@ def mark_prepared(order_id: str, actor_user_id: int | None, remito_number: str |
                 order_id,
             ],
         )
+    if should_register_manual_remito and manual_remito_metadata:
+        # Tercera puerta al mismo agujero que ya se tapo en `register_delivery_order_remitos`
+        # (alquiler el 25/08, entrega de servicio el 02/09): aca el comprobante se registra
+        # dentro de `mark_prepared`, asi que sin estos syncs el numero queda colgado de la
+        # orden y el equipo nunca se marca ni como alquilado ni como entregado.
+        from .bejerman_delivery import (
+            _sync_rental_devices_after_remito,
+            _sync_rental_ingresos_after_remito,
+            _sync_service_release_ingresos_after_remito,
+        )
+
+        manual_group_id = _optional_text(manual_remito_metadata.get("groupId"))
+        if manual_group_id and effective_remito:
+            manual_delivery_type = normalize_delivery_type(current.get("deliveryType"))
+            if manual_delivery_type == "rental":
+                _sync_rental_ingresos_after_remito(
+                    [order_id], manual_group_id, actor_user_id, effective_remito, None
+                )
+                _sync_rental_devices_after_remito(
+                    [order_id], manual_group_id, actor_user_id, effective_remito
+                )
+            elif manual_delivery_type == "service_release":
+                _sync_service_release_ingresos_after_remito(
+                    [order_id], manual_group_id, actor_user_id, effective_remito
+                )
     create_event(
         order_id,
         actor_user_id,

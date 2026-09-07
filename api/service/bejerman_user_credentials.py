@@ -15,7 +15,7 @@ BEJERMAN_CREDENTIALS_REQUIRED = (
     "Debe cargar sus credenciales de Bejerman para operar con el SDK desde NEXORA."
 )
 
-TECHNICAL_ROLES = {"tecnico", "jefe", "jefe_veedor"}
+TECHNICAL_ROLES = {"tecnico", "jefe", "jefe_veedor", "jefe_suplente"}
 ADMINISTRATIVE_ROLES = {"admin", "supervisor", "ventas", "recepcion", "cobranzas"}
 BEJERMAN_WORKSTATION_PATTERN = re.compile(r"^[A-Z0-9_.-]{2,40}$")
 

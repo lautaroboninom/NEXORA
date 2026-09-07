@@ -160,7 +160,7 @@ def _get_stock_alert_recipients():
         SELECT DISTINCT LOWER(email) AS email
         FROM users
         WHERE activo
-          AND LOWER(rol) IN ('jefe', 'jefe_veedor')
+          AND LOWER(rol) IN ('jefe', 'jefe_veedor', 'jefe_suplente')
           AND COALESCE(email, '') <> ''
         """,
         [],
@@ -1253,7 +1253,7 @@ class RechazarPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         if not ensure_rejected_budget_charge_schema():
             raise ValidationError(
                 "No se pudo preparar el esquema de cobro para presupuesto rechazado. "
@@ -1336,7 +1336,7 @@ class QuoteVersionesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         _set_audit_user(request)
         _clone_current_quote_version_from_rejected(ingreso_id)
         return _quote_response(request, ingreso_id)
@@ -1346,7 +1346,7 @@ class EmitirPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         autorizado_por = _clean_text_or_default(request.data.get("autorizado_por"), DEFAULT_AUTORIZADO_POR)
         forma_pago = _clean_text_or_default(request.data.get("forma_pago"), "A definir")
         plazo_entrega_txt = _clean_text_or_default(request.data.get("plazo_entrega_txt"), DEFAULT_PLAZO_ENTREGA_TXT)
@@ -1413,7 +1413,7 @@ class AprobarPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         qid = None
         was_approved = False
         should_notify_repair_ready = False
@@ -1678,7 +1678,7 @@ class AnularPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         if not _annulled_quote_state_available():
             raise ValidationError(
                 "La base todavía no conoce el estado 'anulado'. Reiniciá el contenedor "
@@ -1813,7 +1813,7 @@ class NoAplicaPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         with transaction.atomic():
             current = _get_current_quote_row(ingreso_id, for_update=True)
             if not current:
@@ -1842,7 +1842,7 @@ class QuitarNoAplicaPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin"])
+        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
         with transaction.atomic():
             current = _get_current_quote_row(ingreso_id, for_update=True)
             if not current:

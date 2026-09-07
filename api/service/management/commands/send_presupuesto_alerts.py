@@ -142,7 +142,7 @@ class Command(BaseCommand):
             SELECT DISTINCT LOWER(email) AS email
               FROM users
              WHERE activo=true
-               AND rol='jefe'
+               AND rol IN ('jefe','jefe_suplente')
                AND COALESCE(email,'') <> ''
             """
         ) or []

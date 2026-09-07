@@ -664,7 +664,7 @@ export default function WorkDashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const canCreateOrder = can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_CREATE);
-  const canEditItemDiscounts = ["jefe", "admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
+  const canEditItemDiscounts = ["jefe", "jefe_suplente", "admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
 
   async function load() {
     try {

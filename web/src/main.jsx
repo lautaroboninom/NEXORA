@@ -387,7 +387,7 @@ const router = createBrowserRouter([
       {
         path: "catalogo/clientes",
         element: (
-          <ProtectedRoute roles={["jefe", "admin", "supervisor", "ventas", "jefe_veedor"]}>
+          <ProtectedRoute roles={["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente"]}>
             <CatalogoClientes />
           </ProtectedRoute>
         ),

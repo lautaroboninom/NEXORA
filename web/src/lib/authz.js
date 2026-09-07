@@ -4,6 +4,7 @@
 export const ROLES = {
   JEFE: "jefe",
   JEFE_VEEDOR: "jefe_veedor",
+  JEFE_SUPLENTE: "jefe_suplente",
   ADMIN: "admin",
   SUPERVISOR: "supervisor",
   VENTAS: "ventas",

@@ -194,11 +194,11 @@ function isEditableOrder(order) {
 }
 
 function canSyncDrive(user) {
-  return ["admin", "supervisor", "ventas", "jefe"].includes(String(user?.rol || "").trim().toLowerCase());
+  return ["admin", "supervisor", "ventas", "jefe", "jefe_suplente"].includes(String(user?.rol || "").trim().toLowerCase());
 }
 
 function canEditItemDiscounts(user) {
-  return ["jefe", "admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
+  return ["jefe", "jefe_suplente", "admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
 }
 
 function canEditCommercialFields(user) {

@@ -234,7 +234,7 @@ class ModeloTecnicoView(APIView):
         _set_audit_user(request)
         tecnico_id = request.data.get("tecnico_id")
         if tecnico_id:
-            ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
+            ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe','jefe_suplente')",
                 [tecnico_id], one=True)
             if not ok:
                 raise ValidationError("Técnico inválido")
@@ -249,7 +249,7 @@ class MarcaTecnicoView(APIView):
         _set_audit_user(request)
         tecnico_id = request.data.get("tecnico_id")
         if tecnico_id:
-            ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
+            ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe','jefe_suplente')",
                 [tecnico_id], one=True)
             if not ok:
                 raise ValidationError("Técnico inválido")
@@ -316,7 +316,7 @@ class ModelosPorMarcaView(APIView):
         variante = (d.get("variante") or "").strip() or None
         if tecnico_id:
             ok = q(
-                "SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
+                "SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe','jefe_suplente')",
                 [tecnico_id],
                 one=True,
             )

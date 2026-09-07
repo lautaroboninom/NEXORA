@@ -280,7 +280,7 @@ ACTIVITY_DIAG_FIELDS = {
 
 ACTIVITY_COMMENT_FIELDS = {"comentarios"}
 ACTIVITY_STATE_EVENT_TYPES = {"cambio_estado", "evento_estado", "derivacion", "devolucion_derivacion"}
-ACTIVITY_ACTOR_ROLES = ("tecnico", "jefe", "jefe_veedor")
+ACTIVITY_ACTOR_ROLES = ("tecnico", "jefe", "jefe_veedor", "jefe_suplente")
 ACTIVITY_CHANGE_TABLES = (
     "ingresos",
     "devices",
@@ -343,7 +343,7 @@ def _request_role(request) -> str:
 
 def _require_metricas_activity_viewer(request):
     require_permission(request, "page.metrics")
-    if _request_role(request) not in {"jefe", "jefe_veedor"}:
+    if _request_role(request) not in {"jefe", "jefe_veedor", "jefe_suplente"}:
         raise PermissionDenied("Solo jefe y jefe veedor pueden ver la actividad de técnicos.")
 
 

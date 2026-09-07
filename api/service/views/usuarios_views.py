@@ -708,7 +708,7 @@ class CatalogoTecnicosView(APIView):
             """
             SELECT id, nombre
             FROM users
-            WHERE activo=true AND rol IN ('tecnico','jefe','jefe_veedor')
+            WHERE activo=true AND rol IN ('tecnico','jefe','jefe_veedor','jefe_suplente')
             ORDER BY nombre
             """
         ) or []

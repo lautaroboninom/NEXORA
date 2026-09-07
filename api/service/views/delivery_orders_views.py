@@ -135,7 +135,7 @@ class DeliveryOrderDriveSyncView(APIView):
 
     def post(self, request):
         role = str(getattr(request.user, "rol", "") or "").strip().lower()
-        if role not in {"jefe", "admin", "supervisor", "ventas"}:
+        if role not in {"jefe", "jefe_suplente", "admin", "supervisor", "ventas"}:
             raise PermissionDenied("Solo jefe, admin, supervisor o ventas pueden sincronizar órdenes de entrega con Google Drive.")
         try:
             return Response(sync_delivery_orders_to_drive())

@@ -89,6 +89,7 @@ ROLE_DEFAULTS = {
     "ventas": _empty_role_defaults(),
     "jefe": {code: True for code in PERMISSION_CODES},
     "jefe_veedor": _empty_role_defaults(),
+    "jefe_suplente": _empty_role_defaults(),
     "recepcion": _empty_role_defaults(),
     "cobranzas": _empty_role_defaults(),
     "logistica": _empty_role_defaults(),
@@ -99,6 +100,12 @@ def _grant(role, *codes):
     for code in codes:
         if code in ROLE_DEFAULTS[role]:
             ROLE_DEFAULTS[role][code] = True
+
+
+def _revoke(role, *codes):
+    for code in codes:
+        if code in ROLE_DEFAULTS[role]:
+            ROLE_DEFAULTS[role][code] = False
 
 
 # tecnico
@@ -348,6 +355,25 @@ def _set_union_role_defaults(target_role, *source_roles):
 _set_union_role_defaults("supervisor", "admin", "ventas", "recepcion")
 _grant("supervisor", "action.route_sheet.postpone")
 _grant("supervisor", "action.delivery_order.correct_commercial_terms")
+
+
+# jefe_suplente — quien cubre a jefatura mientras el titular no está.
+#
+# Es la unión de técnico y jefe, y la unión importa: si el suplente es un técnico,
+# tiene que seguir siendo asignable y seguir arreglando equipos. Reemplazarle el rol
+# por uno de jefatura lo sacaba de las listas de técnicos y dejaba de poder recibir
+# equipos asignados.
+#
+# Lo único que se le quita es la configuración de usuarios y permisos: el suplente
+# cubre el trabajo, no la administración de quién puede hacer qué. Esa exclusión es
+# el motivo por el que este rol existe en vez de simplemente usar `jefe`.
+SUPLENTE_EXCLUSIONES = (
+    "page.users",
+    "action.users.manage",
+    "action.users.manage_permissions",
+)
+_set_union_role_defaults("jefe_suplente", "tecnico", "jefe")
+_revoke("jefe_suplente", *SUPLENTE_EXCLUSIONES)
 
 
 def normalize_role(role):

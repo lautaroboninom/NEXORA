@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { techSidebarSections, usesTechMenu } from "./sidebar-menu.js";
+import { can, ROLE_DEFAULT_PERMISSIONS } from "./permissions.js";
 
 const tecnico = { rol: "tecnico" };
 const pathsOf = (user) =>
@@ -12,6 +13,8 @@ test("el menú reducido es sólo para el rol técnico", () => {
   // Jefe y jefe_veedor pueden actuar como técnicos, pero supervisan: menú completo.
   assert.equal(usesTechMenu({ rol: "jefe" }), false);
   assert.equal(usesTechMenu({ rol: "jefe_veedor" }), false);
+  // El suplente cubre a jefatura: menú completo, aunque sea técnico de puesto.
+  assert.equal(usesTechMenu({ rol: "jefe_suplente" }), false);
   assert.equal(usesTechMenu({ rol: "recepcion" }), false);
   assert.equal(usesTechMenu(null), false);
 });
@@ -116,4 +119,25 @@ test("techSidebarSections incluye presupuestos si el usuario tiene el permiso", 
   const paths = pathsOf(conPresupuesto);
   assert.equal(paths.includes("/pendientes-presupuesto"), true);
   assert.equal(paths.includes("/presupuestados"), true);
+});
+
+test("el suplente hace lo de jefatura menos tocar usuarios", () => {
+  const suplente = { rol: "jefe_suplente" };
+  // Lo que la suplencia existe para habilitar.
+  assert.equal(can(suplente, "action.presupuesto.manage"), true);
+  assert.equal(can(suplente, "page.bejerman_sync"), true);
+  // Lo que sigue siendo del titular: es la única razón por la que este rol existe
+  // en vez de usar `jefe` a secas.
+  assert.equal(can(suplente, "page.users"), false);
+  assert.equal(can(suplente, "action.users.manage"), false);
+  assert.equal(can(suplente, "action.users.manage_permissions"), false);
+});
+
+test("el suplente no pierde nada de lo que hacía como técnico", () => {
+  // El bug que motivó el rol: reemplazarlo por uno de jefatura lo sacaba de las
+  // listas de técnicos y la hoja de servicio devolvía "400: técnico inválido".
+  const tecnicoDefaults = ROLE_DEFAULT_PERMISSIONS.tecnico;
+  const suplenteDefaults = ROLE_DEFAULT_PERMISSIONS.jefe_suplente;
+  const perdidos = [...tecnicoDefaults].filter((code) => !suplenteDefaults.has(code));
+  assert.deepEqual(perdidos, []);
 });

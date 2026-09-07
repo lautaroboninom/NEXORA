@@ -1076,7 +1076,7 @@ def _jefe_user_ids():
         SELECT id
         FROM users
         WHERE activo
-          AND LOWER(COALESCE(rol, '')) = 'jefe'
+          AND LOWER(COALESCE(rol, '')) IN ('jefe', 'jefe_suplente')
         """,
         [],
     ) or []

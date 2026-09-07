@@ -235,7 +235,7 @@ class UsuarioNotificacionesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, uid: int):
-        require_roles_strict(request, ["jefe"])
+        require_roles_strict(request, ["jefe", "jefe_suplente"])
         require_permission(request, "action.users.manage_permissions")
         data = get_user_notification_settings(uid)
         if not data:
@@ -243,7 +243,7 @@ class UsuarioNotificacionesView(APIView):
         return Response(data)
 
     def put(self, request, uid: int):
-        require_roles_strict(request, ["jefe"])
+        require_roles_strict(request, ["jefe", "jefe_suplente"])
         require_permission(request, "action.users.manage_permissions")
         payload = request.data or {}
         preferences = payload.get("preferences")

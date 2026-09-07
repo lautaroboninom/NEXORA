@@ -42,6 +42,7 @@ from .helpers import (
 )
 from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
 from .mg_state import is_mg_owner_device, normalize_mg, resolve_mg_flags
+from ..ingreso_duplicados import ingreso_es_de_hoy
 from ..rejected_budget import (
     ensure_rejected_budget_charge_schema,
     get_rejected_quote_summary,
@@ -2315,20 +2316,21 @@ class QuitarRepararView(APIView):
         _set_audit_user(request)
         # Al anular la resolución hay que soltar también el cambio de equipo: si no, la OS
         # queda arrastrando la serie de un cambio que ya no existe.
+        resolucion_next = resolucion_al_anular_estado_final(presupuesto_next)
         exec_void(
             f"""
             UPDATE ingresos
-               SET {sets_con_limpieza_de_cambio('estado=%s', 'resolucion=NULL', 'presupuesto_estado=%s')}
+               SET {sets_con_limpieza_de_cambio('estado=%s', 'resolucion=%s', 'presupuesto_estado=%s')}
              WHERE id=%s
             """,
-            [estado_next, presupuesto_next, ingreso_id],
+            [estado_next, resolucion_next, presupuesto_next, ingreso_id],
         )
         return Response(
             {
                 "ok": True,
                 "estado_anterior": "reparar",
                 "estado": estado_next,
-                "resolucion": None,
+                "resolucion": resolucion_next,
                 "presupuesto_estado": presupuesto_next,
             }
         )
@@ -3502,6 +3504,21 @@ def sets_con_limpieza_de_cambio(*sets: str) -> str:
     La parte de pago se conserva: ver `clear_device_swap_sql_sets`.
     """
     return ", ".join([*sets, *clear_device_swap_sql_sets()])
+
+
+def resolucion_al_anular_estado_final(presupuesto_estado) -> str | None:
+    """Resolución que queda al deshacer un estado final de reparación.
+
+    Quitar el "reparado" deshace el resultado del trabajo, no la respuesta del cliente:
+    con el presupuesto rechazado la OS sigue resuelta por ese lado y tiene que seguir
+    saliendo como "Presupuesto rechazado". Volverla a "sin definir" obligaba a elegir la
+    resolución de nuevo a mano en cada salida, con el riesgo de que saliera otra cosa.
+
+    Devuelve None cuando no hay nada que preservar (el caso normal: se limpia).
+    """
+    if (presupuesto_estado or "").strip().lower() == "rechazado":
+        return "presupuesto_rechazado"
+    return None
 
 
 class IngresoCambioEquipoCandidatosView(APIView):
@@ -5314,7 +5331,7 @@ class IngresoAsignarTecnicoView(APIView):
         tecnico_id = request.data.get("tecnico_id")
         if tecnico_id is None:
             return Response({"detail": "tecnico_id requerido"}, status=400)
-        ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
+        ok = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe','jefe_suplente')",
                 [tecnico_id], one=True)
         if not ok:
             return Response({"detail": "técnico inválido"}, status=400)
@@ -5866,7 +5883,7 @@ class IngresoSolicitarBajaView(APIView):
                 SELECT DISTINCT LOWER(TRIM(CAST(email AS TEXT))) AS email
                   FROM users
                  WHERE COALESCE(activo, TRUE) = TRUE
-                   AND LOWER(COALESCE(rol, '')) = 'jefe'
+                   AND LOWER(COALESCE(rol, '')) IN ('jefe', 'jefe_suplente')
                    AND NULLIF(TRIM(CAST(email AS TEXT)), '') IS NOT NULL
                  ORDER BY 1
                 """
@@ -6566,6 +6583,45 @@ def _tipo_equipo_de_modelo(modelo_id) -> str:
     return ((row or {}).get("tipo_equipo") or "").strip()
 
 
+def _ingreso_duplicado_hoy_response(dup, *, numero_serie: str, numero_interno: str, tipo_equipo: str):
+    """La OS que choca es de hoy: esto no es un conflicto, es el mismo remito cargado dos veces.
+
+    Con una OS vieja todavía abierta el ingreso se crea igual y el choque queda anotado, porque
+    el cliente está esperando el remito. Acá no: no se crea nada y se nombra la OS que ya
+    existe, para que recepción la abra en vez de volver a cargar el equipo. El lote tampoco
+    puede saltearlo con ``_allow_open_duplicate``, que es justo por donde entraban las OS
+    gemelas del mismo día.
+    """
+
+    existing_id = dup["id"]
+    fecha_val = dup.get("fecha_ingreso") or dup.get("fecha_creacion")
+    try:
+        fecha_iso = fecha_val.isoformat()
+    except AttributeError:
+        fecha_iso = fecha_val
+    identificador = (numero_serie or "").strip() or (numero_interno or "").strip()
+    sujeto = f"El equipo {identificador}" if identificador else "Este equipo"
+    return Response(
+        {
+            "detail": (
+                f"{sujeto} ya se ingresó hoy en la OS {os_label(existing_id)}. "
+                "No se puede ingresar dos veces el mismo día: abrí esa orden, o dala de baja "
+                "si quedó mal cargada, antes de emitir un remito nuevo."
+            ),
+            "conflict_type": "INGRESO_DUPLICADO_HOY",
+            "payload": {
+                "ingreso_id": existing_id,
+                "os": os_label(existing_id),
+                "fecha_ingreso": fecha_iso,
+                "numero_serie": (numero_serie or "").strip(),
+                "numero_interno": (numero_interno or "").strip(),
+                "tipo_equipo": (tipo_equipo or "").strip(),
+            },
+        },
+        status=409,
+    )
+
+
 class NuevoIngresoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -6829,6 +6885,13 @@ class NuevoIngresoView(APIView):
                 one=True,
             )
             if dup_mg:
+                if ingreso_es_de_hoy(dup_mg):
+                    return _ingreso_duplicado_hoy_response(
+                        dup_mg,
+                        numero_serie=numero_serie,
+                        numero_interno=numero_interno,
+                        tipo_equipo=tipo_equipo,
+                    )
                 if not allow_open_duplicate:
                     existing_id = dup_mg["id"]
                     fecha_ingreso_val = dup_mg.get("fecha_ingreso") or dup_mg.get("fecha_creacion")
@@ -6864,6 +6927,13 @@ class NuevoIngresoView(APIView):
                 one=True,
             )
             if dup:
+                if ingreso_es_de_hoy(dup):
+                    return _ingreso_duplicado_hoy_response(
+                        dup,
+                        numero_serie=numero_serie,
+                        numero_interno=numero_interno,
+                        tipo_equipo=tipo_equipo,
+                    )
                 if not allow_open_duplicate:
                     existing_id = dup["id"]
                     fecha_ingreso_val = dup.get("fecha_ingreso") or dup.get("fecha_creacion")
@@ -7156,7 +7226,7 @@ class NuevoIngresoView(APIView):
             tmarca = q("SELECT tecnico_id FROM marcas WHERE id=%s", [equipo["marca_id"]], one=True)
             tecnico_id = (tmarca or {}).get("tecnico_id")
         if tecnico_id:
-            tech = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe')",
+            tech = q("SELECT id FROM users WHERE id=%s AND activo=true AND rol IN ('tecnico','jefe','jefe_suplente')",
                      [tecnico_id], one=True)
             if not tech:
                 return Response({"detail": "Técnico inválido o inactivo"}, status=400)
@@ -9186,20 +9256,21 @@ class QuitarEstadoFinalReparacionView(APIView):
         _set_audit_user(request)
         # Al anular la resolución hay que soltar también el cambio de equipo: si no, la OS
         # queda arrastrando la serie de un cambio que ya no existe.
+        resolucion_next = resolucion_al_anular_estado_final(presupuesto_next)
         exec_void(
             f"""
             UPDATE ingresos
-               SET {sets_con_limpieza_de_cambio('estado=%s', 'resolucion=NULL', 'presupuesto_estado=%s')}
+               SET {sets_con_limpieza_de_cambio('estado=%s', 'resolucion=%s', 'presupuesto_estado=%s')}
              WHERE id=%s
             """,
-            [estado_next, presupuesto_next, ingreso_id],
+            [estado_next, resolucion_next, presupuesto_next, ingreso_id],
         )
         return Response(
             {
                 "ok": True,
                 "estado_anterior": estado_cur,
                 "estado": estado_next,
-                "resolucion": None,
+                "resolucion": resolucion_next,
                 "presupuesto_estado": presupuesto_next,
             }
         )
