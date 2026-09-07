@@ -57,6 +57,13 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     # una columna que no existe. Es ADD COLUMN / CREATE INDEX IF NOT EXISTS más un UPDATE
     # con guarda por NULL, así que corre en cada arranque sin costo.
     ("apply_device_swap_schema", {}),
+    # Estaba entre los omitidos como "parche histórico ya aplicado" y no lo estaba: en
+    # producción faltaban las cuatro tablas del centro de trabajo, así que
+    # `send_work_alerts` venía fallando TODOS LOS DÍAS con
+    # `relation "work_notification_state" does not exist` y el resumen operativo no
+    # salía nunca. Dar un parche por aplicado no lo aplica; correrlo en cada arranque
+    # sí, y no cuesta nada porque es CREATE TABLE/INDEX IF NOT EXISTS de punta a punta.
+    ("apply_work_upgrade_schema", {}),
 )
 
 
@@ -78,7 +85,6 @@ EXCLUDED_SCHEMA_COMMANDS: dict[str, str] = {
     "apply_phase3_constraints": "Parche histórico de la fase 3 (02/2026), ya aplicado.",
     "apply_motivo_ingreso_utf8_schema": "Corrección puntual de etiquetas del enum (05/2026), ya aplicada.",
     "apply_historical_corrections_schema": "Parche histórico (05/2026), ya aplicado.",
-    "apply_work_upgrade_schema": "Parche histórico del centro de trabajo (05/2026), ya aplicado.",
     "apply_metricas_actividad_schema": "Índices de la bitácora de actividad (05/2026), ya aplicados.",
     "apply_mg_sale_schema": "Parche histórico de venta MG (04/2026), ya aplicado.",
     "apply_repuestos_schema": "Parche histórico de repuestos (04/2026), ya aplicado.",
