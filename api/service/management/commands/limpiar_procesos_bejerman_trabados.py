@@ -136,10 +136,13 @@ class Command(BaseCommand):
                 self.stdout.write(f"  SE DEJA  {row['id']}: numero raro que no es punto+numero ({numero})")
                 continue
             corregido = numero[len(punto):]
+            # `_optional_text` devuelve None, no "": sin el `or` el tipo vacío se
+            # escribiría como el texto literal "None" en el número del remito, y esto
+            # se guarda en la base.
             nuevo_remito = (
-                f"{_optional_text(row.get('comprobante_tipo'))} "
+                f"{_optional_text(row.get('comprobante_tipo')) or ''} "
                 f"{_optional_text(row.get('comprobante_letra')) or 'R'} {punto}-{corregido}"
-            )
+            ).strip()
             self.stdout.write(
                 f"  CORRIGE  {row['id']}: {row.get('remito_number')} -> {nuevo_remito}"
             )
@@ -221,7 +224,13 @@ class Command(BaseCommand):
                 # Sigue siendo el unico intento de esa entrega: es trabajo pendiente de verdad.
                 continue
             if not _remito_group_confirms_not_imported(row):
-                detalle = (_optional_text(row.get("last_error")) or _optional_text(summary.get("error")))[:90]
+                # Los dos pueden venir nulos —un grupo que falló sin que nadie
+                # registrara por qué— y ahí `None[:90]` reventaba el barrido entero.
+                detalle = (
+                    _optional_text(row.get("last_error"))
+                    or _optional_text(summary.get("error"))
+                    or "sin detalle registrado"
+                )[:90]
                 self.stdout.write(
                     f"  SE DEJA  {row['id']} ({row.get('customer_name')}): el rechazo no confirma "
                     f"que el comprobante no se creo -> {detalle}"
