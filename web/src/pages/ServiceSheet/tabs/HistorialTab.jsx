@@ -1,4 +1,12 @@
-import { formatDateTime as formatDateTimeHelper } from "../../../lib/ui-helpers";
+// `formatDateTime` de ui-helpers imprime sólo la fecha, y acá varios cambios caen el
+// mismo día: sin la hora el historial no deja reconstruir en qué orden pasaron las
+// cosas ni quién pisó a quién.
+const formatFechaHora = (value) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "medium" });
+};
 
 const roleLabel = (value) => {
   if (!value) return "-";
@@ -58,7 +66,7 @@ export default function HistorialTab({ hErr, hLoading, hist }) {
             ) : (
               hist.map((row, idx) => (
                 <tr key={idx} className="border-t">
-                  <td className="p-2 whitespace-nowrap">{formatDateTimeHelper(row.ts)}</td>
+                  <td className="p-2 whitespace-nowrap">{formatFechaHora(row.ts)}</td>
                   <td className="p-2">{row.user_nombre || row.user_id || "-"}</td>
                   <td className="p-2 whitespace-nowrap">{roleLabel(row.user_role)}</td>
                   <td className="p-2">{entityLabel(row.table_name)}</td>

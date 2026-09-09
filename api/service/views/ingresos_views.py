@@ -41,6 +41,7 @@ from .helpers import (
     money,
 )
 from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
+from .quotes_views import marcar_quote_no_aplica
 from .mg_state import is_mg_owner_device, normalize_mg, resolve_mg_flags
 from ..ingreso_duplicados import ingreso_es_de_hoy
 from ..rejected_budget import (
@@ -1350,6 +1351,23 @@ def _estado_actual_txt(ingreso_id: int) -> str:
     try:
         row = q("SELECT estado::text AS estado FROM ingresos WHERE id=%s", [ingreso_id], one=True) or {}
         return (row.get("estado") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _presupuesto_estado_actual_txt(ingreso_id: int) -> str:
+    """Estado de presupuesto que quedó grabado, para no responder uno de fantasía.
+
+    Los cierres sin presupuesto respetan un presupuesto ya emitido o rechazado, así
+    que lo que quedó no siempre es 'no_aplica'.
+    """
+    try:
+        row = q(
+            "SELECT presupuesto_estado FROM ingresos WHERE id=%s",
+            [ingreso_id],
+            one=True,
+        ) or {}
+        return str(row.get("presupuesto_estado") or "").strip().lower()
     except Exception:
         return ""
 
@@ -9028,11 +9046,14 @@ class MarcarControladoSinDefectoView(APIView):
 
         _prev_estado = _estado_actual_txt(ingreso_id)
         _set_audit_user(request)
-        # Forzar estado y presupuesto_estado
+        # El 'no_aplica' se marca primero en `quotes`, que es lo que manda: el trigger
+        # sync_quote_with_ingreso copia el estado de la versión vigente al ingreso y le
+        # pisaba el 'no_aplica' apenas alguien abría la pestaña Presupuesto.
+        presupuesto_no_aplica = marcar_quote_no_aplica(ingreso_id)
         sets = sets_con_limpieza_de_cambio(
             "estado='controlado_sin_defecto'",
             "resolucion='no_se_encontro_falla'",
-            "presupuesto_estado='no_aplica'",
+            *(["presupuesto_estado='no_aplica'"] if presupuesto_no_aplica else []),
         )
         exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
         if _prev_estado != "controlado_sin_defecto":
@@ -9101,7 +9122,11 @@ class MarcarControladoSinDefectoView(APIView):
             except Exception:
                 logger.exception("No se pudo encolar transferencia Bejerman STR a VAL", extra={"ingreso_id": ingreso_id})
 
-        resp = {"ok": True, "estado": "controlado_sin_defecto", "presupuesto_estado": "no_aplica"}
+        resp = {
+            "ok": True,
+            "estado": "controlado_sin_defecto",
+            "presupuesto_estado": _presupuesto_estado_actual_txt(ingreso_id),
+        }
         if auto_moved:
             resp["auto_moved"] = True
             resp["auto_moved_to"] = auto_moved_to
@@ -9316,10 +9341,14 @@ class MarcarNoSeReparaView(APIView):
 
         _prev_estado = _estado_actual_txt(ingreso_id)
         _set_audit_user(request)
+        # Igual que en "controlado sin defecto": el 'no_aplica' vive en `quotes` o no
+        # vive. Y si el cliente rechazó un presupuesto, ese 'rechazado' se conserva:
+        # taparlo con 'no_aplica' le hacía tomar a métricas el costo en vez del cobro.
+        presupuesto_no_aplica = marcar_quote_no_aplica(ingreso_id)
         sets = sets_con_limpieza_de_cambio(
             "estado='no_se_repara'",
             "resolucion='no_reparado'",
-            "presupuesto_estado='no_aplica'",
+            *(["presupuesto_estado='no_aplica'"] if presupuesto_no_aplica else []),
         )
         exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
         if _prev_estado != "no_se_repara":
@@ -9348,7 +9377,12 @@ class MarcarNoSeReparaView(APIView):
                 "No se pudo cerrar el aviso de deshacer la reparación",
                 extra={"ingreso_id": ingreso_id},
             )
-        return Response({"ok": True, "estado": "no_se_repara", "resolucion": "no_reparado", "presupuesto_estado": "no_aplica"})
+        return Response({
+            "ok": True,
+            "estado": "no_se_repara",
+            "resolucion": "no_reparado",
+            "presupuesto_estado": _presupuesto_estado_actual_txt(ingreso_id),
+        })
 
 
 __all__ = [

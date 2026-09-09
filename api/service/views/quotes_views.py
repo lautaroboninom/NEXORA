@@ -645,19 +645,36 @@ def _get_quote_row(ingreso_id: int, quote_id: int, *, for_update: bool = False):
     )
 
 
+def _quote_seed_estado(ingreso_id: int) -> str:
+    """Estado con el que nace la versión 1 cuando la quote se crea al vuelo.
+
+    `ingresos.presupuesto_estado` no es la fuente de verdad: el trigger
+    `sync_quote_with_ingreso` lo reescribe con el estado de la versión vigente cada
+    vez que se toca `quotes`. Naciendo siempre en 'pendiente', abrir la pestaña
+    Presupuesto -que es lo que crea la quote faltante- le reabría el presupuesto a una
+    OS ya cerrada sin falla: el trigger le pisaba el 'no_aplica' al ingreso y quedaba
+    registrado a nombre de quien miró. La versión nueva tiene que nacer diciendo lo
+    mismo que el ingreso ya dice.
+    """
+    row = q("SELECT presupuesto_estado FROM ingresos WHERE id=%s", [ingreso_id], one=True) or {}
+    estado = str(row.get("presupuesto_estado") or "").strip()
+    return "no_aplica" if estado == "no_aplica" else "pendiente"
+
+
 def _ensure_current_quote(ingreso_id: int):
     row = _get_current_quote_row(ingreso_id)
     if row:
         return row["id"]
 
+    seed_estado = _quote_seed_estado(ingreso_id)
     try:
         with transaction.atomic():
             row = _get_current_quote_row(ingreso_id, for_update=True)
             if row:
                 return row["id"]
             return exec_returning(
-                "INSERT INTO quotes(ingreso_id, version_num) VALUES (%s, %s) RETURNING id",
-                [ingreso_id, 1],
+                "INSERT INTO quotes(ingreso_id, version_num, estado) VALUES (%s, %s, %s) RETURNING id",
+                [ingreso_id, 1, seed_estado],
             )
     except Exception:
         row = _get_current_quote_row(ingreso_id)
@@ -674,8 +691,8 @@ def _ensure_current_quote(ingreso_id: int):
                     if row:
                         return row["id"]
                     return exec_returning(
-                        "INSERT INTO quotes(ingreso_id, version_num) VALUES (%s, %s) RETURNING id",
-                        [ingreso_id, 1],
+                        "INSERT INTO quotes(ingreso_id, version_num, estado) VALUES (%s, %s, %s) RETURNING id",
+                        [ingreso_id, 1, seed_estado],
                     )
             except Exception:
                 pass
@@ -693,6 +710,43 @@ def _ensure_current_quote_editable(ingreso_id: int):
     if (current.get("estado") or "").strip() in {"aprobado", "rechazado", "no_aplica"}:
         raise ValidationError("La versión vigente del presupuesto no es editable.")
     return current
+
+
+def marcar_quote_no_aplica(ingreso_id: int) -> bool:
+    """Deja en 'no_aplica' la versión vigente del presupuesto. Devuelve si aplicó.
+
+    La usan los cierres que no llevan presupuesto ("controlado sin defecto" y "no se
+    repara"). Marcar sólo `ingresos.presupuesto_estado` no alcanzaba: el trigger
+    `sync_quote_with_ingreso` reescribe esa columna con el estado de la quote vigente,
+    así que el 'no_aplica' duraba hasta el primer toque a `quotes` -incluida la
+    creación al vuelo que dispara abrir la pestaña Presupuesto- y la OS cerrada volvía
+    a tener presupuesto pendiente.
+
+    Sólo pisa una versión pendiente: si el presupuesto se emitió, se aprobó o lo
+    rechazó el cliente, esa historia manda. Es la misma regla del botón "No aplica",
+    y evita que un cierre le tape a facturación un presupuesto rechazado.
+    """
+    current = q(
+        """
+        SELECT id, estado
+          FROM quotes
+         WHERE ingreso_id=%s
+         ORDER BY COALESCE(version_num, 1) DESC, id DESC
+         LIMIT 1
+        """,
+        [ingreso_id],
+        one=True,
+    )
+    if not current:
+        exec_void(
+            "INSERT INTO quotes(ingreso_id, version_num, estado) VALUES (%s, %s, %s)",
+            [ingreso_id, 1, "no_aplica"],
+        )
+        return True
+    if str(current.get("estado") or "").strip() not in {"", "pendiente"}:
+        return False
+    exec_void("UPDATE quotes SET estado='no_aplica' WHERE id=%s", [current["id"]])
+    return True
 
 
 def _build_quote_versions_summary(ingreso_id: int, current_quote_id: int):
@@ -1868,6 +1922,7 @@ class QuitarNoAplicaPresupuestoView(APIView):
 
 
 __all__ = [
+    'marcar_quote_no_aplica',
     'QuoteDetailView',
     'QuoteItemsView',
     'QuoteItemDetailView',

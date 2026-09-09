@@ -437,6 +437,103 @@ class NoSeReparaFlowAPITest(TestCase):
         self.assertEqual(resolucion, "no_reparado")
         self.assertEqual(presupuesto_estado, "no_aplica")
 
+    # --- El 'no_aplica' tiene que quedar escrito en `quotes` -------------------
+    # `ingresos.presupuesto_estado` no es la fuente de verdad: el trigger
+    # `sync_quote_with_ingreso` lo reescribe con el estado de la versión vigente cada
+    # vez que se toca `quotes`. Cerrar la OS marcando sólo el ingreso dejaba la quote
+    # en 'pendiente', y abrir la pestaña Presupuesto -que crea la quote faltante- le
+    # devolvía el presupuesto pendiente a una OS ya cerrada sin falla (OS 29674).
+
+    def _quote_vigente(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT estado
+                  FROM quotes
+                 WHERE ingreso_id=%s
+                 ORDER BY COALESCE(version_num, 1) DESC, id DESC
+                 LIMIT 1
+                """,
+                [self.ingreso_id],
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def test_no_se_repara_deja_la_quote_vigente_en_no_aplica(self):
+        self.client.force_authenticate(user=self.tecnico)
+
+        resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/no-se-repara/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._quote_vigente(), "no_aplica")
+
+    def test_controlado_sin_defecto_deja_la_quote_vigente_en_no_aplica(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='diagnosticado', resolucion=NULL, presupuesto_estado='pendiente' WHERE id=%s",
+                [self.ingreso_id],
+            )
+            cur.execute(
+                "INSERT INTO quotes (ingreso_id, version_num, estado) VALUES (%s, %s, %s)",
+                [self.ingreso_id, 1, "pendiente"],
+            )
+        self.client.force_authenticate(user=self.tecnico)
+
+        with patch("service.views.ingresos_views.ingreso_targets_rental_stock", return_value=False), \
+             patch("service.views.ingresos_views.ingreso_is_demo_return", return_value=False):
+            resp = self.client.post(
+                f"/api/ingresos/{self.ingreso_id}/controlado-sin-defecto/", {}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._quote_vigente(), "no_aplica")
+        _estado, _resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(presupuesto_estado, "no_aplica")
+
+    def test_no_se_repara_no_tapa_un_presupuesto_rechazado(self):
+        # Rechazar y no reparar es el circuito normal, y ese 'rechazado' es lo que
+        # métricas usa para cobrar el neto pactado en vez del costo de los repuestos.
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET presupuesto_estado='rechazado' WHERE id=%s",
+                [self.ingreso_id],
+            )
+            cur.execute(
+                "INSERT INTO quotes (ingreso_id, version_num, estado) VALUES (%s, %s, %s)",
+                [self.ingreso_id, 1, "rechazado"],
+            )
+        self.client.force_authenticate(user=self.tecnico)
+
+        resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/no-se-repara/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._quote_vigente(), "rechazado")
+        estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "no_se_repara")
+        self.assertEqual(resolucion, "no_reparado")
+        self.assertEqual(presupuesto_estado, "rechazado")
+
+    def test_la_quote_creada_al_vuelo_no_reabre_un_presupuesto_no_aplica(self):
+        # Lo que crea la quote faltante es un GET (abrir la pestaña Presupuesto).
+        # Si nace en 'pendiente', el trigger le pisa el 'no_aplica' al ingreso.
+        from service.views.quotes_views import _quote_seed_estado
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='controlado_sin_defecto', presupuesto_estado='no_aplica' WHERE id=%s",
+                [self.ingreso_id],
+            )
+
+        self.assertEqual(_quote_seed_estado(self.ingreso_id), "no_aplica")
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='diagnosticado', presupuesto_estado='pendiente' WHERE id=%s",
+                [self.ingreso_id],
+            )
+
+        self.assertEqual(_quote_seed_estado(self.ingreso_id), "pendiente")
+
     def test_tecnico_no_asignado_no_puede_marcar_no_se_repara(self):
         self.client.force_authenticate(user=self.otro_tecnico)
 
