@@ -262,6 +262,39 @@ una reversión ingenua les hubiera roto la partida.
    - Comprobante de stock: `cmstco_Cod` (tipo), `cms_Letra`, `cms_Nro`, `cms_FComp`
    - `SegCabC` **no** tiene `sccti_Cod` ni `scc_Numero`; `CabMovS` **no** tiene `cms_Numero`
    - Comprobantes de venta: `SegCabV`/`SegTiposV`/`SegDetV` (`CabVenta` está vacía)
+   - Relación entre renglones (RT ← FC, OC ← FCI): `SegRelDetV` / `SegRelDetC`
+     (`srvsdv_ID` ← `srvsdv_IDOrig`). Sirve para ubicar el renglón con partida de una factura sin partida.
+8. **`StockPar` tiene FK a `Stock` (artículo + depósito).** Para pasar partidas de un artículo a otro
+   hay que crear primero la fila `Stock` del artículo destino en ese depósito, después mover
+   `StockPar` (fusionando si la fila destino ya existe) y al final recalcular `Stock` desde sus
+   partidas. Las filas nuevas o tocadas van con `FecMod` **sin milisegundos**
+   (`CONVERT(datetime, CONVERT(char(19), GETDATE(), 120))`): con milisegundos el importador del SDK
+   ya no puede actualizar esa fila nunca más.
+9. **`CHECKSUM_AGG` no sirve para comparar fotos antes/después**: combina por XOR, así que un número
+   par de filas con el mismo cambio se cancela y la foto "da igual". Usar conteo por clave más
+   `SUM(CAST(BINARY_CHECKSUM(...) AS bigint))`.
+10. **Ensayar en las copias de prueba**: `SBDPSEP` / `SBDPMGBI` están en el mismo servidor, con la misma
+    estructura (datos atrasados). Correr ahí el script completo y su rollback antes de producción.
+11. **Borrar un movimiento que emitió NEXORA deja su job en verde.** Si el comprobante lleva
+    `IdOrigen` `NEXORA-*`, el job que lo generó sigue `succeeded` y nada vuelve a mirarlo. Antes de
+    borrar un ENT "fantasma", fijarse en NEXORA **dónde está físicamente** el equipo: el 07/09/2026
+    `sql/ops/bejerman_borrar_ent_fantasma_backfill_stl.sql` borró 18 ENT a STL y dejó en STR a 11
+    equipos que estaban en la Estantería de Alquiler (OS 28054 entre ellos). A esos no les sobraba
+    el ENT: les faltaba la SAL de STR. Si igual se borra, reencolar los jobs en la misma tanda con
+    `manage.py reabrir_transferencias_stl_deshechas`.
+12. **`ObtenerStockPartida` distingue mayúsculas; SQL Server no.** Un ENT con `g04850336` suma sobre
+    la fila `G04850336` que ya existía, pero la consulta del SDK con `g04850336` no la devuelve. Para
+    comparar grafías por SQL: `CAST(stp_Partida AS varbinary(100))`. Desde NEXORA, la consulta ya se
+    hace con cada grafía (`api/service/bejerman_partida_grafias.py`).
+
+### Mover partidas entre artículos (caso JAY-5Q / JAY-5AW, 11/09/2026)
+
+Además de las tablas de partida de la sección 2, un artículo vive en `ItemVta` / `ItemComp` (libros
+de IVA, con `*stp_Partida`), `UltCpras`, `ListaPrec`, `CFStock` y el maestro (`Articulos`,
+`Articulos2`, `ArticulosEmp`, `ArtPPPNoPart`, `ArtProv`). Para dar de alta un artículo por SQL
+copiar esas cinco filas del maestro desde uno existente de la misma base. Ejemplo completo con
+respaldo en la base, verificación dentro de la transacción y rollback:
+`docs/bejerman-correccion-jay5q-jay5aw-20260911.md`.
 
 ---
 

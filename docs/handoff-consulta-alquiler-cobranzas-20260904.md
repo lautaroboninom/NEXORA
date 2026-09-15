@@ -1,5 +1,18 @@
 # Consulta de alquiler por cliente (Bejerman) — estado de la investigación
 
+> **Actualización verificada del 08/09/2026:** el modelo simplificado de este
+> handoff estaba incompleto. Se recuperó el SQL real de las corridas
+> `SBDASEP.dbo.consEspec0182` y `consEspec4065`: además de alquiler, exige
+> `scv_ActStock = 1`, cantidad distinta de cero y `Defi1Art.da1_Desc LIKE '%Equipa%'`.
+> La operación se filtra por `TipoOper.top_Desc LIKE '%Alq%'`.
+> Hay un caso actual comprobado: el RDA 00001-00026468 tiene cuatro bajas -1
+> que el informe excluye por `scv_ActStock = 0`; incluirlas lleva sus saldos de
+> +1 a 0. Esto no demuestra un error del saldo físico de stock.
+> El caso de DEV `MZJ5S121193` devuelve +1 en SBDPSEP y 0 en SBDASEP.
+> Ver `docs/ns-testigo-MZJ5S121193-20260908.md` y el SQL original preservado
+> en `docs/reportes/ns_sql_real_recuperado_20260908.txt` antes de reutilizar
+> las conclusiones históricas de este documento.
+
 **Fecha:** 04/09/2026 · **Reclamo:** cobranzas (Ezequiel) dice que en el listado
 "N/S por cliente" los equipos alquilados no aparecen correctamente desde que se
 empezó a emitir e ingresar por NEXORA. Pasan las dos cosas: faltan equipos que el

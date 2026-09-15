@@ -1,270 +1,144 @@
-# Guardia de NEXORA — qué mirar y qué hacer
+# Guardia de NEXORA
 
-**Para quién es esto:** la persona que queda a cargo mientras Lautaro no está.
-No hace falta saber programar. Todo lo que se nombra acá se hace desde la pantalla
-de NEXORA, con el navegador.
+Guía para Recepción, Servicio Técnico, Logística, Administración y Cobranzas.
+Revisión del código: 12 de septiembre de 2026.
 
-**La idea de fondo:** el sistema ya se destraba solo en la enorme mayoría de los
-casos. Los procesos que fallan se reintentan solos, los que se quedan a mitad de
-camino se recuperan solos, y los avisos salen solos. Lo que queda para una persona
-son los casos donde **hay que decidir algo**, y son pocos. Este documento es la
-lista de esos casos.
+**Esta auditoría deja cambios en desarrollo. No los instala en producción.**
+La presencia de un botón en el código no acredita que esté disponible en SERVERDATA.
+Si la pantalla no ofrece la acción indicada, registre el caso y escálelo al responsable del área.
 
-**La regla más importante está en la sección 4.** Si leés una sola cosa, que sea esa.
+## Revisión diaria
 
----
+1. Abra NEXORA y consulte una OS conocida. Compruebe que carga su información.
+2. Revise las órdenes pendientes del área y el panel de procesos de Bejerman.
+   Mire el estado, el último intento y el detalle del error, especialmente si una entrega está detenida.
+3. Revise los avisos recibidos y los pendientes visibles en NEXORA.
+   **La ausencia de correo no demuestra que todo esté bien.** Puede no haber pendientes,
+   faltar un destinatario, estar deshabilitado el envío o fallar el proceso de correo.
+4. Registre los casos sin resolver: fecha, OS u orden de entrega, usuario,
+   empresa de Bejerman, comprobante, mensaje exacto y qué se hizo.
 
-## 1. La revisión de todos los días (5 minutos)
+Que la página cargue no demuestra que funcionen la sincronización, los PDF ni el correo.
+No espere hasta el día siguiente si el problema impide una entrega o afecta stock.
 
-Una vez por día, a la mañana. Con esto alcanza.
+## Qué hacer según el estado
 
-### 1.1 ¿El sistema está vivo?
-
-Entrá a NEXORA como cualquier día. Si carga y podés ver la lista de ingresos, está
-vivo. No hace falta nada más.
-
-Si **no** carga, andá directo a la sección 6.
-
-### 1.2 El panel de procesos de Bejerman
-
-Menú lateral → **Sincronización Bejerman**.
-
-Mirá la columna de estados. Lo que importa:
-
-| Estado | Qué significa | Qué hacés |
-|---|---|---|
-| **Pendiente** | Está en la cola, le toca en un rato | Nada. Se resuelve solo |
-| **Ejecutando** | Está trabajando ahora mismo | Nada |
-| **Completado** | Salió bien | Nada |
-| **Falló** | Falló pero va a reintentar solo | **Nada por 24 horas.** Si mañana sigue igual, sección 3 |
-| **Bloqueado** | Se le acabaron los reintentos, necesita una persona | Sección 3 |
-| **En revisión** | No se sabe si el remito salió o no | Sección 3.2 — **es el caso delicado** |
-| **Cancelado** | Alguien lo cerró a mano | Nada |
-
-**Un "Falló" recién aparecido no es una urgencia.** El sistema reintenta con esperas
-cada vez más largas justamente para aguantar que Bejerman se caiga un rato. Recién
-cuando pasa a **Bloqueado** dejó de intentar por su cuenta.
-
-### 1.3 Tu correo
-
-Si algo se bloquea de verdad, te llega un mail con asunto
-**`[NEXORA] Sincronización Bejerman bloqueada`**. Ese mail sale solo, dos horas
-después de que el proceso se bloqueó. Si no te llegó ninguno, no hay nada bloqueado.
-
-También llegan todos los días:
-- **07:30** — alertas de presupuestos pendientes y preventivos vencidos.
-- **08:00** — resumen de facturación pendiente para Cobranzas.
-
-**Si un día no llega ninguno de los tres, algo pasa.** Ver sección 6.
-
----
-
-## 2. Lo que se arregla solo (no toques nada)
-
-Esto está acá para que no pierdas tiempo con cosas que ya se están resolviendo.
-
-- **Un proceso en "Falló" que reintenta.** Espera cada vez más entre intentos.
-  Dejalo. La mayoría sale en el segundo o tercer intento.
-- **Un proceso que quedó "Ejecutando" desde ayer.** A la media hora el sistema se da
-  cuenta de que no quedó nadie atrás y lo devuelve a la cola solo.
-- **Una emisión de remito que quedó "en curso" y nunca contestó.** A los 10 minutos
-  la pantalla te dice que verifiques; a los 20 el sistema cierra la fila solo.
-- **Un job bloqueado porque a alguien le faltaban las credenciales de Bejerman.** En
-  cuanto la persona las carga en su perfil, el proceso se reabre solo.
-- **Errores que dicen `ServiceActivationException` o "el servicio no responde".** Es
-  Bejerman que se durmió. Se despierta solo y el reintento entra bien.
-
----
-
-## 3. Los casos que sí necesitan una persona
-
-### 3.1 Un proceso quedó **Bloqueado**
-
-Abrí la fila. El panel te muestra tres cosas: **Qué ocurrió**, **Cómo resolverlo** y
-el detalle técnico. Leé "Cómo resolverlo" — está escrito para este momento.
-
-Los motivos que aparecen seguido:
-
-| Dice algo como | Qué pasa de verdad | Qué hacer |
-|---|---|---|
-| "Falta stock" / "stock insuficiente" | En Bejerman el equipo no está en el depósito del que se lo quiere sacar | Fijate en Bejerman dónde está la partida. Si está en otro depósito, hay que moverla ahí primero |
-| "No se encontró el artículo" | El equipo de NEXORA no está mapeado a un artículo de Bejerman | Botón **Resolver artículo Bejerman** en la misma fila. Te sugiere candidatos |
-| "Faltan las credenciales" | El usuario que lo disparó no tiene cargada su clave de Bejerman | Que la persona entre a su perfil y las cargue. El proceso se reabre solo |
-| "Tipo de sincronización sin implementación" | Basura vieja de una auditoría | **Cancelar**, dejando escrito el motivo |
-
-Cuando arreglaste la causa, botón **Reintentar**.
-
-### 3.2 Un proceso quedó **En revisión** — leé esto entero
-
-Este es el caso delicado, y es el único donde apretar el botón equivocado hace daño
-de verdad.
-
-**Qué significa:** NEXORA le mandó el remito a Bejerman y **no sabe si llegó o no**.
-Se cortó la conexión, o Bejerman contestó algo ambiguo. El remito puede estar emitido
-o puede no estarlo, y las dos cosas son posibles.
-
-**Por qué importa:** si reintentás y el remito ya había salido, queda **emitido dos
-veces**. Eso es un problema real: dos remitos, dos movimientos de stock, y alguien
-tiene que ir a Bejerman a anular uno.
-
-**Qué hacer, en este orden:**
-
-1. **Botón "Verificar en Bejerman".** Busca el comprobante sin emitir nada. Es
-   gratis y no rompe nada. En la mayoría de los casos lo encuentra y cierra la fila
-   solo. **Empezá siempre por acá.**
-
-2. Si la verificación no lo resuelve, andá a Bejerman y buscalo a mano. El panel te
-   dice qué buscar (cliente, fecha, número de serie).
-
-3. Volvé al panel, botón **Resolver revisión**, y elegí lo que viste:
-   - **"El remito existe en Bejerman"** → cargás el número y la fila se cierra. No
-     se emite nada nuevo.
-   - **"No se emitió: lo verifiqué en Bejerman"** → recién ahí el sistema se
-     habilita a emitirlo de nuevo.
-
-**Nunca elijas "no se emitió" sin haber mirado Bejerman con tus ojos.** Ese botón es
-una declaración, no una suposición.
-
-### 3.3 Un conflicto de ingreso
-
-Un equipo volvió a entrar al taller y su orden anterior seguía abierta. El remito de
-ingreso ya salió; lo que falta es decidir qué pasa con la orden vieja.
-
-El panel te ofrece buscar en Bejerman el comprobante de salida de la vez anterior. Si
-lo encuentra, cierra la orden vieja con ese respaldo. Si no aparece, podés cerrarla
-sin comprobante y queda asentado en el historial quién lo hizo.
-
-No es urgente. Puede esperar a que Lautaro vuelva si tenés dudas.
-
----
-
-## 4. Lo que NO hay que hacer
-
-**Esta es la sección importante.**
-
-### ⛔ No reintentar un remito que puede haber salido
-
-Ya está explicado en 3.2, pero va de nuevo porque es el error caro. Hay dos frases
-de Bejerman que **parecen** un rechazo y no lo son:
-
-- *"El comprobante no se importó debido a que ya existe en la empresa"*
-- *"El comprobante se importó correctamente. La fecha de contabilización se
-  modificó..."*
-
-Las dos significan **el comprobante existe**. Reintentar lo duplica. El sistema ya
-reconoce estos dos textos y no te deja reintentar a ciegas, pero si alguna vez te
-aparece la opción: no.
-
-### ⛔ Un error de conexión no significa "no se ejecutó"
-
-Si el mensaje habla de conexión cortada, timeout, o el servicio que no responde, eso
-dice que **NEXORA no llegó a escuchar la respuesta**. No dice que la operación no
-haya pasado. Van a "En revisión" a propósito. Tratalos como 3.2.
-
-### ⛔ No reiniciar contenedores ni tocar el servidor
-
-Si algo parece trabado, no reinicies nada. El sistema tiene sus propias
-recuperaciones y reiniciar en el medio puede dejar trabajo a mitad de camino. Ver
-sección 6.
-
-### ⛔ No cargar comprobantes a mano en Bejerman "para arreglar"
-
-Si cargás en Bejerman un remito que NEXORA cree que no salió, las dos bases quedan
-diciendo cosas distintas y después nadie entiende qué pasó. Si tenés que hacerlo,
-anotalo y avisá.
-
----
-
-## 5. Los avisos que llegan por mail
-
-| Aviso | Cuándo | Qué hacer |
-|---|---|---|
-| Sincronización Bejerman bloqueada | 2 h después de bloquearse | Sección 3.1 |
-| Presupuestos pendientes | Todos los días 07:30 | Es para el equipo comercial |
-| Preventivos vencidos / próximos | Todos los días 07:30 | Es para Servicio Técnico |
-| Resumen de facturación pendiente | Todos los días 08:00 | Es para Cobranzas |
-| Remito listo / equipo liberado | Cuando pasa | Circuito normal, no es una alerta |
-
-Si **dejan de llegar** los de horario fijo, es una señal de que algo se cayó. No es
-que "ese día no había nada": cuando no hay nada, el mail igual llega diciendo que no
-hay nada.
-
----
-
-## 6. Si se cae todo
-
-**Síntomas:** NEXORA no carga, o carga pero nada se guarda, o dejaron de llegar
-todos los mails.
-
-**Lo primero, y muchas veces lo único:** el servidor SERVERDATA se reinició y no
-terminó de levantar. Después de un reinicio tarda **unos 10 minutos** en volver solo.
-Esperá 10 minutos antes de hacer nada.
-
-**Si a los 10 minutos sigue caído:**
-
-1. Entrá a SERVERDATA (por pantalla o por escritorio remoto).
-2. En el escritorio hay un acceso directo: **"Rebuild NEXORA Producción"**.
-3. Abrilo. Te muestra el estado y te ofrece reconstruir.
-
-Eso arregla la enorme mayoría de las caídas. Tarda entre 10 y 40 minutos y muestra
-en pantalla en qué paso va.
-
-**Si el acceso directo tampoco lo levanta**, ahí sí es momento de llamar. No sigas
-probando cosas: cada intento fallido puede dejar procesos colgados que después hay
-que limpiar.
-
----
-
-## 7. A quién llamar
-
-| Situación | A quién |
+| Estado o situación | Acción operativa |
 |---|---|
-| Duda sobre un caso del panel | Puede esperar. Anotalo |
-| Un remito se emitió dos veces | Avisar a Cobranzas para que anulen uno en Bejerman |
-| El sistema no levanta ni con el rebuild | Lautaro |
-| Algo que huele a pérdida de datos | Lautaro, sin esperar |
+| Pendiente o ejecutando | Consulte el último intento. Si no avanza o bloquea una operación necesaria, registre el caso y avise al responsable. |
+| Falló | Lea el detalle. Algunos procesos reintentan, pero no todos los errores son recuperables. No presuponga que se resolverá solo. |
+| Bloqueado | Identifique y corrija la causa con el área responsable. Reintente únicamente cuando esté resuelta y no haya incertidumbre de emisión. |
+| En revisión, enviado sin respuesta o resultado desconocido | Siga el procedimiento de comprobante incierto de abajo. |
+| Completado | Compruebe el resultado requerido: comprobante, empresa, partidas, cantidades y estado de la entrega. |
+| PDF pendiente | El comprobante puede estar emitido. Reintente la consulta o impresión del PDF; no emita otro remito para conseguirlo. |
 
-Para todo lo demás: **anotarlo y esperar**. Un caso que queda sin resolver una semana
-no rompe nada. Un caso mal resuelto sí.
+Los reintentos necesitan procesos activos, credenciales válidas y servicios disponibles.
+Un error de activación de Bejerman no garantiza que el servicio vaya a recuperarse solo.
 
----
+## Comprobante incierto: evitar una emisión duplicada
 
-## 8. Para el que sepa técnico
+Un corte de conexión o un tiempo de espera agotado **no demuestra que el remito no se emitió**.
+También puede haberse emitido aunque NEXORA todavía no tenga el número o el PDF.
 
-Comandos de diagnóstico, todos de sólo lectura, desde el contenedor `nexora-api`:
+1. Conserve la OS, la orden, el mensaje y la hora. No vuelva a emitir ni cambie a carga manual para eludir el bloqueo.
+2. Si aparece **Verificar en Bejerman**, úselo: consulta el comprobante sin emitir uno nuevo.
+3. Si sigue incierto, el responsable de Administración o Cobranzas debe consultar Bejerman.
+   Contraste empresa, tipo, punto de venta, número, cliente, fecha, artículos,
+   partidas, cantidades y depósito. Encontrar solamente una serie no alcanza.
+4. Si existe el comprobante, vincule o resuelva la revisión con su referencia mediante
+   la función autorizada de NEXORA. No lo vuelva a emitir.
+5. Sólo declare **No se emitió** cuando la consulta confirme la ausencia del comprobante
+   y del movimiento correspondiente. Si hay más de un candidato o la consulta falla,
+   mantenga el caso en revisión y escálelo.
+
+Los mensajes que indican que el comprobante ya existe o que se importó con un cambio
+contable no deben tratarse como autorización para repetirlo.
+Una emisión duplicada requiere conciliación por Administración/Cobranzas antes de
+anular nada; comprueben también el stock y los vínculos en NEXORA.
+
+## Problemas habituales
+
+| Problema | Responsable y siguiente paso |
+|---|---|
+| Falta stock | Logística contrasta artículo, partida, empresa y depósito con Bejerman. No haga transferencias a ciegas ni emita para probar. |
+| Artículo sin vincular | El responsable del catálogo revisa el mapeo. Use Resolver artículo Bejerman si está disponible y verifique empresa y variante. |
+| Credenciales faltantes | El usuario carga sus propias credenciales desde el perfil. Luego compruebe si el proceso se reabrió; no dé la recuperación por hecha. |
+| Derivación activa | Servicio Técnico registra la devolución efectiva antes de liberar o entregar. El estado operativo de la OS se conserva por separado. |
+| Presupuesto pendiente o inconsistente | Administración y Servicio Técnico revisan aprobación, rechazo o anulación. No cambie estados para eludir una validación. |
+| Conjunto de remitos incompleto | Revise los comprobantes ya emitidos y las cantidades pendientes. No reinicie el conjunto ni duplique las entregas ya documentadas. |
+| Ingreso anterior abierto | Recepción y Servicio Técnico determinan qué ocurrió con la OS anterior y su entrega. No la cierren sólo para quitar el aviso. |
+| Tipo de sincronización sin implementación | Escale a soporte con el identificador y el detalle. No suponga que es un registro descartable. |
+
+La entrega física y la emisión del comprobante son hechos distintos. Verifique ambos.
+No haga correcciones históricas ni escrituras directas en tablas del ERP como procedimiento de guardia.
+
+## Correo y procesos automáticos
+
+La configuración de desarrollo del repositorio incluye alertas diarias, resumen de
+facturación, cola de correos, sincronización de stock, búsqueda de PDF y vencimientos
+de postergaciones. Su ejecución efectiva en producción depende de los servicios y
+la configuración instalados en SERVERDATA.
+
+El resumen de facturación no envía correo cuando no tiene destinatarios o pendientes.
+Las alertas de presupuestos tampoco envían un resumen vacío si no encuentran casos.
+Por eso, use las listas de NEXORA para comprobar pendientes; el correo es un aviso complementario.
+
+Si un PDF no aparece, registre tipo, número, empresa y hora. Pedir el PDF no equivale
+a emitir nuevamente el comprobante. Un técnico autorizado puede consultar el estado
+de la cola y el latido del proceso antes de intervenir.
+
+## Si NEXORA no carga o no guarda
+
+1. Pruebe una recarga y verifique si otro puesto presenta el mismo problema.
+   Antes de repetir una operación que guarda datos, consulte si ya quedó registrada.
+2. Avise al responsable operativo y a soporte de infraestructura asignado a SERVERDATA.
+   Informe desde cuándo ocurre, puestos afectados, URL y mensaje exacto.
+3. Si no hay sistema, registre las operaciones pendientes mediante el procedimiento
+   de contingencia del área y conserve sus referencias para conciliarlas al restablecerse.
+   No genere comprobantes o movimientos sin coordinación entre Logística y Administración.
+4. Reiniciar, reconstruir, actualizar o restaurar corresponde al soporte autorizado,
+   tras identificar el servicio afectado y conservar evidencia. **Rebuild no es una
+   acción rutinaria para personal operativo ni una garantía de recuperación.**
+
+No es necesario localizar a la persona que está de vacaciones. Antes de la guardia,
+la organización debe dejar asignados y accesibles el responsable operativo,
+el suplente con permisos probados, soporte de SERVERDATA y soporte de Bejerman.
+La auditoría no puede inventar esos nombres o sus medios de contacto.
+
+## Diagnóstico técnico y recuperación
+
+Comandos de consulta incluidos en el código, ejecutados por soporte en el contenedor
+correcto de la instalación afectada:
 
 ```bash
-python manage.py bejerman_pdf_queue_status          # estado de la cola de PDFs y latido del worker
-python manage.py recover_stuck_bejerman_work        # sin --apply: sólo informa qué está trabado
-python manage.py limpiar_procesos_bejerman_trabados # sin --apply: simula la limpieza del panel
+python manage.py bejerman_pdf_queue_status
+python manage.py recover_stuck_bejerman_work
+python manage.py limpiar_procesos_bejerman_trabados
+python manage.py suplencia --estado
 ```
 
-Ninguno de los tres escribe nada si no le pasás `--apply`.
+Los comandos de recuperación anteriores, sin `--apply`, informan o simulan;
+no confunda una simulación exitosa con una reparación aplicada. Verifique primero
+que la versión instalada incluya el comando. No ejecute pruebas en producción.
+Una suplencia debe prepararse antes de la guardia y comprobarse con el usuario suplente.
+Su cierre restaura los valores guardados; revise cambios de permisos posteriores antes de cerrarla.
 
-**Suplencia temporal** — pone y saca a alguien como reemplazo del jefe. Cambia el rol,
-agrega el permiso de presupuestos y prende las notificaciones de jefatura, guardando
-cómo estaba la persona antes para poder devolverla exactamente ahí:
+Un respaldo sólo es utilizable si se puede restaurar. Soporte debe conocer dónde se
+guardan la base y los archivos, la fecha de la última copia comprobada y el procedimiento
+de restauración. Nunca pruebe la restauración sobre la base activa.
 
-```bash
-python manage.py suplencia --estado                              # qué hay abierto
-python manage.py suplencia --activar --usuario <mail>            # simula
-python manage.py suplencia --activar --usuario <mail> --apply    # aplica
-python manage.py suplencia --cerrar  --usuario <mail> --apply    # revierte todo
-```
+## Mejoras de esta auditoría todavía no desplegadas
 
-Cerrar no es "volver a poner lo que parecía que tenía": reescribe el estado guardado
-al abrir. Los permisos que la persona ya tenía por su cuenta nunca se le quitan.
+- Evidencia del intento de remito persistida aunque falle la respuesta del emisor.
+- Exclusión de trabajos duplicados y rechazo de reservas basadas en una lectura anterior a un remito ya confirmado.
+- Consulta coherente de la derivación activa al repetir una devolución antigua.
+- Corrección de consultas de estados enumerados y paridad del esquema de instalación.
+- Respaldo PostgreSQL binario validado mediante una restauración descartable.
+- Referencias RSS por OS cuando las partidas están asignadas, e historial de entrega coherente.
+- Corrección de remitos después de confirmar que no se importaron, manteniendo el bloqueo cuando el resultado sigue incierto.
+- Fechas civiles de derivación y devolución coherentes con el día local.
 
-Salud del sistema: `https://nexora.tail7bb880.ts.net/api/health/`
+El [informe de auditoría](reportes/auditoria-preventiva-20260912.md) registra las pruebas y los pendientes de validación.
 
-Los procesos que corren solos, y cada cuánto:
-
-| Contenedor | Qué hace | Cada cuánto |
-|---|---|---|
-| `nexora-bejerman-sync` | Cola de stock + recuperación de trabados | 30 s (recuperación cada 5 min) |
-| `nexora-bejerman-pdf` | Busca los PDF de los comprobantes | 2 s |
-| `nexora-email-outbox` | Manda los correos encolados | 10 s |
-| `nexora-billing-postponements` | Vencimientos de facturación pospuesta | 60 s |
-| `nexora-daily-alerts` | Alertas de la mañana | 07:30 |
-| `nexora-billing-summary` | Resumen de Cobranzas | 08:00 |
-| `nexora-bejerman-articulos-sync` | Alinea descripciones SEPID → MG BIO | 6 h |
+Estas mejoras requieren una puesta en producción posterior y validación de la
+instalación real. Mientras tanto, mantenga el procedimiento de revisión de comprobantes inciertos.

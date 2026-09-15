@@ -101,6 +101,26 @@ services:
       "
     restart: unless-stopped
 
+  bejerman-sync:
+    build: ./api
+    env_file:
+      - ./.env
+    environment:
+      - DB_VENDOR=postgresql
+      - POSTGRES_HOST=postgres
+      - DJANGO_SETTINGS_MODULE=app.settings
+      - TZ=${TZ:-America/Argentina/Buenos_Aires}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -lc "
+      python manage.py wait_for_database --timeout 180 && \
+      python manage.py check_bejerman_sdk --skip-live && \
+      python manage.py run_bejerman_sync_loop --interval 30 --limit 10
+      "
+    restart: unless-stopped
+
   web:
     build: ./web
     ports:
