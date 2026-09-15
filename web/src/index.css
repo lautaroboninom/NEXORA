@@ -9,6 +9,7 @@
 
 .btn { @apply px-3 py-2 rounded-md shadow text-white bg-blue-600 hover:bg-blue-700 active:scale-[.99]; }
 .btn-secondary { @apply px-3 py-2 rounded-md shadow text-white bg-emerald-600 hover:bg-emerald-700 active:scale-[.99]; }
+.btn-success { @apply px-3 py-2 rounded-md shadow text-white bg-green-600 hover:bg-green-700 active:scale-[.99] disabled:opacity-50 disabled:cursor-not-allowed; }
 .input { @apply border rounded px-3 py-2 w-full; }
 .card { @apply bg-white rounded-xl shadow p-4; }
 .h1 { @apply text-2xl font-semibold; }

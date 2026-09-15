@@ -7,7 +7,13 @@ import {
   formatDateTime as formatDateTimeHelper,
   hasMgCode,
   isMgOwned,
+  isRentalShelfLocationName,
+  isSepidLocationName,
+  canonicalLocationName,
   isSaleTicketState,
+  bejermanDepositForLocation,
+  locationDisplayName,
+  locationNameKey,
   propiedadEquipoLabelOf,
   resolveFechaIngreso,
 } from "../../../lib/ui-helpers";
@@ -16,6 +22,7 @@ import { isJefe } from "../../../lib/authz";
 import { documentNameFromRis, isRisRegistered, risRemitoFrom, risRemitoWithDocumentName } from "../../../lib/ris-print";
 import { getReleaseFlow } from "../../../lib/release-flow";
 import { getDeviceSwapState, swapConfirmMatches } from "../../../lib/device-swap.js";
+import { openPdfBlob } from "../../../lib/pdf";
 import { Printer, X } from "lucide-react";
 import { ResponsiveModalOverlay, ResponsiveModalPanel } from "../../../components/Responsive.jsx";
 import {
@@ -25,6 +32,7 @@ import {
   postIngresoBejermanEstadoAccion,
   getBejermanRemitosBySerial,
   getIngresoAlquilerRemitoEstado,
+  getIngresoAlquilerRemitoPdfBlob,
   postIngresoAlquilerRemitoAccion,
   checkGarantiaFabrica,
   patchIngresoTecnico,
@@ -407,6 +415,7 @@ export default function PrincipalTab(props) {
     ingressDocumentName: ingressDocumentNameProp,
     risBusy,
     onEmitRis,
+    onVerRis,
     onOpenReleaseModal,
     // savingUb,
     // saveUbicacion,
@@ -441,7 +450,8 @@ export default function PrincipalTab(props) {
   const isRegisteredRis = isRisRegistered(data);
   const risRemito = risRemitoFrom(data);
   const remitoSalidaBejerman = (data?.remito_salida_bejerman || "").toString().trim();
-  const remitoSalida = (data?.remito_salida || remitoSalidaBejerman || "").toString().trim();
+  const remitoSalidaAlquiler = data?.alquilado ? (data?.alquiler_remito || "").toString().trim() : "";
+  const remitoSalida = (data?.remito_salida || remitoSalidaAlquiler || remitoSalidaBejerman || "").toString().trim();
   const remitoSalidaFromBejerman = Boolean(remitoSalidaBejerman) && remitoSalidaBejerman === remitoSalida;
   const hasRisRemito = Boolean(risRemito);
   const hasRisError = String(data?.ris?.status || "").toLowerCase() === "failed"
@@ -495,6 +505,8 @@ export default function PrincipalTab(props) {
     setSelTecnicoId(tecnicoId ?? null);
   }, [tecnicoId]);
   const [savingUb, setSavingUb] = useState(false);
+  const [ubConfirmOpen, setUbConfirmOpen] = useState(false);
+  const [ubNotice, setUbNotice] = useState(null);
   const [mailEnviado, setMailEnviado] = useState(false);
   const [mailFallo, setMailFallo] = useState(false);
   const [emailDebug, setEmailDebug] = useState(null);
@@ -574,12 +586,10 @@ export default function PrincipalTab(props) {
     ["reparado", "controlado_sin_defecto", "no_se_repara", "liberado"].includes(estadoLower);
   const registrandoVenta = Boolean(ventaSalida && puedeCerrarPorVenta);
   const mostrarFormEntrega = estadoLower === "liberado" || isVentaPendienteEntrega || registrandoVenta;
-  const alquilerEditable = Boolean(canEditAlquiler && !mgVendido);
-  const alquilerBloqueadoPorEntrega = Boolean(
-    data?.alquilado
-    && String(data?.alquiler_remito || "").trim()
-    && (data?.fecha_entrega || estadoLower === "entregado")
-  );
+  // Un RTA acredita la salida física del equipo. Una vez asociado, la hoja queda en
+  // consulta: cambiar el alquiler o buscar otro comprobante podría deshacer trazabilidad.
+  const alquilerBloqueadoPorEntrega = Boolean(data?.alquilado && String(data?.alquiler_remito || "").trim());
+  const alquilerEditable = Boolean(canEditAlquiler && !mgVendido && !alquilerBloqueadoPorEntrega);
   const alquilerPuedeDestildarse = Boolean(
     !data?.alquilado || (canUncheckAlquilado && !alquilerBloqueadoPorEntrega)
   );
@@ -684,6 +694,7 @@ export default function PrincipalTab(props) {
   const [rentalRemitoLoading, setRentalRemitoLoading] = useState(false);
   const [rentalRemitoError, setRentalRemitoError] = useState("");
   const [rentalActionBusy, setRentalActionBusy] = useState(false);
+  const [rentalPdfLoading, setRentalPdfLoading] = useState(false);
   const equipoIdentificador = String(data?.numero_serie || data?.numero_interno || "").trim();
   const cargarEstadoAlquilerRemito = useCallback(async () => {
     if (!id) return;
@@ -727,6 +738,23 @@ export default function PrincipalTab(props) {
       setRentalActionBusy(false);
     }
   }, [id, rentalRemitoState, rentalActionBusy, refreshIngreso]);
+  const verRta = useCallback(async () => {
+    if (rentalPdfLoading) return;
+    const printWindow = window.open("", "_blank");
+    setRentalPdfLoading(true);
+    setRentalRemitoError("");
+    try {
+      const pdf = await getIngresoAlquilerRemitoPdfBlob(id);
+      if (!openPdfBlob(pdf, printWindow)) {
+        throw new Error("El navegador bloqueó la ventana del PDF. Habilite las ventanas emergentes e intente nuevamente.");
+      }
+    } catch (error) {
+      try { printWindow?.close(); } catch (_) {}
+      setRentalRemitoError(error?.data?.detail || error?.message || "No se pudo abrir el PDF del RTA.");
+    } finally {
+      setRentalPdfLoading(false);
+    }
+  }, [id, rentalPdfLoading]);
   const rentalRemitoStatusLabel = (() => {
     const status = rentalRemitoState?.status;
     if (rentalRemitoError) return "No disponible";
@@ -936,16 +964,72 @@ export default function PrincipalTab(props) {
     }
   }
 
+  // Las variantes históricas de la estantería sólo deben aparecer una vez. El guion es
+  // una ubicación virtual para estados cerrados, no un destino físico seleccionable.
+  const ubicacionesSeleccionables = useMemo(() => {
+    const seen = new Set();
+    return (ubicaciones || []).filter((ubicacion) => {
+      const nombre = String(ubicacion?.nombre || "").trim();
+      const key = locationNameKey(canonicalLocationName(nombre));
+      if (!nombre || key === "-" || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [ubicaciones]);
+
+  const ubicacionDestino = ubicacionesSeleccionables.find((u) => Number(u?.id) === Number(_selUb));
+  const ubicacionDestinoNombre = ubicacionDestino?.nombre || "";
+  const ubicacionOrigenNombre = String(data?.ubicacion_nombre || "").trim();
+  const depositoOrigenBejerman = bejermanDepositForLocation(ubicacionOrigenNombre);
+  const depositoDestinoBejerman =
+    String(ubicacionDestino?.bejerman_deposit || "").trim() || bejermanDepositForLocation(ubicacionDestinoNombre);
+  const cambiaDepositoBejerman = Boolean(
+    depositoOrigenBejerman &&
+    depositoDestinoBejerman &&
+    depositoOrigenBejerman !== depositoDestinoBejerman
+  );
+  const ubicacionDestinoEsEstanteria = isRentalShelfLocationName(ubicacionDestinoNombre);
+
   async function saveUbicacion() {
     if (!canEditLocation || !ubDirty) return;
+    setUbNotice(null);
+    setUbConfirmOpen(true);
+  }
+
+  async function guardarUbicacion() {
     try {
       setSavingUb(true);
-      await patch({ ubicacion_id: _selUb });
+      const res = await patch({
+        ubicacion_id: _selUb,
+        confirm_bejerman_location_change: true,
+      });
+      const locationSync = res?.bejerman_location_sync;
+      const shelf = res?.rental_shelf;
+      if (locationSync?.queued) {
+        setUbNotice({
+          tone: "ok",
+          text: `Ubicación guardada. Se encoló el traslado de stock ${locationSync.source_deposit} → ${locationSync.target_deposit} en Bejerman.`,
+        });
+      } else if (shelf && !shelf.applies) {
+        setUbNotice({
+          tone: "warn",
+          text: `Ubicación guardada. El stock no se mueve a STL: ${shelf.reason || "el equipo no es del parque de alquiler."}`,
+        });
+      } else if (shelf && shelf.stock_queued) {
+        setUbNotice({ tone: "ok", text: "Ubicación guardada. Se pidió el pase del stock a STL en Bejerman." });
+      } else if (shelf) {
+        setUbNotice({
+          tone: "error",
+          text: `Ubicación guardada, pero no se pudo pedir el pase del stock a STL: ${shelf.stock_error || "error desconocido"}`,
+        });
+      }
       setErr("");
+      if (typeof refreshIngreso === "function") await refreshIngreso({ strong: 1 });
     } catch (e) {
       setErr(e?.message || "No se pudo actualizar la ubicación.");
     } finally {
       setSavingUb(false);
+      setUbConfirmOpen(false);
     }
   }
 
@@ -1240,26 +1324,26 @@ export default function PrincipalTab(props) {
                   {data?.ris?.available && (
                     <span className="block text-xs text-gray-500">
                       {isRegisteredRis
-                        ? `Remito registrado: ${risRemito || data?.ris?.status || "pendiente"}`
+                        ? "Remito registrado"
                         : data?.ris?.remito_number
                           ? risRemitoWithDocumentName(data.ris.remito_number, ingressDocumentName)
                           : `${ingressDocumentName}: ${data?.ris?.status || "pendiente"}`}
                     </span>
                   )}
-                  {!isRegisteredRis && canShowRisAction && typeof onEmitRis === "function" && (
+                  {!isRegisteredRis && canShowRisAction && (typeof onEmitRis === "function" || typeof onVerRis === "function") && (
                     <button
                       type="button"
-                      onClick={onEmitRis}
+                      onClick={hasRisRemito ? (onVerRis || onEmitRis) : onEmitRis}
                       disabled={risBusy}
                       className="mt-1 inline-flex items-center gap-1 rounded border border-sky-200 px-2 py-1 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <Printer className="h-3.5 w-3.5" aria-hidden="true" />
                       {risBusy
                         ? `Preparando ${ingressDocumentName}...`
-                        : hasRisError
-                          ? `Reintentar ${ingressDocumentName}`
-                          : hasRisRemito
-                            ? `Ver ${ingressDocumentName}`
+                        : hasRisRemito
+                          ? `Ver ${ingressDocumentName}`
+                          : hasRisError
+                            ? `Reintentar ${ingressDocumentName}`
                             : `Emitir ${ingressDocumentName}`}
                     </button>
                   )}
@@ -1272,10 +1356,24 @@ export default function PrincipalTab(props) {
                 {remitoSalidaFromBejerman && remitoSalida && (
                   <span className="block text-xs text-gray-500">RSS Bejerman</span>
                 )}
+                {remitoSalidaAlquiler && remitoSalida === remitoSalidaAlquiler && (
+                  <span className="block text-xs text-gray-500">RTA de alquiler</span>
+                )}
               </span>
             </Row>
             <Row label={"Faja de garantía"}>
-              <span>{data?.etiq_garantia_ok ? "OK" : "Abiertas"}</span>
+              {editBasics ? (
+                <select
+                  className="border rounded p-1 w-60"
+                  value={formBasics?.etiq_garantia_ok ? "ok" : "abiertas"}
+                  onChange={(e) => setFormBasics((s) => ({ ...(s || {}), etiq_garantia_ok: e.target.value === "ok" }))}
+                >
+                  <option value="ok">OK</option>
+                  <option value="abiertas">Abiertas</option>
+                </select>
+              ) : (
+                <span>{data?.etiq_garantia_ok ? "OK" : "Abiertas"}</span>
+              )}
             </Row>
           </div>
           {/* Notas */}
@@ -1571,11 +1669,16 @@ export default function PrincipalTab(props) {
                       <option value="" disabled>
                         Seleccione la ubicación.
                       </option>
-                      {ubicaciones.map((u) => (
-                        <option key={u.id} value={String(u.id)}>
-                          {u.nombre}
-                        </option>
-                      ))}
+                    {!ubicacionesSeleccionables.some((u) => String(u.id) === String(ubicacionId)) && ubicacionId && (
+                      <option value={String(ubicacionId)} disabled>
+                        {data?.ubicacion_nombre ? locationDisplayName(data.ubicacion_nombre) : "Sin ubicación"}
+                      </option>
+                    )}
+                    {ubicacionesSeleccionables.map((u) => (
+                      <option key={u.id} value={String(u.id)}>
+                          {u.label || locationDisplayName(u.nombre)}
+                      </option>
+                    ))}
                     </select>
                     <button
                       className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60"
@@ -1587,7 +1690,22 @@ export default function PrincipalTab(props) {
                       {savingUb ? "Guardando..." : "Guardar"}
                     </button>
                   </div>
-                  <div className="text-xs text-gray-500">La ubicación puede modificarse desde aquí.</div>
+                  <div className="text-xs text-gray-500">
+                    Al confirmar un cambio entre ubicaciones físicas, se solicita el traslado de stock correspondiente en Bejerman.
+                  </div>
+                  {ubNotice && (
+                    <div
+                      className={`mt-2 rounded border p-2 text-xs ${
+                        ubNotice.tone === "ok"
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                          : ubNotice.tone === "warn"
+                            ? "border-amber-300 bg-amber-50 text-amber-900"
+                            : "border-red-300 bg-red-50 text-red-900"
+                      }`}
+                    >
+                      {ubNotice.text}
+                    </div>
+                  )}
                 </>
               ) : (
                 <div>{data?.ubicacion_nombre || "-"}</div>
@@ -1664,10 +1782,10 @@ export default function PrincipalTab(props) {
               onChange={(e) => setVentaSalida(e.target.checked)}
             />
             <span>
-              <span className="font-medium">El equipo salió vendido (RT)</span>
+              <span className="font-medium">El equipo salió vendido (RT, o RTN si fue un aporte)</span>
               <span className="block text-xs text-gray-600">
-                La OS cierra como “Vendido entregado”. El RT ya movió el stock en Bejerman,
-                así que NEXORA no genera ningún movimiento de depósito.
+                La OS cierra como “Vendido entregado”. El RT o el RTN ya movieron el stock en
+                Bejerman, así que NEXORA no genera ningún movimiento de depósito.
               </span>
             </span>
           </label>
@@ -1675,7 +1793,7 @@ export default function PrincipalTab(props) {
         {mostrarFormEntrega ? (
           <>
             <div className="grid grid-cols-1 gap-3">
-                <Row label={registrandoVenta ? "Remito de venta RT (requerido)" : "Remito salida (requerido)"}>{
+                <Row label={registrandoVenta ? "Remito de venta RT o RTN (requerido)" : "Remito salida (requerido)"}>{
 
                 <div>
                   <input
@@ -1749,10 +1867,10 @@ export default function PrincipalTab(props) {
                       setErr("El remito es requerido para entregar.");
                       return;
                     }
-                    // El backend cierra como venta según el tipo del comprobante, así que
-                    // se avisa acá antes de que un RSS quede registrado como venta.
-                    if (registrandoVenta && !/^\s*RT\b/i.test(entrega.remito_salida)) {
-                      setErr("Para cerrar por venta el remito tiene que ser un RT.");
+                    // Una venta sale con RT, o con RTN si fue un aporte (los RTN no se facturan).
+                    // El backend exige lo mismo; se avisa acá antes de mandar un RSS como venta.
+                    if (registrandoVenta && !/^\s*RTN?\b/i.test(entrega.remito_salida)) {
+                      setErr("Para cerrar por venta el remito tiene que ser un RT o un RTN.");
                       return;
                     }
                     if (String(data?.resolucion || "") === "cambio" && swapEsperado) {
@@ -1767,7 +1885,8 @@ export default function PrincipalTab(props) {
                         return;
                       }
                     }
-                    await postEntregarIngreso(id, entrega);
+                    // La marca de venta viaja explícita: un RTN solo también es una entrega en alquiler.
+                    await postEntregarIngreso(id, registrandoVenta ? { ...entrega, venta: true } : entrega);
                     await refreshIngreso();
                                 setMailEnviado(true);
                   } catch (e) {
@@ -1887,7 +2006,7 @@ export default function PrincipalTab(props) {
         <h2 className="font-semibold mb-2">Alquiler</h2>
         {alquilerBloqueadoPorEntrega && (
           <div className="text-xs text-amber-700 mb-2">
-            No se puede destildar: el equipo ya fue entregado con remito de alquiler.
+            Equipo entregado con RTA: el alquiler y su remito quedan sólo para consulta.
           </div>
         )}
         <Row label="¿Se alquiló?">
@@ -1952,7 +2071,16 @@ export default function PrincipalTab(props) {
               onKeyDown={blurOnEnter}
               disabled={!alquilerEditable}
             />
-            {alquilerEditable && (
+            {alquilerBloqueadoPorEntrega ? (
+              <button
+                type="button"
+                className="mt-1 rounded border border-sky-300 px-2 py-1 text-xs text-sky-900 hover:bg-sky-50 disabled:opacity-60"
+                onClick={verRta}
+                disabled={rentalPdfLoading}
+              >
+                {rentalPdfLoading ? "Abriendo PDF..." : "Ver RTA"}
+              </button>
+            ) : alquilerEditable && (
               <BuscadorRemitoBejerman
                 flow="rental"
                 ingresoId={id}
@@ -2086,6 +2214,73 @@ export default function PrincipalTab(props) {
         )}
       </div>
       </div>
+      {ubConfirmOpen && (
+        <ResponsiveModalOverlay align="center" onClick={() => (savingUb ? null : setUbConfirmOpen(false))}>
+          <ResponsiveModalPanel className="max-w-lg" onClick={(event) => event.stopPropagation()}>
+            <div className="border-b px-4 py-3">
+              <h2 className="text-base font-semibold text-gray-900">Confirmar cambio de ubicación</h2>
+              <p className="text-xs text-gray-600">
+                {locationDisplayName(ubicacionOrigenNombre) || "Sin ubicación"} → {locationDisplayName(ubicacionDestinoNombre)}
+              </p>
+            </div>
+            <div className="space-y-3 px-4 py-3 text-sm text-gray-700">
+              {cambiaDepositoBejerman ? (
+                <>
+                  <p>
+                    Además de actualizar NEXORA, se encolará una transferencia de stock en Bejerman de{" "}
+                    <span className="font-semibold">{depositoOrigenBejerman}</span> a{" "}
+                    <span className="font-semibold">{depositoDestinoBejerman}</span>.
+                  </p>
+                  <p className="text-xs text-gray-600">
+                    El movimiento se emite y verifica por la cola de sincronización. Si Bejerman no encuentra stock en el
+                    depósito de origen, queda bloqueado sin crear stock en el destino.
+                  </p>
+                </>
+              ) : (
+                <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                  Esta combinación no tiene dos depósitos físicos distintos asociados. Se actualizará sólo la ubicación de
+                  NEXORA; no se emitirá un movimiento en Bejerman.
+                </div>
+              )}
+              {ubicacionDestinoEsEstanteria && (
+                <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                  {isMgOwned(data)
+                    ? "La estantería de alquiler requiere tanto esta ubicación como stock en STL."
+                    : "Si el equipo no pertenece al parque de alquiler, NEXORA guarda la ubicación pero no solicita el pase a STL."}
+                </div>
+              )}
+              {isSepidLocationName(ubicacionDestinoNombre) && (
+                <div className="rounded border border-sky-300 bg-sky-50 p-2 text-xs text-sky-900">
+                  Sepid (VAL) es el depósito de los equipos propios disponibles para venta, incluidos los tomados como parte
+                  de pago que no llevan número MG.
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t px-4 py-3">
+              <button
+                type="button"
+                className="rounded border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => setUbConfirmOpen(false)}
+                disabled={savingUb}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="rounded bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                onClick={guardarUbicacion}
+                disabled={savingUb}
+              >
+                {savingUb
+                  ? "Guardando..."
+                  : cambiaDepositoBejerman
+                    ? "Confirmar y solicitar traslado"
+                    : "Confirmar ubicación"}
+              </button>
+            </div>
+          </ResponsiveModalPanel>
+        </ResponsiveModalOverlay>
+      )}
     </>
   );
 }

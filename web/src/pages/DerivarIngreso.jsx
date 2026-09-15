@@ -1,6 +1,7 @@
 // web/src/pages/DerivarIngreso.jsx
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { localDateInputValue } from "../lib/ui-helpers";
 import {
   getProveedoresExternos,
   postDerivarIngreso,
@@ -15,7 +16,7 @@ export default function DerivarIngreso() {
   const [proveedores, setProveedores] = useState([]);
   const [form, setForm] = useState({
     proveedor_id: "",
-    fecha_deriv: new Date().toISOString().slice(0, 10),
+    fecha_deriv: localDateInputValue(),
     comentarios: "",
   });
   const [error, setError] = useState("");

@@ -22,16 +22,20 @@ export default function DerivadoBadge({ row, className = "" }) {
   );
 }
 
-/** Etiqueta compacta para listados angostos, siempre con el nombre completo. */
+/**
+ * Marca compacta para los listados: una sola "D" pegada al número de OS.
+ * El nombre completo (proveedor y fecha incluidos) queda en el tooltip y en el
+ * texto accesible, para no robarle ancho a la columna.
+ */
 export function DerivadoMark({ row, className = "" }) {
   if (!row?.derivacion_activa) return null;
   return (
     <span
-      className={`inline-flex h-4 shrink-0 items-center justify-center rounded-full bg-cyan-50 px-1.5 text-[10px] font-semibold leading-none text-cyan-800 ring-1 ring-inset ring-cyan-200 ${className}`.trim()}
+      className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-cyan-50 text-[10px] no-underline font-semibold leading-none text-cyan-800 ring-1 ring-inset ring-cyan-200 ${className}`.trim()}
       title={derivationTitle(row)}
       aria-label={derivationTitle(row)}
     >
-      Derivado
+      D
     </span>
   );
 }

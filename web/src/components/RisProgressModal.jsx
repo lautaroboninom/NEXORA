@@ -4,11 +4,33 @@ import { Check, Loader2 } from "lucide-react";
 export const RIS_PROGRESS_MIN_MS = 900;
 
 export function waitForRisProgressPaint() {
-  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+  if (typeof window === "undefined") {
+    return Promise.resolve();
+  }
+  if (typeof document !== "undefined" && document.hidden) {
+    return Promise.resolve();
+  }
+  if (typeof window.requestAnimationFrame !== "function") {
     return Promise.resolve();
   }
   return new Promise((resolve) => {
-    window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    const timer = window.setTimeout(finish, 80);
+    try {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          window.clearTimeout(timer);
+          finish();
+        });
+      });
+    } catch (_) {
+      finish();
+    }
   });
 }
 

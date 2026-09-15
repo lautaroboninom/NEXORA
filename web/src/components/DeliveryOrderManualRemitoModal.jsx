@@ -20,11 +20,11 @@ function requestErrorMessage(error, fallback) {
   return error?.message || fallback;
 }
 
-function draftRemito({ remitoNumber = "", completed = false, equipmentSerials = [] } = {}) {
+function draftRemito({ remitoNumber = "", completed = false, equipmentSerials = [], issueDate = "" } = {}) {
   remitoDraftSequence += 1;
   // `equipmentSerials` es el equipo que eligió el buscador: el backend lo cuelga del
   // renglón, porque un alquiler sin equipo identificado no queda registrado en ningún lado.
-  return { id: `manual-remito-${remitoDraftSequence}`, remitoNumber, completed, equipmentSerials };
+  return { id: `manual-remito-${remitoDraftSequence}`, remitoNumber, completed, equipmentSerials, issueDate };
 }
 
 function suggestedDraftCount(order) {
@@ -228,6 +228,7 @@ function remitoPayload(drafts, units, allocationValues, withAllocations) {
   return drafts.map((draft) => {
     const remito = { remitoNumber: clean(draft.remitoNumber) };
     if (draft.equipmentSerials?.length) remito.equipmentSerials = draft.equipmentSerials;
+    if (clean(draft.issueDate)) remito.issueDate = clean(draft.issueDate);
     if (!withAllocations) return remito;
 
     const byItem = new Map();
@@ -337,14 +338,17 @@ export default function DeliveryOrderManualRemitoModal({ open, order, onClose, o
     if (!numero) return;
     const serial = clean(candidate?.partida) || clean(lookup?.serial);
     const serials = serial ? [serial] : [];
+    const issueDate = clean(candidate?.issueDate);
     setDrafts((current) => {
       const libre = current.find((draft) => !draft.completed && !clean(draft.remitoNumber));
       if (libre) {
         return current.map((draft) => (
-          draft.id === libre.id ? { ...draft, remitoNumber: numero, equipmentSerials: serials } : draft
+          draft.id === libre.id
+            ? { ...draft, remitoNumber: numero, equipmentSerials: serials, issueDate }
+            : draft
         ));
       }
-      return [...current, draftRemito({ remitoNumber: numero, equipmentSerials: serials })];
+      return [...current, draftRemito({ remitoNumber: numero, equipmentSerials: serials, issueDate })];
     });
     setError("");
   };

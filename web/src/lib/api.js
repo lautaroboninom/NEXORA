@@ -115,6 +115,13 @@ import { MOTIVO_OPTIONS } from "./constants";
         detail: "NEXORA está cargando el historial solicitado.",
       };
     }
+    if (pathname.includes("/api/ordenes-entrega/partidas-masivas/")) {
+      return {
+        title: "Validando partidas",
+        status: "Consultando el stock en Bejerman",
+        detail: "NEXORA está revisando cada partida de la lista.",
+      };
+    }
     if (pathname.includes("/api/ordenes-entrega/bejerman-")) {
       return {
         title: "Consultando Bejerman",
@@ -1221,6 +1228,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
     return api.get(`/api/ordenes-entrega/bejerman-articulos-stock/${qs ? `?${qs}` : ""}`);
   };
 
+  export const postDeliveryOrderPartidasMasivasValidar = (payload) =>
+    api.post("/api/ordenes-entrega/partidas-masivas/validar/", payload);
+
   export const getDeliveryOrderRentalAvailableEquipment = (params = {}) => {
     const qs = buildQuery(params);
     return api.get(`/api/ordenes-entrega/alquiler/equipos-disponibles/${qs ? `?${qs}` : ""}`);
@@ -1326,6 +1336,20 @@ export const postModelo = (brandId, payloadOrNombre) => {
   };
   export const postDeviceDirectCreate = (payload) =>
     api.post("/api/devices/alta-directa/", payload);
+  // Unidades del stock real de Bejerman para dar de alta un equipo propio nuevo: la serie
+  // sale de la partida que ya está en el depósito, no se tipea.
+  export const getDeviceStockCandidatos = ({ q = "", deposito = "", empresa = "" } = {}) =>
+    api.get(
+      `/api/devices/stock-candidatos/?q=${encodeURIComponent(q || "")}` +
+        `&deposito=${encodeURIComponent(deposito || "")}` +
+        `&empresa=${encodeURIComponent(empresa || "")}`
+    );
+  // Alta masiva de equipos propios: una lista de N/S + MG de un mismo modelo. `validar` no graba
+  // nada; el alta vuelve a validar y, si pasa, mueve el stock VAL->STL en un solo lote.
+  export const getDeviceAltaMasivaConfig = () => api.get("/api/devices/alta-masiva/");
+  export const postDeviceAltaMasivaValidar = (payload) =>
+    api.post("/api/devices/alta-masiva/validar/", payload);
+  export const postDeviceAltaMasiva = (payload) => api.post("/api/devices/alta-masiva/", payload);
   export const postDevicePreventivoPlan = (deviceId, payload) =>
     api.post(`/api/equipos/${deviceId}/preventivo-plan/`, payload);
   export const patchDevicePreventivoPlan = (deviceId, payload) =>
@@ -1429,6 +1453,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
     const qs = remito ? `?remito=${encodeURIComponent(remito)}` : "";
     return api.get(`/api/ingresos/${id}/alquiler/remito/${qs}`);
   }
+
+  export const getIngresoAlquilerRemitoPdfBlob = (id) =>
+    getBlob(`/api/ingresos/${id}/alquiler/remito/pdf/`);
 
   export async function postIngresoAlquilerRemitoAccion(id, payload) {
     return api.post(`/api/ingresos/${id}/alquiler/remito/accion/`, payload);

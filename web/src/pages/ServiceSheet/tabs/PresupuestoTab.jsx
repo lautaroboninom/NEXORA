@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getBlob } from "../../../lib/api";
 import RejectedBudgetChargeModal from "../../../components/RejectedBudgetChargeModal";
-import { formatDateTime as formatDateTimeHelper } from "../../../lib/ui-helpers";
+import { formatDateTime as formatDateTimeHelper, isMgOwned } from "../../../lib/ui-helpers";
 import {
   getQuote,
   postQuoteItem,
@@ -101,6 +101,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
   const [rejectModalError, setRejectModalError] = useState("");
   const [creandoVersion, setCreandoVersion] = useState(false);
   const [selectedQuoteId, setSelectedQuoteId] = useState(null);
+  const [quoteNotice, setQuoteNotice] = useState("");
 
   const [nuevoRep, setNuevoRep] = useState({ repuesto_id: "", repuesto_codigo: "", descripcion: "", qty: "1", costo_u_neto: "", multiplicador: null, precio_u: "" });
   const [manoObraStr, setManoObraStr] = useState("");
@@ -681,11 +682,20 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
   async function marcarNoAplica() {
     try {
       setQErr("");
+      setQuoteNotice("");
       setEmitiendo(true);
       const r = await postQuoteNoAplica(id);
       setSelectedQuoteId(null);
       setQuote(r);
-      if (typeof refreshIngreso === "function") await refreshIngreso();
+      const ing = typeof refreshIngreso === "function" ? await refreshIngreso({ strong: 1 }) : null;
+      const currentData = ing || data;
+      if ((currentData?.estado || "").toLowerCase() === "reparado") {
+        if (isMgOwned(currentData)) {
+          setQuoteNotice("Equipo propio reparado: se marcó presupuesto 'No aplica' y el equipo pasó a Estantería de Alquiler disponible para alquiler.");
+        } else {
+          onOpenReleaseModal?.({ ...currentData, presupuesto_estado: "no_aplica" });
+        }
+      }
     } catch (e) {
       setQErr(e?.message || "No se pudo marcar 'No aplica'");
     } finally {
@@ -793,6 +803,12 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
 
       {qErr && (
         <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">{qErr}</div>
+      )}
+
+      {quoteNotice && (
+        <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 p-2 rounded mb-3 text-sm">
+          {quoteNotice}
+        </div>
       )}
 
       <div className="flex flex-wrap gap-3 items-end mb-4">

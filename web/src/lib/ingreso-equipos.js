@@ -10,11 +10,24 @@
  * con el que entran los equipos.
  */
 export function equipmentIdentityKey(item) {
+  return equipmentKeyOf({
+    numero_serie: item?.payload?.equipo?.numero_serie,
+    numero_interno: item?.payload?.equipo?.numero_interno,
+    tipo_equipo: equipmentTipoKey(item),
+  });
+}
+
+/**
+ * La misma clave, armada desde los datos sueltos de un equipo.
+ *
+ * La usa el bloqueo por "ya ingresado hoy": el aviso lo dispara el autocompletado sobre el
+ * equipo que devolvió la base, y tiene que dejar de aplicar en cuanto el operador cambia la
+ * serie o el tipo en pantalla. Comparar por esta clave es lo que lo hace soltarse solo.
+ */
+export function equipmentKeyOf({ numero_serie, numero_interno, tipo_equipo } = {}) {
   const normalize = (value) => String(value || "").replace(/[\s-]/g, "").toUpperCase();
-  const serial = normalize(item?.payload?.equipo?.numero_serie);
-  const interno = normalize(item?.payload?.equipo?.numero_interno);
-  const identifier = serial || interno;
-  return identifier ? `${identifier}|${equipmentTipoKey(item)}` : "";
+  const identifier = normalize(numero_serie) || normalize(numero_interno);
+  return identifier ? `${identifier}|${String(tipo_equipo || "").trim().toLowerCase()}` : "";
 }
 
 /**

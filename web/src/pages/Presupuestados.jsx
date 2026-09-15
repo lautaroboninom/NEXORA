@@ -151,9 +151,11 @@ export default function JefePresupuestos() {
         catalogEquipmentLabel(row),
         tipoEquipoOf(row),
         row?.estado,
+        row?.motivo,
         row?.numero_serie,
         row?.numero_interno,
         String(row?.presupuesto_monto ?? row?.presupuesto_total ?? ""),
+        row?.ubicacion_nombre ?? row?.ubicacion,
       ];
       return campos.some((c) => norm(c).includes(needle));
     });
@@ -479,7 +481,7 @@ export default function JefePresupuestos() {
         </button>
         {canApprove ? (
           <button
-            className="btn"
+            className="btn-success !bg-green-600 hover:!bg-green-700 disabled:opacity-50"
             type="button"
             onClick={aprobarSeleccion}
             disabled={approvingBusy || selection.count === 0}

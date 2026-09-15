@@ -6,8 +6,23 @@ import {
   ingresoCustomerBaseName,
   ingresoCustomerName,
   isDemoReturn,
+  MG_CODE_RE,
   propiedadEquipoLabelOf,
+  bejermanDepositForLocation,
+  canonicalLocationName,
+  isSepidLocationName,
+  locationDisplayName,
 } from "./ui-helpers.js";
+
+test("el número interno se reconoce con o sin espacio y con ceros adelante", () => {
+  // Espejo de `service/tests/test_mg_codes.py`.
+  for (const valor of ["MG1678", "MG 1678", "MG  1678", "mg 1678", "MG 001678", "NM 12", "CE102"]) {
+    assert.equal(MG_CODE_RE.test(valor), true, valor);
+  }
+  for (const valor of ["", "MG", "MG SM-004", "MZJ5S121244", "1234", "MG 1234567", "MG-1234"]) {
+    assert.equal(MG_CODE_RE.test(valor), false, valor);
+  }
+});
 
 // La OS 29641 en producción: el equipo se le vendió a NOVAMED y su MG 4988
 // quedó histórico, así que en los listados sólo tiene que verse el N/S.
@@ -115,4 +130,50 @@ test("también lee los listados que traen el cliente en `cliente`", () => {
     ingresoCustomerName({ cliente: "Particular", propietario_nombre: "Juan Pérez" }),
     "Juan Pérez"
   );
+});
+
+test("Sepid y sus aliases históricos se reconocen como depósito Sepid", () => {
+  for (const alias of [
+    "Sepid",
+    "sepid",
+    "Depósito SEPID",
+    "deposito sepid",
+    "deposito sepid val",
+    "Sepid (VAL)",
+    "deposito sepid (val)",
+    "sepid val",
+    "deposito sepid s.a.",
+    "sepid sa",
+    "deposito central",
+    "deposito central sepid",
+    "valdenegro",
+    "deposito valdenegro",
+    "valdenegro 4578",
+  ]) {
+    assert.equal(isSepidLocationName(alias), true, alias);
+    assert.equal(canonicalLocationName(alias), "Sepid", alias);
+    assert.equal(bejermanDepositForLocation(alias), "VAL", alias);
+    assert.equal(locationDisplayName(alias), "Sepid (VAL)", alias);
+  }
+
+  for (const otro of ["Taller", "Sarmiento", "Estantería de Alquiler", "-", ""]) {
+    assert.equal(isSepidLocationName(otro), false, otro);
+  }
+});
+
+test("ubicaciones canónicas resuelven código Bejerman y etiqueta visual correcta", () => {
+  assert.equal(bejermanDepositForLocation("Taller"), "STR");
+  assert.equal(bejermanDepositForLocation("Taller (STR)"), "STR");
+  assert.equal(locationDisplayName("Taller"), "Taller");
+
+  assert.equal(bejermanDepositForLocation("Sarmiento"), "SAR");
+  assert.equal(bejermanDepositForLocation("Sarmiento (SAR)"), "SAR");
+  assert.equal(locationDisplayName("Sarmiento"), "Sarmiento (SAR)");
+
+  assert.equal(bejermanDepositForLocation("Estantería de Alquiler"), "STL");
+  assert.equal(bejermanDepositForLocation("estanteria alquiler"), "STL");
+  assert.equal(locationDisplayName("Estantería de Alquiler"), "Estantería de Alquiler");
+
+  assert.equal(bejermanDepositForLocation("-"), "");
+  assert.equal(locationDisplayName("-"), "-");
 });

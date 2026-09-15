@@ -39,6 +39,19 @@ export function classifyReleaseSelection(rows, { canManageResolution = false } =
     seen.add(id);
 
     const flow = getReleaseFlow(row, { canManageResolution });
+    // El modal de una OS deja imprimir la orden de una venta pendiente -es el comprobante
+    // del trabajo, no la libera-, pero en el lote eso no tiene sentido: hay que ir a la
+    // hoja de servicio a cerrarla con el RT. Va antes del corte por reimpresión para no
+    // esconderla detrás de un "ya fue emitida" que acá sería mentira.
+    if (flow.isSalePending) {
+      blocked.push({
+        id,
+        row,
+        flow,
+        reason: "Es una venta pendiente de entrega: se cierra desde la hoja de servicio con el remito RT.",
+      });
+      continue;
+    }
     if (flow.isReprint) {
       blocked.push({ id, row, flow, reason: "La orden de salida ya fue emitida." });
       continue;

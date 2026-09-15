@@ -12,8 +12,8 @@ import {
 
 test("deja pasar los estados listos para liberar", () => {
   const rows = [
-    { id: 1, estado: "reparado" },
-    { id: 2, estado: "controlado_sin_defecto" },
+    { id: 1, estado: "reparado", presupuesto_estado: "aprobado" },
+    { id: 2, estado: "controlado_sin_defecto", presupuesto_estado: "no_aplica" },
     { id: 3, estado: "no_se_repara" },
   ];
   const { ready, blocked } = classifyReleaseSelection(rows);
@@ -23,7 +23,7 @@ test("deja pasar los estados listos para liberar", () => {
 
 test("bloquea lo que todavía no se puede liberar y explica por qué", () => {
   const rows = [
-    { id: 1, estado: "reparado" },
+    { id: 1, estado: "reparado", presupuesto_estado: "aprobado" },
     { id: 2, estado: "ingresado" },
     { id: 3, estado: "vendido_pendiente_entrega" },
     { id: 4, estado: "liberado" },
@@ -66,8 +66,8 @@ test("una resolución ya cargada alcanza aunque el estado no sea final", () => {
 
 test("no repite la misma OS elegida dos veces", () => {
   const rows = [
-    { id: 5, estado: "reparado" },
-    { id: 5, estado: "reparado" },
+    { id: 5, estado: "reparado", presupuesto_estado: "aprobado" },
+    { id: 5, estado: "reparado", presupuesto_estado: "aprobado" },
   ];
   const { ready } = classifyReleaseSelection(rows);
   assert.equal(ready.length, 1);
@@ -127,7 +127,7 @@ test("con una sola OS usa el endpoint individual", () => {
 // resolución 'cambio' sin el equipo vinculado se liberaba igual.
 test("bloquea un cambio de equipo sin el equipo elegido", () => {
   const { ready, blocked } = classifyReleaseSelection([
-    { id: 7, estado: "reparado", resolucion: "cambio" },
+    { id: 7, estado: "reparado", presupuesto_estado: "aprobado", resolucion: "cambio" },
   ]);
   assert.equal(ready.length, 0);
   assert.match(blocked[0].reason, /cambio de equipo/i);
@@ -135,8 +135,8 @@ test("bloquea un cambio de equipo sin el equipo elegido", () => {
 
 test("deja pasar el cambio ya registrado y la parte de pago", () => {
   const { ready, blocked } = classifyReleaseSelection([
-    { id: 8, estado: "reparado", resolucion: "cambio", serial_cambio: "NS-123", device_cambio_id: 5 },
-    { id: 9, estado: "reparado", resolucion: "cambio", cambio_sin_entrega: true },
+    { id: 8, estado: "reparado", presupuesto_estado: "aprobado", resolucion: "cambio", serial_cambio: "NS-123", device_cambio_id: 5 },
+    { id: 9, estado: "reparado", presupuesto_estado: "aprobado", resolucion: "cambio", cambio_sin_entrega: true },
   ]);
   assert.deepEqual(ready.map((item) => item.id), [8, 9]);
   assert.equal(blocked.length, 0);

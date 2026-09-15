@@ -91,7 +91,7 @@ export function buildPdfWaitPageHtml({
   <style>${PDF_WAIT_PAGE_CSS}</style>
 </head>
 <body>
-  <main>
+  <main id="vista-espera">
     <div class="fila">
       <div class="icono" id="icono">
         <span class="spinner" id="spinner" aria-hidden="true"></span>
@@ -117,9 +117,27 @@ export function buildPdfWaitPageHtml({
       </div>
     </div>
   </main>
+  <div id="vista-impresion" class="vista-impresion" hidden>
+    <header class="barra-impresion">
+      <strong id="impresion-titulo"></strong>
+      <div class="acciones-impresion">
+        <button type="button" id="btn-imprimir">Imprimir</button>
+        <a id="link-abrir-pdf" href="" target="_self">Abrir PDF</a>
+        <button type="button" id="btn-cerrar-impresion">Cerrar</button>
+      </div>
+    </header>
+    <iframe id="pdf-frame" class="marco-pdf" title="PDF"></iframe>
+  </div>
   <script>
     (function () {
       var inicio = Date.now();
+      var vistaEspera = document.getElementById('vista-espera');
+      var vistaImpresion = document.getElementById('vista-impresion');
+      var impresionTitulo = document.getElementById('impresion-titulo');
+      var linkAbrirPdf = document.getElementById('link-abrir-pdf');
+      var btnImprimir = document.getElementById('btn-imprimir');
+      var btnCerrarImpresion = document.getElementById('btn-cerrar-impresion');
+      var frame = document.getElementById('pdf-frame');
       var icono = document.getElementById('icono');
       var spinner = document.getElementById('spinner');
       var tilde = document.getElementById('tilde');
@@ -237,7 +255,64 @@ export function buildPdfWaitPageHtml({
           if (data.state === 'ready') terminar();
           if (data.state === 'error') fallar();
         },
+        showPdf: function (data) {
+          var payload = data || {};
+          var safeUrl = String(payload.url || '');
+          if (!safeUrl) return;
+          var safeLabel = String(payload.documentLabel || payload.title || 'PDF');
+          if (payload.title) document.title = String(payload.title);
+
+          terminar();
+
+          if (vistaEspera) vistaEspera.hidden = true;
+          if (impresionTitulo) impresionTitulo.textContent = safeLabel;
+          if (linkAbrirPdf) linkAbrirPdf.href = safeUrl;
+          document.body.className = 'impresion';
+          if (vistaImpresion) vistaImpresion.hidden = false;
+
+          var delayMs = Math.max(100, Number(payload.printDelayMs) || 700);
+          var printed = false;
+          function printPdf() {
+            if (printed) return;
+            printed = true;
+            try {
+              if (frame && frame.contentWindow) {
+                frame.contentWindow.focus();
+                frame.contentWindow.print();
+                return;
+              }
+            } catch (_) {}
+            try { window.print(); } catch (_) {}
+          }
+
+          if (btnImprimir && !btnImprimir._hasListener) {
+            btnImprimir.addEventListener('click', function () { printed = false; printPdf(); });
+            btnImprimir._hasListener = true;
+          }
+          if (btnCerrarImpresion && !btnCerrarImpresion._hasListener) {
+            btnCerrarImpresion.addEventListener('click', function () { window.close(); });
+            btnCerrarImpresion._hasListener = true;
+          }
+          if (frame) {
+            frame.title = safeLabel;
+            if (!frame._hasListener) {
+              frame.addEventListener('load', function () { window.setTimeout(printPdf, delayMs); });
+              frame._hasListener = true;
+            }
+            frame.src = safeUrl;
+          }
+          window.setTimeout(printPdf, delayMs + 1200);
+        },
       };
+
+      window.addEventListener('message', function (event) {
+        if (!event || !event.data) return;
+        if (event.data.type === 'NEXORA_PDF_WAIT_UPDATE') {
+          window.NEXORA_PDF_WAIT.update(event.data.patch);
+        } else if (event.data.type === 'NEXORA_PDF_SHOW_PDF') {
+          window.NEXORA_PDF_WAIT.showPdf(event.data);
+        }
+      });
     })();
   </script>
 </body>
@@ -250,6 +325,26 @@ const PDF_WAIT_PAGE_CSS = `
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #030712; background: #f3f4f6; }
+    body.impresion { margin: 0; height: 100vh; display: block !important; padding: 0 !important;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #111827; background: #f3f4f6; }
+    .vista-impresion { height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    .vista-impresion[hidden] { display: none !important; }
+    main[hidden], #vista-espera[hidden] { display: none !important; }
+    .barra-impresion { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 12px; border-bottom: 1px solid #d1d5db; background: white; }
+    .barra-impresion strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+    .acciones-impresion { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .acciones-impresion button, .acciones-impresion a { border: 1px solid #9ca3af; border-radius: 8px;
+      background: #111827; color: white; padding: 8px 12px; font: inherit; font-size: 13px; text-decoration: none; cursor: pointer; }
+    .acciones-impresion a { background: white; color: #111827; }
+    .marco-pdf { width: 100%; height: 100%; border: 0; background: white; }
+    @media print {
+      .barra-impresion { display: none !important; }
+      body.impresion { display: block !important; background: white !important; }
+      .marco-pdf { height: 100vh !important; }
+      main, #vista-espera { display: none !important; }
+    }
     main { width: min(480px, 100%); background: #fff; border: 1px solid #bae6fd; border-radius: 8px;
       padding: 20px; box-shadow: 0 20px 25px -5px rgba(2, 6, 23, .12), 0 8px 10px -6px rgba(2, 6, 23, .08); }
     .fila { display: flex; align-items: flex-start; gap: 16px; }
@@ -273,16 +368,19 @@ const PDF_WAIT_PAGE_CSS = `
     .comprobante[hidden] { display: none; }
     .pasos { list-style: none; margin: 16px 0 0; padding: 12px 0 0; border-top: 1px solid #f3f4f6;
       display: grid; gap: 10px; }
-    .pasos li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: #9ca3af; }
+    .pasos li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: #9ca3af;
+      transition: color .2s ease; }
     .pasos .texto { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     .pasos .etapa { font-size: 12px; font-weight: 400; color: #6b7280; }
     .pasos .etapa[hidden] { display: none; }
     .punto { flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px; border-radius: 999px;
-      border: 2px solid #e5e7eb; background: #fff; }
+      border: 2px solid #e5e7eb; background: #fff; transition: all .2s ease; }
     .pasos li.activo { color: #075985; font-weight: 500; }
-    .pasos li.activo .punto { border-color: #0284c7; background: #e0f2fe; }
+    .pasos li.activo .punto { border-color: #0284c7; background: #e0f2fe; display: grid; place-items: center; }
+    .pasos li.activo .punto::after { content: ""; display: block; width: 6px; height: 6px; border-radius: 999px; background: #0284c7; }
     .pasos li.hecho { color: #4b5563; }
-    .pasos li.hecho .punto { border-color: #10b981; background: #10b981; }
+    .pasos li.hecho .punto { border-color: #10b981; background: #10b981; display: grid; place-items: center; }
+    .pasos li.hecho .punto::after { content: "✓"; display: block; font-size: 9px; line-height: 1; color: #fff; font-weight: 700; margin-top: -1px; }
     .pasos li.fallo { color: #b91c1c; font-weight: 500; }
     .pasos li.fallo .punto { border-color: #b91c1c; background: #fee2e2; }
     .aviso { margin: 12px 0 0; padding: 8px 10px; border: 1px solid #fde68a; background: #fffbeb;

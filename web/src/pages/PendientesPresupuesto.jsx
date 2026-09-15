@@ -159,11 +159,13 @@ export default function PendientesPresupuesto() {
         catalogEquipmentLabel(row),
         tipoEquipoOf(row),
         row?.estado,
+        row?.motivo,
         row?.numero_serie,
         row?.numero_interno,
         row?.presupuesto_estado,
         String(row?.presupuesto_numero ?? ""),
         String(row?.presupuesto_monto ?? ""),
+        row?.ubicacion_nombre ?? row?.ubicacion,
       ];
       return campos.some((c) => norm(c).includes(needle));
     });

@@ -102,7 +102,7 @@ function setNativeProperty(element, prop, value) {
   else element[prop] = value;
 }
 
-function restoreControls(controlSnapshots) {
+function restoreControls(controlSnapshots, touchedByUser) {
   if (!Array.isArray(controlSnapshots) || controlSnapshots.length === 0) return;
 
   const controls = Array.from(document.querySelectorAll("input, select, textarea")).filter(isPersistableControl);
@@ -118,7 +118,7 @@ function restoreControls(controlSnapshots) {
   controlSnapshots.forEach((snapshot) => {
     const candidates = grouped.get(snapshot.fp);
     const target = candidates?.[snapshot.index];
-    if (!target) return;
+    if (!target || touchedByUser?.has(target)) return;
 
     if (snapshot.kind === "checked" && target instanceof HTMLInputElement) {
       const nextChecked = !!snapshot.checked;
@@ -209,13 +209,26 @@ export default function useRouteUiState() {
     const snapshot = readStore()[routeKey];
     if (!snapshot) return undefined;
 
+    // What the user types after arriving wins: the 260/700 ms retries used to
+    // overwrite it with the value saved on the previous visit.
+    const touchedByUser = new WeakSet();
+    const onUserInput = (event) => {
+      if (event.isTrusted && event.target) touchedByUser.add(event.target);
+    };
+    document.addEventListener("input", onUserInput, true);
+    document.addEventListener("change", onUserInput, true);
+
     const timers = RESTORE_DELAYS_MS.map((delay) =>
       window.setTimeout(() => {
-        if (persistControls) restoreControls(snapshot.controls);
+        if (persistControls) restoreControls(snapshot.controls, touchedByUser);
         restoreScroll(snapshot);
       }, delay)
     );
 
-    return () => timers.forEach((timer) => clearTimeout(timer));
+    return () => {
+      timers.forEach((timer) => clearTimeout(timer));
+      document.removeEventListener("input", onUserInput, true);
+      document.removeEventListener("change", onUserInput, true);
+    };
   }, [persistControls, routeKey]);
 }

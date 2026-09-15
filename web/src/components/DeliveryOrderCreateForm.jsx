@@ -11,12 +11,21 @@ import {
 } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import {
+  DELIVERY_ORDER_STOCK_LOTS_LIMIT,
+  deliveryOrderAppendRentalEquipment,
   deliveryOrderDefaultDeposit,
+  deliveryOrderFindStockLot,
   deliveryOrderItemCanOmitPartida,
   deliveryOrderItemRequiresPartida,
   deliveryOrderPartidaIsFixedEquipment,
+  deliveryOrderRentalEquipmentKey,
+  deliveryOrderRentalLotBlockReason,
+  deliveryOrderSelectedRentalKeys,
+  deliveryOrderSplitRentalLots,
   deliveryOrderUsedPartidaKeys,
 } from "../lib/delivery-orders";
+import { applyPartidasMasivas } from "../lib/partidas-masivas.js";
+import DeliveryOrderPartidasMasivas from "./DeliveryOrderPartidasMasivas.jsx";
 
 const BEJERMAN_COMPANIES = [
   { key: "SEPID", label: "SEPID" },
@@ -80,6 +89,7 @@ const emptyItem = (priceCurrency = "ARS") => ({
   articleCode: "",
   articleName: "",
   description: "",
+  remitoArticleLegend: "",
   unitPrice: "",
   priceCurrency: normalizePriceCurrency(priceCurrency),
   discountPercent: "",
@@ -99,6 +109,7 @@ const initialForm = (defaultSellerCode = "") => {
     customerName: "",
     customerSearch: "",
     deliveryType: "sale",
+    remitoGeneralLegend: "",
     status: "pendiente_armado",
     priority: "normal",
     sellerCode: seller.code,
@@ -253,6 +264,7 @@ function lotExpiration(lot) {
 function lotLabel(lot) {
   const pieces = [
     clean(lot?.partida),
+    clean(lot?.equipmentInternalNumber),
     `Stock ${formatQuantity(lotAvailableQuantity(lot), 0)}`,
     lotExpiration(lot) ? `Vto. ${lotExpiration(lot)}` : "",
   ];
@@ -359,6 +371,7 @@ function itemFromOrderItem(item) {
     articleCode: clean(item?.articleCode),
     articleName: clean(item?.articleName),
     description: clean(item?.description || item?.sourceText || item?.articleName || item?.articleCode),
+    remitoArticleLegend: clean(item?.remitoArticleLegend || item?.accessories || ""),
     unitPrice: item?.unitPrice == null ? "" : String(item.unitPrice),
     priceCurrency: normalizePriceCurrency(item?.priceCurrency),
     discountPercent: Number(item?.discountPercent || 0) > 0 ? String(item.discountPercent) : "",
@@ -382,6 +395,7 @@ function equipmentItemFromOption(option) {
     articleCode: clean(option?.articleCode),
     articleName: clean(option?.articleName),
     description: clean(option?.description || option?.equipmentDetail || option?.equipmentModel),
+    remitoArticleLegend: clean(option?.remitoArticleLegend || option?.accessories || ""),
     unitPrice: "",
     priceCurrency: "ARS",
     discountPercent: "",
@@ -418,6 +432,7 @@ function formFromOrder(order, defaultSellerCode = "") {
     customerName: clean(order.customerName),
     customerSearch: clean(order.customerName),
     deliveryType,
+    remitoGeneralLegend: clean(order.remitoGeneralLegend || (deliveryType === "rental" ? "Se entrega en alquiler" : "")),
     status: clean(order.status) || "pendiente_armado",
     priority: clean(order.priority) || "normal",
     sellerCode: seller.code,
@@ -519,6 +534,8 @@ export default function DeliveryOrderCreateForm({
   const [articleStock, setArticleStock] = useState({});
   const [articleUnavailable, setArticleUnavailable] = useState(false);
   const [partidaScanWarnings, setPartidaScanWarnings] = useState({});
+  // Renglones con la carga masiva de partidas abierta.
+  const [bulkPartidasOpenByItem, setBulkPartidasOpenByItem] = useState({});
   const partidaInputRefs = useRef({});
   const customerSearchRef = useRef(null);
   const customerNameRef = useRef(null);
@@ -539,15 +556,9 @@ export default function DeliveryOrderCreateForm({
   const isFixedEquipmentPartida = deliveryOrderPartidaIsFixedEquipment(form.deliveryType);
   // El equipo dado de alta con su MG no tiene OS: la clave del atajo sigue al equipo,
   // si no todos los equipos sin OS comparten la clave vacía y el atajo esconde de más.
-  const rentalEquipmentKey = (option) =>
-    clean(option?.ingresoId) ? `os:${clean(option.ingresoId)}` : `dev:${clean(option?.deviceId)}`;
+  const rentalEquipmentKey = (option) => deliveryOrderRentalEquipmentKey(option);
   const selectedRentalIngresoIds = useMemo(
-    () =>
-      new Set(
-        (form.items || [])
-          .filter((item) => clean(item.ingresoId) || clean(item.deviceId))
-          .map((item) => rentalEquipmentKey(item))
-      ),
+    () => deliveryOrderSelectedRentalKeys(form.items),
     [form.items]
   );
   const sellerOptions = useMemo(
@@ -556,6 +567,10 @@ export default function DeliveryOrderCreateForm({
   );
   const headerDisabled = saving || readOnlyHeader;
   const itemDisabled = saving || readOnlyItems;
+  // Al cargar partidas los artículos quedan fijos, pero el depósito no: es de donde Recepción
+  // saca las partidas, y trabarlo dejaba buscando en el VAL que eligió Ventas al crear la orden
+  // aunque el stock estuviera en SAR. El guardado valida cada partida contra su depósito.
+  const depositLocked = readOnlyItems && !isPartidasMode;
   const canEditPlanningStatus =
     !readOnlyHeader &&
     !isPartidasMode &&
@@ -578,6 +593,7 @@ export default function DeliveryOrderCreateForm({
     setArticleStock({});
     setArticleUnavailable(false);
     setPartidaScanWarnings({});
+    setBulkPartidasOpenByItem({});
     partidaInputRefs.current = {};
     setRentalSearch("");
     setRentalEquipment({ items: [], loading: false, unavailable: false, warning: "" });
@@ -760,6 +776,7 @@ export default function DeliveryOrderCreateForm({
       if (value !== "rental") setAllItemDeposits(nextDeposit);
       setArticleStock({});
       setPartidaScanWarnings({});
+      setBulkPartidasOpenByItem({});
       setRentalSearch("");
     } else if (field === "companyKey") {
       setArticleStock({});
@@ -774,9 +791,14 @@ export default function DeliveryOrderCreateForm({
             : current.deliveryType === "rental"
               ? sellerByCode(currentUserSellerCode)
               : currentSeller;
+        const nextGeneralLegend =
+          value === "rental"
+            ? (clean(current.remitoGeneralLegend) || "Se entrega en alquiler")
+            : current.remitoGeneralLegend;
         return {
           ...current,
           deliveryType: value,
+          remitoGeneralLegend: nextGeneralLegend,
           sellerCode: nextSeller.code,
           sellerName: nextSeller.label,
           items: value === "rental"
@@ -847,10 +869,28 @@ export default function DeliveryOrderCreateForm({
 
   const updateItem = (index, changes) => {
     if (readOnlyItems) return;
-    setForm((current) => ({
-      ...current,
-      items: current.items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...changes } : item)),
-    }));
+    setForm((current) => {
+      const targetItem = current.items[index];
+      const targetArticleCode = clean(changes?.articleCode ?? targetItem?.articleCode);
+      const isArticleLegendChange = Object.prototype.hasOwnProperty.call(changes || {}, "remitoArticleLegend");
+
+      return {
+        ...current,
+        items: current.items.map((item, itemIndex) => {
+          if (itemIndex === index) {
+            return { ...item, ...changes };
+          }
+          if (
+            isArticleLegendChange &&
+            targetArticleCode &&
+            clean(item.articleCode).toUpperCase() === targetArticleCode.toUpperCase()
+          ) {
+            return { ...item, remitoArticleLegend: changes.remitoArticleLegend };
+          }
+          return item;
+        }),
+      };
+    });
   };
 
   const updatePartida = (itemIndex, partidaIndex, changes) => {
@@ -924,9 +964,19 @@ export default function DeliveryOrderCreateForm({
     }
 
     const scannedKey = partidaMatchKey(scannedPartida);
-    const matchingLot = (stockLots || []).find((lot) => partidaMatchKey(lot?.partida) === scannedKey);
-    if (!matchingLot) {
+    // Sin lote y sin `missing`, la partida quedó afuera de un listado recortado: entra como se
+    // escaneó y la valida el guardado, que consulta el depósito completo.
+    const { lot: matchingLot, missing } = deliveryOrderFindStockLot(stockLots, scannedPartida, {
+      truncated: stockState?.truncated,
+    });
+    if (missing) {
       setPartidaScanWarning(itemIndex, partidaIndex, "La partida escaneada no figura para este artículo en el depósito seleccionado.");
+      focusPartidaInput(itemIndex, partidaIndex);
+      return;
+    }
+    const blockReason = deliveryOrderRentalLotBlockReason(matchingLot);
+    if (blockReason) {
+      setPartidaScanWarning(itemIndex, partidaIndex, blockReason);
       focusPartidaInput(itemIndex, partidaIndex);
       return;
     }
@@ -952,8 +1002,17 @@ export default function DeliveryOrderCreateForm({
 
     const available = lotAvailableQuantity(matchingLot);
     const assignedQuantity = Math.min(1, remaining, available > 0 ? available : 1);
+    const draft = matchingLot
+      ? lotDraft(matchingLot, assignedQuantity, depositCode)
+      : {
+          partida: scannedPartida,
+          assignedQuantity: String(assignedQuantity),
+          partidaExpirationDate: "",
+          stockAvailableQuantity: "",
+          stockCheckedAt: "",
+        };
     const nextRows = rows.map((row, rowIndex) =>
-      rowIndex === partidaIndex ? { ...row, ...lotDraft(matchingLot, assignedQuantity, depositCode) } : row
+      rowIndex === partidaIndex ? { ...row, ...draft } : row
     );
     const remainingAfterScan = remaining - assignedQuantity;
     let nextFocusIndex = partidaIndex;
@@ -990,9 +1049,19 @@ export default function DeliveryOrderCreateForm({
     if (!clean(item.articleCode) || stockState?.loading || stockState?.unavailable) return;
     const lots = Array.isArray(stockLots) ? stockLots : [];
     if (!stockState || !lots.length) return;
-    const matchingLot = lots.find((lot) => partidaMatchKey(lot?.partida) === partidaMatchKey(partida));
-    if (!matchingLot) {
+    const { lot: matchingLot, missing } = deliveryOrderFindStockLot(lots, partida, { truncated: stockState.truncated });
+    if (missing) {
       setPartidaScanWarning(itemIndex, partidaIndex, "La partida no figura para este artículo en el depósito seleccionado.");
+      return;
+    }
+    if (!matchingLot) {
+      // Afuera de un listado recortado: queda como se escribió y la valida el guardado.
+      clearPartidaScanWarning(itemIndex, partidaIndex);
+      return;
+    }
+    const blockReason = deliveryOrderRentalLotBlockReason(matchingLot);
+    if (blockReason) {
+      setPartidaScanWarning(itemIndex, partidaIndex, blockReason);
       return;
     }
     const assignedQuantity = clean(row.assignedQuantity) || "1";
@@ -1011,19 +1080,28 @@ export default function DeliveryOrderCreateForm({
   const addRentalEquipment = (option) => {
     if (readOnlyItems) return;
     if (!clean(option?.ingresoId) && !clean(option?.deviceId)) return;
-    if (selectedRentalIngresoIds.has(rentalEquipmentKey(option))) return;
-    const articleCode = clean(option?.articleCode);
-    const itemIndex = form.items.length === 1 && isBlankItem(form.items[0]) ? 0 : form.items.length;
+    const key = rentalEquipmentKey(option);
+    if (key && selectedRentalIngresoIds.has(key)) return;
+
+    const { items: nextItems, targetIndex, added } = deliveryOrderAppendRentalEquipment(
+      form.items,
+      option,
+      {
+        priceCurrency: form.priceCurrency,
+        fallbackDeposit: "STL",
+      }
+    );
+
+    if (!added) return;
+
     setForm((current) => ({
       ...current,
-      items: current.items.length === 1 && isBlankItem(current.items[0])
-        ? [{ ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }]
-        : [...current.items, { ...equipmentItemFromOption(option), priceCurrency: normalizePriceCurrency(current.priceCurrency) }],
+      items: nextItems,
     }));
-    // El renglón nace con el NS asignado, así que el bloque de NS aparece abierto sin pasar
-    // por openPartidas y nadie consultaba el stock: el panel "NS disponibles" quedaba vacío,
-    // como si STL no tuviera nada, justo del depósito del que salió el equipo.
-    if (articleCode) void loadArticleStock(itemIndex, articleCode, "STL");
+
+    setPartidasOpenByItem((current) => ({ ...current, [targetIndex]: true }));
+    const articleCode = clean(option?.articleCode);
+    if (articleCode) void loadArticleStock(targetIndex, articleCode, "STL");
   };
 
   const removeItem = (index) => {
@@ -1041,6 +1119,8 @@ export default function DeliveryOrderCreateForm({
     setArticleStock((current) => shiftIndexedState(current, index));
     setPartidasOpenByItem((current) => shiftIndexedState(current, index));
     setPartidaScanWarnings({});
+    // La lista pegada vive dentro del panel, que no se corre de renglón junto con los índices.
+    setBulkPartidasOpenByItem({});
     partidaInputRefs.current = {};
   };
 
@@ -1081,6 +1161,39 @@ export default function DeliveryOrderCreateForm({
   const closePartidas = (itemIndex) => {
     if (partidasRequired) return;
     setPartidasOpenByItem((current) => ({ ...current, [itemIndex]: false }));
+  };
+
+  // Abrir la carga masiva abre también el bloque de partidas: lo que se carga tiene que quedar a la vista.
+  const toggleBulkPartidas = (itemIndex) => {
+    const opening = !bulkPartidasOpenByItem[itemIndex];
+    setBulkPartidasOpenByItem((current) => ({ ...current, [itemIndex]: opening }));
+    if (opening) openPartidas(itemIndex);
+  };
+
+  const applyBulkPartidas = (itemIndex, filas, { adjustQuantity = false } = {}) => {
+    setForm((current) => ({
+      ...current,
+      items: current.items.map((item, index) =>
+        index === itemIndex
+          ? applyPartidasMasivas(item, filas, { adjustQuantity: adjustQuantity && !readOnlyItems })
+          : item
+      ),
+    }));
+    setPartidaScanWarnings({});
+  };
+
+  const clearPartidas = (itemIndex) => {
+    const item = form.items[itemIndex] || {};
+    const count = activePartidas(item).length;
+    const label = isRental ? `los ${count} NS` : `las ${count} partidas`;
+    if (count > 1 && !window.confirm(`¿Quitar ${label} del renglón ${itemIndex + 1}?`)) return;
+    setForm((current) => ({
+      ...current,
+      items: current.items.map((row, index) =>
+        index === itemIndex ? { ...row, partidas: [emptyPartida("1", clean(row.stockDepositCode) || depositCode)] } : row
+      ),
+    }));
+    setPartidaScanWarnings({});
   };
 
   const closeArticleOptions = (index) => {
@@ -1165,10 +1278,12 @@ export default function DeliveryOrderCreateForm({
     try {
       const data = await getDeliveryOrderBejermanArticleStock({
         articleCode: code,
-        limit: 100,
+        limit: DELIVERY_ORDER_STOCK_LOTS_LIMIT,
         companyKey: effectiveCompanyKey,
         deliveryType: form.deliveryType,
         depositCode: selectedDeposit,
+        // Al editar, los NS de esta misma orden no cuentan como reservados por otra.
+        orderId: initialOrder?.id,
       });
       const unavailable = Boolean(data?.unavailable);
       setArticleStock((current) => ({
@@ -1177,6 +1292,7 @@ export default function DeliveryOrderCreateForm({
           items: Array.isArray(data?.items) ? data.items : [],
           loading: false,
           unavailable,
+          truncated: Boolean(data?.truncated),
           warning: clean(data?.warning) || (
             unavailable
               ? `No se pudieron consultar ${isRental ? "los NS" : "las partidas"} de Bejerman. Reintentá en unos minutos.`
@@ -1215,7 +1331,7 @@ export default function DeliveryOrderCreateForm({
   }, [initialOrder?.id, partidasRequired, partidasOpenByDefault, effectiveCompanyKey, depositCode]);
 
   const changeDeposit = (event) => {
-    if (readOnlyItems) return;
+    if (depositLocked) return;
     const nextDeposit = clean(event.target.value).toUpperCase() || defaultDepositForDeliveryType(form.deliveryType);
     setDepositCode(nextDeposit);
     setAllItemDeposits(nextDeposit);
@@ -1232,12 +1348,16 @@ export default function DeliveryOrderCreateForm({
     if (readOnlyItems) return;
     setPartidaScanWarnings({});
     const articleCode = clean(article?.code);
+    const existingLegend = form.items.find(
+      (it, idx) => idx !== index && articleCode && clean(it.articleCode).toUpperCase() === articleCode.toUpperCase() && clean(it.remitoArticleLegend)
+    )?.remitoArticleLegend || "";
     const articleName = clean(article?.name || article?.description || articleCode);
     const articleRequiresPartida = deliveryOrderItemRequiresPartida(article);
     updateItem(index, {
       articleCode,
       articleName,
       description: clean(article?.description) || articleName || articleCode,
+      remitoArticleLegend: existingLegend || clean(form.items[index]?.remitoArticleLegend),
       partida: "",
       partidaExpirationDate: "",
       stockDepositCode: depositCode,
@@ -1301,7 +1421,34 @@ export default function DeliveryOrderCreateForm({
     const remaining = Math.max(0, requested - assignedOther);
     const available = lotAvailableQuantity(lot);
     const assigned = available > 0 ? Math.min(remaining || requested, available) : remaining || requested;
-    updatePartida(itemIndex, partidaIndex, lotDraft(lot, assigned, depositCode));
+
+    // Si después de asignar esta partida todavía quedan cantidades pendientes,
+    // agregar automáticamente una fila vacía para que el usuario pueda seguir
+    // seleccionando sin tener que hacer clic en "Agregar partida" cada vez.
+    const remainingAfterChoice = remaining - assigned;
+    if (remainingAfterChoice > QUANTITY_TOLERANCE) {
+      const draft = lotDraft(lot, assigned, depositCode);
+      const nextRows = currentRows.map((row, index) =>
+        index === partidaIndex ? { ...row, ...draft } : row
+      );
+      const nextEmptyIndex = nextRows.findIndex((row, index) => index !== partidaIndex && !clean(row.partida));
+      let nextFocusIndex;
+      if (nextEmptyIndex >= 0) {
+        nextFocusIndex = nextEmptyIndex;
+      } else {
+        nextFocusIndex = nextRows.length;
+        nextRows.push(emptyPartida(String(remainingAfterChoice), clean(lot?.stockDepositCode || lot?.depositCode) || clean(item.stockDepositCode) || depositCode));
+      }
+      setForm((current) => ({
+        ...current,
+        items: current.items.map((currentItem, index) =>
+          index === itemIndex ? { ...currentItem, partidas: nextRows } : currentItem
+        ),
+      }));
+      focusPartidaInput(itemIndex, nextFocusIndex);
+    } else {
+      updatePartida(itemIndex, partidaIndex, lotDraft(lot, assigned, depositCode));
+    }
   };
 
   const buildPartidasPayloadForItem = (item) =>
@@ -1356,16 +1503,23 @@ export default function DeliveryOrderCreateForm({
         const stockState = articleStock[index];
         const stockLots = Array.isArray(stockState?.items) ? stockState.items : [];
         if (clean(item.articleCode) && stockState && !stockState.loading && !stockState.unavailable) {
-          const matchingLot = stockLots.find((lot) => partidaMatchKey(lot?.partida) === rowPartidaKey);
-          if (!matchingLot) {
+          const { lot: matchingLot, missing } = deliveryOrderFindStockLot(stockLots, rowPartida, {
+            truncated: stockState.truncated,
+          });
+          if (missing) {
             return isRental
               ? `NS sin stock en STL: ${rowPartida}.`
               : `La partida ${rowPartida} no figura para este artículo en el depósito seleccionado.`;
           }
-          if (quantityNumber(row.assignedQuantity, 0) - lotAvailableQuantity(matchingLot) > QUANTITY_TOLERANCE) {
-            return isRental
-              ? `NS sin stock suficiente en STL: ${rowPartida}.`
-              : `La partida ${rowPartida} no tiene stock suficiente en el depósito seleccionado.`;
+          // Sin lote, la partida quedó afuera de un listado recortado: la valida el guardado.
+          if (matchingLot) {
+            const blockReason = deliveryOrderRentalLotBlockReason(matchingLot);
+            if (blockReason) return blockReason;
+            if (quantityNumber(row.assignedQuantity, 0) - lotAvailableQuantity(matchingLot) > QUANTITY_TOLERANCE) {
+              return isRental
+                ? `NS sin stock suficiente en STL: ${rowPartida}.`
+                : `La partida ${rowPartida} no tiene stock suficiente en el depósito seleccionado.`;
+            }
           }
         }
         assigned += quantityNumber(row.assignedQuantity, 0);
@@ -1392,6 +1546,7 @@ export default function DeliveryOrderCreateForm({
           articleName: clean(item.articleName) || null,
           articleRequiresPartida: deliveryOrderItemRequiresPartida(item),
           description,
+          remitoArticleLegend: clean(item.remitoArticleLegend) || null,
           quantity: quantityOf(item.quantity),
           unitPrice: decimalTextOrNull(item.unitPrice),
           priceCurrency: normalizePriceCurrency(item.priceCurrency, form.priceCurrency),
@@ -1465,6 +1620,7 @@ export default function DeliveryOrderCreateForm({
       customerName: clean(form.customerName),
       bejermanCustomerCode: customer?.cod_empresa || initialOrder?.bejermanCustomerCode || "",
       deliveryType: form.deliveryType,
+      remitoGeneralLegend: clean(form.remitoGeneralLegend) || null,
       ...(canEditPlanningStatus ? { status: form.status } : {}),
       priority: form.priority,
       sellerName: sellerNameForCode(effectiveSellerCode, form.sellerName),
@@ -1496,6 +1652,7 @@ export default function DeliveryOrderCreateForm({
         setArticleEmpty({});
         setArticleStock({});
         setArticleUnavailable(false);
+        setBulkPartidasOpenByItem({});
         setRentalSearch("");
         setRentalEquipment({ items: [], loading: false, unavailable: false, warning: "" });
       }
@@ -1708,6 +1865,22 @@ export default function DeliveryOrderCreateForm({
             disabled={headerDisabled}
           />
         </label>
+        <label className="text-sm xl:col-span-2">
+          <span className="mb-1 block text-xs uppercase text-gray-500">Leyenda general en remito</span>
+          <input
+            value={form.remitoGeneralLegend}
+            onChange={update("remitoGeneralLegend")}
+            onKeyDown={suppressEnterSubmit}
+            placeholder={isRental ? "Se entrega en alquiler" : "Leyenda opcional al inicio del remito"}
+            className="h-10 w-full rounded border px-3 py-2 disabled:bg-gray-100 disabled:text-gray-600"
+            disabled={headerDisabled}
+          />
+          {isRental && (
+            <span className="mt-1 block text-xs text-gray-500">
+              Por defecto: &quot;Se entrega en alquiler&quot;. Se imprime una sola vez arriba de todo en cada remito.
+            </span>
+          )}
+        </label>
       </div>
 
       <div className="space-y-3">
@@ -1720,7 +1893,7 @@ export default function DeliveryOrderCreateForm({
                 value={depositCode}
                 onChange={changeDeposit}
                 className="h-8 min-w-[92px] rounded border bg-white px-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-600"
-                disabled={itemDisabled || isRental || loadingDeposits || !form.companyKey}
+                disabled={saving || depositLocked || isRental || loadingDeposits || !form.companyKey}
               >
                 {depositOptions.map((option) => (
                   <option key={option.code} value={option.code}>
@@ -1800,6 +1973,9 @@ export default function DeliveryOrderCreateForm({
             : "";
           const stockState = articleStock[index];
           const stockLots = Array.isArray(stockState?.items) ? stockState.items : [];
+          // Un NS puede tener stock en STL y no poder alquilarse (figura alquilado, fuera de la
+          // estantería, sin alta): no se ofrece, se lista aparte con el motivo.
+          const { usable: usableStockLots, blocked: blockedStockLots } = deliveryOrderSplitRentalLots(stockLots);
           const partidaRows = item.partidas || [emptyPartida()];
           const suggestedPartidaIndex = Math.max(0, partidaRows.length - 1);
           const suggestedRow = partidaRows[suggestedPartidaIndex];
@@ -1815,13 +1991,16 @@ export default function DeliveryOrderCreateForm({
           );
           const visibleStockLots = suggestedRowResolved
             ? []
-            : stockLots.filter((lot) => {
+            : usableStockLots.filter((lot) => {
                 const lotPartida = clean(lot?.partida).toLowerCase();
                 if (lotPartida && usedPartidas.has(lotPartida)) return false;
                 if (!suggestedPartidaQuery) return true;
                 return lotLabel(lot).toLowerCase().includes(suggestedPartidaQuery);
               });
           const partidasOpen = !canOmitPartida && (partidasRequired || Boolean(partidasOpenByItem[index]) || stats.hasRows);
+          // Una reparación no elige partidas del stock, y un artículo sin partida no tiene qué cargar.
+          const bulkPartidasAvailable = !canOmitPartida && !isFixedEquipmentPartida;
+          const bulkPartidasOpen = bulkPartidasAvailable && Boolean(bulkPartidasOpenByItem[index]);
           return (
             <div key={item.id || index} className="rounded border bg-gray-50 p-2">
               <div className={`grid grid-cols-1 gap-2 ${canEditItemDiscounts ? "lg:grid-cols-[72px_minmax(240px,1.6fr)_minmax(200px,1fr)_96px_66px_72px_38px]" : "lg:grid-cols-[72px_minmax(240px,1.6fr)_minmax(200px,1fr)_96px_66px_38px]"}`}>
@@ -1932,6 +2111,42 @@ export default function DeliveryOrderCreateForm({
                 )}
               </div>
 
+              <div className="mt-2">
+                <label className="block text-xs text-gray-600">
+                  <span className="font-medium text-gray-700">
+                    {isRental ? "Accesorios del equipo (impreso en remito)" : "Leyenda / accesorios del artículo en remito"}
+                  </span>
+                  <input
+                    value={item.remitoArticleLegend || ""}
+                    onChange={(event) => updateItem(index, { remitoArticleLegend: event.target.value })}
+                    onKeyDown={suppressEnterSubmit}
+                    placeholder={isRental ? "Ej: Bolso, cable de alimentación, tubo corrugado, fuente" : "Aclaración o accesorios para este artículo"}
+                    className="mt-1 h-9 w-full rounded border bg-white px-3 py-1.5 text-sm disabled:bg-gray-100 disabled:text-gray-600"
+                    disabled={itemDisabled}
+                  />
+                  {isRental && item.articleCode && (
+                    <span className="mt-0.5 block text-[11px] text-gray-500">
+                      {clean(item.remitoArticleLegend) ? (
+                        <>
+                          Se imprimirá en el remito como:{" "}
+                          <em>
+                            Los siguientes equipos se entregan con: {clean(item.remitoArticleLegend)}
+                          </em>{" "}
+                          (se sincroniza entre renglones del mismo artículo).
+                        </>
+                      ) : (
+                        "Opcional. Si se deja vacío, no se imprimirá ninguna leyenda para este artículo."
+                      )}
+                    </span>
+                  )}
+                  {!isRental && item.articleCode && clean(item.remitoArticleLegend) && (
+                    <span className="mt-0.5 block text-[11px] text-gray-500">
+                      Se imprimirá en el remito para este artículo (se sincroniza entre renglones del mismo artículo).
+                    </span>
+                  )}
+                </label>
+              </div>
+
               <div className="mt-2 rounded border border-gray-200 bg-white p-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -1949,6 +2164,19 @@ export default function DeliveryOrderCreateForm({
                       Asignado {stats.assigned} / {stats.total}
                       {stats.mismatch && stats.overNumber > 0 ? ` · Excede ${stats.over}` : ` · Pendiente ${stats.pending}`}
                     </div>
+                    {bulkPartidasAvailable && (
+                      <button
+                        type="button"
+                        onClick={() => toggleBulkPartidas(index)}
+                        aria-pressed={bulkPartidasOpen}
+                        className={`rounded border px-3 py-1.5 text-sm ${
+                          bulkPartidasOpen ? "border-sky-300 bg-sky-100 text-sky-900" : "bg-white hover:bg-gray-50"
+                        }`}
+                        disabled={saving}
+                      >
+                        Carga masiva
+                      </button>
+                    )}
                     {!canOmitPartida && !partidasOpen ? (
                       <button type="button" onClick={() => openPartidas(index)} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={saving}>
                         {isRental ? "Indicar NS" : "Indicar partidas"}
@@ -1962,6 +2190,20 @@ export default function DeliveryOrderCreateForm({
                     )}
                   </div>
                 </div>
+                {bulkPartidasOpen && (
+                  <DeliveryOrderPartidasMasivas
+                    items={form.items}
+                    itemIndex={index}
+                    deliveryType={form.deliveryType}
+                    companyKey={effectiveCompanyKey}
+                    depositCode={isRental ? "STL" : clean(item.stockDepositCode) || depositCode}
+                    orderId={initialOrder?.id || ""}
+                    canAdjustQuantity={!readOnlyItems}
+                    disabled={saving}
+                    onApply={(filas, options) => applyBulkPartidas(index, filas, options)}
+                    onClose={() => toggleBulkPartidas(index)}
+                  />
+                )}
                 {partidasRequired && !stats.hasRows && !canOmitPartida && (
                   <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                     {isRental ? "Faltan NS para poder preparar o emitir el RTA." : "Complete las partidas faltantes para poder marcar la orden como preparada."}
@@ -2038,9 +2280,22 @@ export default function DeliveryOrderCreateForm({
                       })}
                     </div>
                     <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                      <button type="button" onClick={() => addPartida(index)} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={saving}>
-                        {isRental ? "Agregar NS" : "Agregar partida"}
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button type="button" onClick={() => addPartida(index)} className="rounded border bg-white px-3 py-1.5 text-sm hover:bg-gray-50" disabled={saving}>
+                          {isRental ? "Agregar NS" : "Agregar partida"}
+                        </button>
+                        {/* Después de una carga masiva, sacar una lista equivocada de a una X no es opción. */}
+                        {stats.lots > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => clearPartidas(index)}
+                            className="rounded border bg-white px-3 py-1.5 text-sm text-red-700 hover:bg-red-50"
+                            disabled={saving}
+                          >
+                            {isRental ? `Quitar los ${stats.lots} NS` : `Quitar las ${stats.lots} partidas`}
+                          </button>
+                        )}
+                      </div>
                       {item.articleCode && (
                         <button
                           type="button"
@@ -2061,7 +2316,9 @@ export default function DeliveryOrderCreateForm({
                                 una sola tarjeta a la vista y sin esto parece que hay uno solo en el depósito. */}
                             <div className="text-xs text-sky-700">
                               Depósito {stockState?.depositCode || depositCode}
-                              {stockLots.length > 0 ? ` · ${stockLots.length} con stock` : ""}
+                              {usableStockLots.length > 0
+                                ? ` · ${usableStockLots.length} ${isRental ? (usableStockLots.length === 1 ? "disponible" : "disponibles") : "con stock"}`
+                                : ""}
                             </div>
                           </div>
                         </div>
@@ -2093,11 +2350,16 @@ export default function DeliveryOrderCreateForm({
                             ))}
                           </div>
                         )}
-                        {!stockState?.loading && !isFixedEquipmentPartida && stockLots.length > 0 && visibleStockLots.length === 0 && (
+                        {!stockState?.loading && !isFixedEquipmentPartida && usableStockLots.length > 0 && visibleStockLots.length === 0 && (
                           <div className="mt-2 text-xs text-sky-800">
                             {suggestedRowResolved
                               ? `${isRental ? "El NS" : "La partida"} de este renglón ya está tomado del stock.`
                               : "Sin coincidencias para el filtro ingresado."}
+                          </div>
+                        )}
+                        {!stockState?.loading && stockLots.length > 0 && usableStockLots.length === 0 && (
+                          <div className="mt-2 text-xs text-amber-800">
+                            Ninguno de los NS con stock en {stockState?.depositCode || depositCode} se puede alquilar.
                           </div>
                         )}
                         {/* Sin estos dos avisos el recuadro queda con el título solo, que se lee

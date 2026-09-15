@@ -14,6 +14,8 @@ export const DELIVERY_ORDER_SORT_COLUMNS = {
   factura: { accessor: (row) => row?.invoiceNumber ?? row?.invoice_number },
   fecha: {
     accessor: (row) =>
+      row?.effectiveSortAt ??
+      row?.effective_sort_at ??
       row?.createdAt ??
       row?.created_at ??
       row?.orderDate ??
@@ -33,4 +35,3 @@ export const DELIVERY_ORDER_SORT_OPTIONS = [
   { value: "factura", label: "Factura" },
   { value: "fecha", label: "Fecha" },
 ];
-

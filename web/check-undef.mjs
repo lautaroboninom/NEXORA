@@ -66,3 +66,5 @@ for (const file of files) {
 }
 
 console.log(problemas ? `\n${problemas} problema(s)` : `\nSin identificadores sueltos (${files.length} archivos)`);
+
+process.exitCode = problemas ? 1 : 0;

@@ -345,7 +345,7 @@ export default function ReleaseOrderModal({
             <Printer className="h-4 w-4" aria-hidden="true" />
             {saving
               ? "Preparando..."
-              : flow.isSoldDelivered
+              : flow.isSalePending || flow.isSoldDelivered
                 ? "Ver e imprimir salida"
                 : flow.isReprint
                   ? "Ver y reimprimir orden"

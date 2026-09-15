@@ -108,6 +108,34 @@ export function queueBadgeCounts(colas, userId, store = storage()) {
   return salida;
 }
 
+/**
+ * Pone al día la foto guardada con lo que contestó el servidor, sin que el usuario
+ * abra la pantalla. El menú lo corre con cada consulta, y hace dos cosas para que el
+ * número no se quede mudo:
+ *
+ * - Siembra la cola que nunca se abrió en este navegador. Antes la foto sólo nacía al
+ *   entrar a la pantalla: quien no la abría nunca en esa PC no veía un número jamás.
+ * - Olvida las órdenes que ya no están. Si no, una OS que se fue de la cola y volvió
+ *   sin que nadie abriera la pantalla en el medio (reparada → presupuesto emitido →
+ *   aprobado) seguía figurando como vista y no contaba como novedad.
+ *
+ * Nunca suma a la foto una orden que no estaba: eso lo hace sólo abrir la pantalla
+ * (`markQueueSeen`), que es lo que apaga el número.
+ */
+export function reconcileSeenIds(colas, userId, store = storage()) {
+  for (const [queueKey, ids] of Object.entries(colas || {})) {
+    if (!Array.isArray(ids)) continue;
+    const seen = readSeenIds(userId, queueKey, store);
+    if (seen === null) {
+      writeSeenIds(userId, queueKey, ids, store);
+      continue;
+    }
+    const actuales = new Set(ids.map((id) => Number(id)));
+    const vigentes = [...seen].filter((id) => actuales.has(id));
+    if (vigentes.length !== seen.size) writeSeenIds(userId, queueKey, vigentes, store);
+  }
+}
+
 /** Marca la cola como vista con la foto que devolvió el servidor recién. */
 export function markQueueSeen(colas, queueKey, userId, store = storage()) {
   const ids = (colas || {})[queueKey];

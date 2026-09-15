@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { getGeneralEquipos } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, tipoEquipoOf, resolveFechaIngreso, resolveFechaCreacion } from "../lib/ui-helpers";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
 import useQueryState from "../hooks/useQueryState";
@@ -98,7 +99,10 @@ export default function BuscarNS() {
                   className="hover:bg-gray-50"
                   onClick={() => nav(`/ingresos/${ingresoId}`)}
                 >
-                  <div className="font-semibold text-gray-900 underline">{formatOSHelper(r, "")}</div>
+                  <div className="font-semibold text-gray-900">
+                    <span className="underline">{formatOSHelper(r, "")}</span>
+                    <DerivadoMark row={r} className="ml-1.5 align-middle" />
+                  </div>
                   <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                     <MobileDataField label="Marca" value={r?.marca || "-"} />
                     <MobileDataField label="Modelo" value={r?.modelo || "-"} />
@@ -134,7 +138,10 @@ export default function BuscarNS() {
                     onClick={() => nav(`/ingresos/${ingresoId}`)}
                     title="Ir a la hoja de servicio"
                   >
-                    <td className="p-2 underline">{formatOSHelper(r, "")}</td>
+                    <td className="p-2">
+                      <span className="underline">{formatOSHelper(r, "")}</span>
+                      <DerivadoMark row={r} className="ml-1.5 align-middle" />
+                    </td>
                     <td className="p-2">{r?.marca || "-"}</td>
                     <td className="p-2">{r?.modelo || "-"}</td>
                     <td className="p-2"><DeviceIdentifier row={r} /></td>

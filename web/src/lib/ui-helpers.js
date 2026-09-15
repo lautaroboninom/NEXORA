@@ -27,6 +27,13 @@ export const parseDateLocal = (s) => {
   return new Date(s);
 };
 
+// Para inputs de fecha civil: no desplazar el día al convertir a UTC.
+export const localDateInputValue = (date = new Date()) => {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+};
+
 export const formatDateOnly = (s, locale = "es-AR") => {
   const d = parseDateLocal(s);
   return d ? d.toLocaleDateString(locale, { dateStyle: "short" }) : "-";
@@ -100,8 +107,74 @@ export const catalogEquipmentLabel = (row, fallback = "-") => {
 };
 
 export const SALE_TICKET_STATES = new Set(["vendido_pendiente_entrega", "vendido_entregado"]);
-const MG_CODE_RE = /^(MG|NM|NV|CE)\s*\d{1,4}$/i;
+// Número interno de MG BIO: pegado o separado, con o sin ceros a la izquierda y hasta 6 dígitos
+// ("MG1678", "MG 001678"). Espejo de `service/mg_codes.py`: si cambia uno, cambia el otro.
+export const MG_CODE_RE = /^(MG|NM|NV|CE)\s*0*\d{1,6}$/i;
 const cleanText = (v) => (v == null ? "" : String(v).trim());
+
+export const locationNameKey = (value) =>
+  cleanText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("es-AR")
+    .replace(/\s+/g, " ");
+
+const SEPID_KEYS = new Set([
+  "sepid",
+  "deposito sepid",
+  "deposito sepid s.a.",
+  "deposito sepid sa",
+  "sepid s.a.",
+  "sepid sa",
+  "deposito sepid (val)",
+  "deposito sepid val",
+  "sepid (val)",
+  "sepid val",
+  "deposito central",
+  "deposito central sepid",
+  "valdenegro",
+  "deposito valdenegro",
+  "valdenegro 4578",
+]);
+
+export const isSepidLocationName = (value) => {
+  const key = locationNameKey(value);
+  if (!key) return false;
+  return (
+    SEPID_KEYS.has(key) ||
+    key === "sepid" ||
+    key.startsWith("sepid") ||
+    key.includes("sepid") ||
+    key.includes("valdenegro")
+  );
+};
+
+export const canonicalLocationName = (value) => {
+  const key = locationNameKey(value);
+  if (!key) return cleanText(value);
+  if (isSepidLocationName(value)) return "Sepid";
+  if (key === "sarmiento" || key.includes("sarmiento")) return "Sarmiento";
+  if (key === "taller" || key.includes("taller")) return "Taller";
+  if (key.includes("estanter") && key.includes("alquiler")) return "Estantería de Alquiler";
+  if (key === "-") return "-";
+  return cleanText(value);
+};
+
+export const bejermanDepositForLocation = (value) => {
+  const canonical = canonicalLocationName(value);
+  if (canonical === "Taller") return "STR";
+  if (canonical === "Sarmiento") return "SAR";
+  if (canonical === "Estantería de Alquiler") return "STL";
+  if (canonical === "Sepid") return "VAL";
+  return "";
+};
+
+export const locationDisplayName = (value) => {
+  const canonical = canonicalLocationName(value);
+  if (canonical === "Sarmiento") return "Sarmiento (SAR)";
+  if (canonical === "Sepid") return "Sepid (VAL)";
+  return canonical || cleanText(value);
+};
 
 export const isSaleTicketState = (value) =>
   SALE_TICKET_STATES.has(String(value ?? "").trim().toLowerCase());
@@ -127,6 +200,17 @@ export const hasMgCode = (row) => {
     row?.numero_serie,
     row?.equipo?.numero_serie,
   ].some((value) => MG_CODE_RE.test(cleanText(value)));
+};
+
+/** ¿Ese nombre de ubicación es la estantería de alquiler?
+ *
+ * Mismo criterio que `is_rental_shelf_location_name` en el backend: el nombre convivió
+ * escrito de varias maneras -con y sin acento, con y sin "de"- y los ids de ubicación
+ * son datos de instancia.
+ */
+export const isRentalShelfLocationName = (value) => {
+  const text = locationNameKey(value);
+  return text.includes("estanter") && text.includes("alquiler");
 };
 
 export const isMgOwned = (row) => {

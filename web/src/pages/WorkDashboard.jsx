@@ -8,6 +8,7 @@ import BusquedaAccRefCard from "../components/BusquedaAccRefCard.jsx";
 import QrScanCard from "../components/QrScanCard.jsx";
 import DeliveryOrderCreateForm from "../components/DeliveryOrderCreateForm.jsx";
 import WorkQueueTable from "../components/WorkQueueTable.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import { SortableTh } from "../components/TableSortControls.jsx";
 import { DELIVERY_ORDER_SORT_COLUMNS } from "../lib/delivery-order-sort.js";
 import { sortRows } from "../lib/table-sort.js";
@@ -117,7 +118,10 @@ function SearchResult({ item, groupKey, onOpen }) {
       className="w-full border-b px-3 py-2 text-left last:border-b-0 hover:bg-gray-50"
       onClick={() => onOpen(item)}
     >
-      <div className="text-sm font-medium text-gray-900">{title || "-"}</div>
+      <div className="text-sm font-medium text-gray-900">
+        {title || "-"}
+        {groupKey === "ingresos" && <DerivadoMark row={item} className="ml-1.5 align-middle" />}
+      </div>
       <div className="text-xs text-gray-500">{subtitle || "-"}</div>
     </button>
   );

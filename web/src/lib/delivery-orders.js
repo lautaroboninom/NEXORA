@@ -107,6 +107,41 @@ export function deliveryOrderUsedPartidaKeys(items, itemIndex, partidaIndex, fal
   return used;
 }
 
+/** Por qué un NS con stock en STL no se puede alquilar, o "" si se puede.
+ * El stock viene de Bejerman y el equipo de NEXORA, y no siempre coinciden: un remito manual que
+ * no descontó STL deja stock de un equipo alquilado. El backend marca esos NS con
+ * `rentalAvailable: false`; lo que no trae la marca (otro depósito, o si esa consulta falló) se
+ * sigue ofreciendo y el guardado vuelve a validar. */
+export function deliveryOrderRentalLotBlockReason(lot) {
+  if (lot?.rentalAvailable !== false) return "";
+  return clean(lot?.rentalBlockReason) || `El NS ${clean(lot?.partida)} no está disponible para alquilar.`;
+}
+
+export function deliveryOrderSplitRentalLots(lots) {
+  const usable = [];
+  const blocked = [];
+  (Array.isArray(lots) ? lots : []).forEach((lot) => {
+    (deliveryOrderRentalLotBlockReason(lot) ? blocked : usable).push(lot);
+  });
+  return { usable, blocked };
+}
+
+/** Cuántas partidas se piden al consultar el stock de un artículo en un depósito. Pedir 100
+ * dejó afuera partidas reales de SAR (OE-00478: 186 Auto CPAP y 224 humidificadores) y el
+ * recuadro las rechazaba como "no figura en el depósito". Espejo del tope del backend. */
+export const DELIVERY_ORDER_STOCK_LOTS_LIMIT = 2000;
+
+/** El lote de la partida escrita o escaneada, y si el listado prueba que falta.
+ * Un listado recortado (`truncated`) no prueba nada: `missing` queda en false y la partida
+ * la valida el guardado, que consulta el depósito completo. */
+export function deliveryOrderFindStockLot(lots, partida, { truncated = false } = {}) {
+  const key = clean(partida).toLowerCase();
+  const lot = key
+    ? (Array.isArray(lots) ? lots : []).find((candidate) => clean(candidate?.partida).toLowerCase() === key) || null
+    : null;
+  return { lot, missing: !lot && !truncated };
+}
+
 export function formatOrderMoney(value, currency = "ARS") {
   const parsed = parseNumber(value);
   if (parsed === null) return "-";
@@ -422,4 +457,158 @@ export function deliveryOrderCommercialLabel(order) {
   ]
     .filter(Boolean)
     .join(" - ");
+}
+
+export function deliveryOrderRentalEquipmentKey(option) {
+  const ingresoId = clean(option?.ingresoId);
+  if (ingresoId) return `os:${ingresoId}`;
+  const deviceId = clean(option?.deviceId);
+  if (deviceId) return `dev:${deviceId}`;
+  return "";
+}
+
+export function deliveryOrderSelectedRentalKeys(items) {
+  const keys = new Set();
+  for (const item of items || []) {
+    const itemKey = deliveryOrderRentalEquipmentKey(item);
+    if (itemKey) keys.add(itemKey);
+    for (const partida of item?.partidas || []) {
+      const partidaKey = deliveryOrderRentalEquipmentKey(partida);
+      if (partidaKey) keys.add(partidaKey);
+    }
+  }
+  return keys;
+}
+
+export function hasPartidaRowData(row) {
+  return Boolean(
+    clean(row?.partida) ||
+    clean(row?.partidaExpirationDate) ||
+    clean(row?.stockAvailableQuantity)
+  );
+}
+
+export function isDeliveryOrderBlankItem(item) {
+  return (
+    !clean(item?.id) &&
+    !clean(item?.ingresoId) &&
+    !clean(item?.deviceId) &&
+    !clean(item?.articleCode) &&
+    !clean(item?.description) &&
+    !(Array.isArray(item?.partidas) ? item.partidas : []).some(hasPartidaRowData)
+  );
+}
+
+export function deliveryOrderPartidaFromRentalOption(option, fallbackDeposit = "STL") {
+  const stock = option?.stockAvailableQuantity == null ? "" : String(option.stockAvailableQuantity);
+  return {
+    ingresoId: option?.ingresoId == null ? "" : String(option.ingresoId),
+    deviceId: option?.deviceId == null ? "" : String(option.deviceId),
+    partida: clean(option?.partida || option?.equipmentSerial),
+    assignedQuantity: "1",
+    partidaExpirationDate: clean(option?.partidaExpirationDate),
+    stockDepositCode: clean(option?.stockDepositCode) || fallbackDeposit || "STL",
+    stockAvailableQuantity: stock,
+    stockCheckedAt: clean(option?.stockCheckedAt),
+  };
+}
+
+export function deliveryOrderAppendRentalEquipment(
+  items,
+  option,
+  { priceCurrency = "ARS", fallbackDeposit = "STL" } = {}
+) {
+  const currentItems = Array.isArray(items) ? items : [];
+  const articleCode = clean(option?.articleCode);
+  const newPartida = deliveryOrderPartidaFromRentalOption(option, fallbackDeposit);
+
+  // Si ya existe un renglón con el mismo código de artículo, se incorpora como una nueva partida a ese renglón
+  const existingIndex = articleCode
+    ? currentItems.findIndex(
+        (it) => clean(it?.articleCode).toUpperCase() === articleCode.toUpperCase()
+      )
+    : -1;
+
+  if (existingIndex >= 0) {
+    const existingItem = currentItems[existingIndex];
+    const currentPartidas = Array.isArray(existingItem.partidas) ? existingItem.partidas : [];
+
+    const optionIngresoId = clean(option?.ingresoId);
+    const optionDeviceId = clean(option?.deviceId);
+    const optionSerial = clean(option?.partida || option?.equipmentSerial).toUpperCase();
+
+    const alreadyPresent = currentPartidas.some((p) => {
+      if (optionIngresoId && clean(p.ingresoId) === optionIngresoId) return true;
+      if (optionDeviceId && clean(p.deviceId) === optionDeviceId) return true;
+      if (optionSerial && clean(p.partida).toUpperCase() === optionSerial) return true;
+      return false;
+    });
+
+    if (alreadyPresent) {
+      return { items: currentItems, targetIndex: existingIndex, added: false };
+    }
+
+    let nextPartidas;
+    const emptyRowIndex = currentPartidas.findIndex((p) => !hasPartidaRowData(p));
+    if (emptyRowIndex >= 0) {
+      nextPartidas = [...currentPartidas];
+      nextPartidas[emptyRowIndex] = newPartida;
+    } else {
+      nextPartidas = [...currentPartidas, newPartida];
+    }
+
+    const activeRows = nextPartidas.filter(hasPartidaRowData);
+    const totalAssigned = activeRows.reduce(
+      (sum, row) => sum + (parseNumber(row.assignedQuantity) || 1),
+      0
+    );
+    const currentQty = parseNumber(existingItem.quantity) || 0;
+    const nextQuantity = String(Math.max(currentQty, totalAssigned));
+
+    const existingLegend = clean(existingItem.remitoArticleLegend);
+    const optionLegend = clean(option?.remitoArticleLegend || option?.accessories);
+    const remitoArticleLegend = existingLegend || optionLegend;
+
+    const updatedItem = {
+      ...existingItem,
+      quantity: nextQuantity,
+      remitoArticleLegend,
+      articleRequiresPartida: true,
+      stockDepositCode: existingItem.stockDepositCode || fallbackDeposit || "STL",
+      partidas: nextPartidas,
+      ...(nextPartidas.length > 1 ? { ingresoId: "", deviceId: "" } : {}),
+    };
+
+    const nextItems = currentItems.map((it, idx) => (idx === existingIndex ? updatedItem : it));
+    return { items: nextItems, targetIndex: existingIndex, added: true };
+  }
+
+  // Si el artículo no está en la orden, se agrega como renglón nuevo (o reemplaza el renglón inicial vacío)
+  const isOnlyBlank = currentItems.length === 1 && isDeliveryOrderBlankItem(currentItems[0]);
+  const targetIndex = isOnlyBlank ? 0 : currentItems.length;
+
+  const stock = option?.stockAvailableQuantity == null ? "" : String(option.stockAvailableQuantity);
+  const newItem = {
+    id: "",
+    ingresoId: option?.ingresoId == null ? "" : String(option.ingresoId),
+    deviceId: option?.deviceId == null ? "" : String(option.deviceId),
+    quantity: "1",
+    articleCode,
+    articleName: clean(option?.articleName),
+    description: clean(option?.description || option?.equipmentDetail || option?.equipmentModel),
+    remitoArticleLegend: clean(option?.remitoArticleLegend || option?.accessories || ""),
+    unitPrice: "",
+    priceCurrency: clean(priceCurrency).toUpperCase() === "USD" ? "USD" : "ARS",
+    discountPercent: "",
+    partida: clean(option?.partida || option?.equipmentSerial),
+    partidaExpirationDate: clean(option?.partidaExpirationDate),
+    stockDepositCode: clean(option?.stockDepositCode) || fallbackDeposit || "STL",
+    stockAvailableQuantity: stock,
+    stockCheckedAt: clean(option?.stockCheckedAt),
+    articleRequiresPartida: true,
+    partidas: [newPartida],
+  };
+
+  const nextItems = isOnlyBlank ? [newItem] : [...currentItems, newItem];
+  return { items: nextItems, targetIndex, added: true };
 }

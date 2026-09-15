@@ -70,6 +70,7 @@ const TYPE_LABELS = {
   stock_to_desguace: "Baja a DES",
   stock_from_desguace: "Alta a STR",
   stock_str_to_val: "STR a VAL",
+  stock_val_to_stl: "VAL a STL (alta equipo propio)",
   stock_exit_rts: "Salida RTS bloqueada",
 };
 
@@ -1018,18 +1019,22 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
   const editHref = firstOrderId
     ? `/ordenes-entrega?orderId=${encodeURIComponent(firstOrderId)}&edit=1&reviewGroupId=${encodeURIComponent(row?.group_id || row?.id || "")}&returnTo=${encodeURIComponent(returnTo)}`
     : "";
-  const verifyAllowed = actions?.verify?.allowed ?? (canManage && needsReview);
-  const editAllowed = actions?.edit?.allowed ?? (canEditOrders && ["ready_for_correction", "ready_to_reissue"].includes(reviewState));
-  const reissueAllowed = actions?.reissue?.allowed ?? (canManage && canGenerateRemito && reviewState === "ready_to_reissue");
-  const resolveAllowed = actions?.resolve?.allowed ?? (canManage && needsReview);
-  // El backend ya decide qué acciones tienen sentido para este proceso (`visible`).
-  // Ignorarlo era lo que dejaba los cuatro botones dibujados —y grises— en procesos
-  // que un operador ya había cerrado: la fila parecía tener trabajo pendiente y no
-  // había ninguno.
-  const showVerify = actions?.verify?.visible ?? needsReview;
-  const showEdit = actions?.edit?.visible ?? needsReview;
-  const showResolve = actions?.resolve?.visible ?? needsReview;
-  const showReissue = actions?.reissue?.visible ?? needsReview;
+  // El backend declara qué acciones existen para este proceso. Cuando las manda, se le
+  // cree y punto: adivinar por nuestra cuenta era lo que dibujaba «Verificar» y «Emitir
+  // corregido» sobre los remitos de ingreso, que no tienen ni una ni otra — tres botones
+  // que llamaban al mismo endpoint y fallaban siempre. Los defaults quedan sólo para un
+  // origen que todavía no declare nada.
+  const hasDeclaredActions = Boolean(row?.actions);
+  const declared = (name, fallback) => (hasDeclaredActions ? Boolean(actions?.[name]?.allowed) : fallback);
+  const declaredVisible = (name, fallback) => (hasDeclaredActions ? Boolean(actions?.[name]?.visible) : fallback);
+  const verifyAllowed = declared("verify", canManage && needsReview);
+  const editAllowed = declared("edit", canEditOrders && ["ready_for_correction", "ready_to_reissue"].includes(reviewState));
+  const reissueAllowed = declared("reissue", canManage && canGenerateRemito && reviewState === "ready_to_reissue");
+  const resolveAllowed = declared("resolve", canManage && needsReview);
+  const showVerify = declaredVisible("verify", needsReview);
+  const showEdit = declaredVisible("edit", needsReview);
+  const showResolve = declaredVisible("resolve", needsReview);
+  const showReissue = declaredVisible("reissue", needsReview);
   const actionLoading = Boolean(actionState?.loading);
   const actionError = trimValue(actionState?.error);
   const verifyBlockedReason = !verifyAllowed ? trimValue(actions?.verify?.blockedReason) : "";
@@ -1142,8 +1147,10 @@ function RemitoReviewResolveModal({ target, onClose, onSubmit }) {
     setDecision("adopt");
     setReason("");
     setError("");
-    setNumero(trimValue(candidates[0]?.comprobanteNumero));
-  }, [row?.id, candidates]);
+    // Los remitos de ingreso no traen candidatos de Bejerman, pero muchos ya tienen el
+    // número anotado en la OS: se ofrece como sugerencia en vez de un campo vacío.
+    setNumero(trimValue(candidates[0]?.comprobanteNumero) || trimValue(row?.actions?.resolve?.suggestedNumber));
+  }, [row?.id, row?.actions?.resolve?.suggestedNumber, candidates]);
 
   if (!target?.row) return null;
 

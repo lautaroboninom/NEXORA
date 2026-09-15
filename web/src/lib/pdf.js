@@ -11,13 +11,29 @@ import { isRegisteredNoPdfCode, registeredNoPdfMessage } from "./remitos";
 export { PDF_REPRINT_STEPS, PDF_WAIT_STEPS };
 
 export function openPdfBlob(blob, reservedWindow = null) {
+  if (!(blob instanceof Blob)) return false;
   const url = URL.createObjectURL(blob);
   let opened = false;
 
+  const targetWindow = reservedWindow && typeof reservedWindow === "object" && "window" in reservedWindow
+    ? reservedWindow.window
+    : reservedWindow;
+
   try {
-    if (reservedWindow && !reservedWindow.closed) {
-      reservedWindow.location.href = url;
-      opened = true;
+    if (targetWindow && !targetWindow.closed) {
+      if (typeof targetWindow.NEXORA_PDF_WAIT?.showPdf === "function") {
+        targetWindow.NEXORA_PDF_WAIT.showPdf({ url });
+        opened = true;
+      } else {
+        try {
+          targetWindow.location.href = url;
+          opened = true;
+        } catch (_) {
+          targetWindow.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"/><title>PDF</title><style>html,body,iframe{margin:0;padding:0;width:100%;height:100%;border:0;}</style></head><body><iframe src="${escapeHtml(url)}"></iframe></body></html>`);
+          targetWindow.document.close();
+          opened = true;
+        }
+      }
     } else {
       opened = openDetachedWindow(url);
     }
@@ -25,18 +41,23 @@ export function openPdfBlob(blob, reservedWindow = null) {
     opened = false;
   }
 
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch (_) {}
+  }, 60_000);
   return opened;
 }
 export function openDetachedWindow(url) {
   const href = String(url || "").trim();
   if (!href) return false;
   try {
+    const direct = window.open(href, "_blank");
+    if (direct) return true;
+  } catch (_) {}
+  try {
     const target = window.open("", "_blank");
     if (!target) return false;
-    try {
-      target.opener = null;
-    } catch (_) {}
     target.location.href = href;
     return true;
   } catch (_) {
@@ -364,22 +385,66 @@ export function openPrintablePdf(blob, {
       URL.revokeObjectURL(url);
     } catch (_) {}
   };
-  let target = null;
+  const rawTitle = String(title || "PDF");
+  const rawLabel = String(documentLabel || title || "PDF");
+  const safeTitle = escapeHtml(rawTitle);
+  const safeLabel = escapeHtml(rawLabel);
+  const safePrintDelayMs = Math.max(100, Number(printDelayMs) || 700);
+  const safeAutoRevokeMs = Math.max(60000, Number(autoRevokeMs) || 300000);
 
+  const targetWindow = reservedWindow && typeof reservedWindow === "object" && "window" in reservedWindow
+    ? reservedWindow.window
+    : reservedWindow;
+
+  // Si la pestaña reservada sigue viva y ya tiene la página de espera,
+  // mostramos el PDF en su propio visor embebido sin recargar ni navegar.
+  if (targetWindow && !targetWindow.closed) {
+    let handled = false;
+    try {
+      if (typeof targetWindow.NEXORA_PDF_WAIT?.showPdf === "function") {
+        targetWindow.NEXORA_PDF_WAIT.showPdf({
+          url,
+          title: rawTitle,
+          documentLabel: rawLabel,
+          printDelayMs: safePrintDelayMs,
+        });
+        handled = true;
+      }
+    } catch (_) {}
+
+    if (!handled) {
+      try {
+        if (typeof targetWindow.postMessage === "function") {
+          targetWindow.postMessage(
+            {
+              type: "NEXORA_PDF_SHOW_PDF",
+              url,
+              title: rawTitle,
+              documentLabel: rawLabel,
+              printDelayMs: safePrintDelayMs,
+            },
+            "*",
+          );
+          handled = true;
+        }
+      } catch (_) {}
+    }
+
+    if (handled) {
+      window.setTimeout(revoke, safeAutoRevokeMs);
+      return { opened: true, reason: "", revoke };
+    }
+  }
+
+  let target = null;
   try {
-    target = reservedWindow && !reservedWindow.closed ? reservedWindow : window.open("", "_blank");
+    target = targetWindow && !targetWindow.closed ? targetWindow : window.open("", "_blank");
     if (!target) {
       revoke();
       return { opened: false, reason: "blocked" };
     }
-    try {
-      target.opener = null;
-    } catch (_) {}
 
-    const safeTitle = escapeHtml(title);
-    const safeLabel = escapeHtml(documentLabel || title);
     const safeUrl = escapeHtml(url);
-    const safePrintDelayMs = Math.max(100, Number(printDelayMs) || 700);
 
     target.document.write(`<!doctype html>
 <html lang="es">
@@ -432,13 +497,13 @@ export function openPrintablePdf(blob, {
 </body>
 </html>`);
     target.document.close();
-    window.setTimeout(revoke, Math.max(60000, Number(autoRevokeMs) || 300000));
+    window.setTimeout(revoke, safeAutoRevokeMs);
     return { opened: true, reason: "", revoke };
   } catch (_) {
     try {
       if (target && !target.closed) {
         target.location.href = url;
-        window.setTimeout(revoke, Math.max(60000, Number(autoRevokeMs) || 300000));
+        window.setTimeout(revoke, safeAutoRevokeMs);
         return { opened: true, reason: "fallback_url", revoke };
       }
     } catch (_) {}
@@ -475,9 +540,6 @@ export function reservePdfWindow({
     target = window.open("", "_blank");
     if (target) {
       try {
-        target.opener = null;
-      } catch (_) {}
-      try {
         target.document.write(
           buildPdfWaitPageHtml({
             title,
@@ -499,13 +561,27 @@ export function reservePdfWindow({
   return {
     /** Empuja el estado real a la pestaña; devuelve false si ya la cerraron. */
     update(patch) {
+      const data = patch || {};
+      let updated = false;
       try {
         if (target && !target.closed && target.NEXORA_PDF_WAIT) {
-          target.NEXORA_PDF_WAIT.update(patch || {});
-          return true;
+          target.NEXORA_PDF_WAIT.update(data);
+          updated = true;
         }
       } catch (_) {}
-      return false;
+      try {
+        if (target && !target.closed && typeof target.postMessage === "function") {
+          target.postMessage(
+            {
+              type: "NEXORA_PDF_WAIT_UPDATE",
+              patch: data,
+            },
+            "*",
+          );
+          updated = true;
+        }
+      } catch (_) {}
+      return updated;
     },
     open(blob) {
       return openPdfBlob(blob, target);
@@ -530,6 +606,12 @@ export function reservePdfWindow({
       try {
         if (target && !target.closed) target.close();
       } catch (_) {}
+    },
+    get window() {
+      return target;
+    },
+    get closed() {
+      return !target || target.closed;
     },
   };
 }

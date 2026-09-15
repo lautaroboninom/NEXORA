@@ -16,9 +16,11 @@ import {
   waitForRemitoJob,
 } from "../lib/delivery-remito-job";
 import {
+  DELIVERY_ORDER_STOCK_LOTS_LIMIT,
   deliveryOrderBejermanCustomerLabel,
   deliveryOrderDefaultDeposit,
   deliveryOrderEquipmentContext,
+  deliveryOrderFindStockLot,
   deliveryOrderCompanyKey,
   deliveryOrderCompanyLabel,
   deliveryOrderIsOccasionalCustomer,
@@ -340,7 +342,7 @@ function ArticleEditor({ order, item, onUpdated, disabled }) {
     try {
       const data = await getDeliveryOrderBejermanArticleStock({
         articleCode: code,
-        limit: 100,
+        limit: DELIVERY_ORDER_STOCK_LOTS_LIMIT,
         companyKey: deliveryOrderCompanyKey(order),
         deliveryType: order.deliveryType,
         depositCode: itemStockDeposit(order, item),
@@ -624,7 +626,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
     setStock({ loading: true, items: [], warning: "", unavailable: false, depositCode: itemStockDeposit(order, item) });
     getDeliveryOrderBejermanArticleStock({
       articleCode,
-      limit: 100,
+      limit: DELIVERY_ORDER_STOCK_LOTS_LIMIT,
       companyKey: deliveryOrderCompanyKey(order),
       deliveryType: order.deliveryType,
       depositCode: itemStockDeposit(order, item),
@@ -639,6 +641,7 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
             unavailable ? "No se pudieron consultar las partidas de Bejerman. Reintentá en unos minutos." : ""
           ),
           unavailable,
+          truncated: Boolean(data?.truncated),
           depositCode: clean(data?.depositCode) || itemStockDeposit(order, item),
         });
       })
@@ -691,11 +694,13 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
     const row = rows[index] || {};
     const partida = clean(row.partida);
     if (!partida || stock?.loading || stock?.unavailable || !stockLots.length) return;
-    const matchingLot = stockLots.find((lot) => clean(lot?.partida).toLowerCase() === partida.toLowerCase());
-    if (!matchingLot) {
+    const { lot: matchingLot, missing } = deliveryOrderFindStockLot(stockLots, partida, { truncated: stock?.truncated });
+    if (missing) {
       setError("La partida no figura para este artículo en el depósito seleccionado.");
       return;
     }
+    // Afuera de un listado recortado: queda como se escribió y la valida el guardado.
+    if (!matchingLot) return;
     const nextRow = lotDraft(matchingLot, clean(row.assignedQuantity) || "1", itemStockDeposit(order, item));
     applyRows(rows.map((current, rowIndex) => (rowIndex === index ? nextRow : current)));
   };
@@ -727,12 +732,15 @@ function PartidasEditor({ order, item, onUpdated, disabled }) {
     const availableStockLots = Array.isArray(stock?.items) ? stock.items : [];
     if (!stock?.loading && !stock?.unavailable && availableStockLots.length) {
       for (const partida of partidas) {
-        const matchingLot = availableStockLots.find((lot) => clean(lot?.partida).toLowerCase() === partida.partida.toLowerCase());
-        if (!matchingLot) {
+        const { lot: matchingLot, missing } = deliveryOrderFindStockLot(availableStockLots, partida.partida, {
+          truncated: stock?.truncated,
+        });
+        if (missing) {
           setError(`La partida ${partida.partida} no figura para este artículo en el depósito seleccionado.`);
           return;
         }
-        if (numberOf(partida.assignedQuantity, 0) - lotAvailableQuantity(matchingLot) > 0.0001) {
+        // Sin lote, la partida quedó afuera de un listado recortado: la valida el guardado.
+        if (matchingLot && numberOf(partida.assignedQuantity, 0) - lotAvailableQuantity(matchingLot) > 0.0001) {
           setError(`La partida ${partida.partida} no tiene stock suficiente en el depósito seleccionado.`);
           return;
         }
@@ -988,7 +996,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
       message: `Emitiendo ${progressLabel} en Bejerman`,
       detail: "NEXORA está enviando el remito a Bejerman. Esta pestaña abre la impresión cuando el PDF esté listo.",
       fallbackMessage:
-        `NEXORA sigue preparando el PDF del ${documentLabel}. Aguarde un poco mas. No se ansioso.`,
+        `NEXORA sigue preparando el PDF del ${documentLabel}. Aguarde un poco más.`,
     });
     // El modal y la pestaña de impresión cuentan lo mismo: el operador mira una
     // o la otra según dónde tenga el foco, y las dos tienen que decir la verdad.
@@ -1127,6 +1135,7 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
           : "El PDF está listo. Intentando abrir la ventana de impresión.",
         { step: "print", state: "ready" },
       );
+      await waitForRisProgressPaint();
       await waitForRisProgressMinimum(startedAt);
       const [firstJob, ...restJobs] = printJobs;
       const opened = reservedPrintWindow.openPrintable(
@@ -1310,6 +1319,11 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
                       {deliveryOrderEquipmentContext(order) && (
                         <div className="mt-0.5 text-xs text-gray-500">{deliveryOrderEquipmentContext(order)}</div>
                       )}
+                      {(order.remitoGeneralLegend || (order.deliveryType === "rental" ? "Se entrega en alquiler" : "")) && (
+                        <div className="mt-1 text-xs text-sky-900">
+                          <span className="font-medium">Leyenda general:</span> {order.remitoGeneralLegend || "Se entrega en alquiler"}
+                        </div>
+                      )}
                     </div>
                     <div className="text-xs text-gray-500">{order.sourceReference || order.deliveryType}</div>
                   </div>
@@ -1334,6 +1348,11 @@ export default function DeliveryOrderRemitoModal({ open, orders, canAssignArticl
                             <div>{deliveryOrderItemPartidaLabel(item, order, { includePartidaLabel: false }) || "-"}</div>
                           </div>
                         </div>
+                        {clean(item.remitoArticleLegend) && (
+                          <div className="text-xs text-slate-700 bg-slate-50 rounded px-2 py-1 border border-slate-200">
+                            <span className="font-medium">Accesorios / leyenda artículo:</span> {item.remitoArticleLegend}
+                          </div>
+                        )}
                         {!clean(item.articleCode) && canAssignArticles && (
                           <ArticleEditor order={order} item={item} onUpdated={updateOrder} disabled={saving} />
                         )}

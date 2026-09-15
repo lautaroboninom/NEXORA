@@ -27,7 +27,11 @@ import {
 } from "@/lib/api";
 import { isPendingPdfError, openPdfBlob, PDF_REPRINT_STEPS } from "@/lib/pdf";
 import { MOTIVO } from "@/lib/constants";
-import { findDuplicateEquipmentIndex, findStagedEquipmentIndex } from "@/lib/ingreso-equipos";
+import {
+  equipmentKeyOf,
+  findDuplicateEquipmentIndex,
+  findStagedEquipmentIndex,
+} from "@/lib/ingreso-equipos";
 import {
   openRisPrintablePdf,
   openReservedRisPrintablePdf,
@@ -162,7 +166,7 @@ function documentProfileFromResult(result) {
   );
 }
 
-function documentTypeFromResult(result, fallback = "RIS") {
+function documentTypeFromResult(result, fallback = "remito") {
   return cleanText(documentProfileFromResult(result)?.type) || fallback;
 }
 
@@ -355,6 +359,10 @@ export default function NuevoIngreso() {
   });
   const [mgLookup, setMgLookup] = useState({ loading: false, notFound: false, checkedNs: "" });
   const [mgInactiveInfo, setMgInactiveInfo] = useState(null);
+  // El equipo que devolvió el autocompletado ya tiene una OS abierta de hoy: es el remito
+  // cargado por segunda vez. Se guarda con la clave del equipo (serie + tipo) para que el
+  // bloqueo se suelte solo apenas el operador cambie alguno de los dos.
+  const [ingresoDeHoy, setIngresoDeHoy] = useState(null);
   const [nsAutofillInfo, setNsAutofillInfo] = useState("");
   const [nsAutofillClienteWarning, setNsAutofillClienteWarning] = useState("");
   // Aviso de "esto es otro equipo con el mismo número": qué equipo tenía la base con ese
@@ -738,6 +746,7 @@ export default function NuevoIngreso() {
     setTecnicoId(null);
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
+    setIngresoDeHoy(null);
     setBejermanSuggestion(null);
     setAppliedBejermanSale(null);
     setEquipoAlquiladoOrigen(false);
@@ -807,6 +816,7 @@ export default function NuevoIngreso() {
     setVarianteTxt("");
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
+    setIngresoDeHoy(null);
     setBejermanSuggestion(null);
     setAppliedBejermanSale(null);
     setRisPreflight(null);
@@ -967,6 +977,9 @@ export default function NuevoIngreso() {
     const seq = ++mgLookupSeqRef.current;
     (async () => {
       setMgLookup((s) => ({ ...s, loading: true, notFound: false, checkedNs: lookupCode }));
+      // El aviso de "ya ingresado hoy" lo vuelve a decidir esta búsqueda: arrastrar el de la
+      // anterior dejaría trabado un equipo que no es.
+      setIngresoDeHoy(null);
       try {
         const res = await lookupScan(lookupCode, {
           company_key: lookupCompanyKey,
@@ -1061,6 +1074,23 @@ export default function NuevoIngreso() {
         const tipoFromDevice = String(device.tipo_equipo || "").trim();
         const varianteFromDevice = String(device.variante || "").trim();
         const mgFromDevice = String(device.numero_interno || "").trim();
+        // Éste es el freno que el operador necesita en el momento de tipear el número, y no
+        // cuando ya cargó los seis equipos y le da a emitir: si el equipo tiene una OS abierta
+        // de hoy, el remito que está por hacer ya salió.
+        if (ingreso?.ingreso_en_curso && ingreso?.ingreso_hoy && ingreso?.id) {
+          setIngresoDeHoy({
+            key: equipmentKeyOf({
+              numero_serie: lookupByInterno ? nsFromDevice : nsFromDevice || lookupCode,
+              numero_interno: lookupByInterno ? mgFromDevice || lookupCode : mgFromDevice,
+              tipo_equipo: tipoFromDevice,
+            }),
+            ingresoId: ingreso.id,
+            os: ingreso.os || String(ingreso.id),
+            fechaIngreso: ingreso.fecha_ingreso || null,
+            identificador: nsFromDevice || mgFromDevice || lookupCode,
+            equipo: [tipoFromDevice, device.marca, device.modelo].filter(Boolean).join(" - "),
+          });
+        }
         const mgInactiveBySale = !!flags.mg_inactivo_venta;
         const propioMg = !mgInactiveBySale && (
           flags.es_propietario_mg === true ||
@@ -1576,6 +1606,30 @@ export default function NuevoIngreso() {
     return String(modelo?.tipo_equipo || tipoSel || "").trim();
   };
 
+  // El aviso vale mientras en pantalla siga estando el equipo que lo disparó. Si el operador
+  // corrige la serie o el tipo, ya está hablando de otro equipo y el bloqueo se cae solo.
+  const ingresoDeHoyBloqueo = (() => {
+    if (!ingresoDeHoy?.key) return null;
+    const actual = equipmentKeyOf({
+      numero_serie: form.equipo.numero_serie,
+      numero_interno: form.equipo.numero_interno,
+      tipo_equipo: tipoEquipoActual(),
+    });
+    if (!actual) return null;
+    if (actual === ingresoDeHoy.key) return ingresoDeHoy;
+    // Los equipos viejos pueden no tener el tipo cargado. Ahí alcanza con que sea el mismo
+    // número: si no, el aviso se caería justo al elegir el modelo, que es el que le pone tipo.
+    const [idActual] = actual.split("|");
+    const [idBloqueo, tipoBloqueo] = ingresoDeHoy.key.split("|");
+    return !tipoBloqueo && idActual === idBloqueo ? ingresoDeHoy : null;
+  })();
+  const ingresoDeHoyMensaje = ingresoDeHoyBloqueo
+    ? `Este equipo ya se ingresó hoy en la OS ${ingresoDeHoyBloqueo.os}` +
+      `${ingresoDeHoyBloqueo.identificador ? ` (${ingresoDeHoyBloqueo.identificador})` : ""}. ` +
+      "No se puede ingresar dos veces el mismo día: abrí esa orden, o dala de baja si quedó " +
+      "mal cargada, antes de emitir un remito nuevo."
+    : "";
+
   // Cómo se lee el equipo que está cargado en la pantalla. Sirve para el renglón de la lista
   // y para poder decirle al operador de qué equipo se limpiaron los datos.
   const equipoDescripcionActual = () => {
@@ -1778,6 +1832,7 @@ export default function NuevoIngreso() {
   };
 
   const validateCurrentEquipmentForSubmit = () => {
+    if (ingresoDeHoyBloqueo) return ingresoDeHoyMensaje;
     if (!form.equipo.marca_id) return "Seleccione una marca válida de la lista.";
     if (!form.equipo.modelo_id) return "Seleccione un modelo.";
     if (!form.motivo) return "Seleccione un motivo.";
@@ -1989,6 +2044,7 @@ export default function NuevoIngreso() {
     setVarianteTxt("");
     setMgLookup({ loading: false, notFound: false, checkedNs: "" });
     setMgInactiveInfo(null);
+    setIngresoDeHoy(null);
     setBejermanSuggestion(null);
     setAppliedBejermanSale(null);
     setNsAutofillInfo("");
@@ -2108,7 +2164,7 @@ export default function NuevoIngreso() {
     setBatchItems(nextItems);
     setEditingBatchItemId(null);
     clearCurrentEquipmentFields();
-    const nextDocumentType = documentTypeFromResult(nextPreflight, risMode === "register" ? "remito" : "RIS");
+    const nextDocumentType = documentTypeFromResult(nextPreflight);
     if (successNotice !== null) {
       setNotice(
         successNotice ||
@@ -2374,23 +2430,23 @@ export default function NuevoIngreso() {
           step: "emit",
           detail: "NEXORA está sumando el equipo cargado a la lista antes de emitir.",
         });
-        const staged = await stageCurrentEquipment({
-          silent: true,
-          commitOnPreflightIssues: false,
-          successNotice: null,
-        });
+        let staged;
+        try {
+          staged = await stageCurrentEquipment({
+            silent: true,
+            commitOnPreflightIssues: false,
+            successNotice: null,
+          });
+        } catch (stageErr) {
+          setErr(stageErr?.message || "No se pudo agregar el equipo pendiente.");
+          return;
+        }
         if (!staged.ok) {
-          reservedPrintWindow?.close();
-          setLoading(false);
-          setSubmitStage("");
           return;
         }
         effectiveBatchItems = staged.items;
       }
       if (!effectiveBatchItems.length) {
-        reservedPrintWindow?.close();
-        setLoading(false);
-        setSubmitStage("");
         setErr(isRegisterMode ? "Agregue el equipo a la lista antes de registrar el remito." : "Agregue el equipo a la lista antes de emitir el remito.");
         return;
       }
@@ -2399,22 +2455,16 @@ export default function NuevoIngreso() {
         step: "emit",
         detail: "NEXORA está revisando cliente, artículos y partidas antes de emitir.",
       });
-      const preflight = await runRisPreflight({ silent: true, items: effectiveBatchItems });
-      if (!preflight?.can_emit) {
-        reservedPrintWindow?.close();
-        setLoading(false);
-        setSubmitStage("");
+      let preflight;
+      try {
+        preflight = await runRisPreflight({ silent: true, items: effectiveBatchItems });
+      } catch (preflightError) {
+        setErr(preflightError?.message || "No se pudo validar el remito antes de emitirlo.");
         return;
       }
-    } catch (preflightError) {
-      reservedPrintWindow?.close();
-      setLoading(false);
-      setSubmitStage("");
-      setErr(preflightError?.message || "No se pudo validar el remito antes de emitirlo.");
-      return;
-    }
-
-    try {
+      if (!preflight?.can_emit) {
+        return;
+      }
       if (effectiveBatchItems.length) {
         const fechaIngresoNorm = normalizeFechaIngreso(form.fecha_ingreso);
         const lotePayload = {
@@ -2434,11 +2484,17 @@ export default function NuevoIngreso() {
         });
         await waitForRisProgressPaint();
         const r = await postNuevoIngresoLote(lotePayload);
-        avisarEtapa(isRegisterMode ? "Registrando remito..." : "Preparando PDF...", { step: "pdf" });
         const remito = risRemitoFrom(r);
         const remitoNumbers = risRemitoNumbersFrom(r);
         const remitoLabel = remitoNumbersLabel(r);
         const documentLabel = remitoDocumentLabel(r);
+        avisarEtapa(isRegisterMode ? "Registrando remito..." : "Preparando PDF...", {
+          step: "pdf",
+          documentLabel,
+          detail: isRegisterMode
+            ? "NEXORA está registrando el remito."
+            : "El comprobante ya fue emitido por Bejerman. Obteniendo el archivo para imprimir.",
+        });
         const responseMode = r?.document_mode || r?.ris?.document_mode || risMode;
         const isRegisteredResponse = responseMode === "register";
         const count = Array.isArray(r?.ingresos) ? r.ingresos.length : effectiveBatchItems.length;
@@ -2458,7 +2514,6 @@ export default function NuevoIngreso() {
             );
         if (!isRegisteredResponse && remitoNumbers.length > 0 && firstIngresoId) {
           const controller = beginPdfWait(remitoLabel);
-          reservedPrintWindow?.update({ step: "pdf", documentLabel });
           try {
             const blob = await waitForRisPdfBlob(firstIngresoId, r, {
               signal: controller.signal,
@@ -2466,6 +2521,7 @@ export default function NuevoIngreso() {
               onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
             });
             avisarEtapa("Abriendo impresión...", { step: "print", state: "ready" });
+            await waitForRisProgressPaint();
             const opened = reservedPrintWindow
               ? openReservedRisPrintablePdf(reservedPrintWindow, blob, r).opened
               : openRisPrintablePdf(blob, r).opened;
@@ -2477,6 +2533,12 @@ export default function NuevoIngreso() {
               risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
             }
           } catch (pdfError) {
+            reservedPrintWindow?.update({
+              state: "error",
+              status: "El comprobante fue emitido pero no se pudo obtener el PDF.",
+              detail: "El comprobante ya quedó registrado en Bejerman. Puede reimprimirlo más tarde desde la hoja de servicio.",
+            });
+            printWindowUsed = true;
             risNotice += ` ${pdfWaitNotice(pdfError, firstIngresoId, r)}`;
           } finally {
             endPdfWait();
@@ -2548,19 +2610,24 @@ export default function NuevoIngreso() {
           });
           await waitForRisProgressPaint();
           risResult = await postIngresoRisEmitir(r.ingreso_id);
-          avisarEtapa("Preparando PDF...", { step: "pdf" });
           const remito = risRemitoFrom(risResult);
+          const documentLabel = remito ? `Remito ${remito}` : "";
+          avisarEtapa("Preparando PDF...", {
+            step: "pdf",
+            documentLabel,
+            detail: "El comprobante ya fue emitido por Bejerman. Obteniendo el archivo para imprimir.",
+          });
           risNotice = remito
             ? `Ingreso creado y remito ${remito} emitido.`
             : "Ingreso creado y remito emitido.";
           const controller = beginPdfWait(remito);
-          reservedPrintWindow?.update({ step: "pdf", documentLabel: remito ? `Remito ${remito}` : "" });
           const blob = await waitForRisPdfBlob(r.ingreso_id, risResult, {
             signal: controller.signal,
             reservedWindow: reservedPrintWindow,
             onProgress: (progress) => setSubmitStage(progress?.status || "Preparando PDF del remito..."),
           });
           avisarEtapa("Abriendo impresión...", { step: "print", state: "ready" });
+          await waitForRisProgressPaint();
           const opened = reservedPrintWindow
             ? openReservedRisPrintablePdf(reservedPrintWindow, blob, risResult).opened
             : openRisPrintablePdf(blob, risResult).opened;
@@ -2572,6 +2639,14 @@ export default function NuevoIngreso() {
             risNotice += " El PDF ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.";
           }
         } catch (risError) {
+          if (risResult) {
+            reservedPrintWindow?.update({
+              state: "error",
+              status: "El comprobante fue emitido pero no se pudo obtener el PDF.",
+              detail: "El comprobante ya quedó registrado en Bejerman. Puede reimprimirlo más tarde desde la hoja de servicio.",
+            });
+            printWindowUsed = true;
+          }
           risNotice = isPendingPdfError(risError)
             ? `${risNotice} ${pdfWaitNotice(risError, r.ingreso_id, risResult)}`
             : `Ingreso creado. No se pudo emitir o abrir el remito: ${risError?.message || "error desconocido"}. Reintente desde la hoja de servicio.`;
@@ -2663,7 +2738,7 @@ export default function NuevoIngreso() {
   const isRegisterMode = risMode === "register";
   const editingBatchItem = batchItems.find((item) => item.id === editingBatchItemId) || null;
   const currentEquipmentDraft = hasCurrentEquipmentDraft();
-  const resolvedDocumentType = documentTypeFromResult(risPreflight, isRegisterMode ? "remito" : "RIS");
+  const resolvedDocumentType = documentTypeFromResult(risPreflight);
   const documentActionLabel = isRegisterMode ? "Registrar remito" : "Emitir remito";
   const documentLabel = resolvedDocumentType;
   const manualRemitoReady = !isRegisterMode || manualRemitoNumber.trim().length > 0;
@@ -2689,10 +2764,15 @@ export default function NuevoIngreso() {
     risPreflightLoading ||
     !canSubmitCliente ||
     !!editingBatchItem ||
+    // El equipo que está en pantalla se agrega solo al emitir, así que un bloqueo activo
+    // frena todo el remito hasta que se corrija o se borre el número.
+    !!ingresoDeHoyBloqueo ||
     !manualRemitoReady ||
     !canSubmitRemito;
   const submitButtonText = loading
     ? submitStage || "Guardando..."
+    : ingresoDeHoyBloqueo
+      ? `Equipo ya ingresado hoy (OS ${ingresoDeHoyBloqueo.os})`
     : editingBatchItem
       ? "Guarde los cambios del equipo"
     : currentEquipmentDraft
@@ -2946,6 +3026,26 @@ export default function NuevoIngreso() {
 
       <form onSubmit={submit} className="grid gap-4 2xl:grid-cols-[minmax(0,920px)_420px] 2xl:items-start">
         <div className="min-w-0 space-y-6">
+        {ingresoDeHoyBloqueo && (
+          <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+            <div className="font-semibold">Este equipo ya se ingresó hoy</div>
+            <div className="mt-1">
+              {ingresoDeHoyBloqueo.identificador ? <b>{ingresoDeHoyBloqueo.identificador}</b> : "El equipo"}
+              {ingresoDeHoyBloqueo.equipo ? ` (${ingresoDeHoyBloqueo.equipo})` : ""} está en la{" "}
+              <b>OS {ingresoDeHoyBloqueo.os}</b>, abierta desde hoy. No se puede ingresar dos veces el
+              mismo día: si el remito anterior no salió bien, reimprimilo desde esa orden; si quedó mal
+              cargada, dala de baja antes de emitir uno nuevo.
+            </div>
+            {canViewCreatedIngreso && (
+              <Link
+                to={`/ingresos/${ingresoDeHoyBloqueo.ingresoId}`}
+                className="mt-2 inline-block font-semibold underline underline-offset-2 hover:text-red-950"
+              >
+                Abrir la OS {ingresoDeHoyBloqueo.os}
+              </Link>
+            )}
+          </div>
+        )}
         {nsAutofillInfo && (
           <div className="bg-indigo-50 border border-indigo-200 text-indigo-800 p-2 rounded text-sm">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
@@ -3470,15 +3570,17 @@ export default function NuevoIngreso() {
             )}
             <button
               type="button"
-              disabled={loading || risPreflightLoading || !canSubmitCliente}
+              disabled={loading || risPreflightLoading || !canSubmitCliente || !!ingresoDeHoyBloqueo}
               className={`px-4 py-2 rounded border text-sm font-semibold ${
-                loading || risPreflightLoading || !canSubmitCliente
+                loading || risPreflightLoading || !canSubmitCliente || ingresoDeHoyBloqueo
                   ? "border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed"
                   : "border-blue-600 text-blue-700 hover:bg-blue-50"
               }`}
               onClick={addCurrentEquipmentToBatch}
             >
-              {risPreflightLoading
+              {ingresoDeHoyBloqueo
+                ? "Ya ingresado hoy"
+                : risPreflightLoading
                 ? `Validando ${documentLabel}...`
                 : editingBatchItem
                   ? "Guardar cambios"

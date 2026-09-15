@@ -6,6 +6,7 @@ import {
   ingresoIdOf,
   formatOS,
   formatDateOnly,
+  localDateInputValue,
   norm,
   tipoEquipoOf,
   catalogEquipmentLabel,
@@ -17,6 +18,7 @@ import StatusChip from "../components/StatusChip.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
 import ListToolbar from "../components/ListToolbar.jsx";
 import IngresoTable from "../components/IngresoTable.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import useQueryState from "../hooks/useQueryState";
 import useColumnFilters from "../hooks/useColumnFilters";
 import {
@@ -25,7 +27,18 @@ import {
 } from "../lib/ingreso-list-filters";
 
 const COLUMNS = [
-  { field: "os", label: "OS", cellClassName: "underline", render: (row) => formatOS(row), filter: "text" },
+  {
+    field: "os",
+    label: "OS",
+    cellClassName: "underline",
+    render: (row) => (
+      <>
+        {formatOS(row)}
+        <DerivadoMark row={row} className="ml-1.5" />
+      </>
+    ),
+    filter: "text",
+  },
   {
     field: "cliente",
     label: "Cliente",
@@ -78,7 +91,7 @@ export default function Derivados() {
       const data = await api.get("/api/ingresos/derivados/");
       setRows(Array.isArray(data) ? data : []);
       // preset fechas por fila (hoy)
-      const today = new Date().toISOString().slice(0,10);
+      const today = localDateInputValue();
       const m = {};
       (Array.isArray(data) ? data : []).forEach(r => { m[ingresoIdOf(r)] = today; });
       setFechaMap(m);

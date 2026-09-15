@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   equipmentIdentityKey,
+  equipmentKeyOf,
   findDuplicateEquipmentIndex,
   findStagedEquipmentIndex,
 } from "./ingreso-equipos.js";
@@ -82,4 +83,35 @@ test("el humidificador ve al CPAP que ya está en la lista, pero no al revés qu
   assert.equal(findStagedEquipmentIndex(lista, { numero_serie: "sn9", tipo_equipo: "cpap" }), 0);
   assert.equal(findStagedEquipmentIndex(lista, { numero_serie: "SN-9", tipo_equipo: "Calentador humidificador" }), -1);
   assert.equal(findStagedEquipmentIndex(lista, { numero_serie: "SN-9", tipo_equipo: "CPAP" }, { skipItemId: "1" }), -1);
+});
+
+test("la clave del bloqueo 'ya ingresado hoy' sigue al equipo que hay en pantalla", () => {
+  // El aviso lo dispara el autocompletado sobre el equipo de la base; tiene que seguir
+  // valiendo si el operador escribe la serie de otra forma, y caerse si cambia el tipo.
+  const bloqueo = equipmentKeyOf({ numero_serie: "S12BEA05013", tipo_equipo: "Concentrador de oxígeno" });
+
+  assert.equal(
+    equipmentKeyOf({ numero_serie: " s12bea-05013 ", tipo_equipo: "concentrador de oxígeno" }),
+    bloqueo,
+  );
+  assert.notEqual(
+    equipmentKeyOf({ numero_serie: "S12BEA05013", tipo_equipo: "Calentador humidificador" }),
+    bloqueo,
+  );
+  assert.notEqual(equipmentKeyOf({ numero_serie: "S12BEA05014", tipo_equipo: "Concentrador de oxígeno" }), bloqueo);
+});
+
+test("sin número no hay clave: el bloqueo no puede quedarse pegado a un formulario vacío", () => {
+  assert.equal(equipmentKeyOf({ tipo_equipo: "CPAP" }), "");
+  assert.equal(equipmentKeyOf({}), "");
+  assert.equal(equipmentKeyOf(), "");
+});
+
+test("la identidad de la lista y la clave suelta son la misma cuenta", () => {
+  const item = {
+    id: "1",
+    payload: { equipo: { numero_serie: "SN-1", tipo_equipo: "CPAP" } },
+  };
+
+  assert.equal(equipmentIdentityKey(item), equipmentKeyOf({ numero_serie: "sn1", tipo_equipo: "cpap" }));
 });

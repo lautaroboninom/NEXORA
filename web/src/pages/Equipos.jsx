@@ -49,6 +49,9 @@ import {
   deviceOwnerMeta,
   deviceModelTitle,
   deviceBarcodeValue,
+  locationDisplayName,
+  canonicalLocationName,
+  locationNameKey,
 } from "../lib/ui-helpers";
 import { DEVICE_ACTION, canRequestDeviceBaja, getDeviceActions } from "../lib/device-actions.js";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
@@ -239,6 +242,26 @@ function sortedCatalogOptions(rows = []) {
     }))
     .filter((row) => row.id != null && row.nombre)
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
+}
+
+function deduplicatedLocationOptions(rows = [], { excludeVirtual = false } = {}) {
+  const seen = new Set();
+  const banned = new Set(["-", "alquilado", "desguace"]);
+  return (Array.isArray(rows) ? rows : [])
+    .filter((r) => {
+      const name = String(r?.nombre || "").trim();
+      if (!name) return false;
+      if (excludeVirtual && banned.has(name.toLowerCase())) return false;
+      const canonical = canonicalLocationName(name);
+      const key = locationNameKey(canonical);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((r) => ({
+      ...r,
+      label: r.label || locationDisplayName(r.nombre),
+    }));
 }
 
 function initialDeviceFilters(searchParams) {
@@ -657,8 +680,8 @@ function EditModal({ deviceId, onClose, onSaved, canEdit, customers = [] }) {
                 disabled={!canEdit || saving}
               >
                 <option value="">Sin ubicación</option>
-                {(ubicaciones || []).map((u) => (
-                  <option key={u.id} value={u.id}>{u.nombre}</option>
+                {deduplicatedLocationOptions(ubicaciones, { excludeVirtual: true }).map((u) => (
+                  <option key={u.id} value={u.id}>{u.label || locationDisplayName(u.nombre)}</option>
                 ))}
               </select>
             </label>
@@ -2381,7 +2404,7 @@ export default function Equipos() {
         setDeviceFilterCatalogs({
           tipos: uniqueSortedTextOptions(tiposRows),
           marcas: sortedCatalogOptions(marcasRows),
-          ubicaciones: sortedCatalogOptions(ubicacionesRows),
+          ubicaciones: deduplicatedLocationOptions(sortedCatalogOptions(ubicacionesRows)),
         });
       } catch (e) {
         if (!active) return;
@@ -2447,7 +2470,7 @@ export default function Equipos() {
     if (deviceFilters.tipo_equipo) badges.push(`Tipo: ${deviceFilters.tipo_equipo}`);
     if (marca) badges.push(`Marca: ${marca}`);
     if (deviceFilters.modelo) badges.push(`Modelo: ${deviceFilters.modelo}`);
-    if (ubicacion) badges.push(`Ubicación: ${ubicacion}`);
+    if (ubicacion) badges.push(`Ubicación: ${locationDisplayName(ubicacion)}`);
     if (alquiler && deviceFilters.alquilado) badges.push(`Alquiler: ${alquiler}`);
     return badges;
   }, [deviceFilterCatalogs, deviceFilters, hasDeviceSearch, qDebounced]);
@@ -3222,7 +3245,7 @@ export default function Equipos() {
                 >
                   <option value="">Todas</option>
                   {deviceFilterCatalogs.ubicaciones.map((ubicacion) => (
-                    <option key={ubicacion.id} value={ubicacion.id}>{ubicacion.nombre}</option>
+                    <option key={ubicacion.id} value={ubicacion.id}>{ubicacion.label || locationDisplayName(ubicacion.nombre)}</option>
                   ))}
                 </select>
               </label>

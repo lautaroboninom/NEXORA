@@ -16,6 +16,9 @@ import {
   formatOS,
   formatDateOnly,
   norm,
+  locationDisplayName,
+  canonicalLocationName,
+  locationNameKey,
   tipoEquipoOf,
   catalogEquipmentLabel,
 } from "../lib/ui-helpers";
@@ -140,6 +143,7 @@ const COLUMNS = [
 
 export default function Depositos() {
   const [ubicaciones, setUbicaciones] = useState([]);
+  const [loadingUbicaciones, setLoadingUbicaciones] = useState(true);
   const [ubicacionId, setUbicacionId] = useQueryState("ubicacion_id", "");
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -152,16 +156,27 @@ export default function Depositos() {
   const nav = useNavigate();
 
   useEffect(() => {
+    setLoadingUbicaciones(true);
     getUbicaciones()
-      .then(setUbicaciones)
-      .catch((e) => setErr(e.message || "Error ubicaciones"));
+      .then((data) => {
+        setUbicaciones(Array.isArray(data) ? data : []);
+      })
+      .catch((e) => setErr(e.message || "Error ubicaciones"))
+      .finally(() => setLoadingUbicaciones(false));
   }, []);
 
   const ubicacionesFiltradas = useMemo(() => {
     const banned = new Set(["-", "alquilado", "desguace"]);
-    return (ubicaciones || []).filter(
-      (u) => !banned.has(String(u?.nombre || "").toLowerCase().trim())
-    );
+    const seen = new Set();
+    return (ubicaciones || []).filter((u) => {
+      const name = String(u?.nombre || "").trim();
+      if (!name || banned.has(name.toLowerCase())) return false;
+      const canonical = canonicalLocationName(name);
+      const key = locationNameKey(canonical);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }, [ubicaciones]);
 
   const ubicacionNombre = useMemo(() => {
@@ -173,6 +188,11 @@ export default function Depositos() {
     if (!ubicacionId) {
       setRows([]);
       setWarning("");
+      return;
+    }
+    // Si es una ubicación de base de datos y todavía se están cargando los catálogos,
+    // esperar a tener la lista antes de consultar para no traer todos los equipos sin filtro.
+    if (ubicacionId !== FUENTE_ALQUILER && ubicacionId !== FUENTE_BAJAS && loadingUbicaciones) {
       return;
     }
     setLoading(true);
@@ -190,8 +210,11 @@ export default function Depositos() {
       if (ubicacionId === FUENTE_BAJAS) {
         params.estado = "baja";
       } else if (ubicacionNombre) {
-        // La API filtra por nombre (param "ubicacion"), no por id
-        params.ubicacion = ubicacionNombre;
+        params.ubicacion = canonicalLocationName(ubicacionNombre);
+        params.ubicacion_id = ubicacionId;
+      } else {
+        setRows([]);
+        return;
       }
       const data = await getGeneralEquipos(params);
       setRows(Array.isArray(data) ? data : []);
@@ -201,7 +224,7 @@ export default function Depositos() {
     } finally {
       setLoading(false);
     }
-  }, [ubicacionId, ubicacionNombre]);
+  }, [ubicacionId, ubicacionNombre, loadingUbicaciones]);
 
   useEffect(() => {
     load();
@@ -256,7 +279,7 @@ export default function Depositos() {
           <option value={FUENTE_BAJAS}>Bajas</option>
           {ubicacionesFiltradas.map((u) => (
             <option key={u.id} value={u.id}>
-              {u.nombre}
+              {u.label || locationDisplayName(u.nombre)}
             </option>
           ))}
         </select>
@@ -299,7 +322,9 @@ export default function Depositos() {
             emptyText={
               ubicacionId === FUENTE_ALQUILER
                 ? "No hay equipos disponibles en Estantería de Alquiler con stock STL."
-                : "Sin resultados."
+                : ubicacionNombre
+                  ? `No hay equipos en ${locationDisplayName(ubicacionNombre)}.`
+                  : "Sin resultados."
             }
             totalCount={rows.length}
             countLabel="equipos"

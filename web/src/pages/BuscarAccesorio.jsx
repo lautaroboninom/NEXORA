@@ -4,6 +4,7 @@ import { buscarAccesorioPorRef } from "../lib/api";
 import { formatDateOnly as formatDateOnlyHelper, formatOS as formatOSHelper, resolveFechaIngreso } from "../lib/ui-helpers";
 import CustomerCell from "../components/CustomerCell.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
+import { DerivadoMark } from "../components/DerivadoBadge.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
 import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
 import useQueryState from "../hooks/useQueryState";
@@ -66,7 +67,10 @@ export default function BuscarAccesorio() {
                   className="hover:bg-gray-50"
                   onClick={() => nav(`/ingresos/${ingresoId}`)}
                 >
-                  <div className="font-semibold text-gray-900 underline">{formatOSHelper(r, ingresoId)}</div>
+                  <div className="font-semibold text-gray-900">
+                    <span className="underline">{formatOSHelper(r, ingresoId)}</span>
+                    <DerivadoMark row={r} className="ml-1.5 align-middle" />
+                  </div>
                   <div className="mt-3 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                     <MobileDataField label="Accesorio" value={r?.accesorio_nombre || "-"} />
                     <MobileDataField label="Referencia" value={r?.referencia || "-"} />
@@ -105,7 +109,10 @@ export default function BuscarAccesorio() {
                     onClick={() => nav(`/ingresos/${ingresoId}`)}
                     title="Ir a la hoja de servicio"
                   >
-                    <td className="p-2 underline">{formatOSHelper(r, ingresoId)}</td>
+                    <td className="p-2">
+                      <span className="underline">{formatOSHelper(r, ingresoId)}</span>
+                      <DerivadoMark row={r} className="ml-1.5 align-middle" />
+                    </td>
                     <td className="p-2">{r?.accesorio_nombre || "-"}</td>
                     <td className="p-2">{r?.referencia || "-"}</td>
                     <td className="p-2"><CustomerCell row={r} /></td>

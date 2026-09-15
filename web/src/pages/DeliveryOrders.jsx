@@ -30,7 +30,7 @@ import {
   deliveryOrderServiceReleaseReferences,
   formatServiceOrderReference,
 } from "../lib/delivery-orders";
-import { CloudUpload, FileText, MapPinned, Pencil, Plus, Printer, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CloudUpload, FileText, MapPinned, Pencil, Plus, Printer, X } from "lucide-react";
 import {
   DesktopTableWrap,
   MobileDataCard,
@@ -43,8 +43,9 @@ import {
 } from "../components/Responsive.jsx";
 import { useLocation, useNavigate } from "react-router-dom";
 import useQueryState from "../hooks/useQueryState";
-import { MobileSortControl, SortableTh } from "../components/TableSortControls.jsx";
+import { SortableTh } from "../components/TableSortControls.jsx";
 import { DELIVERY_ORDER_SORT_OPTIONS } from "../lib/delivery-order-sort";
+import { parseSort, sortForDirection } from "../lib/table-sort";
 
 const STATUS_LABELS = {
   pendiente_stock: "Pendiente de stock",
@@ -84,6 +85,9 @@ const TYPE_LABELS = {
 };
 
 const PAGE_SIZE = 25;
+// Al elegir un criterio en el selector arrancamos por la dirección que la gente
+// espera: alfabético para los textos, pero la fecha siempre de la más nueva.
+const DEFAULT_SORT_DIRECTIONS = { fecha: "desc" };
 const PENDING_DELIVERY_STATUS_FILTER = "pendiente_stock,pendiente_armado,armado_pendiente_entrega";
 const ORDER_HISTORY_STATUS_FILTER = "entregado_pendiente_facturacion,entregado_no_facturable,facturado";
 const PENDING_DELIVERY_STATUSES = new Set(["pendiente_armado", "armado_pendiente_entrega"]);
@@ -455,6 +459,17 @@ function formatDateTime(value) {
   }).format(date);
 }
 
+function formatDate(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("es-AR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
+}
+
 function formatQuantity(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "-";
@@ -713,6 +728,19 @@ export default function DeliveryOrders() {
     setPage(0);
   };
 
+  // El orden por defecto del backend ya es "las más nuevas arriba", así que volver
+  // a ese orden es simplemente limpiar el sort: por eso encabeza el selector.
+  const activeSort = parseSort(sort);
+  // Sin criterio elegido mandan las más nuevas arriba, así que la flecha muestra
+  // "descendente" aunque el sort venga vacío.
+  const activeSortDirection = activeSort.field ? activeSort.direction : "desc";
+  const changeSortField = (field) =>
+    updateSort(field ? sortForDirection(field, DEFAULT_SORT_DIRECTIONS[field] || "asc") : "");
+  const toggleSortDirection = () => {
+    if (!activeSort.field) return;
+    updateSort(sortForDirection(activeSort.field, activeSort.direction === "desc" ? "asc" : "desc"));
+  };
+
   const handleDriveSync = async () => {
     setDriveSyncing(true);
     setError("");
@@ -969,6 +997,11 @@ export default function DeliveryOrders() {
         ) : (
           <OrderNumberCell value={serviceReferences[0] || order.orderNumber} />
         )}
+        {order?.createdAt && (
+          <div className="mt-0.5 text-xs text-gray-500" title={`Creada: ${formatDateTime(order.createdAt)}`}>
+            {formatDate(order.createdAt)}
+          </div>
+        )}
         {ingresoId && (
           <button
             type="button"
@@ -1154,7 +1187,7 @@ export default function DeliveryOrders() {
         </ResponsiveActionBar>
       </div>
 
-      <div className="grid gap-2 border p-3 sm:grid-cols-2 lg:grid-cols-[150px_150px_minmax(220px,1fr)_auto] lg:items-end">
+      <div className="grid gap-2 border p-3 sm:grid-cols-2 lg:grid-cols-[150px_150px_minmax(190px,230px)_minmax(220px,1fr)_auto] lg:items-end">
         <label className="text-sm">
           <span className="mb-1 block text-xs uppercase text-gray-500">Estado</span>
           <select
@@ -1186,6 +1219,38 @@ export default function DeliveryOrders() {
             ))}
           </select>
         </label>
+        <div className="text-sm">
+          <span className="mb-1 block text-xs uppercase text-gray-500">Ordenar por</span>
+          <div className="flex gap-1">
+            <select
+              value={activeSort.field}
+              onChange={(event) => changeSortField(event.target.value)}
+              className="h-9 w-full min-w-0 rounded border px-2"
+              aria-label="Ordenar la lista"
+            >
+              <option value="">Más nuevas primero</option>
+              {DELIVERY_ORDER_SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!activeSort.field}
+              onClick={toggleSortDirection}
+              className="flex h-9 shrink-0 items-center justify-center rounded border px-2 hover:bg-gray-50 disabled:opacity-40"
+              aria-label={activeSortDirection === "desc" ? "Cambiar a orden ascendente" : "Cambiar a orden descendente"}
+              title={activeSortDirection === "desc" ? "Descendente" : "Ascendente"}
+            >
+              {activeSortDirection === "desc" ? (
+                <ArrowDown aria-hidden="true" className="h-4 w-4" />
+              ) : (
+                <ArrowUp aria-hidden="true" className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+        </div>
         <label className="text-sm sm:col-span-2 lg:col-span-1">
           <span className="mb-1 block text-xs uppercase text-gray-500">Buscar</span>
           <input
@@ -1221,13 +1286,6 @@ export default function DeliveryOrders() {
           </button>
         </div>
       )}
-
-      <MobileSortControl
-        sort={sort}
-        onSortChange={updateSort}
-        options={DELIVERY_ORDER_SORT_OPTIONS.filter((option) => option.value !== "fecha")}
-        className="mb-3"
-      />
 
       <MobileDataList>
         {loading && !orders.length && <MobileDataCard className="text-center text-gray-500">Cargando...</MobileDataCard>}
@@ -1626,6 +1684,11 @@ function DeliveryOrderDetailModal({
               <RemitoDocuments order={order} />
             </DetailField>
             <DetailField label="Factura" value={order.invoiceNumber || "-"} />
+            <DetailField
+              label="Leyenda general remito"
+              value={order.remitoGeneralLegend || (order.deliveryType === "rental" ? "Se entrega en alquiler" : "-")}
+              className="lg:col-span-2"
+            />
           </div>
 
           <div className="mt-4">
@@ -1691,6 +1754,11 @@ function DeliveryOrderDetailModal({
                           <div className="font-medium text-gray-900">{item.articleName || item.description || "-"}</div>
                           {item.description && item.description !== item.articleName && (
                             <div className="mt-0.5 text-xs text-gray-500">{item.description}</div>
+                          )}
+                          {item.remitoArticleLegend && (
+                            <div className="mt-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-700">
+                              <span className="font-medium">Accesorios / leyenda:</span> {item.remitoArticleLegend}
+                            </div>
                           )}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2">{formatQuantity(item.quantity)}</td>

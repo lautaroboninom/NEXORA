@@ -120,7 +120,7 @@ const HISTORICAL_ACTIONS = {
     label: "Alta de ingreso",
     summary: "Reactivar históricamente una OS dada de baja y recuperar su stock patrimonial.",
     nexora: "Marca la OS como ingresada, la devuelve al Taller y registra el evento y la auditoría.",
-    bejerman: "Para equipos propios MG, encola el movimiento inverso desde baja o desguace.",
+    bejerman: "Para equipos propios MG, encola el movimiento a STR desde el depósito donde el equipo esté hoy (DES si la baja se sincronizó, o el que haya quedado si no).",
     button: "Registrar alta de ingreso",
   },
 };
@@ -598,6 +598,7 @@ export default function ServiceSheet() {
   const [formBasics, setFormBasics] = useState(null);
   const [savingBasics, setSavingBasics] = useState(false);
   const [risBusy, setRisBusy] = useState(false);
+  const [risActionType, setRisActionType] = useState("");
   const [risProgressStatus, setRisProgressStatus] = useState("");
   const [risWaitStartedAt, setRisWaitStartedAt] = useState(0);
   const [risWaitRemito, setRisWaitRemito] = useState("");
@@ -894,9 +895,12 @@ export default function ServiceSheet() {
   // PATCH helper
   async function patch(fields) {
     try {
-      await patchIngreso(id, fields);
+      const res = await patchIngreso(id, fields);
       setData((d) => ({ ...d, ...fields }));
       setErr("");
+      // Quien guarda a veces necesita saber qué más hizo el backend con ese campo
+      // (mover la ubicación a la estantería arrastra el stock a STL).
+      return res;
     } catch (e) {
       const conflict = e?.data?.conflict_type;
       if (conflict) {
@@ -973,7 +977,7 @@ export default function ServiceSheet() {
     }
   }
 
-  async function emitirRisIngreso() {
+  async function verRisIngreso() {
     if (risBusy) return;
     setErr("");
     setManualRisPrint(null);
@@ -983,17 +987,13 @@ export default function ServiceSheet() {
       setTimeout(() => setToastMsg(""), 2500);
       return;
     }
-    // Reimprimir un remito ya emitido no pasa por Bejerman de nuevo: la pestaña
-    // no tiene que prometer una emisión que no va a ocurrir.
-    const yaEmitido = isRisGenerated(data);
+    const existingRemito = risRemitoFrom(data);
     const reservedPrintWindow = reserveRisPrintWindow({
       title: `${ingressDocumentName} - NEXORA`,
-      heading: yaEmitido ? `Reimprimiendo ${ingressDocumentName}` : `Emitiendo ${ingressDocumentName}`,
-      message: yaEmitido
-        ? `Buscando el PDF del ${ingressDocumentName}`
-        : `Emitiendo ${ingressDocumentName} en Bejerman`,
+      heading: `Buscando ${ingressDocumentName}`,
+      message: `Buscando el PDF del ${ingressDocumentName}`,
       detail: `Esta pestaña abre la impresión del ${ingressDocumentName} cuando el PDF esté listo.`,
-      steps: yaEmitido ? PDF_REPRINT_STEPS : PDF_WAIT_STEPS,
+      steps: PDF_REPRINT_STEPS,
     });
     const avisar = (status, patch = {}) => {
       setRisProgressStatus(status);
@@ -1003,10 +1003,10 @@ export default function ServiceSheet() {
     const progressStartedAt = Date.now();
     try {
       setRisBusy(true);
+      setRisActionType("view");
       await waitForRisProgressPaint();
       let risSource = data;
-      const existingRemito = risRemitoFrom(data);
-      if (!isRisGenerated(risSource) && existingRemito) {
+      if (!isRisGenerated(risSource)) {
         avisar(`Buscando PDF del ${ingressDocumentName}...`, {
           detail: "NEXORA está consultando en Bejerman el estado del comprobante.",
         });
@@ -1021,31 +1021,107 @@ export default function ServiceSheet() {
         return;
       }
       if (!isRisGenerated(risSource)) {
-        avisar(`Validando ${ingressDocumentName}...`, {
-          step: "emit",
-          detail: "NEXORA está revisando artículos, partidas y stock antes de emitir.",
-        });
-        const preflight = await runRisPreflight({ silent: true });
-        if (!preflight?.can_emit) return;
-        const preflightDocumentName = ingressDocumentNameFor(preflight);
-        avisar(`Emitiendo ${preflightDocumentName} en Bejerman...`, {
-          step: "emit",
-          detail: "NEXORA está enviando el comprobante a Bejerman.",
-        });
-        await waitForRisProgressPaint();
-        risSource = await postIngresoRisEmitir(id);
-        await refreshIngreso({ strong: 1 });
-        if (isRisRegistered(risSource)) {
-          const remito = risRemitoFrom(risSource);
-          setToastMsg(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
-          setTimeout(() => setToastMsg(""), 2500);
-          return;
-        }
+        // Ver nunca emite: si después de refrescar el estado no está confirmado, se frena acá.
+        setErr(
+          existingRemito
+            ? `Este ingreso ya tiene anotado el remito «${existingRemito}», pero NEXORA no pudo ` +
+              "confirmarlo automáticamente en Bejerman. Revíselo manualmente antes de emitir uno nuevo."
+            : `No se encontró un ${ingressDocumentName} emitido en Bejerman para este ingreso.`,
+        );
+        return;
+      }
+      const risDocumentName = ingressDocumentNameFor(risSource);
+      const remito = risRemitoFrom(risSource) || existingRemito;
+      const controller = new AbortController();
+      risWaitAbortRef.current = controller;
+      setRisWaitStartedAt(Date.now());
+      setRisWaitRemito(remito || "");
+      reservedPrintWindow.update({
+        step: "pdf",
+        documentLabel: remito ? `Remito ${remito}` : "",
+      });
+      const blob = await waitForRisPdfBlob(id, risSource, {
+        signal: controller.signal,
+        reservedWindow: reservedPrintWindow,
+        onProgress: (progress) => setRisProgressStatus(progress?.status || `Preparando PDF del ${risDocumentName}...`),
+      });
+      avisar("Abriendo impresión...", { step: "print", state: "ready" });
+      const opened = openReservedRisPrintablePdf(reservedPrintWindow, blob, risSource).opened;
+      printWindowUsed = opened;
+      if (opened) {
+        setToastMsg(remito ? `${risDocumentName} ${remito} listo para imprimir.` : `${risDocumentName} listo para imprimir.`);
+        setTimeout(() => setToastMsg(""), 2500);
+      } else {
+        setManualRisPrint({ blob, source: risSource, remito });
+        setErr(`El PDF del ${risDocumentName} ya está listo, pero el navegador bloqueó la ventana automática. Use Abrir e imprimir.`);
+      }
+    } catch (e) {
+      if (isPendingPdfError(e)) {
+        setToastMsg(`${e?.message || "Bejerman todavía no devolvió el PDF."} Podés reintentar desde acá.`);
+        setTimeout(() => setToastMsg(""), 6000);
+        return;
+      }
+      setErr(e?.message || `No se pudo recuperar el PDF del ${ingressDocumentName}`);
+    } finally {
+      if (!printWindowUsed) reservedPrintWindow.close();
+      risWaitAbortRef.current = null;
+      setRisWaitStartedAt(0);
+      setRisWaitRemito("");
+      await waitForRisProgressMinimum(progressStartedAt);
+      setRisBusy(false);
+      setRisProgressStatus("");
+      setRisActionType("");
+    }
+  }
+
+  async function emitirRisIngreso() {
+    if (risBusy) return;
+    setErr("");
+    setManualRisPrint(null);
+    const existingRemito = risRemitoFrom(data);
+    if (existingRemito || isRisGenerated(data) || isRisRegistered(data)) {
+      // Ver es ver, no emitir: si ya tiene comprobante, no se emite de nuevo.
+      return verRisIngreso();
+    }
+    const reservedPrintWindow = reserveRisPrintWindow({
+      title: `${ingressDocumentName} - NEXORA`,
+      heading: `Emitiendo ${ingressDocumentName}`,
+      message: `Emitiendo ${ingressDocumentName} en Bejerman`,
+      detail: `Esta pestaña abre la impresión del ${ingressDocumentName} cuando el PDF esté listo.`,
+      steps: PDF_WAIT_STEPS,
+    });
+    const avisar = (status, patch = {}) => {
+      setRisProgressStatus(status);
+      reservedPrintWindow.update({ status, ...patch });
+    };
+    let printWindowUsed = false;
+    const progressStartedAt = Date.now();
+    try {
+      setRisBusy(true);
+      setRisActionType("emit");
+      await waitForRisProgressPaint();
+      avisar(`Validando ${ingressDocumentName}...`, {
+        step: "emit",
+        detail: "NEXORA está revisando artículos, partidas y stock antes de emitir.",
+      });
+      const preflight = await runRisPreflight({ silent: true });
+      if (!preflight?.can_emit) return;
+      const preflightDocumentName = ingressDocumentNameFor(preflight);
+      avisar(`Emitiendo ${preflightDocumentName} en Bejerman...`, {
+        step: "emit",
+        detail: "NEXORA está enviando el comprobante a Bejerman.",
+      });
+      await waitForRisProgressPaint();
+      let risSource = await postIngresoRisEmitir(id);
+      await refreshIngreso({ strong: 1 });
+      if (isRisRegistered(risSource)) {
+        const remito = risRemitoFrom(risSource);
+        setToastMsg(remito ? `Remito ${remito} registrado en Bejerman.` : "Remito registrado en Bejerman.");
+        setTimeout(() => setToastMsg(""), 2500);
+        return;
       }
       const risDocumentName = ingressDocumentNameFor(risSource);
       const remito = risRemitoFrom(risSource) || risRemitoFrom(data);
-      // A partir de acá el comprobante ya está emitido: sólo falta el archivo, y
-      // esa espera se puede cancelar sin dejar nada a medias.
       const controller = new AbortController();
       risWaitAbortRef.current = controller;
       setRisWaitStartedAt(Date.now());
@@ -1081,7 +1157,7 @@ export default function ServiceSheet() {
         setTimeout(() => setToastMsg(""), 6000);
         return;
       }
-      setErr(e?.message || `No se pudo emitir o reimprimir el ${ingressDocumentName}`);
+      setErr(e?.message || `No se pudo emitir el ${ingressDocumentName}`);
     } finally {
       if (!printWindowUsed) reservedPrintWindow.close();
       risWaitAbortRef.current = null;
@@ -1090,6 +1166,7 @@ export default function ServiceSheet() {
       await waitForRisProgressMinimum(progressStartedAt);
       setRisBusy(false);
       setRisProgressStatus("");
+      setRisActionType("");
     }
   }
 
@@ -1272,6 +1349,7 @@ export default function ServiceSheet() {
       comentarios: data?.comentarios || "",
       motivo: data?.motivo || "",
       garantia_reparacion: !!data?.garantia_reparacion,
+      etiq_garantia_ok: !!data?.etiq_garantia_ok,
       equipo_variante: data?.equipo_variante || "",
       garantia: !!data?.garantia,
     });
@@ -1398,6 +1476,7 @@ export default function ServiceSheet() {
     const motivoActual = (data?.motivo || "").trim();
     if (motivoNuevo && motivoNuevo !== motivoActual) diff.motivo = motivoNuevo;
     if ((formBasics.garantia_reparacion ? 1 : 0) !== (data?.garantia_reparacion ? 1 : 0)) diff.garantia_reparacion = !!formBasics.garantia_reparacion;
+    if ((formBasics.etiq_garantia_ok ? 1 : 0) !== (data?.etiq_garantia_ok ? 1 : 0)) diff.etiq_garantia_ok = !!formBasics.etiq_garantia_ok;
     try {
       const norm = (s) => (s || "").toString().trim().toLowerCase();
       const selMarca = marcas.find((m) => String(m.id) === String(marcaIdSel));
@@ -1854,6 +1933,21 @@ export default function ServiceSheet() {
     const ns = (formBasics?.numero_serie || "").trim();
     const selMarca = marcas.find((m) => String(m.id) === String(marcaIdSel));
     const marcaName = (selMarca?.nombre || data?.marca || "").toString();
+    // La garantía se vuelve a calcular sólo si cambia lo que la define: N/S, marca o modelo (los
+    // mismos criterios con los que "Guardar" los manda). El cálculo es contra la fecha de hoy, así
+    // que abrir la edición de una OS vieja y guardar cualquier otro dato destildaba la garantía de
+    // fábrica que tenía al ingresar (OS 28956, 11/09/2026).
+    const norm = (s) => (s || "").toString().trim().toLowerCase();
+    const selModelo = modelos.find((m) => String(m.id) === String(modeloIdSel));
+    const identificacionCambio =
+      (formBasics?.numero_serie ?? "") !== (data?.numero_serie ?? "") ||
+      (!!selMarca && norm(selMarca.nombre) !== norm(data?.marca)) ||
+      (!!selModelo && norm(selModelo.nombre) !== norm(data?.modelo));
+    if (!identificacionCambio) {
+      // Si se tocó la serie y se la dejó como estaba, vuelve la garantía guardada.
+      setFormBasics((s) => (s && !!s.garantia !== !!data?.garantia ? { ...s, garantia: !!data?.garantia } : s));
+      return;
+    }
     if (!ns) { if (formBasics) setFormBasics((s) => ({ ...(s || {}), garantia: false })); return; }
     const h = setTimeout(async () => {
       try {
@@ -1872,7 +1966,7 @@ export default function ServiceSheet() {
       } catch {}
     }, 400);
     return () => clearTimeout(h);
-  }, [editBasics, formBasics?.numero_serie, marcaIdSel, modeloIdSel, marcas, data?.marca]);
+  }, [editBasics, formBasics?.numero_serie, marcaIdSel, modeloIdSel, marcas, modelos, data?.marca, data?.modelo, data?.numero_serie, data?.garantia]);
 
   const estadoLower = (data?.estado || "").toLowerCase();
   const isEntregadoOBaja = estadoLower === "entregado" || estadoLower === "baja" || isSaleTicketState(estadoLower);
@@ -2026,6 +2120,9 @@ export default function ServiceSheet() {
   );
   const maxDateOnly = maxLocalNow.slice(0, 10);
   // Descriptores para el ActionMenu compartido. Las acciones de baja/alta usan
+  const hasRisRemito = Boolean(risRemitoFrom(data));
+  const hasRisError = String(data?.ris?.status || "").toLowerCase() === "failed"
+    || String(data?.ris?.pdf_status || "").toLowerCase() === "failed";
   // las mismas etiquetas que el listado de Equipos.
   const menuActions = [
     canSeeHistory && numeroSerie
@@ -2034,12 +2131,14 @@ export default function ServiceSheet() {
     canSeeHistory ? { key: "historial", label: "Historial de cambios", tone: "default" } : null,
     canShowRisAction
       ? {
-        key: "ris",
+        key: hasRisRemito ? "ris_ver" : "ris_emitir",
         label: risBusy
           ? `Preparando ${ingressDocumentName}...`
-          : data?.ris?.remito_number
+          : hasRisRemito
             ? `Ver ${ingressDocumentName}`
-            : `Emitir ${ingressDocumentName}`,
+            : hasRisError
+              ? `Reintentar ${ingressDocumentName}`
+              : `Emitir ${ingressDocumentName}`,
         tone: "info",
         disabled: risBusy,
       }
@@ -2101,6 +2200,14 @@ export default function ServiceSheet() {
         setTabPersisted("historial");
         break;
       case "ris":
+      case "ris_ver":
+        if (hasRisRemito) {
+          verRisIngreso();
+        } else {
+          emitirRisIngreso();
+        }
+        break;
+      case "ris_emitir":
         emitirRisIngreso();
         break;
       case "barcode":
@@ -2154,8 +2261,19 @@ export default function ServiceSheet() {
     <div className="max-w-none p-4">
       <RisProgressModal
         open={risBusy}
-        title={risProgressStatus.toLowerCase().includes("validando") ? `Validando ${ingressDocumentName}` : `Emitiendo ${ingressDocumentName}`}
-        status={risProgressStatus || `Emitiendo ${ingressDocumentName} en Bejerman...`}
+        title={
+          risActionType === "view"
+            ? `Buscando ${ingressDocumentName}`
+            : risProgressStatus.toLowerCase().includes("validando")
+              ? `Validando ${ingressDocumentName}`
+              : `Emitiendo ${ingressDocumentName}`
+        }
+        status={
+          risProgressStatus ||
+          (risActionType === "view"
+            ? `Buscando PDF del ${ingressDocumentName}...`
+            : `Emitiendo ${ingressDocumentName} en Bejerman...`)
+        }
         documentLabel={risWaitRemito ? `Remito ${risWaitRemito}` : ""}
         waitStartedAt={risWaitStartedAt}
         onCancel={risWaitStartedAt ? cancelRisWait : undefined}
@@ -2278,6 +2396,7 @@ export default function ServiceSheet() {
           ingressDocumentName={ingressDocumentName}
           risBusy={risBusy}
           onEmitRis={emitirRisIngreso}
+          onVerRis={verRisIngreso}
           onOpenReleaseModal={openReleaseOrderModal}
           tecnicos={tecnicos}
           tecnicoId={tecnicoId}

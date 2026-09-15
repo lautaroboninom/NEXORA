@@ -89,3 +89,41 @@ test("traduce el progreso de la espera a pasos de la pestaña", () => {
   assert.equal(listo.step, "print");
   assert.equal(listo.stage, "");
 });
+
+test("el script expone showPdf y escucha mensajes postMessage", () => {
+  const code = scriptOf(buildPdfWaitPageHtml({}));
+  assert.match(code, /showPdf: function \(data\)/);
+  assert.match(code, /addEventListener\('message'/);
+  assert.match(code, /NEXORA_PDF_WAIT_UPDATE/);
+  assert.match(code, /NEXORA_PDF_SHOW_PDF/);
+});
+
+test("incluye vista de impresión embebida con iframe y barra de acciones", () => {
+  const html = buildPdfWaitPageHtml({});
+  assert.match(html, /id="vista-impresion"/);
+  assert.match(html, /id="pdf-frame"/);
+  assert.match(html, /id="impresion-titulo"/);
+  assert.match(html, /id="btn-imprimir"/);
+  assert.match(html, /id="link-abrir-pdf"/);
+  assert.match(html, /id="btn-cerrar-impresion"/);
+});
+
+test("el estilo CSS incluye tilde de paso completado y modo impresión", () => {
+  const html = buildPdfWaitPageHtml({});
+  assert.match(html, /\.pasos li\.activo \.punto::after/);
+  assert.match(html, /\.pasos li\.hecho \.punto::after/);
+  assert.match(html, /content:\s*"✓"/);
+  assert.match(html, /main\[hidden\]/);
+  assert.match(html, /body\.impresion/);
+  assert.match(html, /@media print[\s\S]*?main, #vista-espera\s*\{\s*display:\s*none\s*!important/);
+});
+
+test("showPdf adjunta listener al frame antes de asignar src y cuenta con timer de seguridad", () => {
+  const code = scriptOf(buildPdfWaitPageHtml({}));
+  const listenerPos = code.indexOf("frame.addEventListener('load'");
+  const srcPos = code.indexOf("frame.src = safeUrl");
+  assert.ok(listenerPos > 0, "debe registrar el listener load");
+  assert.ok(srcPos > 0, "debe asignar src");
+  assert.ok(listenerPos < srcPos, "debe registrar el listener antes de asignar src para no perder el evento");
+  assert.match(code, /window\.setTimeout\(printPdf,\s*delayMs\s*\+\s*1200\)/);
+});
