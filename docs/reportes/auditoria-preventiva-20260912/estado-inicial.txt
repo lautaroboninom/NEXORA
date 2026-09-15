@@ -1,0 +1,94 @@
+ M api/service/bejerman_delivery.py
+ M api/service/bejerman_remito_legends.py
+ M api/service/bejerman_rental_remito.py
+ M api/service/bejerman_ris.py
+ M api/service/bejerman_sdk.py
+ M api/service/bejerman_sync.py
+ M api/service/delivery_orders.py
+ M api/service/management/commands/apply_bejerman_sync_schema.py
+ M api/service/permission_policy.py
+ M api/service/serializers.py
+ M api/service/tests/test_bejerman_delivery.py
+ M api/service/tests/test_bejerman_remito_contracts.py
+ M api/service/tests/test_bejerman_remito_legends.py
+ M api/service/tests/test_bejerman_rental_remito.py
+ M api/service/tests/test_bejerman_sync.py
+ M api/service/tests/test_mg_sale_flow.py
+ M api/service/tests/test_no_se_repara_flow.py
+ M api/service/tests/test_quotes_anular.py
+ M api/service/tests/test_rejected_budget_charge_flow.py
+ M api/service/tests/test_release_requires_budget_approval.py
+ M api/service/urls.py
+ M api/service/views/__init__.py
+ M api/service/views/bejerman_views.py
+ M api/service/views/colas_views.py
+ M api/service/views/devices_views.py
+ M api/service/views/ingresos_views.py
+ M api/service/views/reportes_views.py
+ M api/service/views/scan_views.py
+ M api/service/views/work_views.py
+ M docker-compose.yml
+ M docs/handoff-consulta-alquiler-cobranzas-20260904.md
+ M sql/schema.sql
+ M web/public/sw.js
+ M web/src/components/DeliveryOrderManualRemitoModal.jsx
+ M web/src/components/DeliveryOrderRemitoModal.jsx
+ M web/src/components/DerivadoBadge.jsx
+ M web/src/components/ReleaseOrderModal.jsx
+ M web/src/hooks/useQueryState.js
+ M web/src/index.css
+ M web/src/lib/api.js
+ M web/src/lib/ingreso-equipos.js
+ M web/src/lib/ingreso-equipos.test.js
+ M web/src/lib/release-bulk.js
+ M web/src/lib/release-bulk.test.js
+ M web/src/lib/release-flow.js
+ M web/src/lib/release-flow.test.js
+ M web/src/pages/BejermanSync.jsx
+ M web/src/pages/BuscarAccesorio.jsx
+ M web/src/pages/BuscarNS.jsx
+ M web/src/pages/Derivados.jsx
+ M web/src/pages/Equipos.jsx
+ M web/src/pages/NuevoIngreso.jsx
+ M web/src/pages/Presupuestados.jsx
+ M web/src/pages/ServiceSheet.jsx
+ M web/src/pages/ServiceSheet/tabs/PrincipalTab.jsx
+ M web/src/pages/WorkDashboard.jsx
+?? api/query_orders.py
+?? api/service/management/commands/fix_ventas_pendientes_entrega.py
+?? api/service/management/commands/sync_rental_delivery_orders.py
+?? api/service/release_gate.py
+?? api/service/tests/test_bejerman_rda_descriptions.py
+?? api/service/tests/test_device_alta_propio.py
+?? api/service/tests/test_general_por_cliente_export.py
+?? api/service/tests/test_ingreso_duplicado_mismo_dia.py
+?? api/service/tests/test_numero_interno_dedupe_sql.py
+?? api/service/tests/test_numero_interno_normalizacion.py
+?? api/service/tests/test_stock_val_to_stl.py
+?? docs/liberacion-presupuesto-20260909.md
+?? docs/ns-cliente-aclaraciones-nexora-20260907.md
+?? docs/ns-cliente-copia-sepp-20260908.md
+?? docs/ns-cliente-correcciones-historicas-20260909.md
+?? docs/ns-testigo-MZJ5S121193-20260908.md
+?? docs/reportes/ns_cliente_sep_origen_copia_20260908.json
+?? docs/reportes/ns_cliente_sepp_copia_verificacion_20260908.json
+?? docs/reportes/ns_edu_jay5q_despues_20260909.json
+?? docs/reportes/ns_historico_cinco_casos_antes_20260909.json
+?? docs/reportes/ns_historico_cinco_casos_despues_20260909.json
+?? docs/reportes/ns_historico_nativa_prefijo_antes_20260909.json
+?? docs/reportes/ns_historico_nativa_prefijo_despues_20260909.json
+?? docs/reportes/ns_historicos_pendientes_20260909.json
+?? docs/reportes/ns_sql_real_recuperado_20260908.txt
+?? scripts/apply_ns_cliente_sepp.py
+?? scripts/apply_ns_edu_jay5q_20260909.py
+?? scripts/apply_ns_historicos_20260909.py
+?? scripts/apply_ns_nativa_prefijo_20260909.py
+?? scripts/audit_bejerman_catalog_encoding.py
+?? scripts/audit_ns_text_bytes.py
+?? sql/ops/bejerman_ns_conflictos_descripcion.sql
+?? sql/ops/borrar_ingresos_duplicados_merno_20260908.sql
+?? sql/ops/copy_ns_cliente_sep_sepp_20260908.sql
+?? sql/ops/corregir_ns_historicos_20260909.sql
+?? sql/ops/ns_historicos_pendientes_20260909.sql
+?? sql/ops/ns_merno_incluir_rda_sin_movimiento_preview_20260908.sql
+?? sql/ops/ns_testigo_MZJ5S121193_lectura_20260908.sql

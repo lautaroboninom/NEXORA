@@ -1,0 +1,6 @@
+- generic [ref=e1] clickable [onclick]
+  - StaticText "Acceso denegado"
+  - StaticText "No tiene permisos para acceder a esta sección."
+  - generic
+    - link "Ir al inicio" [ref=e2]
+    - link "Iniciar sesión" [ref=e3]

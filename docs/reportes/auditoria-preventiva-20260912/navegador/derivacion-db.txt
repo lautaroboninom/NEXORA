@@ -1,0 +1,5 @@
+    estado     | derivacion_estado | fecha_deriv | fecha_entrega 
+---------------+-------------------+-------------+---------------
+ diagnosticado | devuelto          | 2026-09-12  | 2026-09-12
+(1 row)
+

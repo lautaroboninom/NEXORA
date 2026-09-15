@@ -1,0 +1,3 @@
+numero_serie,articulo,deposito_a_reducir,cantidad,motivo,aprobado_por,stock_hash
+E2317B17114,1105001,STR,1,"Duplicado de ingreso frente a equipo en desguace",Solicitud operativa 2026-09-15,1e2b59da934f1b99
+P09837126,1103010,STL,1,"Duplicado de traslado frente a equipo en desguace",Solicitud operativa 2026-09-15,494ee319af417c8c

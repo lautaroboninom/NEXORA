@@ -1,0 +1,1217 @@
+{
+  "modulos": 121,
+  "casos": 1881,
+  "omitidos": 0,
+  "resultados": [
+    {
+      "module": "test_airsep_serial_fix",
+      "exit": 0,
+      "seconds": 6.7,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_airsep_serial_fix.log"
+    },
+    {
+      "module": "test_alta_masiva_propios",
+      "exit": 0,
+      "seconds": 3.7,
+      "testsRun": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-finalfix/test_alta_masiva_propios.log"
+    },
+    {
+      "module": "test_bejerman_article_catalog_sync",
+      "exit": 0,
+      "seconds": 6.0,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_article_catalog_sync.log"
+    },
+    {
+      "module": "test_bejerman_customer_document_fields",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 18,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_customer_document_fields.log"
+    },
+    {
+      "module": "test_bejerman_delivery",
+      "exit": 0,
+      "seconds": 6.2,
+      "testsRun": 230,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-mergecheck/test_bejerman_delivery.log"
+    },
+    {
+      "module": "test_bejerman_delivery_definitive_rejection",
+      "exit": 0,
+      "seconds": 3.3,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_delivery_definitive_rejection.log"
+    },
+    {
+      "module": "test_bejerman_equipment_status",
+      "exit": 0,
+      "seconds": 3.2,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_equipment_status.log"
+    },
+    {
+      "module": "test_bejerman_force_stock_entry",
+      "exit": 0,
+      "seconds": 3.9,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_force_stock_entry.log"
+    },
+    {
+      "module": "test_bejerman_particular_customers",
+      "exit": 0,
+      "seconds": 3.1,
+      "testsRun": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_particular_customers.log"
+    },
+    {
+      "module": "test_bejerman_partida_multiarticulo",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_partida_multiarticulo.log"
+    },
+    {
+      "module": "test_bejerman_partida_observacion",
+      "exit": 0,
+      "seconds": 3.1,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_partida_observacion.log"
+    },
+    {
+      "module": "test_bejerman_pdf_requests",
+      "exit": 0,
+      "seconds": 11.3,
+      "testsRun": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_pdf_requests.log"
+    },
+    {
+      "module": "test_bejerman_procesos_trabados",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_procesos_trabados.log"
+    },
+    {
+      "module": "test_bejerman_purchase_entries",
+      "exit": 0,
+      "seconds": 10.4,
+      "testsRun": 50,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_purchase_entries.log"
+    },
+    {
+      "module": "test_bejerman_rda_descriptions",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_rda_descriptions.log"
+    },
+    {
+      "module": "test_bejerman_remito_contracts",
+      "exit": 0,
+      "seconds": 3.6,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_contracts.log"
+    },
+    {
+      "module": "test_bejerman_remito_currency_fix",
+      "exit": 0,
+      "seconds": 3.2,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_currency_fix.log"
+    },
+    {
+      "module": "test_bejerman_remito_iva_fix",
+      "exit": 0,
+      "seconds": 3.8,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_iva_fix.log"
+    },
+    {
+      "module": "test_bejerman_remito_legends",
+      "exit": 0,
+      "seconds": 4.8,
+      "testsRun": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-mergecheck/test_bejerman_remito_legends.log"
+    },
+    {
+      "module": "test_bejerman_remito_lookup",
+      "exit": 0,
+      "seconds": 3.1,
+      "testsRun": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_lookup.log"
+    },
+    {
+      "module": "test_bejerman_remito_pdf",
+      "exit": 0,
+      "seconds": 3.5,
+      "testsRun": 24,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_pdf.log"
+    },
+    {
+      "module": "test_bejerman_remito_pdf_data",
+      "exit": 0,
+      "seconds": 6.7,
+      "testsRun": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_pdf_data.log"
+    },
+    {
+      "module": "test_bejerman_remito_sales_sync",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_remito_sales_sync.log"
+    },
+    {
+      "module": "test_bejerman_rental_remito",
+      "exit": 0,
+      "seconds": 5.5,
+      "testsRun": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_rental_remito.log"
+    },
+    {
+      "module": "test_bejerman_ris_split",
+      "exit": 0,
+      "seconds": 3.1,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_ris_split.log"
+    },
+    {
+      "module": "test_bejerman_sal_tras_repos",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_sal_tras_repos.log"
+    },
+    {
+      "module": "test_bejerman_sales",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_sales.log"
+    },
+    {
+      "module": "test_bejerman_sdk_hardening",
+      "exit": 0,
+      "seconds": 3.1,
+      "testsRun": 24,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_sdk_hardening.log"
+    },
+    {
+      "module": "test_bejerman_sync",
+      "exit": 0,
+      "seconds": 19.4,
+      "testsRun": 157,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_sync.log"
+    },
+    {
+      "module": "test_bejerman_sync_alerts",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_sync_alerts.log"
+    },
+    {
+      "module": "test_bejerman_test_environment",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_test_environment.log"
+    },
+    {
+      "module": "test_bejerman_user_credentials",
+      "exit": 0,
+      "seconds": 6.5,
+      "testsRun": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_bejerman_user_credentials.log"
+    },
+    {
+      "module": "test_billing_summary_runner",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_billing_summary_runner.log"
+    },
+    {
+      "module": "test_catalogo_modelo_variantes",
+      "exit": 0,
+      "seconds": 6.6,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_catalogo_modelo_variantes.log"
+    },
+    {
+      "module": "test_cerrar_reparacion_permissions",
+      "exit": 0,
+      "seconds": 6.7,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_cerrar_reparacion_permissions.log"
+    },
+    {
+      "module": "test_cliente_original",
+      "exit": 0,
+      "seconds": 3.3,
+      "testsRun": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_cliente_original.log"
+    },
+    {
+      "module": "test_clientes_bejerman",
+      "exit": 0,
+      "seconds": 6.3,
+      "testsRun": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_clientes_bejerman.log"
+    },
+    {
+      "module": "test_corregir_codigos_repuestos",
+      "exit": 0,
+      "seconds": 5.9,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_corregir_codigos_repuestos.log"
+    },
+    {
+      "module": "test_daily_schedule",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_daily_schedule.log"
+    },
+    {
+      "module": "test_delivery_order_bejerman_group_recovery",
+      "exit": 0,
+      "seconds": 6.1,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_delivery_order_bejerman_group_recovery.log"
+    },
+    {
+      "module": "test_delivery_order_group_billing",
+      "exit": 0,
+      "seconds": 7.1,
+      "testsRun": 27,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_delivery_order_group_billing.log"
+    },
+    {
+      "module": "test_delivery_order_partidas_masivas",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_delivery_order_partidas_masivas.log"
+    },
+    {
+      "module": "test_delivery_order_service_release_delivery_sync",
+      "exit": 0,
+      "seconds": 6.6,
+      "testsRun": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-finalfix/test_delivery_order_service_release_delivery_sync.log"
+    },
+    {
+      "module": "test_delivery_remito_jobs",
+      "exit": 0,
+      "seconds": 7.8,
+      "testsRun": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-finalfix/test_delivery_remito_jobs.log"
+    },
+    {
+      "module": "test_derivaciones_workflow",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_derivaciones_workflow.log"
+    },
+    {
+      "module": "test_device_alta_propio",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_device_alta_propio.log"
+    },
+    {
+      "module": "test_device_identificadores_api",
+      "exit": 0,
+      "seconds": 6.2,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_device_identificadores_api.log"
+    },
+    {
+      "module": "test_device_swap",
+      "exit": 0,
+      "seconds": 8.0,
+      "testsRun": 54,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_device_swap.log"
+    },
+    {
+      "module": "test_device_swap_sql",
+      "exit": 0,
+      "seconds": 2.6,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_device_swap_sql.log"
+    },
+    {
+      "module": "test_devices_list_view",
+      "exit": 0,
+      "seconds": 6.0,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_devices_list_view.log"
+    },
+    {
+      "module": "test_drive_delivery_sync",
+      "exit": 0,
+      "seconds": 2.6,
+      "testsRun": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_drive_delivery_sync.log"
+    },
+    {
+      "module": "test_email_delivery",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_email_delivery.log"
+    },
+    {
+      "module": "test_evento_reparar_y_destino_cambio",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_evento_reparar_y_destino_cambio.log"
+    },
+    {
+      "module": "test_exit_order_pdf",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_exit_order_pdf.log"
+    },
+    {
+      "module": "test_fechas_hitos",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_fechas_hitos.log"
+    },
+    {
+      "module": "test_general_por_cliente_export",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_general_por_cliente_export.log"
+    },
+    {
+      "module": "test_global_search_remitos",
+      "exit": 0,
+      "seconds": 7.3,
+      "testsRun": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_global_search_remitos.log"
+    },
+    {
+      "module": "test_historico_columna_cliente",
+      "exit": 0,
+      "seconds": 8.0,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_historico_columna_cliente.log"
+    },
+    {
+      "module": "test_ingreso_alquiler_remito_views",
+      "exit": 0,
+      "seconds": 8.6,
+      "testsRun": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_alquiler_remito_views.log"
+    },
+    {
+      "module": "test_ingreso_alquiler_uncheck",
+      "exit": 0,
+      "seconds": 6.2,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_alquiler_uncheck.log"
+    },
+    {
+      "module": "test_ingreso_assignment_requests",
+      "exit": 0,
+      "seconds": 5.6,
+      "testsRun": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_assignment_requests.log"
+    },
+    {
+      "module": "test_ingreso_baja_rechazar",
+      "exit": 0,
+      "seconds": 5.7,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_baja_rechazar.log"
+    },
+    {
+      "module": "test_ingreso_duplicado_mismo_dia",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_duplicado_mismo_dia.log"
+    },
+    {
+      "module": "test_ingreso_historial_helpers",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_historial_helpers.log"
+    },
+    {
+      "module": "test_ingreso_historical_corrections",
+      "exit": 0,
+      "seconds": 6.0,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_historical_corrections.log"
+    },
+    {
+      "module": "test_ingreso_list_serializer",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_list_serializer.log"
+    },
+    {
+      "module": "test_ingreso_media",
+      "exit": 0,
+      "seconds": 6.8,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_media.log"
+    },
+    {
+      "module": "test_ingreso_open_conflict",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 27,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_open_conflict.log"
+    },
+    {
+      "module": "test_ingreso_tests",
+      "exit": 0,
+      "seconds": 7.0,
+      "testsRun": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_ingreso_tests.log"
+    },
+    {
+      "module": "test_limpiar_procesos_trabados_sin_error",
+      "exit": 0,
+      "seconds": 6.3,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_limpiar_procesos_trabados_sin_error.log"
+    },
+    {
+      "module": "test_metricas_actividad_tecnicos",
+      "exit": 0,
+      "seconds": 6.4,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_metricas_actividad_tecnicos.log"
+    },
+    {
+      "module": "test_mg_sale_flow",
+      "exit": 0,
+      "seconds": 7.3,
+      "testsRun": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_mg_sale_flow.log"
+    },
+    {
+      "module": "test_mg_state",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_mg_state.log"
+    },
+    {
+      "module": "test_modelo_homonimo_tipo_equipo",
+      "exit": 0,
+      "seconds": 7.1,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_modelo_homonimo_tipo_equipo.log"
+    },
+    {
+      "module": "test_nexora_cutover",
+      "exit": 0,
+      "seconds": 2.6,
+      "testsRun": 20,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_nexora_cutover.log"
+    },
+    {
+      "module": "test_no_se_repara_flow",
+      "exit": 0,
+      "seconds": 5.6,
+      "testsRun": 20,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_no_se_repara_flow.log"
+    },
+    {
+      "module": "test_notification_email_outbox",
+      "exit": 0,
+      "seconds": 5.2,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_notification_email_outbox.log"
+    },
+    {
+      "module": "test_notifications",
+      "exit": 0,
+      "seconds": 26.2,
+      "testsRun": 150,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-finalfix/test_notifications.log"
+    },
+    {
+      "module": "test_notifications_refresh",
+      "exit": 0,
+      "seconds": 6.3,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_notifications_refresh.log"
+    },
+    {
+      "module": "test_nuevo_ingreso_lote_runtime",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_nuevo_ingreso_lote_runtime.log"
+    },
+    {
+      "module": "test_numero_interno_dedupe_sql",
+      "exit": 0,
+      "seconds": 5.9,
+      "testsRun": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_numero_interno_dedupe_sql.log"
+    },
+    {
+      "module": "test_numero_interno_normalizacion",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_numero_interno_normalizacion.log"
+    },
+    {
+      "module": "test_pdf_cliente_original",
+      "exit": 0,
+      "seconds": 6.0,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_pdf_cliente_original.log"
+    },
+    {
+      "module": "test_pdf_title_format",
+      "exit": 0,
+      "seconds": 3.5,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_pdf_title_format.log"
+    },
+    {
+      "module": "test_pdf_wait_pages",
+      "exit": 0,
+      "seconds": 3.1,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_pdf_wait_pages.log"
+    },
+    {
+      "module": "test_pendientes_por_tecnico",
+      "exit": 0,
+      "seconds": 5.4,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_pendientes_por_tecnico.log"
+    },
+    {
+      "module": "test_pending_device_trace",
+      "exit": 0,
+      "seconds": 5.9,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_pending_device_trace.log"
+    },
+    {
+      "module": "test_portal_integration",
+      "exit": 0,
+      "seconds": 7.6,
+      "testsRun": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_portal_integration.log"
+    },
+    {
+      "module": "test_prepare_production_schema",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_prepare_production_schema.log"
+    },
+    {
+      "module": "test_presupuestados_export",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_presupuestados_export.log"
+    },
+    {
+      "module": "test_preventivos_repuestos",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_preventivos_repuestos.log"
+    },
+    {
+      "module": "test_preventivos_sync",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_preventivos_sync.log"
+    },
+    {
+      "module": "test_quote_mg_notifications",
+      "exit": 0,
+      "seconds": 6.4,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_quote_mg_notifications.log"
+    },
+    {
+      "module": "test_quote_pdf_warranty",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_quote_pdf_warranty.log"
+    },
+    {
+      "module": "test_quotes_anular",
+      "exit": 0,
+      "seconds": 6.1,
+      "testsRun": 18,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_quotes_anular.log"
+    },
+    {
+      "module": "test_quotes_emitir_autoasignacion",
+      "exit": 0,
+      "seconds": 5.8,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_quotes_emitir_autoasignacion.log"
+    },
+    {
+      "module": "test_quotes_generated_totals",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_quotes_generated_totals.log"
+    },
+    {
+      "module": "test_recepcion_permissions",
+      "exit": 0,
+      "seconds": 5.7,
+      "testsRun": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_recepcion_permissions.log"
+    },
+    {
+      "module": "test_rejected_budget_charge_flow",
+      "exit": 0,
+      "seconds": 5.5,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_rejected_budget_charge_flow.log"
+    },
+    {
+      "module": "test_release_requires_budget_approval",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_release_requires_budget_approval.log"
+    },
+    {
+      "module": "test_remito_reservation_race",
+      "exit": 0,
+      "seconds": 6.8,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-finalfix/test_remito_reservation_race.log"
+    },
+    {
+      "module": "test_remitos_salida_bulk",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_remitos_salida_bulk.log"
+    },
+    {
+      "module": "test_rental_stock_routing",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_rental_stock_routing.log"
+    },
+    {
+      "module": "test_repair_delivery_order_manual_splits",
+      "exit": 0,
+      "seconds": 6.0,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_repair_delivery_order_manual_splits.log"
+    },
+    {
+      "module": "test_repuestos_compra",
+      "exit": 0,
+      "seconds": 5.7,
+      "testsRun": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_repuestos_compra.log"
+    },
+    {
+      "module": "test_repuestos_cost_currency",
+      "exit": 0,
+      "seconds": 6.0,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_repuestos_cost_currency.log"
+    },
+    {
+      "module": "test_repuestos_costos_masivos",
+      "exit": 0,
+      "seconds": 4.7,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_repuestos_costos_masivos.log"
+    },
+    {
+      "module": "test_revision_tecnica_flow",
+      "exit": 0,
+      "seconds": 6.3,
+      "testsRun": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_revision_tecnica_flow.log"
+    },
+    {
+      "module": "test_route_sheet",
+      "exit": 0,
+      "seconds": 5.5,
+      "testsRun": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_route_sheet.log"
+    },
+    {
+      "module": "test_salida_por_venta",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_salida_por_venta.log"
+    },
+    {
+      "module": "test_scan_lookup_company",
+      "exit": 0,
+      "seconds": 3.0,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_scan_lookup_company.log"
+    },
+    {
+      "module": "test_scan_lookup_ns_ambiguo",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_scan_lookup_ns_ambiguo.log"
+    },
+    {
+      "module": "test_service_order_billing_email",
+      "exit": 0,
+      "seconds": 2.6,
+      "testsRun": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_service_order_billing_email.log"
+    },
+    {
+      "module": "test_service_release_deposit",
+      "exit": 0,
+      "seconds": 2.7,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_service_release_deposit.log"
+    },
+    {
+      "module": "test_stock_val_to_stl",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 28,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-stockfinal/test_stock_val_to_stl.log"
+    },
+    {
+      "module": "test_suplencia",
+      "exit": 0,
+      "seconds": 5.6,
+      "testsRun": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_suplencia.log"
+    },
+    {
+      "module": "test_table_sorting",
+      "exit": 0,
+      "seconds": 2.8,
+      "testsRun": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_table_sorting.log"
+    },
+    {
+      "module": "test_test_protocols_catalog",
+      "exit": 0,
+      "seconds": 5.8,
+      "testsRun": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_test_protocols_catalog.log"
+    },
+    {
+      "module": "test_usuarios_admin",
+      "exit": 0,
+      "seconds": 10.2,
+      "testsRun": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_usuarios_admin.log"
+    },
+    {
+      "module": "test_warranty_endpoint",
+      "exit": 0,
+      "seconds": 2.9,
+      "testsRun": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_warranty_endpoint.log"
+    },
+    {
+      "module": "test_work_upgrade",
+      "exit": 0,
+      "seconds": 8.7,
+      "testsRun": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "evidencia": "module-results-final/test_work_upgrade.log"
+    }
+  ]
+}

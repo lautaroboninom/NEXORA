@@ -1,0 +1,7 @@
+numero_serie,articulo,deposito_a_reducir,cantidad,motivo,aprobado_por,stock_hash
+BJD16A31118,1111002,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,c340d3f89ea7c18e
+MZJ5S121186,1115003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,364c78931dce9a36
+E2120301095,1103001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,47fcfd14822b5f58
+E2320101159,1105001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,3ab3a806127ac6cb
+H2120105344,1111001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,1d2f069852a98cff
+H21BE506052,1111001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,1d2f069852a98cff

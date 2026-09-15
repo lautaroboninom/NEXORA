@@ -1,0 +1,45 @@
+{
+  "base": "SBDASEP",
+  "modo": "lectura",
+  "ya_aplicado": true,
+  "despues": [
+    {
+      "scv_ID": 19196,
+      "scvemp_Codigo": "SEP",
+      "scvsuc_Cod": " ",
+      "scv_FEmision": "2026-09-09T00:00:00",
+      "scv_FecMod": "2026-09-09T11:52:28",
+      "scvusu_Codigo": "SPADM6",
+      "scvcli_Cod": "   EDU",
+      "scvtop_Cod": "ALQ ",
+      "scv_ActStock": true,
+      "sdv_ID": 111344,
+      "sdv_NReng": 4,
+      "sdvemp_Codigo": "SEP",
+      "sdvsuc_Cod": " ",
+      "sdvart_CodGen": "1115005 ",
+      "sdvstp_Partida": "MZJ5S79784",
+      "sdv_CantUM1": -1,
+      "sdv_Desc": "Concentrador de oxígeno Longfian JAY-5Q",
+      "sdvdep_Cod": "STR",
+      "sdvmst_ID": 106943
+    }
+  ],
+  "consulta_despues": [
+    {
+      "SCVCLI_COD": "   EDU",
+      "SCVCLI_RAZSOC": "ANDREOLI EDUARDO GABRIEL",
+      "SDVART_CODGEN": "1115005 ",
+      "SDV_DESC": "Concentrador de oxígeno Longfian JAY-5Q",
+      "SDVSTP_PARTIDA": "MZJ5S79784",
+      "SDV_CANTUM1": "0"
+    }
+  ],
+  "cambio": {
+    "sdv_ID": 111344,
+    "campo": "sdv_Desc",
+    "antes": "Concentrador de oxígeno Longfian JAY-5AW   ",
+    "despues": "Concentrador de oxígeno Longfian JAY-5Q"
+  },
+  "verificado": true
+}

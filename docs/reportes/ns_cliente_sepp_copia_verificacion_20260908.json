@@ -1,0 +1,45 @@
+{
+  "AsciiVista": {
+    "filas": 1,
+    "origen_sin_cambios": true,
+    "copia_exacta_salvo_identificadores": true
+  },
+  "AsciiVistaFiltros": {
+    "filas": 4,
+    "origen_sin_cambios": true,
+    "copia_exacta_salvo_identificadores": true
+  },
+  "AsciiVistaGrilla": {
+    "filas": 18,
+    "origen_sin_cambios": true,
+    "copia_exacta_salvo_identificadores": true
+  },
+  "AsciiVistaGroup": {
+    "filas": 6,
+    "origen_sin_cambios": true,
+    "copia_exacta_salvo_identificadores": true
+  },
+  "AsciiArbolVista": {
+    "filas": 1,
+    "origen_sin_cambios": true,
+    "copia_exacta_salvo_identificadores": true
+  },
+  "destino": [
+    {
+      "escenario": "SEPP",
+      "base": "SBDPSEP",
+      "servidor": "SAMTRONIC",
+      "sistema": "WFLEX"
+    }
+  ],
+  "saldo_testigo": [
+    {
+      "SCVCLI_COD": "   NOV",
+      "SCVCLI_RAZSOC": "NOVAMED S.A.",
+      "SDVART_CODGEN": "1115003 ",
+      "SDV_DESC": "Concentrador de oxígeno Longfian JAY-5   ",
+      "SDVSTP_PARTIDA": "MZJ5S121193",
+      "SDV_CANTUM1": "1"
+    }
+  ]
+}

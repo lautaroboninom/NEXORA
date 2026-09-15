@@ -1,0 +1,17 @@
+numero_serie,articulo,deposito_a_reducir,cantidad,motivo,aprobado_por,stock_hash
+MZJ5S121701,1115003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,364c78931dce9a36
+C3121A01312,1103003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,98149b791d12fb0d
+C3121A01343,1103003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,98149b791d12fb0d
+MZJ5S121220,1115003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,364c78931dce9a36
+MZJ5S121365,1115003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,364c78931dce9a36
+CSX1965K251,1103004,STR,1,"Duplicado de ingreso frente a equipo en desguace",Solicitud operativa 2026-09-15,9897c2222fd4485d
+CSX1882K338,1103004,STR,1,"Duplicado de ingreso frente a equipo en desguace",Solicitud operativa 2026-09-15,9897c2222fd4485d
+H2120301236,1111001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,1d2f069852a98cff
+H2118A04094,1111001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,1d2f069852a98cff
+CJD19631180,1111002,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,c340d3f89ea7c18e
+BJD16A31118,1111002,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,c340d3f89ea7c18e
+MZJ5S121186,1115003,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,364c78931dce9a36
+E2120301095,1103001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,47fcfd14822b5f58
+E2320101159,1105001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,3ab3a806127ac6cb
+H2120105344,1111001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,1d2f069852a98cff
+H21BE506052,1111001,STR,1,"Duplicado de ingreso frente a stock de alquiler",Solicitud operativa 2026-09-15,1d2f069852a98cff

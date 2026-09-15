@@ -1,0 +1,5 @@
+ id |    estado     |                              descripcion_problema                              |                   trabajos_realizados                   
+----+---------------+--------------------------------------------------------------------------------+---------------------------------------------------------
+  1 | diagnosticado | Diagnóstico de auditoría: validación de guardado y recuperación en desarrollo. | Prueba sintética; no corresponde a un equipo operativo.
+(1 row)
+

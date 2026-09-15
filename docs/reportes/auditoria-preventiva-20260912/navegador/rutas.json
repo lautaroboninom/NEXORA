@@ -1,0 +1,233 @@
+[
+  {
+    "page": "",
+    "path": "/",
+    "exit": 0,
+    "snapshot": "00-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Órdenes de entrega",
+    "path": "/administracion/ordenes-entrega",
+    "exit": 0,
+    "snapshot": "01-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Facturación",
+    "path": "/cobranzas/facturacion",
+    "exit": 0,
+    "snapshot": "02-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "General por cliente",
+    "path": "/clientes",
+    "exit": 0,
+    "snapshot": "03-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Histórico ingresos",
+    "path": "/ingresos/historico",
+    "exit": 0,
+    "snapshot": "04-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Equipos",
+    "path": "/equipos",
+    "exit": 0,
+    "snapshot": "05-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Nuevo ingreso",
+    "path": "/ingresos/nuevo",
+    "exit": 0,
+    "snapshot": "06-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Ingreso de mercadería",
+    "path": "/ingresos/nuevo?tab=mercaderia",
+    "exit": 0,
+    "snapshot": "07-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Hoja de ruta",
+    "path": "/hoja-de-ruta",
+    "exit": 0,
+    "snapshot": "08-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Pendientes general",
+    "path": "/pendientes",
+    "exit": 0,
+    "snapshot": "09-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Mis pendientes",
+    "path": "/tecnico",
+    "exit": 0,
+    "snapshot": "10-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Pendientes por técnico",
+    "path": "/pendientes-por-tecnico",
+    "exit": 0,
+    "snapshot": "11-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Pendientes de presupuesto",
+    "path": "/pendientes-presupuesto",
+    "exit": 0,
+    "snapshot": "12-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Presupuestados",
+    "path": "/presupuestados",
+    "exit": 0,
+    "snapshot": "13-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Pendientes de reparación",
+    "path": "/pendientes-reparacion",
+    "exit": 0,
+    "snapshot": "14-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Listos para liberar",
+    "path": "/listos-para-liberar",
+    "exit": 0,
+    "snapshot": "15-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Liberados",
+    "path": "/listos",
+    "exit": 0,
+    "snapshot": "16-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Derivados",
+    "path": "/derivados",
+    "exit": 0,
+    "snapshot": "17-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Stock / Depósitos",
+    "path": "/depositos",
+    "exit": 0,
+    "snapshot": "18-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Buscar NS",
+    "path": "/buscar-ns",
+    "exit": 0,
+    "snapshot": "19-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Buscar accesorio",
+    "path": "/buscar-accesorio",
+    "exit": 0,
+    "snapshot": "20-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Remitos",
+    "path": "/cobranzas/remitos",
+    "exit": 0,
+    "snapshot": "21-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Métricas",
+    "path": "/metricas",
+    "exit": 0,
+    "snapshot": "22-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Usuarios",
+    "path": "/usuarios",
+    "exit": 0,
+    "snapshot": "23-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Clientes",
+    "path": "/catalogo/clientes",
+    "exit": 0,
+    "snapshot": "24-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Tipos de equipo",
+    "path": "/catalogo/tipos-equipo",
+    "exit": 0,
+    "snapshot": "25-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Accesorios",
+    "path": "/catalogo/accesorios",
+    "exit": 0,
+    "snapshot": "26-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Marcas y modelos",
+    "path": "/catalogo/marcas",
+    "exit": 0,
+    "snapshot": "27-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Proveedores externos",
+    "path": "/catalogo/proveedores",
+    "exit": 0,
+    "snapshot": "28-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Repuestos",
+    "path": "/catalogo/repuestos",
+    "exit": 0,
+    "snapshot": "29-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Garantías",
+    "path": "/garantias",
+    "exit": 0,
+    "snapshot": "30-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Bejerman",
+    "path": "/bejerman",
+    "exit": 0,
+    "snapshot": "31-snapshot.txt",
+    "errors": ""
+  },
+  {
+    "page": "Protocolos de test",
+    "path": "/sistema/protocolos-test",
+    "exit": 0,
+    "snapshot": "32-snapshot.txt",
+    "errors": ""
+  }
+]

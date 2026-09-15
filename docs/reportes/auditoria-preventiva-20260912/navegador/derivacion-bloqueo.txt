@@ -1,0 +1,310 @@
+- generic [ref=e1] clickable [onclick]
+  - banner
+    - link "NEXORA" [ref=e2]
+      - image "NEXORA"
+    - navigation
+      - link "Órdenes" [ref=e33]
+      - link "Cobranzas" [ref=e34]
+      - link "General por cliente" [ref=e35]
+      - link "Histórico ingresos" [ref=e36]
+      - link "Equipos" [ref=e37]
+    - link "Nuevo ingreso" [ref=e3]
+    - button "Abrir notificaciones" [expanded=false, ref=e38]
+    - button "Bejerman pendiente" [ref=e4]
+      - StaticText "Bejerman pendiente"
+    - StaticText "Auditor"
+    - StaticText " "
+    - StaticText "jefe"
+    - button "Salir" [ref=e5]
+  - main
+    - complementary
+      - image "NEXORA"
+      - StaticText "RECEPCIÓN Y ENTREGAS"
+      - link "Órdenes de entrega" [ref=e39]
+        - StaticText "Órdenes de entrega"
+      - link "Ingreso de mercadería" [ref=e40]
+        - StaticText "Ingreso de mercadería"
+      - link "Hoja de ruta" [ref=e41]
+        - StaticText "Hoja de ruta"
+      - StaticText "SERVICIO TÉCNICO"
+      - link "Pendientes general" [ref=e42]
+        - StaticText "Pendientes general"
+      - link "Mis pendientes" [ref=e43]
+        - StaticText "Mis pendientes"
+      - link "Pendientes por técnico" [ref=e44]
+        - StaticText "Pendientes por técnico"
+      - link "Pendientes de presupuesto" [ref=e45]
+        - StaticText "Pendientes de presupuesto"
+      - link "Presupuestados" [ref=e46]
+        - StaticText "Presupuestados"
+      - link "Pendientes de reparación" [ref=e47]
+        - StaticText "Pendientes de reparación"
+      - link "Listos para liberar" [ref=e48]
+        - StaticText "Listos para liberar"
+      - link "Liberados" [ref=e49]
+        - StaticText "Liberados"
+      - link "Derivados" [ref=e50]
+        - StaticText "Derivados"
+      - link "Stock / Depósitos" [ref=e51]
+        - StaticText "Stock / Depósitos"
+      - StaticText "ADMINISTRACIÓN"
+      - link "General por cliente" [ref=e52]
+        - StaticText "General por cliente"
+      - link "Histórico ingresos" [ref=e53]
+        - StaticText "Histórico ingresos"
+      - link "Equipos" [ref=e54]
+        - StaticText "Equipos"
+      - link "Buscar NS" [ref=e55]
+        - StaticText "Buscar NS"
+      - link "Buscar accesorio" [ref=e56]
+        - StaticText "Buscar accesorio"
+      - StaticText "COBRANZAS"
+      - link "Facturación" [ref=e57]
+        - StaticText "Facturación"
+      - link "Remitos" [ref=e58]
+        - StaticText "Remitos"
+      - StaticText "SISTEMA"
+      - link "Métricas" [ref=e59]
+        - StaticText "Métricas"
+      - link "Usuarios" [ref=e60]
+        - StaticText "Usuarios"
+      - link "Clientes" [ref=e61]
+        - StaticText "Clientes"
+      - link "Tipos de equipo" [ref=e62]
+        - StaticText "Tipos de equipo"
+      - link "Accesorios" [ref=e63]
+        - StaticText "Accesorios"
+      - link "Marcas y modelos" [ref=e64]
+        - StaticText "Marcas y modelos"
+      - link "Proveedores externos" [ref=e65]
+        - StaticText "Proveedores externos"
+      - link "Repuestos" [ref=e66]
+        - StaticText "Repuestos"
+      - link "Garantías" [ref=e67]
+        - StaticText "Garantías"
+      - link "Bejerman" [ref=e68]
+        - StaticText "Bejerman"
+      - link "Protocolos de test" [ref=e69]
+        - StaticText "Protocolos de test"
+    - dialog [ref=e6] clickable [onclick]
+      - generic [ref=e70] clickable [onclick]
+        - heading "Salida del equipo" [level=2, ref=e77]
+        - generic
+          - StaticText "00001 - CPAP | Marca auditoría | Modelo auditoría"
+        - button "Cerrar" [ref=e78]
+        - StaticText "OS"
+        - StaticText "00001"
+        - StaticText "CLIENTE"
+        - StaticText "Cliente sintético auditoría"
+        - StaticText "SERIE"
+        - StaticText "AUDIT-UI-20260911"
+        - StaticText "ESTADO"
+        - generic "Diagnosticado"
+          - StaticText "Diagnosticado"
+        - StaticText "PRESUPUESTO"
+        - generic "Pendiente"
+          - StaticText "Pendiente"
+        - StaticText "RESOLUCIÓN"
+        - StaticText "Sin definir"
+        - StaticText "El equipo sigue derivado. Marcá la derivación como devuelta antes de liberarlo."
+        - LabelText
+          - StaticText "Resolución de reparación"
+          - combobox "Resolución de reparación" [expanded=false, ref=e90]: Seleccionar resolución
+            - MenuListPopup
+              - option "Seleccionar resolución" [selected, ref=e94]
+              - option "Reparado" [ref=e95]
+              - option "No reparado" [ref=e96]
+              - option "No se encontró falla" [ref=e97]
+              - option "Presupuesto rechazado" [ref=e98]
+              - option "Cambio" [ref=e99]
+        - button "Cancelar" [ref=e79]
+        - button "Liberar e imprimir" [disabled, ref=e80]
+    - button "Volver" [ref=e7]
+    - heading "Hoja de servicio - OS: 00001 - NS/MG: AUDIT-UI-20260911" [level=1, ref=e8]
+      - StaticText "Hoja de servicio - OS: 00001 - NS/MG: AUDIT-UI-20260911"
+    - generic "Derivado · Proveedor auditoria local · desde 12/9/26"
+      - StaticText "Derivado"
+    - button "Acciones" [expanded=false, ref=e71]
+    - generic
+      - StaticText "OS"
+      - StaticText "00001"
+      - StaticText "CLIENTE"
+      - StaticText "Cliente sintético auditoría"
+      - StaticText "TIPO DE EQUIPO"
+      - StaticText "CPAP"
+      - StaticText "MARCA"
+      - StaticText "Marca auditoría"
+      - StaticText "MODELO"
+      - StaticText "Modelo auditoría"
+      - StaticText "N/S O MG"
+      - StaticText "AUDIT-UI-20260911"
+      - StaticText "ESTADO"
+      - generic "Diagnosticado"
+        - StaticText "Diagnosticado"
+      - StaticText "PRESUPUESTO"
+      - generic "Pendiente"
+        - StaticText "Pendiente"
+      - StaticText "TÉCNICO"
+      - StaticText "Técnico NEXORA"
+      - StaticText "UBICACIÓN"
+      - StaticText "Taller"
+      - StaticText "Ingreso: "
+      - StaticText "-"
+      - StaticText "Antigüedad: "
+      - StaticText "-"
+      - StaticText "Propiedad: "
+      - StaticText "Cliente"
+      - StaticText "Garantía reparación: "
+      - StaticText "No"
+      - StaticText "Garantía fábrica: "
+      - StaticText "No"
+    - button "Principal" [ref=e9]
+    - button "Diagnóstico y Reparación" [ref=e10]
+    - button "Tests" [ref=e11]
+    - button "Presupuesto" [ref=e12]
+    - button "Derivaciones" [ref=e13]
+    - button "Archivos" [ref=e14]
+    - button "Historial" [ref=e15]
+    - heading "Cliente" [level=2, ref=e16]
+    - StaticText "Razón social"
+    - StaticText "Cliente sintético auditoría"
+    - StaticText "Código empresa"
+    - StaticText "-"
+    - StaticText "Teléfono"
+    - StaticText "-"
+    - heading "Equipo" [level=2, ref=e17]
+    - StaticText "Propiedad: "
+    - StaticText "Cliente"
+    - StaticText "Tipo de equipo"
+    - StaticText "CPAP"
+    - StaticText "Marca"
+    - StaticText "Marca auditoría"
+    - StaticText "Modelo"
+    - StaticText "Modelo auditoría"
+    - StaticText "Variante"
+    - StaticText "-"
+    - StaticText "Garantía (fábrica)"
+    - StaticText "No"
+    - StaticText "N° serie"
+    - StaticText "AUDIT-UI-20260911"
+    - StaticText "Garantía de reparación"
+    - StaticText "No"
+    - StaticText "N° interno (MG)"
+    - StaticText "-"
+    - StaticText "Remito ingreso"
+    - generic
+      - StaticText "-"
+      - StaticText "RIS: pending"
+      - button "Emitir RIS" [ref=e72]
+    - StaticText "Remito salida"
+    - StaticText "-"
+    - StaticText "Faja de garantía"
+    - StaticText "OK"
+    - heading "Notas" [level=2, ref=e18]
+    - StaticText "Informe preliminar"
+    - StaticText "-"
+    - StaticText "Accesorios"
+    - StaticText "-"
+    - heading "Estado" [level=2, ref=e19]
+    - StaticText "Motivo"
+    - StaticText "reparación"
+    - StaticText "Estado"
+    - generic "Estado del equipo"
+      - StaticText "Diagnosticado"
+    - StaticText "Presupuesto"
+    - generic "Pendiente"
+      - StaticText "Pendiente"
+    - StaticText "Resolución"
+    - StaticText "-"
+    - StaticText "Derivado"
+    - generic "Derivado · Proveedor auditoria local · desde 12/9/26"
+      - StaticText "Derivado"
+    - StaticText "Proveedor auditoria local"
+    - StaticText " · desde 12/9/26"
+    - StaticText "FECHAS IMPORTANTES"
+    - generic
+      - StaticText "Creación: 11/9/26"
+    - generic
+      - StaticText "Ingreso: -"
+    - generic
+      - StaticText "Diagnóstico: 11/9/26"
+    - generic
+      - StaticText "Presupuestado: -"
+    - generic
+      - StaticText "Reparación: -"
+    - generic
+      - StaticText "Liberación: -"
+    - generic
+      - StaticText "Entrega: -"
+    - StaticText "BEJERMAN"
+    - button "Actualizar" [ref=e20]
+    - StaticText "No disponible"
+    - StaticText "Debe cargar sus credenciales de Bejerman para operar con el SDK desde NEXORA."
+    - generic
+      - StaticText "Ingresado por: -"
+    - heading "Asignación" [level=2, ref=e21]
+    - combobox [expanded=false, ref=e22]: Técnico NEXORA
+      - MenuListPopup
+        - option "-- Seleccionar técnico --" [ref=e81]
+        - option "Auditor" [ref=e82]
+        - option "Técnico NEXORA" [selected, ref=e83]
+    - button "Guardar" [disabled, ref=e23]
+    - generic
+      - StaticText "Actual: Técnico NEXORA"
+    - heading "Ubicación" [level=2, ref=e24]
+    - combobox "Seleccionar ubicación" [expanded=false, ref=e25]: Taller
+      - MenuListPopup
+        - option "Seleccione la ubicación." [disabled, ref=e84]
+        - option "Taller" [selected, ref=e85]
+        - option "Sarmiento" [ref=e86]
+        - option "Estantería de Alquiler" [ref=e87]
+        - option "-" [ref=e88]
+    - button "Guardar" [disabled, ref=e26]
+    - StaticText "La ubicación puede modificarse desde aquí."
+    - heading "Comentarios" [level=3, ref=e27]
+    - StaticText "-"
+    - heading "Salida del equipo" [level=2, ref=e28]
+    - StaticText "El equipo sigue derivado. Marcá la derivación como devuelta antes de liberarlo."
+    - button "Revisar salida" [ref=e29]
+    - StaticText "ESTADO"
+    - generic "Diagnosticado"
+      - StaticText "Diagnosticado"
+    - StaticText "PRESUPUESTO"
+    - generic "Pendiente"
+      - StaticText "Pendiente"
+    - StaticText "RESOLUCIÓN"
+    - StaticText "Sin definir"
+    - heading "Entrega" [level=2, ref=e30]
+    - StaticText "El equipo sigue derivado. Marcá la derivación como devuelta antes de entregarlo."
+    - StaticText "Remito salida"
+    - StaticText "-"
+    - StaticText "Factura"
+    - StaticText "-"
+    - StaticText "Fecha entrega"
+    - StaticText "-"
+    - heading "Alquiler" [level=2, ref=e31]
+    - StaticText "¿Se alquiló?"
+    - checkbox [checked=false, ref=e73]
+    - StaticText "¿A quién?"
+    - combobox "Elija de la lista" [ref=e74]
+    - StaticText "Remito"
+    - textbox [ref=e32]
+    - button "Buscar RTA en Bejerman" [ref=e75]
+    - StaticText "Fecha"
+    - Date
+      - generic
+        - spinbutton "Día" [ref=e91]: 0
+          - StaticText "dd"
+        - StaticText "/"
+        - spinbutton "Mes" [ref=e92]: 0
+          - StaticText "mm"
+        - StaticText "/"
+        - spinbutton "Año" [ref=e93]: 0
+          - StaticText "aaaa"
+      - button "Mostrar el selector de fechas" [ref=e89]
+    - button "Editar datos" [ref=e76]
+  - contentinfo
+    - StaticText "© "
+    - StaticText "2026"
+    - StaticText " Sepid S.A. Todos los derechos reservados."
+    - StaticText "NEXORA - Gestión integral de ventas y servicio técnico"

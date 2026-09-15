@@ -1,0 +1,347 @@
+[
+  {
+    "file": "api/service/bejerman_particular_customers.py",
+    "before": "60c9a8c5963e30d73ccd4d71207c07e772ffabb83d180f87751c40251329df74",
+    "after": "6a1a87b1aa986d2f3dcee41d0178a07ed0685461f0a4f0a2bced4498fe90ad79"
+  },
+  {
+    "file": "api/service/delivery_remito_jobs.py",
+    "before": "5aaac18299a91b35bafae5554141ec1145772c383d02cf8549c65e6f3100ac03",
+    "after": "77a5b0e3b895a3c79638b50338b3021e8afa42930f31a3a48e971c8983e3f4ec"
+  },
+  {
+    "file": "api/service/management/commands/prepare_production_schema.py",
+    "before": "5f25209fdd6690cca472f8dc1490c45de5ab27f2fcb8d133d9f458389a45208a",
+    "after": "fcde0f1d782821a5844df10113aa7b9687630f7206632dbcec43ce961dbbb314"
+  },
+  {
+    "file": "api/service/views/derivaciones_views.py",
+    "before": "91ac4bd2818e0ba3fd4512c521606bb1a0010a4d15b44bb9609f6f3f56ad3ce7",
+    "after": "47b9ce4e82d02e6b9e9b0ea1b128d20c1aa051992ef5ed7cb6d64fc48471178b"
+  },
+  {
+    "file": "api/service/views/ingresos_views.py",
+    "before": "0dcc1ae112e94c6c26b7541d17ed6774ba3b4fe8f4feb205a4cb022a256a36a5",
+    "after": "e418310414c46dfdb6ae6ebece1bf3d8c4d7633d73a92b8360d60f5146fbd039"
+  },
+  {
+    "file": "scripts/backup-nexora.ps1",
+    "before": "c48039aaf2f23c8702622f5c3a80a33a7aa670a616841d850f5c9723fed2fefe",
+    "after": "b6c67a80454dfd4a3f46349db323fe381aa5ea6ef1c2806cb7fedeab40bd7f4a"
+  },
+  {
+    "file": "docs/runbook-guardia-vacaciones.md",
+    "before": "994e0f74130d414803a11e69630f197607f5207ca8bea58c942aac584556833f",
+    "after": "b3bb69b12f0149769e46eff424be3ddf68075a6a260ddf8e0d1c31f5fc1dfcec"
+  },
+  {
+    "file": "api/service/tests/test_delivery_remito_jobs.py",
+    "before": "69e660afdd39c3b1dc0d6fe1a7b2503a419d63976fee5cffaaa907eafb7eedde",
+    "after": "7c9153a77fceca5e34a3358a205fa46715a0f2a1dcd0dd4a03f8609d8fc1a0ec"
+  },
+  {
+    "file": "api/service/tests/test_derivaciones_workflow.py",
+    "before": "fbdc024e444ff4f6076fba47a06b5a4028a66054beb09ab8b12a43eeb7fdbe95",
+    "after": "9da1015d63bec21b672889f7ae3e07bab65e1a5d3b2ffbe904ef2727f3fd3d4b"
+  },
+  {
+    "file": "api/service/tests/test_prepare_production_schema.py",
+    "before": "a361f12722c22aea1c56c17b8360eaa4f57c8db45a7fd88856b230de3c2af1bc",
+    "after": "5c01e46485ea5230434c06eff542fb1f1a531dd598a7b3e6cf8f98da3f4e2392"
+  },
+  {
+    "file": "api/service/tests/schema_helpers.py",
+    "before": null,
+    "after": "5d05ccf653ecd01aae3fb46abfc5ed01443e29e723c4d428f724b05e317f9833"
+  },
+  {
+    "file": "api/service/tests/runner.py",
+    "before": null,
+    "after": "141fabc8ca08754d664fa0e370397820a2cb66e558b7c73e21554ab48f528fb7"
+  },
+  {
+    "file": "api/service/tests/test_remito_reservation_race.py",
+    "before": null,
+    "after": "cf09fe7d3b344e489e71fbf7fa6f40eb34f200fbf61f986a4629e8c4bb90c415"
+  },
+  {
+    "file": "api/service/bejerman_delivery.py",
+    "before": "ad84267e836aec1f396b2b5cf6bc1def23fa90efe22636dce6ee87495b4f6d0b",
+    "after": "010d075a666526b48333df3691d4ea964b4f2a4f5433ed3316ac63bcebf9de9c"
+  },
+  {
+    "file": "sql/schema.sql",
+    "before": "b17b9d170ee7e343a241792a8b3dca0623def900586286bac35c8e20e9553d95",
+    "after": "fb73eb8406bc1a0f63563507e3d9a252846d64440b1a149e749f2cb614dd20ff"
+  },
+  {
+    "file": "api/service/bejerman_stock_corrections.py",
+    "before": "02106e24561f4355fda77295ab15c384bee48975a9c1852ff20a7808ede43e78",
+    "after": "32ad8afefb95005453bac2024dd90d538a69dd5fdfd1651e09ec2e45d0aabc71"
+  },
+  {
+    "file": "api/service/bejerman_delivery.py",
+    "before": "010d075a666526b48333df3691d4ea964b4f2a4f5433ed3316ac63bcebf9de9c",
+    "after": "83d7de0aff63fc062da8bcd37a508ea856f25fa14e0a17f5330f4e7f1a0f3084"
+  },
+  {
+    "file": "api/service/views/ingresos_views.py",
+    "before": "e418310414c46dfdb6ae6ebece1bf3d8c4d7633d73a92b8360d60f5146fbd039",
+    "after": "bdc260dbd40db7174c2245304dd19c2e2531399d53f50743227afa116f7339b8"
+  },
+  {
+    "file": "api/service/views/ingreso_tests_views.py",
+    "before": "61a613221b93409eb938725b20f68fbfbdb45271cac6c8dafc7d179563fe1398",
+    "after": "a1648bd9644e818443912d7e52b042132ff966f81ff96f8dfb1442ee6c931a6f"
+  },
+  {
+    "file": "api/service/bejerman_delivery.py",
+    "before": "83d7de0aff63fc062da8bcd37a508ea856f25fa14e0a17f5330f4e7f1a0f3084",
+    "after": "1f879cf4328fbb54c09b7fae2610374f851bb481ee7f3ab6aba5bd9c208ef54a"
+  },
+  {
+    "file": "api/service/tests/test_airsep_serial_fix.py",
+    "before": "b43f2e7d9559ee35225e2580752b588903164fab29588b9d5800bd4293e49800",
+    "after": "35084f8ee56624a555b0aa2c789fe8aaa2d4f94d67152c2553cb13a30bcbbfb8"
+  },
+  {
+    "file": "api/service/tests/test_alta_masiva_propios.py",
+    "before": "8a6155a3f0a7f03601c3d8436a7d7b611ec0499bd791fa2ba6e985c1dae60c9e",
+    "after": "cbeeb16a44afe94fa0c236a9834d1618dac23bbea0763c464c7359bb084d7a64"
+  },
+  {
+    "file": "api/service/tests/test_bejerman_delivery.py",
+    "before": "0c88b5946b93886efaceef9ed939d4a49d398f3b38ea3e06cbcbbe0a42082e97",
+    "after": "8347e8a892561533c7a76590628a997fd75976b8b5ffca2d8b8ff1b55a676f06"
+  },
+  {
+    "file": "api/service/tests/test_bejerman_pdf_requests.py",
+    "before": "fa4fa52c66d398a9eca8e661904d55531fa2dcff014560d852653ca756c447a0",
+    "after": "40187efd1406a7f285810d4f7d117cfbd78cc39ca4e798b2db67dffa612d4a16"
+  },
+  {
+    "file": "api/service/tests/test_bejerman_rental_remito.py",
+    "before": "ac5afb8ff288baba85b92ade8b7a49dd437560e340b9fe93755dc5dd3a525c21",
+    "after": "a72ae8032f68b9ebe361275bbb37326bee5154132b67b12eed95bafd4baf2e5a"
+  },
+  {
+    "file": "api/service/tests/test_bejerman_sdk_hardening.py",
+    "before": "4741c25299540ba64d0a26b839f4ef03faed16e4d03c09a6a228eb51f393ec2a",
+    "after": "066f21124163f55bbd6c39ff9f4b564eac97ed1bcc8fe013682574ce00127ab8"
+  },
+  {
+    "file": "api/service/tests/test_bejerman_sync.py",
+    "before": "d0c96119196869f4a587ef59638afc819340695d761314692b17e0b407fd9f71",
+    "after": "3aecd702faf89f9eee9c86bcc946ac5a0ae8e917f8ba523c548ee43eb2b0ce71"
+  },
+  {
+    "file": "api/service/tests/test_bejerman_user_credentials.py",
+    "before": "8db47de447d0c21922a97cf40c81c8732e0c8aceff026c7fe7fa01d00d13c823",
+    "after": "e1f4e31b96070dbba72b5de915eddab6fa396a71adcf77a156de432745b22dab"
+  },
+  {
+    "file": "api/service/tests/test_catalogo_modelo_variantes.py",
+    "before": "ee6462fd8f547c199a679edb3278561506b0bf66c983da5a9097195275ca4ee5",
+    "after": "bcec9266ad7f768e923a3594f0e4df4770906b038ba274e4545304a387dd8418"
+  },
+  {
+    "file": "api/service/tests/test_cerrar_reparacion_permissions.py",
+    "before": "4055f94d8c701cd6c53472e2cddf313bfaef2cbaa5b0c06c935cbfc29a5e6f7f",
+    "after": "e1697dadb24ea4cc58d836271ed34f37842c98d1b9a13dbf4eda15c6b7ee52f2"
+  },
+  {
+    "file": "api/service/tests/test_clientes_bejerman.py",
+    "before": "6175369390a47a74fc2e01cdf827e9da8f5b43c3ef71d1a35c1f0305a1cee292",
+    "after": "2ca83115c274d5401a4fa2deb1ee5ac0f4080889a1c00891931bcb9ff7d79e2f"
+  },
+  {
+    "file": "api/service/tests/test_corregir_codigos_repuestos.py",
+    "before": "03f4982c343c1bc826f4fc7986ed0df86f22bb9d73aa6556670aec76e0eebbf1",
+    "after": "b6a1e4905ea93010cd5f88c6ce6090d88643d4878883a6ec164875d14e41c1d2"
+  },
+  {
+    "file": "api/service/tests/test_delivery_order_service_release_delivery_sync.py",
+    "before": "d57809dfa282d30c2068aeeda024ed9441562fbc64a350c509d5847637942398",
+    "after": "6b4dafe4c81f79398bf79cb25393a97e483dbacfb3e05eee8b8f1b09f6dca76d"
+  },
+  {
+    "file": "api/service/tests/test_devices_list_view.py",
+    "before": "0a8274867f686b5effa691fda67ef048d1d4714fdf7b0bd49e5b81ca78e86be9",
+    "after": "a21633aad217283e9c7d48778204e3e9fc13f33026d877e7199455a2898fe3e8"
+  },
+  {
+    "file": "api/service/tests/test_device_identificadores_api.py",
+    "before": "255f87a6930472a34237ef26727f6f2d29be32057259f1cddd6044c0f8cbf214",
+    "after": "c293143dd04dda1dd6d48495f696eb4196d6793dd6c3f7b419db24837f1057f1"
+  },
+  {
+    "file": "api/service/tests/test_global_search_remitos.py",
+    "before": "1aa8ef8ab4e38f056eaed12c05f06560576bfd38ef3b4c22a1266dfb41c2bbc6",
+    "after": "2865200c57cb358b110dba67188770c9d181c49053cc564e8923aa4c58cfbaad"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_alquiler_remito_views.py",
+    "before": "7ccf93c659985359508e2cda1fa2dea28f3523da494d78e7253556da020eea36",
+    "after": "3850430e184cfc4891950abb9c2142b332e7c9ac53f3ffc117ce43de3dd926aa"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_alquiler_uncheck.py",
+    "before": "d18c60d75867b3dbad3ec2a25edf2cba9cb266ea73cb5dbe21d52ecbd781a270",
+    "after": "6730a8e7c75a5e8b99b7d7e7578a838f94519c8447a1733ea9534605692e8efe"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_assignment_requests.py",
+    "before": "1b3334c514c8f677be52641aaa8a5391bc9cd6c6448682a803aa738c6039bc17",
+    "after": "de9527c0133016da9d12a304192c0a59779cc0fd7ab46bb2ee3574b3ccac1a78"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_baja_rechazar.py",
+    "before": "ddb32864ba857ab8f4628f932c6537d1bfd5932f3fffba796f4770a9703f2ea8",
+    "after": "76fecda8f2e398a4249d19f80518ffa39075bff81e36d9fa8c11ebb1b83cdd40"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_historical_corrections.py",
+    "before": "83cf789cb9bc3e54b188f38da4074d14de9d6f3a504fb91006e82ae5d89feb7c",
+    "after": "a4a15c663874ba97cbfe176178b5e85b488646d4a25d9a54259a337c92102b78"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_media.py",
+    "before": "2491f8413078712448afd583191f6fd75223479c8938e4ac85c0045785126bd8",
+    "after": "1559f9a1ae0f4869f4acef285699ba946fce35dc5fa1de7fe0dbf3b977113f75"
+  },
+  {
+    "file": "api/service/tests/test_ingreso_tests.py",
+    "before": "61b28a3468905c99132c0f786b6885367e82f73cfbf114caf45b95446321e895",
+    "after": "fd70430e3537e4dbe712ea7ca020d73640d0497afa6627fd0858aab619d8fb54"
+  },
+  {
+    "file": "api/service/tests/test_metricas_actividad_tecnicos.py",
+    "before": "5ca7ca586a6616746d66c47cc4c6ad9f8be5bbdbdba67542728b2f58fc854024",
+    "after": "5316157a7e6f0df9edda78fe3bd0080ee2b14bd9d6a0768885b1ae24a6f2ce58"
+  },
+  {
+    "file": "api/service/tests/test_mg_sale_flow.py",
+    "before": "f3c01f0ae9beb2d1e010420e74ad3b97bc66e2feb849a99affaede0eb2196b88",
+    "after": "85007c72ca4bcc6ebae676a05e3f9dea1cab93ca96a0b4b19d8e7812b90b53b4"
+  },
+  {
+    "file": "api/service/tests/test_modelo_homonimo_tipo_equipo.py",
+    "before": "5f98db4537bac645b9e5e08192f9b96212b800e590ca2cc1cd952ab1ae8f9eae",
+    "after": "ee7b78b27da14edd6bbd47523f6e7d58600c22699edc715c63a1f2e0b8c8cff0"
+  },
+  {
+    "file": "api/service/tests/test_nexora_cutover.py",
+    "before": "5dd94b2cf8781cb7935409426b0af4b1855241da57994b99242fba2a171cbf92",
+    "after": "b93e32444150c2b79456ae37e584bc323a4cc12dfebea01783950efdf20e61ee"
+  },
+  {
+    "file": "api/service/tests/test_notifications.py",
+    "before": "f238d404a64b8cb39482102edc1e843cc3dd43c4c339621e843fc686c46d9baf",
+    "after": "ddfdbfd7d30442f86b75098d40294ffc9cb10c617c3d8d5ed880a84046da5b76"
+  },
+  {
+    "file": "api/service/tests/test_notifications_refresh.py",
+    "before": "e4d07f6d24ca16c6c5980967ae0fb3298e296475c18150918e38dac4d5df9687",
+    "after": "5a8fdf66cbe746c066f2b3890966b3c1c059d029d457ff9544b85196c4027a19"
+  },
+  {
+    "file": "api/service/tests/test_no_se_repara_flow.py",
+    "before": "77d0e2fa4e563f30e405523bfa6b8dd7888d50e7e6eb527597e40edba8593e38",
+    "after": "6cf060ee22514895fa3d6eb758dde04b3843d6420ad410ecf0e1d2618323be38"
+  },
+  {
+    "file": "api/service/tests/test_pendientes_por_tecnico.py",
+    "before": "68cc1bd13d8d4b5a9871bc2566204ee886a3578ab4e381e235306af6403aa7c7",
+    "after": "214df914f5fa58913b9480544dccc228e1aa44c7ad7fc93adf47a460df991969"
+  },
+  {
+    "file": "api/service/tests/test_pending_device_trace.py",
+    "before": "7b73b8afe721ee263c7c222094ec6ca50653b6a62570407c20c6eb79ff29b476",
+    "after": "2e921a3e5152730e4183948e20717aa2655a807d631c8ba4684d10aaf2d555d9"
+  },
+  {
+    "file": "api/service/tests/test_portal_integration.py",
+    "before": "957343af8315e8103e65da5d5591ff635ac10d5312581cbbe5637ee55e6f611d",
+    "after": "040aef0671ca3cbf30a2b19e7cfc1e4aa632c91a0769bc9e64ecef13ba102aa6"
+  },
+  {
+    "file": "api/service/tests/test_quotes_anular.py",
+    "before": "0e98d69d600f29fbbd9dbeb8a8d586f35b4c147b7ca6258ec50ec3337986e503",
+    "after": "10da6f6c1e522da9ef9e5a55f8e0f1b4d37ac21ae7c0bfae352884f98b3bede0"
+  },
+  {
+    "file": "api/service/tests/test_quotes_emitir_autoasignacion.py",
+    "before": "996b73dfe5cac0f78e24b31207adfdbfd824bb0dfa9a1a1fb023bd16a39a8643",
+    "after": "b8d6a3686aa9e64b9d84333bcbeb85cd7e8b9bebc57863ee7e46929c381d5c84"
+  },
+  {
+    "file": "api/service/tests/test_quote_mg_notifications.py",
+    "before": "a101bc65c510be800f36c968c863993a0b466ed9addddd97f471e66f0d8dbe21",
+    "after": "aa36c386aa4401e610bc8d4fedbab82819a7a45f69610f37d9e037994df18d99"
+  },
+  {
+    "file": "api/service/tests/test_recepcion_permissions.py",
+    "before": "26a7ed381244183fc6d1dc02c7620374386d5525ba0a8236d859142f0b7712e5",
+    "after": "ad0017a93cfe7ebdafd0f99e2016fb76a9bec09318fb191aa4912c623bc1c8c3"
+  },
+  {
+    "file": "api/service/tests/test_rejected_budget_charge_flow.py",
+    "before": "42a761cf03e3e01859232d7a01941c48f9361197b14416d5d34b9bf619ba19ff",
+    "after": "4faf9f0bd9a080ba644cf67a387aeb793f3b53905c27355c9eff8b2d5920b6d6"
+  },
+  {
+    "file": "api/service/tests/test_repuestos_compra.py",
+    "before": "583cee0f1501bb92037c38c3368dfa70f4b40dff8c298a9a178412cf0e896df7",
+    "after": "8761fa0edbe9c1fd73827afe230c6aaaaf80b6ebe35cc4cfe357315a47819e36"
+  },
+  {
+    "file": "api/service/tests/test_repuestos_cost_currency.py",
+    "before": "c295e9b80494919d7d55279added531ba32a9285c479aec4be3fcbb4e13cd196",
+    "after": "a41a1d2ad934ba5dbd26aae5f10792fb8bc9fbdd2db08f3ab7054b0480792efe"
+  },
+  {
+    "file": "api/service/tests/test_revision_tecnica_flow.py",
+    "before": "2730f06711cdf19f63c9b92be41cb8878ce0250bef8d13761b72dde4184ac95b",
+    "after": "66902c64e2c862f163a5b6f44f908123449a356a3d64c14ca2340d0f6c48df8f"
+  },
+  {
+    "file": "api/service/tests/test_stock_val_to_stl.py",
+    "before": "20f57cada60791445825d8d9bf24270000423a53a7c8294bd3020ad0596913be",
+    "after": "ec6e110c7ac6ec540dc724779e6247293a08fb49482c340dc96890144e288858"
+  },
+  {
+    "file": "api/service/tests/test_work_upgrade.py",
+    "before": "b78ca9cff0f01af5f4f287dcdfe3a8bbec0686c7d12b853072fc54804a64ef76",
+    "after": "8710d6fd06ba6a51b678ef63c88b543ecc7699b06f2852f4c90dd60695a2e1a6"
+  },
+  {
+    "file": "web/src/lib/derivation-dates.test.js",
+    "before": null,
+    "after": "5cee935815088f381664a67cfc8415ce941ebece5897b138b0845fcca5fad933"
+  },
+  {
+    "file": "web/src/lib/ui-helpers.js",
+    "before": "ab7c87bbc679e662862b6639a2ec39fa3404f53550d574e2fc05041b99050b07",
+    "after": "0781729f9ec04c2c22e5da466012a30a7af4958650e85e5684f4be75663ef7c2"
+  },
+  {
+    "file": "web/src/pages/Derivados.jsx",
+    "before": "567eb152e0e93880ebc8aef35324bde7c4fd9e2c37fd6572e59601d9ea83327a",
+    "after": "a754503e2f5beb592db01b0b514656be9efff41e0e3da6eaddf4796359f07643"
+  },
+  {
+    "file": "web/src/pages/DerivarIngreso.jsx",
+    "before": "d45742ffd0b5d0daff114ec2856e7e5b724b9af749a27033947dfb542280673f",
+    "after": "7d3e95d3dc06348e36159ba9598dee7ca0afa1e6a8f90810eb14fb1188b22a31"
+  },
+  {
+    "file": "web/src/pages/ServiceSheet/tabs/DerivacionesTab.jsx",
+    "before": "63d00408398da5e4ef678f849a92215e22b22c1f82951b4363ecfe4bdf9a7067",
+    "after": "34f2d7048474ca512c2ffc9f2f27d328b069737a7dfdaca8deb4d564637d5472"
+  },
+  {
+    "file": "docs/runbook-guardia-vacaciones.md",
+    "before": "b3bb69b12f0149769e46eff424be3ddf68075a6a260ddf8e0d1c31f5fc1dfcec",
+    "after": "a0a5c0b92ff5b537b500bffc85c507f84ec76213dcb9bd793b89f6e3c8cde37e"
+  }
+]

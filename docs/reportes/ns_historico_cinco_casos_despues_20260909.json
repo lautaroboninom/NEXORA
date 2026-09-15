@@ -1,0 +1,219 @@
+{
+  "base": "SBDASEP",
+  "modo": "aplicación",
+  "ya_en_destino": false,
+  "consulta_antes": [
+    {
+      "SCVCLI_COD": "   DIA",
+      "SCVCLI_RAZSOC": "DIAGNOSTIC MEDIC S.A.",
+      "SDVART_CODGEN": "1115007 ",
+      "SDV_DESC": "Concentrador de oxígeno AIR SEP NEW LIFE",
+      "SDVSTP_PARTIDA": "5143451",
+      "SDV_CANTUM1": "1"
+    },
+    {
+      "SCVCLI_COD": "   DIA",
+      "SCVCLI_RAZSOC": "DIAGNOSTIC MEDIC S.A.",
+      "SDVART_CODGEN": "1115007 ",
+      "SDV_DESC": "Concentrador de oxígeno AIR SEP NEW LIFE   ",
+      "SDVSTP_PARTIDA": "N5143451",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": " INTEG",
+      "SCVCLI_RAZSOC": "ORTOPEDIA INTEGRAR S.R.L.",
+      "SDVART_CODGEN": "1115023 ",
+      "SDV_DESC": "Concentrador de oxígeno Longfian JAY-5Q   ",
+      "SDVSTP_PARTIDA": "MZJ5S117719",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJ2P00005",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJ2P00078",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJ2P00096",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00005",
+      "SDV_CANTUM1": "1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00078",
+      "SDV_CANTUM1": "1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00096",
+      "SDV_CANTUM1": "0"
+    }
+  ],
+  "consulta_esperada": [
+    {
+      "SCVCLI_COD": "   DIA",
+      "SCVCLI_RAZSOC": "DIAGNOSTIC MEDIC S.A.",
+      "SDVART_CODGEN": "1115007 ",
+      "SDV_DESC": "Concentrador de oxígeno AIR SEP NEW LIFE",
+      "SDVSTP_PARTIDA": "5143451",
+      "SDV_CANTUM1": "0"
+    },
+    {
+      "SCVCLI_COD": " INTEG",
+      "SCVCLI_RAZSOC": "ORTOPEDIA INTEGRAR S.R.L.",
+      "SDVART_CODGEN": "1115023 ",
+      "SDV_DESC": "Concentrador de oxígeno Longfian JAY-5Q   ",
+      "SDVSTP_PARTIDA": "MZJ5S117719",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJ2P00096",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00005",
+      "SDV_CANTUM1": "0"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00078",
+      "SDV_CANTUM1": "0"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00096",
+      "SDV_CANTUM1": "0"
+    }
+  ],
+  "transaccion": [
+    {
+      "estado": "COMMIT",
+      "base": "SBDASEP",
+      "fecha_servidor": "09/09/2026 11:19:00 a.m. -03:00",
+      "renglones_corregidos": "3"
+    }
+  ],
+  "filas_completas_verificadas": {
+    "SegDetV": 12,
+    "SegCabV": 11,
+    "StockPar": 17,
+    "MovStock": 39
+  },
+  "unicos_campos_modificados": [
+    {
+      "sdv_ID": 111088,
+      "campo": "sdvstp_Partida",
+      "antes": "N5143451",
+      "despues": "5143451"
+    },
+    {
+      "sdv_ID": 110836,
+      "campo": "sdvstp_Partida",
+      "antes": "MZJ2P00005",
+      "despues": "MZJP00005"
+    },
+    {
+      "sdv_ID": 110843,
+      "campo": "sdvstp_Partida",
+      "antes": "MZJ2P00078",
+      "despues": "MZJP00078"
+    }
+  ],
+  "consulta_despues": [
+    {
+      "SCVCLI_COD": "   DIA",
+      "SCVCLI_RAZSOC": "DIAGNOSTIC MEDIC S.A.",
+      "SDVART_CODGEN": "1115007 ",
+      "SDV_DESC": "Concentrador de oxígeno AIR SEP NEW LIFE",
+      "SDVSTP_PARTIDA": "5143451",
+      "SDV_CANTUM1": "0"
+    },
+    {
+      "SCVCLI_COD": " INTEG",
+      "SCVCLI_RAZSOC": "ORTOPEDIA INTEGRAR S.R.L.",
+      "SDVART_CODGEN": "1115023 ",
+      "SDV_DESC": "Concentrador de oxígeno Longfian JAY-5Q   ",
+      "SDVSTP_PARTIDA": "MZJ5S117719",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJ2P00096",
+      "SDV_CANTUM1": "-1"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJP00005",
+      "SDV_CANTUM1": "0"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D ",
+      "SDVSTP_PARTIDA": "MZJP00078",
+      "SDV_CANTUM1": "0"
+    },
+    {
+      "SCVCLI_COD": "NATIVA",
+      "SCVCLI_RAZSOC": "NATIVA S.R.L.",
+      "SDVART_CODGEN": "1112004 ",
+      "SDV_DESC": "Concentrador de oxígeno portátil Longfian JAY-10D",
+      "SDVSTP_PARTIDA": "MZJP00096",
+      "SDV_CANTUM1": "0"
+    }
+  ],
+  "verificado": true,
+  "tablas_sin_cambios": [
+    "SegCabV",
+    "StockPar",
+    "MovStock"
+  ]
+}
