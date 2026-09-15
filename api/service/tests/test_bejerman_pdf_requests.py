@@ -180,7 +180,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
     def _force_due(self, document_key: str) -> None:
         with connection.cursor() as cur:
             cur.execute(
-                "UPDATE bejerman_pdf_requests SET next_folder_check_at = CURRENT_TIMESTAMP WHERE document_key = %s",
+                "UPDATE bejerman_pdf_requests SET next_folder_check_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE document_key = %s",
                 [document_key],
             )
 
@@ -205,6 +205,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
         client.generar_comprobante_ventas_pdf.assert_not_called()
 
     def test_carpeta_ausente_encola_una_solicitud_sin_soap(self):
+        self._beat()
         client = self._client()
         reference = self._reference()
         document_key = document_key_for(client, reference)
@@ -806,7 +807,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
                     return exc.pdf_state, exc.generation_requested
                 raise AssertionError("La carpeta ausente debía dejar la solicitud pendiente")
             finally:
-                close_old_connections()
+                connection.close()
 
         with (
             patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),
@@ -848,7 +849,7 @@ class BejermanPdfRequestsTests(TransactionTestCase):
             try:
                 return self._enqueue(self._client(), reference)
             finally:
-                close_old_connections()
+                connection.close()
 
         with (
             patch("service.bejerman_pdf_requests.comprobante_pdf_output_path", return_value=REMOTE_PATH),

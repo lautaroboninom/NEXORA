@@ -2,6 +2,7 @@ import datetime as dt
 import hashlib
 import os
 import re
+from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Tuple
 
@@ -43,39 +44,40 @@ def load_repuestos_unificados_from_excel(path: str | None, sheet: str | None = N
 
     from openpyxl import load_workbook
 
-    wb = load_workbook(path, data_only=True, read_only=True)
-    sheet_names = [sheet] if sheet else wb.sheetnames
+    with closing(load_workbook(path, data_only=True, read_only=True)) as wb:
+        sheet_names = [sheet] if sheet else wb.sheetnames
 
-    items = {}
-    conflicts = []
+        items = {}
+        conflicts = []
 
-    for sheet_name in sheet_names:
-        if sheet_name not in wb.sheetnames:
-            continue
-        ws = wb[sheet_name]
-        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            code_raw = row[0] if len(row) > 0 else None  # A
-            name_raw = row[1] if len(row) > 1 else None  # B
-            prov_raw = row[4] if len(row) > 4 else None  # E
-
-            code = _norm_code(code_raw)
-            name = _norm_name(name_raw)
-            prov = _norm_name(prov_raw)
-
-            if row_idx <= 3 and _is_header_unificados(code, name, prov_raw):
+        for sheet_name in sheet_names:
+            if sheet_name not in wb.sheetnames:
                 continue
-            if not code or not name:
-                continue
+            ws = wb[sheet_name]
+            for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                code_raw = row[0] if len(row) > 0 else None  # A
+                name_raw = row[1] if len(row) > 1 else None  # B
+                prov_raw = row[4] if len(row) > 4 else None  # E
 
-            prev = items.get(code)
-            if prev and prev.get("nombre") != name:
-                conflicts.append(
-                    {"codigo": code, "nombre_prev": prev.get("nombre"), "nombre_new": name, "sheet": sheet_name, "row": row_idx}
-                )
+                code = _norm_code(code_raw)
+                name = _norm_name(name_raw)
+                prov = _norm_name(prov_raw)
 
-            items[code] = {"codigo": code, "nombre": name, "proveedor": prov}
+                if row_idx <= 3 and _is_header_unificados(code, name, prov_raw):
+                    continue
+                if not code or not name:
+                    continue
 
-    return items, conflicts
+                prev = items.get(code)
+                if prev and prev.get("nombre") != name:
+                    conflicts.append(
+                        {"codigo": code, "nombre_prev": prev.get("nombre"), "nombre_new": name, "sheet": sheet_name, "row": row_idx}
+                    )
+
+                items[code] = {"codigo": code, "nombre": name, "proveedor": prov}
+
+        return items, conflicts
+
 
 
 def sync_catalogo_repuestos_unificados(path: str | None = None, sheet: str | None = None, deactivate_missing: bool = False):
@@ -361,51 +363,52 @@ def load_repuestos_from_excel(path: str, sheet: str | None = None) -> Tuple[Dict
     if not os.path.exists(path):
         raise FileNotFoundError(f"No existe archivo: {path}")
 
-    wb = load_workbook(path, read_only=True, data_only=True)
-    sheets = [sheet] if sheet else wb.sheetnames
-    items: Dict[str, Dict] = {}
-    conflicts: List[Dict] = []
+    with closing(load_workbook(path, read_only=True, data_only=True)) as wb:
+        sheets = [sheet] if sheet else wb.sheetnames
+        items: Dict[str, Dict] = {}
+        conflicts: List[Dict] = []
 
-    for sheet_name in sheets:
-        if sheet_name not in wb.sheetnames:
-            continue
-        ws = wb[sheet_name]
-        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            code_raw = row[1] if len(row) > 1 else None  # col B
-            cost_raw = row[3] if len(row) > 3 else None  # col D
-            name_raw = row[5] if len(row) > 5 else None  # col F
-
-            code = _norm_code(code_raw)
-            name = _norm_name(name_raw)
-            cost = _parse_cost(cost_raw)
-
-            if not name:
+        for sheet_name in sheets:
+            if sheet_name not in wb.sheetnames:
                 continue
-            if row_idx <= 2 and _is_header(code, name, cost_raw):
-                continue
-            if cost is None:
-                continue
-            if not code:
-                code = _fallback_code_from_name(name)
+            ws = wb[sheet_name]
+            for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                code_raw = row[1] if len(row) > 1 else None  # col B
+                cost_raw = row[3] if len(row) > 3 else None  # col D
+                name_raw = row[5] if len(row) > 5 else None  # col F
 
-            cost = cost.quantize(Decimal("0.01"))
-            prev = items.get(code)
-            if prev and (
-                prev["nombre"] != name
-                or prev["costo_usd"] != cost
-            ):
-                conflicts.append({
-                    "codigo": code,
-                    "nombre_prev": prev["nombre"],
-                    "costo_prev": str(prev["costo_usd"]),
-                    "nombre_new": name,
-                    "costo_new": str(cost),
-                    "sheet": sheet_name,
-                    "row": row_idx,
-                })
-            items[code] = {"codigo": code, "nombre": name, "costo_usd": cost, "costo_moneda": "USD"}
+                code = _norm_code(code_raw)
+                name = _norm_name(name_raw)
+                cost = _parse_cost(cost_raw)
 
-    return items, conflicts
+                if not name:
+                    continue
+                if row_idx <= 2 and _is_header(code, name, cost_raw):
+                    continue
+                if cost is None:
+                    continue
+                if not code:
+                    code = _fallback_code_from_name(name)
+
+                cost = cost.quantize(Decimal("0.01"))
+                prev = items.get(code)
+                if prev and (
+                    prev["nombre"] != name
+                    or prev["costo_usd"] != cost
+                ):
+                    conflicts.append({
+                        "codigo": code,
+                        "nombre_prev": prev["nombre"],
+                        "costo_prev": str(prev["costo_usd"]),
+                        "nombre_new": name,
+                        "costo_new": str(cost),
+                        "sheet": sheet_name,
+                        "row": row_idx,
+                    })
+                items[code] = {"codigo": code, "nombre": name, "costo_usd": cost, "costo_moneda": "USD"}
+
+        return items, conflicts
+
 
 
 def sync_catalogo_repuestos(path: str | None = None, sheet: str | None = None, deactivate_missing: bool = True) -> Dict:
@@ -481,29 +484,30 @@ def load_costos_masivos_from_excel(path: str, sheet: str = "Hoja1") -> List[Dict
     if not os.path.exists(path):
         raise FileNotFoundError(f"No existe archivo: {path}")
 
-    wb = load_workbook(path, data_only=True, read_only=True)
-    if sheet not in wb.sheetnames:
-        raise ValueError(f"Hoja '{sheet}' no encontrada. Disponibles: {wb.sheetnames}")
-    ws = wb[sheet]
+    with closing(load_workbook(path, data_only=True, read_only=True)) as wb:
+        if sheet not in wb.sheetnames:
+            raise ValueError(f"Hoja '{sheet}' no encontrada. Disponibles: {wb.sheetnames}")
+        ws = wb[sheet]
 
-    items: List[Dict] = []
-    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-        code_raw = row[0] if len(row) > 0 else None
-        name_raw = row[1] if len(row) > 1 else None
-        cost_raw = row[2] if len(row) > 2 else None
+        items: List[Dict] = []
+        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            code_raw = row[0] if len(row) > 0 else None
+            name_raw = row[1] if len(row) > 1 else None
+            cost_raw = row[2] if len(row) > 2 else None
 
-        code = _norm_code(code_raw)
-        name = _norm_name(name_raw)
-        cost = _to_decimal(cost_raw)
+            code = _norm_code(code_raw)
+            name = _norm_name(name_raw)
+            cost = _to_decimal(cost_raw)
 
-        if row_idx == 1 and _is_header(code, name, cost_raw):
-            continue
-        if not code or not name or cost is None:
-            continue
+            if row_idx == 1 and _is_header(code, name, cost_raw):
+                continue
+            if not code or not name or cost is None:
+                continue
 
-        items.append({"codigo": code, "nombre": name, "costo_usd": cost.quantize(Decimal("0.01"))})
+            items.append({"codigo": code, "nombre": name, "costo_usd": cost.quantize(Decimal("0.01"))})
 
-    return items
+        return items
+
 
 
 def actualizar_costos_masivos(items: List[Dict], insertar_faltantes: bool = True) -> Dict:
@@ -572,43 +576,44 @@ def load_maestro_codigos_from_excel(path: str, sheet: str = "CODIGOS") -> List[D
     if not os.path.exists(path):
         raise FileNotFoundError(f"No existe archivo: {path}")
 
-    wb = load_workbook(path, data_only=True, read_only=True)
-    if sheet not in wb.sheetnames:
-        raise ValueError(f"Hoja '{sheet}' no encontrada. Disponibles: {wb.sheetnames}")
-    ws = wb[sheet]
+    with closing(load_workbook(path, data_only=True, read_only=True)) as wb:
+        if sheet not in wb.sheetnames:
+            raise ValueError(f"Hoja '{sheet}' no encontrada. Disponibles: {wb.sheetnames}")
+        ws = wb[sheet]
 
-    header_seen = False
-    items: List[Dict] = []
-    for row in ws.iter_rows(values_only=True):
-        col1 = row[1] if len(row) > 1 else None
-        col2 = row[2] if len(row) > 2 else None
+        header_seen = False
+        items: List[Dict] = []
+        for row in ws.iter_rows(values_only=True):
+            col1 = row[1] if len(row) > 1 else None
+            col2 = row[2] if len(row) > 2 else None
 
-        if not header_seen:
-            if isinstance(col1, str) and col1.strip().upper() == "CODIGO":
-                header_seen = True
-            continue
+            if not header_seen:
+                if isinstance(col1, str) and col1.strip().upper() == "CODIGO":
+                    header_seen = True
+                continue
 
-        codigo_viejo = _norm_name(col1)
-        if not codigo_viejo:
-            continue
+            codigo_viejo = _norm_name(col1)
+            if not codigo_viejo:
+                continue
 
-        if isinstance(col2, float) and col2.is_integer():
-            codigo_nuevo = str(int(col2))
-        elif col2 is None:
-            codigo_nuevo = ""
-        else:
-            codigo_nuevo = str(col2).strip()
+            if isinstance(col2, float) and col2.is_integer():
+                codigo_nuevo = str(int(col2))
+            elif col2 is None:
+                codigo_nuevo = ""
+            else:
+                codigo_nuevo = str(col2).strip()
 
-        items.append({
-            "codigo_viejo": codigo_viejo.strip().upper(),
-            "codigo_nuevo": codigo_nuevo.upper(),
-            "descripcion": _norm_name(row[3] if len(row) > 3 else None),
-            "cod_prov": _norm_name(row[4] if len(row) > 4 else None),
-            "proveedor": _norm_name(row[5] if len(row) > 5 else None),
-            "equipo": _norm_name(row[6] if len(row) > 6 else None),
-        })
+            items.append({
+                "codigo_viejo": codigo_viejo.strip().upper(),
+                "codigo_nuevo": codigo_nuevo.upper(),
+                "descripcion": _norm_name(row[3] if len(row) > 3 else None),
+                "cod_prov": _norm_name(row[4] if len(row) > 4 else None),
+                "proveedor": _norm_name(row[5] if len(row) > 5 else None),
+                "equipo": _norm_name(row[6] if len(row) > 6 else None),
+            })
 
-    return items
+        return items
+
 
 
 def corregir_codigos_repuestos(mapping_items: List[Dict], dry_run: bool = False) -> Dict:

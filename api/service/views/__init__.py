@@ -74,6 +74,7 @@ from .ingresos_views import (
     IngresoBejermanEstadoView,
     IngresoBejermanEstadoAccionView,
     IngresoAlquilerRemitoView,
+    IngresoAlquilerRemitoPdfView,
     IngresoAlquilerRemitoAccionView,
     IngresoDetalleView,
     IngresoAsignarTecnicoView,
@@ -209,6 +210,7 @@ from .derivaciones_views import (
 
 from .devices_views import (
     DeviceDirectCreateView,
+    DeviceStockCandidatosView,
     DeviceIdentificadoresView,
     DevicesListView,
     DevicesMergeView,
@@ -417,6 +419,7 @@ __all__ = [
     "IngresoBejermanEstadoView",
     "IngresoBejermanEstadoAccionView",
     "IngresoAlquilerRemitoView",
+    "IngresoAlquilerRemitoPdfView",
     "IngresoAlquilerRemitoAccionView",
     "IngresoDetalleView",
     "IngresoAsignarTecnicoView",
@@ -526,6 +529,7 @@ __all__ = [
     "EquiposDerivadosView",
     # devices
     "DeviceDirectCreateView",
+    "DeviceStockCandidatosView",
     "DeviceIdentificadoresView",
     "DevicesListView",
     "DevicesMergeView",

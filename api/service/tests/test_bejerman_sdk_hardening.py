@@ -326,9 +326,9 @@ class ProbeComprobantePdfCopyDirectoryScanTests(SimpleTestCase):
 
         self.assertIsNone(pdf)
         self.assertEqual(status, "missing")
-        read_candidates.assert_called_once()
-        _output_dir, _filenames, prefixes = read_candidates.call_args.args
-        self.assertIsNone(prefixes)
+        self.assertEqual(read_candidates.call_count, 2)
+        for candidate_call in read_candidates.call_args_list:
+            self.assertIsNone(candidate_call.args[2])
 
     def test_allow_directory_scan_true_pasa_el_prefijo(self):
         with (
@@ -347,9 +347,9 @@ class ProbeComprobantePdfCopyDirectoryScanTests(SimpleTestCase):
 
         self.assertIsNone(pdf)
         self.assertEqual(status, "missing")
-        read_candidates.assert_called_once()
-        _output_dir, _filenames, prefixes = read_candidates.call_args.args
-        self.assertEqual(prefixes, ["RTR00007-00000683"])
+        self.assertEqual(read_candidates.call_count, 2)
+        for candidate_call in read_candidates.call_args_list:
+            self.assertEqual(candidate_call.args[2], ["RTR00007-00000683", "V-RT -R-00007-00000683-"])
 
 
 class DuplicateCheckMessageTests(SimpleTestCase):

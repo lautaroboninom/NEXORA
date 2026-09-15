@@ -439,9 +439,11 @@ class WorkUpgradeAPITest(TestCase):
                 """,
                 [derivado_device, "ingresado", "no_aplica", "reparación", now - dt.timedelta(days=12), now - dt.timedelta(days=12), taller_id, cls.tecnico.id],
             )
+            cur.execute("INSERT INTO proveedores_externos(nombre) VALUES ('Laboratorio de prueba') RETURNING id")
+            proveedor_id = cur.fetchone()[0]
             cur.execute(
                 "INSERT INTO equipos_derivados(ingreso_id, proveedor_id, fecha_deriv, fecha_entrega, estado) VALUES (%s,%s,%s,%s,%s)",
-                [cls.derivado_ingreso_id, None, timezone.localdate() - dt.timedelta(days=10), None, "derivado"],
+                [cls.derivado_ingreso_id, proveedor_id, timezone.localdate() - dt.timedelta(days=10), None, "derivado"],
             )
 
             cls.otro_ingreso_id = cls._insert_id(
@@ -454,11 +456,11 @@ class WorkUpgradeAPITest(TestCase):
             )
 
             cur.execute(
-                "INSERT INTO preventivo_planes(scope_type, device_id, customer_id, proxima_revision_fecha, activa) VALUES (%s,%s,%s,%s,TRUE)",
+                "INSERT INTO preventivo_planes(scope_type, device_id, customer_id, proxima_revision_fecha, activa, periodicidad_valor, periodicidad_unidad) VALUES (%s,%s,%s,%s,TRUE,1,'meses')",
                 ["device", old_device, None, timezone.localdate() - dt.timedelta(days=1)],
             )
             cur.execute(
-                "INSERT INTO preventivo_planes(scope_type, device_id, customer_id, proxima_revision_fecha, activa) VALUES (%s,%s,%s,%s,TRUE)",
+                "INSERT INTO preventivo_planes(scope_type, device_id, customer_id, proxima_revision_fecha, activa, periodicidad_valor, periodicidad_unidad) VALUES (%s,%s,%s,%s,TRUE,1,'meses')",
                 ["device", delivered_device, None, timezone.localdate() + dt.timedelta(days=10)],
             )
 
@@ -573,7 +575,7 @@ class WorkUpgradeAPITest(TestCase):
                 INSERT INTO ingresos(device_id, estado, presupuesto_estado, motivo, fecha_ingreso, fecha_creacion, ubicacion_id, asignado_a)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [device_id, "diagnosticado", "presupuestado", "reparacion", now - dt.timedelta(days=20), now - dt.timedelta(days=20), ubicacion_id, self.tecnico.id],
+                [device_id, "diagnosticado", "presupuestado", "reparación", now - dt.timedelta(days=20), now - dt.timedelta(days=20), ubicacion_id, self.tecnico.id],
             )
             cur.execute(
                 "INSERT INTO quotes(ingreso_id, estado, moneda, fecha_emitido) VALUES (%s,%s,%s,%s)",
@@ -585,6 +587,46 @@ class WorkUpgradeAPITest(TestCase):
         duplicados = [row for row in resp.data["prioridades"] if row.get("ingreso_id") == duplicado_ingreso_id]
         self.assertEqual(len(duplicados), 1)
         self.assertEqual(duplicados[0]["alert_key"], "presupuesto_sin_aprobar")
+
+    def test_presupuesto_demorado_de_un_equipo_derivado_avisa_aunque_no_este_en_taller(self):
+        """La alerta mira el taller y lo derivado. Un presupuesto emitido de un equipo que está en
+        otra ubicación y sin derivar sigue afuera."""
+        now = timezone.now()
+        with connection.cursor() as cur:
+            cur.execute("SELECT device_id FROM ingresos WHERE id = %s", [self.derivado_ingreso_id])
+            (device_id,) = cur.fetchone()
+            otra_ubicacion_id = self._insert_id(cur, "INSERT INTO locations(nombre) VALUES (%s)", ["Sarmiento"])
+            cur.execute("SELECT id FROM proveedores_externos ORDER BY id LIMIT 1")
+            (proveedor_id,) = cur.fetchone()
+
+            def presupuesto_emitido():
+                ingreso_id = self._insert_id(
+                    cur,
+                    """
+                    INSERT INTO ingresos(device_id, estado, presupuesto_estado, motivo, fecha_ingreso, fecha_creacion, ubicacion_id, asignado_a)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    [device_id, "diagnosticado", "presupuestado", "reparación", now - dt.timedelta(days=15), now - dt.timedelta(days=15), otra_ubicacion_id, self.tecnico.id],
+                )
+                cur.execute(
+                    "INSERT INTO quotes(ingreso_id, estado, moneda, fecha_emitido) VALUES (%s,%s,%s,%s)",
+                    [ingreso_id, "presupuestado", "ARS", now - dt.timedelta(days=10)],
+                )
+                return ingreso_id
+
+            derivado_id = presupuesto_emitido()
+            cur.execute(
+                "INSERT INTO equipos_derivados(ingreso_id, proveedor_id, fecha_deriv, fecha_entrega, estado) VALUES (%s,%s,%s,%s,%s)",
+                [derivado_id, proveedor_id, timezone.localdate() - dt.timedelta(days=9), None, "derivado"],
+            )
+            sin_derivar_id = presupuesto_emitido()
+
+        resp = self.client.get("/api/trabajo/resumen/?periodo=hoy")
+        self.assertEqual(resp.status_code, 200)
+        alerta = next(row for row in resp.data["alerts"] if row["key"] == "presupuesto_sin_aprobar")
+        ids = {row.get("ingreso_id") for row in alerta.get("items", [])}
+        self.assertIn(derivado_id, ids)
+        self.assertNotIn(sin_derivar_id, ids)
 
     def test_dashboard_tecnico_muestra_solo_datos_propios(self):
         self.client.force_authenticate(user=self.tecnico)

@@ -37,6 +37,13 @@ class FakeRemitoContractClient:
     def list_comprobantes_ventas(self, filters=None):
         return {"Resultado": "OK", "DatosJSON": "[]"}
 
+    def list_articulos(self, filters=None, limit=5000):
+        return {"Resultado": "OK", "DatosJSON": json.dumps([
+            {"Articulo_Codigo": "NXTESTPART", "Articulo_Descripcion": "Equipo de prueba"},
+            {"Articulo_Codigo": "1115001", "Articulo_Descripcion": "Concentrador de oxígeno"},
+            {"Articulo_Codigo": "1115003", "Articulo_Descripcion": "Concentrador de oxígeno Longfian JAY-5"},
+        ])}
+
     def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
         self.comprobantes.append(comprobante)
         self.ingresar_kwargs.append(kwargs)

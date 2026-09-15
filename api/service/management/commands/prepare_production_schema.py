@@ -15,6 +15,7 @@ SCHEMA_LOCK_ID = 7_428_118_037_112_047
 # EL ORDEN IMPORTA: los valores de enum van antes de las tablas que los usan.
 # Cada entrada es (nombre_del_comando, kwargs).
 SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
+    ("apply_locations_schema", {}),
     ("apply_ticket_sale_states_schema", {}),
     ("apply_no_se_repara_schema", {}),
     ("apply_delivery_orders_schema", {}),
@@ -24,6 +25,8 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     ("apply_route_sheet_schema", {}),
     ("apply_bejerman_purchase_entries_schema", {}),
     ("apply_bejerman_user_credentials_schema", {}),
+    ("apply_user_permissions_schema", {}),
+    ("apply_users_admin_schema", {}),
     ("apply_bejerman_pdf_settings_schema", {}),
     ("apply_bejerman_worker_heartbeat_schema", {}),
     ("apply_bejerman_pdf_requests_schema", {}),
@@ -99,18 +102,6 @@ EXCLUDED_SCHEMA_COMMANDS: dict[str, str] = {
     "apply_quote_versions_schema": "Parche histórico de versionado de presupuestos (06/2026), ya aplicado.",
     "apply_cotizacion_equipo_schema": "Parche histórico del motivo 'Cotización de equipo' (06/2026), ya aplicado.",
     "apply_revision_tecnica_schema": "Parche histórico del motivo 'Revisión Técnica' (06/2026), ya aplicado.",
-    # Los dos que siguen NO son históricos: crean tablas que la app usa hoy, pero nunca estuvieron
-    # en ninguna de las cuatro listas, así que en producción se aplicaron a mano. Se dejan afuera
-    # para no cambiar el comportamiento en el mismo paso en que se centraliza la lista.
-    # Son los primeros candidatos a subir a SCHEMA_COMMANDS, tras confirmar que son idempotentes.
-    "apply_user_permissions_schema": (
-        "Crea user_permission_overrides, que la app usa. Nunca estuvo en las listas de arranque; "
-        "candidato a subir a SCHEMA_COMMANDS tras verificar idempotencia."
-    ),
-    "apply_users_admin_schema": (
-        "Seguimiento del último acceso de usuarios. Nunca estuvo en las listas de arranque; "
-        "candidato a subir a SCHEMA_COMMANDS tras verificar idempotencia."
-    ),
 }
 
 

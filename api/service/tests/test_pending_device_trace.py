@@ -450,8 +450,8 @@ class PendingDeviceTraceCommandsTest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     @classmethod
@@ -479,22 +479,22 @@ class PendingDeviceTraceCommandsTest(TestCase):
         )
         with connection.cursor() as cur:
             cur.execute("INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)", ["MGBIO", "MG BIO", ""])
-            cls.customer_mg = cls._last_id(cur)
+            cls.customer_mg = cls._last_id(cur, "customers")
             cur.execute("INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)", ["NOVA", "NOVAMED SA", ""])
-            cls.customer_novamed = cls._last_id(cur)
+            cls.customer_novamed = cls._last_id(cur, "customers")
             cur.execute("INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)", ["CLI1", "Cliente Demo", ""])
-            cls.customer_cli = cls._last_id(cur)
+            cls.customer_cli = cls._last_id(cur, "customers")
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["AirSep"])
-            cls.marca_id = cls._last_id(cur)
+            cls.marca_id = cls._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s)",
                 [cls.marca_id, "New Life", "Concentrador", ""],
             )
-            cls.model_id = cls._last_id(cur)
+            cls.model_id = cls._last_id(cur, "models")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["-"])
-            cls.loc_dash = cls._last_id(cur)
+            cls.loc_dash = cls._last_id(cur, "locations")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
-            cls.loc_taller = cls._last_id(cur)
+            cls.loc_taller = cls._last_id(cur, "locations")
 
     def setUp(self):
         super().setUp()
@@ -527,7 +527,7 @@ class PendingDeviceTraceCommandsTest(TestCase):
                     self.loc_taller,
                 ],
             )
-            self.device_id = self._last_id(cur)
+            self.device_id = self._last_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO ingresos(
@@ -539,13 +539,13 @@ class PendingDeviceTraceCommandsTest(TestCase):
                 [
                     self.device_id,
                     "reparado",
-                    "reparacion",
+                    "reparación",
                     timezone.make_aware(datetime(2025, 6, 10, 12, 0, 0)),
                     timezone.make_aware(datetime(2025, 6, 10, 12, 0, 0)),
                     self.loc_taller,
                 ],
             )
-            self.ingreso_id = self._last_id(cur)
+            self.ingreso_id = self._last_id(cur, "ingresos")
 
     def _write_novamed_workbook(self, path: Path):
         workbook = Workbook()

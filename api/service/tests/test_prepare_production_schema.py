@@ -56,6 +56,12 @@ class SchemaCommandInventoryTests(SimpleTestCase):
 
         self.assertEqual(len(nombres), len(set(nombres)))
 
+    def test_actualizar_instala_permisos_y_seguimiento_de_accesos(self):
+        nombres = [name for name, _ in SCHEMA_COMMANDS]
+        for requerido in ("apply_user_permissions_schema", "apply_users_admin_schema"):
+            self.assertIn(requerido, nombres)
+            self.assertGreater(nombres.index(requerido), nombres.index("apply_delivery_orders_schema"))
+
     def test_los_comandos_a_correr_estan_registrados_en_django(self):
         # Un typo en la tupla se descubriria recien al arrancar el contenedor.
         registrados = set(get_commands())

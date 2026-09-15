@@ -1,9 +1,10 @@
-from django.db import connection
+from django.db import connection, transaction
 from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 from django.template.loader import get_template
 from urllib import request as urlrequest
+from contextlib import nullcontext
 import json
 import datetime as dt
 
@@ -11,7 +12,7 @@ import unicodedata
 import os
 from decimal import Decimal, ROUND_HALF_UP
 
-from ..constants import DEFAULT_LOCATION_NAMES, LOCATION_NAME_REMAPS
+from ..constants import DEFAULT_LOCATION_NAMES, canonical_location_name
 from ..permission_policy import resolve_permission_code_for_request
 from ..permissions import permissions_v2_enabled, require_any_permission, require_permission
 
@@ -113,16 +114,18 @@ def _reset_pk_sequence(table_name: str) -> None:
     # Safety: only allow simple [schema.]name form
     if not all(c.isalnum() or c in ("_", ".") for c in table_name):
         return
-    with connection.cursor() as cur:
-        # set last_value to MAX(id) so nextval yields MAX+1
-        try:
-            cur.execute(
-                f"SELECT setval(pg_get_serial_sequence(%s, 'id'), COALESCE((SELECT MAX(id) FROM {table_name}), 1))",
-                [table_name],
-            )
-        except Exception:
-            # ignore – best effort
-            pass
+    # set last_value to MAX(id) so nextval yields MAX+1. El savepoint es
+    # obligatorio porque este helper es deliberadamente best-effort.
+    try:
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"SELECT setval(pg_get_serial_sequence(%s, 'id'), COALESCE((SELECT MAX(id) FROM {table_name}), 1))",
+                    [table_name],
+                )
+    except Exception:
+        # ignore – best effort
+        pass
 
 
 def repair_pk_sequence(table_name: str) -> None:
@@ -137,15 +140,16 @@ def repair_pk_sequence(table_name: str) -> None:
     # Safety: allow only simple [schema.]name form
     if not all(c.isalnum() or c in ("_", ".") for c in table_name):
         return
-    with connection.cursor() as cur:
-        try:
-            cur.execute(
-                f"SELECT setval(pg_get_serial_sequence(%s, 'id'), COALESCE((SELECT MAX(id) FROM {table_name}), 1))",
-                [table_name],
-            )
-        except Exception:
-            # ignore – best effort
-            pass
+    try:
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            with connection.cursor() as cur:
+                cur.execute(
+                    f"SELECT setval(pg_get_serial_sequence(%s, 'id'), COALESCE((SELECT MAX(id) FROM {table_name}), 1))",
+                    [table_name],
+                )
+    except Exception:
+        # ignore – best effort
+        pass
 
 
 def _maybe_fix_seq_and_retry(cur, sql, params, err) -> bool:
@@ -504,24 +508,57 @@ def _in(roles, request):
 
 
 def ensure_default_locations():
-    with connection.cursor() as cur:
-        for alias, target in LOCATION_NAME_REMAPS.items():
-            cur.execute(
-                "UPDATE locations SET nombre=%s WHERE LOWER(nombre)=LOWER(%s)",
-                [target, alias],
-            )
-        for name in DEFAULT_LOCATION_NAMES:
-            cur.execute(
-                """
-                INSERT INTO locations (nombre)
-                SELECT %s
-                FROM (SELECT 1) AS _seed
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM locations WHERE LOWER(nombre)=LOWER(%s)
+    """Asegura las ubicaciones del dominio y consolida aliases históricos.
+
+    `locations.nombre` es único sólo de forma literal: "Estanteria de Alquiler",
+    "Estantería de Alquiler" o una variante con espacios podían coexistir y aparecían
+    repetidas en el selector. Se conserva la fila canónica (o la de menor id), se
+    reasignan sus referencias y recién entonces se elimina el alias.
+    """
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute("SELECT id, nombre FROM locations ORDER BY id")
+            rows = list(cur.fetchall() or [])
+
+            for canonical_name in DEFAULT_LOCATION_NAMES:
+                matches = [
+                    (location_id, name)
+                    for location_id, name in rows
+                    if canonical_location_name(name) == canonical_name
+                ]
+                if not matches:
+                    cur.execute(
+                        "INSERT INTO locations(nombre) VALUES (%s) RETURNING id",
+                        [canonical_name],
+                    )
+                    rows.append((cur.fetchone()[0], canonical_name))
+                    continue
+
+                primary_id, primary_name = next(
+                    (row for row in matches if row[1] == canonical_name),
+                    matches[0],
                 )
-                """,
-                [name, name],
-            )
+                if primary_name != canonical_name:
+                    cur.execute(
+                        "UPDATE locations SET nombre=%s WHERE id=%s",
+                        [canonical_name, primary_id],
+                    )
+
+                for duplicate_id, _ in matches:
+                    if duplicate_id == primary_id:
+                        continue
+                    cur.execute(
+                        "UPDATE ingresos SET ubicacion_id=%s WHERE ubicacion_id=%s",
+                        [primary_id, duplicate_id],
+                    )
+                    cur.execute(
+                        "UPDATE devices SET ubicacion_id=%s WHERE ubicacion_id=%s",
+                        [primary_id, duplicate_id],
+                    )
+                    cur.execute("DELETE FROM locations WHERE id=%s", [duplicate_id])
+
+                duplicate_ids = {location_id for location_id, _ in matches if location_id != primary_id}
+                rows = [row for row in rows if row[0] not in duplicate_ids]
 
 
 def _frontend_url(request, path: str) -> str:

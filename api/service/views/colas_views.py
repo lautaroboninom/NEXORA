@@ -15,6 +15,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..permissions import user_has_permission
+from ..mg_codes import sql_is_mg_code
+from ..release_gate import sql_presupuesto_bloquea_salida
 
 
 # Las colas viven en el taller: es el mismo recorte por ubicación que hacen las
@@ -43,23 +45,43 @@ _SQL_MIS_PENDIENTES = """
                             'vendido_pendiente_entrega','vendido_entregado')
 """
 
-_SQL_PENDIENTES_PRESUPUESTO = """
+_SQL_PENDIENTES_PRESUPUESTO = f"""
     SELECT t.id
       FROM ingresos t
-      LEFT JOIN locations loc ON loc.id = t.ubicacion_id
+      JOIN devices d ON d.id = t.device_id
      WHERE COALESCE(t.presupuesto_estado, 'pendiente') = 'pendiente'
-       AND LOWER(loc.nombre) = LOWER(%s)
-       AND t.estado NOT IN ('ingresado','entregado','liberado','alquilado','baja','no_se_repara',
+       -- Es el mismo recorte que PendientesPresupuestoView: una nueva salida de
+       -- alquiler no resuelve el presupuesto pendiente de la reparación anterior.
+       AND t.estado NOT IN ('ingresado','entregado','liberado','baja','no_se_repara',
                             'vendido_pendiente_entrega','vendido_entregado')
+       AND (
+         t.estado <> 'alquilado'
+         OR (
+           {sql_is_mg_code('d.numero_interno')}
+           AND LOWER(BTRIM(COALESCE(d.mg_estado,'activo'))) <> 'inactivo_venta'
+         )
+         OR LOWER(BTRIM(COALESCE(t.motivo::text,''))) IN ('baja alquiler','reparación alquiler','reparacion alquiler')
+       )
 """
 
-_SQL_LISTOS_PARA_LIBERAR = """
+
+def _sql_listos_para_liberar() -> str:
+    """El contador no puede contar una OS que la lista no muestra.
+
+    El corte de presupuesto se arma en `release_gate` -no está escrito acá- justamente
+    porque este SQL y el de `AprobadosYReparadosView` tienen que decir lo mismo. Se
+    resuelve por request y no en una constante de módulo porque el fragmento consulta el
+    esquema (`devices.mg_estado` puede no existir) y a la hora de importar todavía no hay
+    conexión.
+    """
+    return f"""
     SELECT t.id
       FROM ingresos t
+      JOIN devices d ON d.id = t.device_id
       LEFT JOIN locations loc ON loc.id = t.ubicacion_id
      WHERE LOWER(loc.nombre) = LOWER(%s)
        AND t.estado IN ('reparado','controlado_sin_defecto','no_se_repara')
-       AND COALESCE(t.presupuesto_estado::text, '') <> 'presupuestado'
+       AND NOT {sql_presupuesto_bloquea_salida("t", "d")}
 """
 
 
@@ -100,7 +122,7 @@ class ColasNovedadesView(APIView):
                     cur, _SQL_PENDIENTES_GENERAL, [UBICACION_TALLER]
                 )
                 colas["listos_para_liberar"] = _ids(
-                    cur, _SQL_LISTOS_PARA_LIBERAR, [UBICACION_TALLER]
+                    cur, _sql_listos_para_liberar(), [UBICACION_TALLER]
                 )
                 # Sin usuario resuelto la cola propia no existe; devolverla vacía
                 # sería mentir con un cero en vez de no mostrar nada.
@@ -110,7 +132,7 @@ class ColasNovedadesView(APIView):
                     )
             if ver_presupuestos:
                 colas["pendientes_presupuesto"] = _ids(
-                    cur, _SQL_PENDIENTES_PRESUPUESTO, [UBICACION_TALLER]
+                    cur, _SQL_PENDIENTES_PRESUPUESTO, []
                 )
 
         return Response({"colas": colas})

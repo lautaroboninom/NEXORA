@@ -23,7 +23,7 @@ class CapturingBejermanSDKClient(BejermanSDKClient):
         super().__init__(*args, **kwargs)
         self.last_body = ""
 
-    def _post(self, action, body):
+    def _post(self, action, body, *, retry_transport=True):
         self.last_body = body
         return {"Resultado": "OK", "Token": "token-prueba"}
 
@@ -208,13 +208,13 @@ class BejermanUserCredentialsApiTests(TestCase):
                     company_key="SEPID",
                     bejerman_username="OPER1",
                     bejerman_password="clave-personal",
-                    bejerman_workstation="STEC",
+                    bejerman_workstation="ADMV",
                 ),
                 call(
                     company_key="MGBIO",
                     bejerman_username="OPER1",
                     bejerman_password="clave-personal",
-                    bejerman_workstation="STEC",
+                    bejerman_workstation="ADMV",
                 ),
             ],
         )
@@ -407,13 +407,13 @@ class BejermanUserCredentialsApiTests(TestCase):
                     company_key="SEPID",
                     bejerman_username="SPADM7",
                     bejerman_password="clave-personal",
-                    bejerman_workstation="STEC",
+                    bejerman_workstation="ADMV",
                 ),
                 call(
                     company_key="MGBIO",
                     bejerman_username="SPADM7",
                     bejerman_password="clave-personal",
-                    bejerman_workstation="STEC",
+                    bejerman_workstation="ADMV",
                 ),
             ],
         )

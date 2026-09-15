@@ -1,8 +1,9 @@
-﻿from django.db import connection, transaction
+from django.db import connection, transaction
 import re
 import time
 import json
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta
 from django.utils import timezone
@@ -44,6 +45,8 @@ from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
 from .quotes_views import marcar_quote_no_aplica
 from .mg_state import is_mg_owner_device, normalize_mg, resolve_mg_flags
 from ..ingreso_duplicados import ingreso_es_de_hoy
+from ..mg_codes import normalize_mg_code, sql_is_mg_code, sql_mg_key
+from ..release_gate import sql_presupuesto_bloquea_salida
 from ..rejected_budget import (
     ensure_rejected_budget_charge_schema,
     get_rejected_quote_summary,
@@ -58,6 +61,7 @@ from ..derivations import (
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
     enqueue_demo_ready_transfer_for_ingreso,
+    enqueue_location_transfer_for_ingreso,
     enqueue_stock_alta_for_ingreso,
     enqueue_stock_baja_for_ingreso,
     enqueue_stock_transfer_for_ingreso,
@@ -65,6 +69,12 @@ from ..bejerman_sync import (
     ingreso_is_demo_return,
     ingreso_is_internal_equipment,
     ingreso_targets_rental_stock,
+)
+from ..constants import bejerman_deposit_for_location, canonical_location_name
+from ..rental_shelf import (
+    RENTAL_SHELF_LOCATION_NAME,
+    is_rental_shelf_location_name,
+    move_ingreso_to_rental_shelf,
 )
 from ..bejerman_sdk import (
     BejermanSDKClient,
@@ -110,6 +120,7 @@ from ..bejerman_ris import (
 from ..bejerman_rental_remito import (
     RentalRemitoError,
     execute_rental_remito_action,
+    fetch_rental_remito_pdf,
     get_rental_remito_state,
 )
 from ..bejerman_ingreso_conflicts import (
@@ -398,92 +409,95 @@ def _parse_datetime_or_date_raw(value):
 
 def _has_mg_schema() -> bool:
     try:
-        if connection.vendor == "postgresql":
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            if connection.vendor == "postgresql":
+                row = q(
+                    """
+                    SELECT 1
+                      FROM information_schema.columns
+                     WHERE table_name='devices'
+                       AND column_name='mg_estado'
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """,
+                    one=True,
+                )
+                return bool(row)
             row = q(
                 """
                 SELECT 1
                   FROM information_schema.columns
                  WHERE table_name='devices'
                    AND column_name='mg_estado'
-                   AND table_schema = ANY(current_schemas(true))
                  LIMIT 1
                 """,
                 one=True,
             )
             return bool(row)
-        row = q(
-            """
-            SELECT 1
-              FROM information_schema.columns
-             WHERE table_name='devices'
-               AND column_name='mg_estado'
-             LIMIT 1
-            """,
-            one=True,
-        )
-        return bool(row)
     except Exception:
         return False
 
 
 def _has_table_column(table_name: str, column_name: str) -> bool:
     try:
-        if connection.vendor == "postgresql":
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            if connection.vendor == "postgresql":
+                row = q(
+                    """
+                    SELECT 1
+                      FROM information_schema.columns
+                     WHERE table_name=%s
+                       AND column_name=%s
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """,
+                    [table_name, column_name],
+                    one=True,
+                )
+                return bool(row)
             row = q(
                 """
                 SELECT 1
                   FROM information_schema.columns
                  WHERE table_name=%s
                    AND column_name=%s
-                   AND table_schema = ANY(current_schemas(true))
                  LIMIT 1
                 """,
                 [table_name, column_name],
                 one=True,
             )
             return bool(row)
-        row = q(
-            """
-            SELECT 1
-              FROM information_schema.columns
-             WHERE table_name=%s
-               AND column_name=%s
-             LIMIT 1
-            """,
-            [table_name, column_name],
-            one=True,
-        )
-        return bool(row)
     except Exception:
         return False
 
 
 def _has_table(table_name: str) -> bool:
     try:
-        if connection.vendor == "postgresql":
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            if connection.vendor == "postgresql":
+                row = q(
+                    """
+                    SELECT 1
+                      FROM information_schema.tables
+                     WHERE table_name=%s
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """,
+                    [table_name],
+                    one=True,
+                )
+                return bool(row)
             row = q(
                 """
                 SELECT 1
                   FROM information_schema.tables
                  WHERE table_name=%s
-                   AND table_schema = ANY(current_schemas(true))
                  LIMIT 1
                 """,
                 [table_name],
                 one=True,
             )
             return bool(row)
-        row = q(
-            """
-            SELECT 1
-              FROM information_schema.tables
-             WHERE table_name=%s
-             LIMIT 1
-            """,
-            [table_name],
-            one=True,
-        )
-        return bool(row)
     except Exception:
         return False
 
@@ -754,9 +768,6 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
         needle = txt(needle)
         return not needle or needle.lower() in low(value)
 
-    def no_space_upper(value) -> str:
-        return txt(value).replace(" ", "").upper()
-
     def date_value(value):
         if value is None:
             return None
@@ -799,9 +810,10 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
     if excluir_estados and estado in excluir_estados:
         return False
 
-    ubic = txt(filters.get("ubic"))
+    ubic = canonical_location_name(filters.get("ubic")) if filters.get("ubic") else ""
     ubic_id_raw = txt(filters.get("ubic_id_raw"))
-    if ubic and low(row.get("ubicacion_nombre")) != ubic.lower():
+    row_ubic_canonical = canonical_location_name(row.get("ubicacion_nombre")) if row.get("ubicacion_nombre") else ""
+    if ubic and row_ubic_canonical.lower() != ubic.lower():
         return False
     if not ubic and ubic_id_raw.isdigit() and int(row.get("ubicacion_id") or 0) != int(ubic_id_raw):
         return False
@@ -844,11 +856,12 @@ def _historico_deleted_row_matches(row: dict, filters: dict) -> bool:
     )
     q_raw = txt(filters.get("q_raw"))
     if q_raw:
-        m_mg = _re.match(r"^MG\s*(\d{4})$", q_raw, _re.IGNORECASE)
+        # Criterio único de número interno (`mg_codes`): "MG1678", "MG 1678" y "MG 001678" son
+        # el mismo equipo.
+        mg_buscado = normalize_mg_code(q_raw)
         m_os = _re.match(r"^(?:OS\s*)?(\d+)$", q_raw, _re.IGNORECASE)
-        if m_mg:
-            mg_no_space = ("MG" + m_mg.group(1)).upper()
-            if mg_no_space not in (no_space_upper(row.get("numero_interno")), no_space_upper(row.get("numero_serie"))):
+        if mg_buscado:
+            if mg_buscado not in (normalize_mg_code(row.get("numero_interno")), normalize_mg_code(row.get("numero_serie"))):
                 return False
         elif m_os:
             if int(row.get("id") or 0) != int(m_os.group(1)):
@@ -1284,6 +1297,20 @@ def _service_release_remito_salida_for_ingreso(ingreso_id: int) -> str:
                    WHERE ({ingreso_match_sql})
                      AND o.delivery_type = 'service_release'
                      AND g.status IN ('generated', 'reconciled')
+                     AND (
+                       NOT EXISTS (
+                         SELECT 1 FROM delivery_order_remito_item_allocations AS allocation
+                          WHERE allocation.link_id = l.id
+                       )
+                       OR EXISTS (
+                         SELECT 1
+                           FROM delivery_order_remito_item_allocations AS allocation
+                           JOIN delivery_order_items AS assigned_item ON assigned_item.id = allocation.order_item_id
+                           LEFT JOIN delivery_order_item_partidas AS assigned_partida ON assigned_partida.id = allocation.order_item_partida_id
+                          WHERE allocation.link_id = l.id
+                            AND COALESCE(assigned_partida.ingreso_id, assigned_item.ingreso_id, o.ingreso_id) = target.ingreso_id
+                       )
+                     )
                      AND UPPER(COALESCE(
                            NULLIF(g.comprobante_tipo, ''),
                            NULLIF(g.response_summary -> 'profile' ->> 'type', ''),
@@ -1744,9 +1771,12 @@ class PendientesPresupuestoView(APIView):
                        COALESCE(m.nombre,'') AS modelo,
                        COALESCE(m.tipo_equipo,'') AS tipo_equipo,
                        COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
+                       t.motivo,
                        t.fecha_ingreso,
                        t.fecha_servicio,
-                       q.fecha_emitido AS presupuesto_fecha_emision
+                       q.fecha_emitido AS presupuesto_fecha_emision,
+                       t.ubicacion_id,
+                       COALESCE(loc.nombre,'') AS ubicacion_nombre
                 FROM ingresos t
                 JOIN devices d ON d.id=t.device_id
                 JOIN customers c ON c.id=d.customer_id
@@ -1760,11 +1790,21 @@ class PendientesPresupuestoView(APIView):
                 )
                 LEFT JOIN locations loc ON loc.id = t.ubicacion_id
                 WHERE COALESCE(t.presupuesto_estado, 'pendiente') = 'pendiente'
-                  AND LOWER(loc.nombre) = LOWER(%s)
-                  AND t.estado NOT IN ('ingresado','entregado','liberado','alquilado','baja','no_se_repara','vendido_pendiente_entrega','vendido_entregado')
+                  -- Al volver a alquilar un equipo propio, la OS que documenta la
+                  -- reparación puede pasar a estado "alquilado". Eso no resuelve el
+                  -- presupuesto por los daños del alquiler anterior: debe seguir en
+                  -- esta cola hasta que Comercial lo resuelva.
+                  AND t.estado NOT IN ('ingresado','entregado','liberado','baja','no_se_repara','vendido_pendiente_entrega','vendido_entregado')
+                  AND (
+                    t.estado <> 'alquilado'
+                    OR (
+                      {sql_is_mg_code('d.numero_interno')}
+                      AND LOWER(BTRIM(COALESCE(d.mg_estado,'activo'))) <> 'inactivo_venta'
+                    )
+                    OR LOWER(BTRIM(COALESCE(t.motivo::text,''))) IN ('baja alquiler','reparación alquiler','reparacion alquiler')
+                  )
                 ORDER BY COALESCE(t.fecha_servicio, t.fecha_ingreso) ASC;
-                """,
-                ["taller"],
+                """
             )
             data = _fetchall_dicts(cur)
         attach_active_derivations(data)
@@ -1797,6 +1837,7 @@ class PresupuestadosView(APIView):
                   COALESCE(m.nombre,'') AS modelo,
                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
                   COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
+                  t.motivo,
                   t.fecha_ingreso,
                   q.id AS presupuesto_id,
                   q.id AS presupuesto_numero,
@@ -1808,7 +1849,9 @@ class PresupuestadosView(APIView):
                   ), 0) AS presupuesto_monto,
                   COALESCE(q.moneda, 'ARS') AS presupuesto_moneda,
                   q.fecha_emitido AS presupuesto_fecha_emision,
-                  NULL AS presupuesto_fecha_envio 
+                  NULL AS presupuesto_fecha_envio,
+                  t.ubicacion_id,
+                  COALESCE(loc.nombre,'') AS ubicacion_nombre
                 FROM ingresos t
                 JOIN devices d ON d.id = t.device_id
                 JOIN customers c ON c.id = d.customer_id
@@ -1825,11 +1868,11 @@ class PresupuestadosView(APIView):
                         q.estado::text IN ('emitido','enviado','presupuestado')
                         OR t.presupuesto_estado = 'presupuestado'
                       )
-                  AND LOWER(loc.nombre) = LOWER(%s)
-                  AND t.estado NOT IN ('entregado','liberado','alquilado','baja','no_se_repara','vendido_pendiente_entrega','vendido_entregado')
+                  -- `no_se_repara` se muestra: un presupuesto emitido frena la salida aunque el
+                  -- equipo no se repare (`release_gate`), y si no figura acá nadie lo resuelve.
+                  AND t.estado NOT IN ('entregado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                 ORDER BY COALESCE(q.fecha_emitido, t.fecha_ingreso) ASC;
-                """,
-                ["taller"],
+                """
             )
             data = _fetchall_dicts(cur)
         attach_active_derivations(data)
@@ -2042,66 +2085,17 @@ class MarcarReparadoView(APIView):
                 comentario="Marcado como reparado",
             )
 
-        # Movimiento automático a Estantería de Alquiler si el equipo es propio.
-        auto_moved = False
-        auto_moved_to = None
-        new_ubic_id = None
-        should_enqueue_stl = False
-        should_enqueue_demo_val = False
-        try:
-            # Leer números para detección de equipo MG y ubicación actual.
-            info = q(
-                """
-                SELECT COALESCE(d.numero_serie,'') AS numero_serie,
-                       COALESCE(d.numero_interno,'') AS numero_interno,
-                       t.ubicacion_id,
-                       COALESCE(loc.nombre,'') AS ubicacion_nombre
-                  FROM ingresos t
-                  LEFT JOIN devices d ON d.id = t.device_id
-                  LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-                 WHERE t.id=%s
-                """,
-                [ingreso_id],
-                one=True,
-            ) or {}
-            if ingreso_targets_rental_stock(ingreso_id):
-                should_enqueue_stl = True
-                # Asegurar existencia de ubicaciones por defecto y buscar ID canónico.
-                try:
-                    ensure_default_locations()
-                except Exception:
-                    pass
-                target_name = "Estantería de Alquiler"
-                loc_row = q(
-                    "SELECT id, nombre FROM locations WHERE LOWER(nombre)=LOWER(%s) LIMIT 1",
-                    [target_name],
-                    one=True,
-                )
-                if loc_row:
-                    target_id = loc_row.get("id")
-                    cur_id = info.get("ubicacion_id")
-                    if target_id and int(cur_id or 0) != int(target_id):
-                        exec_void("UPDATE ingresos SET ubicacion_id=%s WHERE id=%s", [target_id, ingreso_id])
-                        auto_moved = True
-                        auto_moved_to = loc_row.get("nombre") or target_name
-                        new_ubic_id = target_id
-            elif ingreso_is_demo_return(ingreso_id):
-                should_enqueue_demo_val = True
-        except Exception:
-            # No bloquear el flujo por errores en movimiento automático.
-            pass
-        if should_enqueue_stl:
+        # El equipo propio que sale del taller vuelve al parque de alquiler: la estantería
+        # en NEXORA y el stock en STL son las dos mitades de "disponible para alquilar".
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        shelf = move_ingreso_to_rental_shelf(ingreso_id, actor_user_id=actor_user_id)
+        if not shelf.get("applies"):
             try:
-                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
-            except Exception:
-                logger.exception("No se pudo encolar transferencia Bejerman STR a STL", extra={"ingreso_id": ingreso_id})
-        if should_enqueue_demo_val:
-            try:
-                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+                if ingreso_is_demo_return(ingreso_id):
+                    enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=actor_user_id)
             except Exception:
                 logger.exception("No se pudo encolar transferencia Bejerman STR a VAL", extra={"ingreso_id": ingreso_id})
+
         # Disparar aviso si pasó a 'reparado' y el presupuesto ya estaba aprobado.
         _should_send_mail = (_prev_estado != "reparado" and _prev_presu == "aprobado")
         if _should_send_mail:
@@ -2118,16 +2112,15 @@ class MarcarReparadoView(APIView):
                 )
 
         resp = {"ok": True}
-        try:
-            if auto_moved:
-                resp.update({
+        if shelf.get("moved"):
+            resp.update(
+                {
                     "auto_moved": True,
-                    "auto_moved_to": auto_moved_to or "Estantería de Alquiler",
-                    "ubicacion_id": new_ubic_id,
-                    "ubicacion_nombre": auto_moved_to or "Estantería de Alquiler",
-                })
-        except Exception:
-            pass
+                    "auto_moved_to": shelf.get("location_name") or RENTAL_SHELF_LOCATION_NAME,
+                    "ubicacion_id": shelf.get("location_id"),
+                    "ubicacion_nombre": shelf.get("location_name") or RENTAL_SHELF_LOCATION_NAME,
+                }
+            )
         return Response(resp)
 
 
@@ -2418,6 +2411,11 @@ class HabilitarReparacionCotizacionView(APIView):
 # (RT), no por el de servicio técnico (RSS) ni por el de alquiler (RTA). El tipo va al
 # principio del número guardado ("RT R 00001-00024051"), y `\b` evita que RTA/RTN entren.
 _SALE_EXIT_REMITO_RE = re.compile(r"^\s*RT\b", re.IGNORECASE)
+# Lo que puede documentar una salida que el operador marcó como venta: el RT o el RTN. Los
+# aportes a NOVAMED salen con RTN, que no se factura (OS 29131, 14/09/2026). El RTN solo no
+# alcanza para reconocer una venta -también es la entrega en alquiler-, así que vale únicamente
+# junto con la marca explícita.
+_SALE_MARKED_REMITO_RE = re.compile(r"^\s*RTN?\b", re.IGNORECASE)
 
 
 def is_sale_exit_remito(remito) -> bool:
@@ -2430,7 +2428,7 @@ def is_sale_exit_remito(remito) -> bool:
     return bool(_SALE_EXIT_REMITO_RE.match(str(remito or "")))
 
 
-def resolve_ingreso_entrega_estado(ingreso_id: int, remito_salida=None) -> dict:
+def resolve_ingreso_entrega_estado(ingreso_id: int, remito_salida=None, *, venta: bool = False) -> dict:
     """Determina a que estado debe pasar un ingreso al entregarse.
 
     Replica la deteccion de alquiler/MG/venta pendiente que usa
@@ -2439,11 +2437,12 @@ def resolve_ingreso_entrega_estado(ingreso_id: int, remito_salida=None) -> dict:
     exactamente las mismas reglas.
 
     `remito_salida` es opcional para no romper a los llamadores que no lo tienen a mano;
-    cuando viene y es un RT manda por encima de la heurística de alquiler/MG.
+    cuando viene y es un RT manda por encima de la heurística de alquiler/MG. `venta` es la
+    marca explícita del operador ("salió vendido"), que también admite el RTN de un aporte.
     """
     # El tipo de comprobante no depende de la base: si la lectura de abajo falla, la venta
     # tiene que seguir cerrando como venta y no caerse a 'entregado'.
-    es_venta = is_sale_exit_remito(remito_salida)
+    es_venta = bool(venta) or is_sale_exit_remito(remito_salida)
     estado_to = "vendido_entregado" if es_venta else "entregado"
     set_alquilado = False
     clear_alquilado = es_venta
@@ -2518,6 +2517,15 @@ class EntregarIngresoView(APIView):
         remito = (data.get("remito_salida") or "").strip()
         if not remito:
             return Response({"detail": "remito_salida requerido"}, status=400)
+        # "El equipo salió vendido": la marca la pone el operador en la hoja de servicio, y
+        # entonces el comprobante puede ser un RT o el RTN de un aporte. Cualquier otro no
+        # documenta una venta.
+        marca_venta = _parse_bool_or_default(data.get("venta"), default=False)
+        if marca_venta and not _SALE_MARKED_REMITO_RE.match(remito):
+            return Response(
+                {"detail": "Para cerrar por venta el remito tiene que ser un RT o un RTN."},
+                status=400,
+            )
         factura = (data.get("factura_numero") or "").strip() or None
         fecha_entrega = data.get("fecha_entrega") or None
         retira_persona = (data.get("retira_persona") or "").strip()
@@ -2557,7 +2565,7 @@ class EntregarIngresoView(APIView):
                             },
                             status=409,
                         )
-        deteccion = resolve_ingreso_entrega_estado(ingreso_id, remito_salida=remito)
+        deteccion = resolve_ingreso_entrega_estado(ingreso_id, remito_salida=remito, venta=marca_venta)
         estado_to = deteccion["estado_to"]
         set_alquilado = deteccion["set_alquilado"]
         clear_alquilado = deteccion["clear_alquilado"]
@@ -2627,9 +2635,11 @@ class EntregarIngresoView(APIView):
         # En un cambio de equipo el que ingresó se queda en SEPID: no hay movimiento de
         # stock hacia el cliente. El que se lleva sale por su propia orden de entrega.
         #
-        # En una venta tampoco: el RT lo emitió comercial y ya movió el stock en Bejerman.
-        # Encolar acá una transferencia más dejaría el depósito en negativo.
-        if not es_cambio_de_equipo and not is_sale_exit_remito(remito):
+        # En una venta tampoco: el RT o el RTN los emitió comercial y ya movieron el stock en
+        # Bejerman. Encolar acá una transferencia más dejaría el depósito en negativo. Se decide
+        # por el estado al que cierra y no por el tipo del remito: una venta pendiente cerrada
+        # con un comprobante que no empieza con "RT" también es una venta.
+        if not es_cambio_de_equipo and estado_to != "vendido_entregado":
             try:
                 with transaction.atomic():
                     user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
@@ -2806,20 +2816,17 @@ class DarAltaIngresoView(APIView):
 def find_mg_numero_interno_conflict(device_id, numero_interno: str):
     """Devuelve el device que ya ocupa ese número interno MG, o None.
 
-    El número se compara normalizado a 'XX ####' igual que el índice único
-    `uq_devices_numint_norm`, para que 'MG 12' y 'MG 0012' no convivan.
+    El número se compara con la clave de `mg_codes`, para que 'MG 12', 'MG12' y 'MG 0012' no
+    convivan. La expresión anterior (con `LPAD('\2',4,'0')`) sí los dejaba convivir.
     """
     if connection.vendor == "postgresql":
         return q(
-            """
+            f"""
             SELECT id
               FROM devices
              WHERE id <> %s
-               AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-               AND UPPER(REGEXP_REPLACE(numero_interno,
-                   '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                   UPPER(REGEXP_REPLACE(%s,
-                   '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+               AND {sql_is_mg_code('numero_interno')}
+               AND {sql_mg_key('numero_interno')} = {sql_mg_key('%s')}
              LIMIT 1
             """,
             [device_id, numero_interno],
@@ -3209,7 +3216,7 @@ def _swap_known_devices(serials) -> dict:
           COALESCE(d.numero_interno,'') AS numero_interno,
           COALESCE(d.tipo_equipo,'')    AS tipo_equipo,
           COALESCE(d.alquilado,false)   AS alquilado,
-          COALESCE(ult.estado,'')       AS ultimo_estado,
+          COALESCE(ult.estado::text,'')       AS ultimo_estado,
           COALESCE(ult.derivacion_activa, FALSE) AS derivacion_activa
         FROM devices d
         LEFT JOIN LATERAL (
@@ -3388,7 +3395,7 @@ def _load_swap_target_device(device_id: int):
           COALESCE(d.numero_serie,'')   AS numero_serie,
           COALESCE(d.numero_interno,'') AS numero_interno,
           COALESCE(d.alquilado,false)   AS alquilado,
-          COALESCE(ult.estado,'')       AS ultimo_estado,
+          COALESCE(ult.estado::text,'')       AS ultimo_estado,
           COALESCE(ult.derivacion_activa, FALSE) AS derivacion_activa
         FROM devices d
         LEFT JOIN LATERAL (
@@ -3788,6 +3795,20 @@ class IngresoCambioEquipoView(APIView):
                 ingreso.get("device_id"), numero_interno_mg, mg_owner_id, ingreso_id=ingreso_id
             )
             patrimonial_email = _notify_estado_patrimonial(request, ingreso_id, "alta_mg")
+
+        if destino == "venta":
+            # El equipo tomado como parte de pago ya es propio aunque no reciba un número
+            # MG. VAL es su depósito físico en Bejerman y "Sepid" su proyección local para
+            # que quede visible como disponible para venta, no mezclado con alquiler.
+            ensure_default_locations()
+            sepid = q(
+                "SELECT id FROM locations WHERE LOWER(nombre)=LOWER(%s) LIMIT 1",
+                ["Sepid"],
+                one=True,
+            )
+            if not sepid:
+                raise ValidationError("No se pudo preparar la ubicación Sepid (VAL).")
+            exec_void("UPDATE ingresos SET ubicacion_id=%s WHERE id=%s", [sepid["id"], ingreso_id])
 
         encolar = DEVICE_SWAP_DESTINOS_CON_MOVIMIENTO.get(destino)
         if encolar:
@@ -4452,20 +4473,39 @@ class GeneralPorClienteExportView(APIView):
                 return "No aplica"
             return s[:1].upper() + s[1:]
 
+        def _fecha_ingreso_label(v):
+            if not v:
+                return "-"
+            try:
+                if isinstance(v, datetime):
+                    if timezone.is_aware(v):
+                        v = timezone.localtime(v)
+                    return v.strftime("%d-%m-%y")
+                if isinstance(v, date):
+                    return v.strftime("%d-%m-%y")
+                if isinstance(v, str):
+                    s = v.strip()
+                    if not s:
+                        return "-"
+                    parsed = parse_datetime(s) or parse_date(s)
+                    if isinstance(parsed, datetime):
+                        if timezone.is_aware(parsed):
+                            parsed = timezone.localtime(parsed)
+                        return parsed.strftime("%d-%m-%y")
+                    if isinstance(parsed, date):
+                        return parsed.strftime("%d-%m-%y")
+                    return s
+                return v.strftime("%d-%m-%y")
+            except Exception:
+                return str(v)
+
         for r in rows:
             os_txt = os_label(r.get("id"))
             equipo = _equipolabel_row(r)
             ns_val = _ns_label(r)
             estado = (r.get("estado") or "-")
             presu = _presu_label(r.get("presupuesto_estado"))
-            fecha = r.get("fecha_ingreso")
-            if fecha is not None:
-                try:
-                    fecha_txt = fecha.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    fecha_txt = str(fecha)
-            else:
-                fecha_txt = "-"
+            fecha_txt = _fecha_ingreso_label(r.get("fecha_ingreso"))
 
             ws.append([
                 os_txt,
@@ -4569,6 +4609,7 @@ class AprobadosYReparadosView(APIView):
         mg_list_sql = _mg_list_select_sql()
         swap_list_sql = _swap_list_select_sql()
         owner_list_sql = _owner_list_select_sql()
+        gate_presupuesto_sql = sql_presupuesto_bloquea_salida("t", "d")
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -4585,6 +4626,12 @@ class AprobadosYReparadosView(APIView):
                      COALESCE(m.nombre,'') AS modelo,
                      COALESCE(m.tipo_equipo,'') AS tipo_equipo,
                      COALESCE(NULLIF(t.equipo_variante,''), NULLIF(d.variante,''), NULLIF(m.variante,'')) AS equipo_variante,
+                     t.motivo,
+                     -- El front repite el mismo corte de presupuesto antes de habilitar el
+                     -- botón (release-flow.js), y sin las garantías no puede distinguir la
+                     -- reparación que se cobra de la que no.
+                     COALESCE(t.garantia_fabrica, FALSE) AS garantia_fabrica,
+                     COALESCE(t.garantia_reparacion, FALSE) AS garantia_reparacion,
                      t.fecha_ingreso,
                      ev.fecha_reparado
               FROM ingresos t
@@ -4601,12 +4648,12 @@ class AprobadosYReparadosView(APIView):
               ) ev ON ev.ingreso_id = t.id
               WHERE LOWER(loc.nombre) = LOWER(%s)
                 AND t.estado IN ('reparado','controlado_sin_defecto','no_se_repara')
-                -- El presupuesto emitido y sin respuesta no está listo para salir: la OS
-                -- espera en "Presupuestados" (esa cola sí incluye los 'reparado') hasta
-                -- que se apruebe o se rechace. El COALESCE es necesario porque el NULL
-                -- de una OS sin presupuesto haría NULL toda la condición y la sacaría de
-                -- la lista.
-                AND COALESCE(t.presupuesto_estado::text, '') <> 'presupuestado'
+                -- Nada del cliente sale sin la plata definida: ni el presupuesto emitido y
+                -- sin respuesta, ni -desde 09/09/2026- la reparación cobrable que nunca se
+                -- presupuestó. Primero se debe resolver el presupuesto: emitirlo y
+                -- aprobarlo, rechazarlo o registrar explícitamente que no aplica.
+                -- La regla completa, con sus excepciones, está en `service/release_gate.py`.
+                AND NOT {gate_presupuesto_sql}
               ORDER BY (ev.fecha_reparado IS NULL) ASC, ev.fecha_reparado ASC, t.fecha_ingreso ASC;
             """,
                 ["taller"],
@@ -4705,7 +4752,9 @@ class LiberadosView(APIView):
                 """,
                 ["taller"],
             )
-            return Response(_fetchall_dicts(cur))
+            rows = _fetchall_dicts(cur)
+        attach_active_derivations(rows)
+        return Response(rows)
 
 
 class GeneralEquiposView(APIView):
@@ -4758,7 +4807,7 @@ class GeneralEquiposView(APIView):
             # cota superior razonable
             page_size = min(page_size, 500)
         historico_filter_ctx = {
-            "ubic": ubic,
+            "ubic": canonical_location_name(ubic) if ubic else "",
             "ubic_id_raw": ubic_id_raw,
             "estados": estados,
             "excluir_estados": excluir_estados,
@@ -4816,7 +4865,7 @@ class GeneralEquiposView(APIView):
                     params.append(f"%{value}%")
             if ubic:
                 wh.append("LOWER(loc.nombre) = LOWER(%s)")
-                params.append(ubic)
+                params.append(canonical_location_name(ubic))
             else:
                 # Compat: permitir filtrar por ubicacion_id (numérico)
                 try:
@@ -4844,18 +4893,19 @@ class GeneralEquiposView(APIView):
                 if needle:
                     needle_ns = needle.replace(" ", "").upper()
                     import re as _re
-                    m_mg = _re.match(r"^MG\s*(\d{4})$", needle, _re.IGNORECASE)
+                    es_codigo_mg = normalize_mg_code(needle) is not None
                     m_os = _re.match(r"^(?:OS\s*)?(\d+)$", needle, _re.IGNORECASE)
-                    if m_mg:
-                        mg_no_space = ("MG" + m_mg.group(1)).upper()
+                    if es_codigo_mg:
+                        # Criterio único de número interno (`mg_codes`): "MG1678", "MG 1678" y
+                        # "MG 001678" traen el mismo equipo, esté guardado de la forma que esté.
                         clauses = [
-                            "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s",
-                            "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s",
+                            f"{sql_mg_key('d.numero_interno')} = {sql_mg_key('%s')}",
+                            f"{sql_mg_key('d.numero_serie')} = {sql_mg_key('%s')}",
                         ]
                         if has_mg_sale_extended:
-                            clauses.append("REPLACE(UPPER(COALESCE(d.mg_venta_numero_alternativo,'')),' ','') = %s")
+                            clauses.append(f"{sql_mg_key('d.mg_venta_numero_alternativo')} = {sql_mg_key('%s')}")
                         wh.append("(" + " OR ".join(clauses) + ")")
-                        params.extend([mg_no_space] * len(clauses))
+                        params.extend([needle] * len(clauses))
                     else:
                         like = f"%{needle}%"
                         like_ns = f"%{needle_ns}%"
@@ -5069,7 +5119,7 @@ class GeneralEquiposExportView(APIView):
         solo_taller = solo_taller_raw in ("1", "true", "yes", "y", "t")
         delivered = delivered_raw in ("1", "true", "yes", "y", "t")
         historico_filter_ctx = {
-            "ubic": ubic,
+            "ubic": canonical_location_name(ubic) if ubic else "",
             "ubic_id_raw": ubic_id_raw,
             "estados": estados,
             "excluir_estados": excluir_estados,
@@ -5129,7 +5179,7 @@ class GeneralEquiposExportView(APIView):
 
             if ubic:
                 wh.append("LOWER(loc.nombre) = LOWER(%s)")
-                params.append(ubic)
+                params.append(canonical_location_name(ubic))
             else:
                 try:
                     if ubic_id_raw and str(int(ubic_id_raw)) == ubic_id_raw:
@@ -5157,18 +5207,19 @@ class GeneralEquiposExportView(APIView):
                 if needle:
                     needle_ns = needle.replace(" ", "").upper()
                     import re as _re
-                    m_mg = _re.match(r"^MG\s*(\d{4})$", needle, _re.IGNORECASE)
+                    es_codigo_mg = normalize_mg_code(needle) is not None
                     m_os = _re.match(r"^(?:OS\s*)?(\d+)$", needle, _re.IGNORECASE)
-                    if m_mg:
-                        mg_no_space = ("MG" + m_mg.group(1)).upper()
+                    if es_codigo_mg:
+                        # Criterio único de número interno (`mg_codes`): "MG1678", "MG 1678" y
+                        # "MG 001678" traen el mismo equipo, esté guardado de la forma que esté.
                         clauses = [
-                            "REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s",
-                            "REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s",
+                            f"{sql_mg_key('d.numero_interno')} = {sql_mg_key('%s')}",
+                            f"{sql_mg_key('d.numero_serie')} = {sql_mg_key('%s')}",
                         ]
                         if has_mg_sale_extended:
-                            clauses.append("REPLACE(UPPER(COALESCE(d.mg_venta_numero_alternativo,'')),' ','') = %s")
+                            clauses.append(f"{sql_mg_key('d.mg_venta_numero_alternativo')} = {sql_mg_key('%s')}")
                         wh.append("(" + " OR ".join(clauses) + ")")
-                        params.extend([mg_no_space] * len(clauses))
+                        params.extend([needle] * len(clauses))
                     else:
                         like = f"%{needle}%"
                         like_ns = f"%{needle_ns}%"
@@ -6850,11 +6901,8 @@ class NuevoIngresoView(APIView):
                   {mg_state_sql}
                   {mg_sale_sql}
                 FROM devices d
-                WHERE d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{{1,4}}$'
-                  AND UPPER(REGEXP_REPLACE(d.numero_interno,
-                      '^(MG|NM|NV|CE)\\s*(\\d{{1,4}})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                      UPPER(REGEXP_REPLACE(%s,
-                      '^(MG|NM|NV|CE)\\s*(\\d{{1,4}})$', '\\1 ' || LPAD('\\2',4,'0')))
+                WHERE {sql_is_mg_code('d.numero_interno')}
+                  AND {sql_mg_key('d.numero_interno')} = {sql_mg_key('%s')}
                 LIMIT 1
                 """,
                 [numero_interno],
@@ -6882,18 +6930,15 @@ class NuevoIngresoView(APIView):
                     )
 
             dup_mg = q(
-                """
+                f"""
                 SELECT t.id,
                        COALESCE(t.fecha_ingreso, t.fecha_creacion) AS fecha_ingreso,
                        t.fecha_creacion
                   FROM ingresos t
                   JOIN devices d ON d.id = t.device_id
                   LEFT JOIN models m ON m.id = d.model_id
-                 WHERE d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                   AND UPPER(REGEXP_REPLACE(d.numero_interno,
-                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                       UPPER(REGEXP_REPLACE(%s,
-                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                 WHERE {sql_is_mg_code('d.numero_interno')}
+                   AND {sql_mg_key('d.numero_interno')} = {sql_mg_key('%s')}
                    AND LOWER(TRIM(COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo, ''))) = %s
                    AND t.estado NOT IN ('entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
                  ORDER BY t.id DESC
@@ -7021,14 +7066,11 @@ class NuevoIngresoView(APIView):
             if not dev_mg:
                 # Búsqueda por número interno normalizado (MG|NM|NV|CE ####)
                 dev_mg = q(
-                    """
+                    f"""
                     SELECT id, COALESCE(numero_serie,'') AS numero_serie, COALESCE(numero_interno,'') AS numero_interno
                       FROM devices
-                     WHERE numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                       AND UPPER(REGEXP_REPLACE(numero_interno,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                           UPPER(REGEXP_REPLACE(%s,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                     WHERE {sql_is_mg_code('numero_interno')}
+                       AND {sql_mg_key('numero_interno')} = {sql_mg_key('%s')}
                      LIMIT 1
                     """,
                     [numero_interno],
@@ -7155,27 +7197,39 @@ class NuevoIngresoView(APIView):
         # Actualizar snapshot de cliente del device al del ingreso actual
         if device_id and customer_id:
             try:
-                exec_void("UPDATE devices SET customer_id=%s WHERE id=%s", [customer_id, device_id])
+                with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+                    exec_void("UPDATE devices SET customer_id=%s WHERE id=%s", [customer_id, device_id])
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo actualizar el cliente del equipo durante el ingreso",
+                    extra={"device_id": device_id, "customer_id": customer_id},
+                )
         # Actualizar fecha de vencimiento de garantía en el device según venta Bejerman.
         if device_id and _has_table_column("devices", "garantia_vence"):
             try:
-                vence = wcalc.get("vence_el") if isinstance(wcalc, dict) else None
-                if vence is None:
-                    exec_void("UPDATE devices SET garantia_vence = NULL WHERE id=%s", [device_id])
-                else:
-                    exec_void("UPDATE devices SET garantia_vence = %s WHERE id=%s", [vence, device_id])
+                with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+                    vence = wcalc.get("vence_el") if isinstance(wcalc, dict) else None
+                    if vence is None:
+                        exec_void("UPDATE devices SET garantia_vence = NULL WHERE id=%s", [device_id])
+                    else:
+                        exec_void("UPDATE devices SET garantia_vence = %s WHERE id=%s", [vence, device_id])
             except Exception:
-                pass
+                logger.exception(
+                    "No se pudo actualizar el vencimiento de garantía del equipo",
+                    extra={"device_id": device_id},
+                )
         if numero_interno and device_id:
             try:
-                exec_void(
-                    "UPDATE devices SET numero_interno = NULLIF(%s,'') WHERE id=%s",
-                    [numero_interno, device_id],
-                )
+                with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+                    exec_void(
+                        "UPDATE devices SET numero_interno = NULLIF(%s,'') WHERE id=%s",
+                        [numero_interno, device_id],
+                    )
             except Exception as e:
                 # Seguridad adicional: capturar violaciones de índice único y devolver error entendible
+                # sin confirmar ninguna de las escrituras previas de este alta.
+                if connection.in_atomic_block:
+                    transaction.set_rollback(True)
                 msg = (
                     "No se pudo asignar el número interno al equipo porque ya está "
                     "en uso por otro dispositivo. Revise el MG ingresado."
@@ -7295,20 +7349,23 @@ class NuevoIngresoView(APIView):
 
         # Setear empresa Bejerman/branding si las columnas existen en la base.
         try:
-            company_sets = []
-            company_params = []
-            if _has_table_column("ingresos", "empresa_bejerman"):
-                company_sets.append("empresa_bejerman=%s")
-                company_params.append(empresa_bejerman)
-            if _has_table_column("ingresos", "empresa_facturar"):
-                company_sets.append("empresa_facturar=%s")
-                company_params.append(empresa_facturar)
-            if company_sets:
-                company_params.append(ingreso_id)
-                exec_void(f"UPDATE ingresos SET {', '.join(company_sets)} WHERE id=%s", company_params)
+            with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+                company_sets = []
+                company_params = []
+                if _has_table_column("ingresos", "empresa_bejerman"):
+                    company_sets.append("empresa_bejerman=%s")
+                    company_params.append(empresa_bejerman)
+                if _has_table_column("ingresos", "empresa_facturar"):
+                    company_sets.append("empresa_facturar=%s")
+                    company_params.append(empresa_facturar)
+                if company_sets:
+                    company_params.append(ingreso_id)
+                    exec_void(f"UPDATE ingresos SET {', '.join(company_sets)} WHERE id=%s", company_params)
         except Exception:
-            # Mejor no romper si no existe la columna.
-            pass
+            logger.exception(
+                "No se pudo guardar la empresa Bejerman del ingreso",
+                extra={"ingreso_id": ingreso_id, "empresa_bejerman": empresa_bejerman},
+            )
 
         sets, params = [], []
         if remito_ingreso:
@@ -8112,6 +8169,25 @@ class IngresoAlquilerRemitoView(APIView):
         return Response(state)
 
 
+class IngresoAlquilerRemitoPdfView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, ingreso_id: int):
+        if not _can_read_ingreso_detail(request, ingreso_id):
+            return Response({"detail": "Ingreso no encontrado"}, status=404)
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        try:
+            pdf_bytes, content_type, filename = fetch_rental_remito_pdf(ingreso_id, actor_user_id=actor_user_id)
+        except RentalRemitoError as exc:
+            return Response({"detail": exc.detail, "code": exc.code}, status=exc.status_code)
+        except Exception as exc:
+            logger.warning("ingreso_alquiler_remito_pdf_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
+            return _bejerman_estado_error_response(exc, ingreso_id)
+        response = HttpResponse(pdf_bytes, content_type=content_type or "application/pdf")
+        response["Content-Disposition"] = f'inline; filename="{filename}"'
+        return response
+
+
 class IngresoAlquilerRemitoAccionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -8545,9 +8621,18 @@ class IngresoDetalleView(APIView):
 
         row_est = q(
             f"""
-            SELECT estado, asignado_a, alquilado, motivo, fecha_entrega, alquiler_remito, {permite_reparacion_sql}
-              FROM ingresos
-             WHERE id=%s
+            SELECT t.estado,
+                   t.asignado_a,
+                   t.alquilado,
+                   t.motivo,
+                   t.fecha_entrega,
+                   t.alquiler_remito,
+                   t.remito_salida,
+                   COALESCE(loc.nombre, '') AS ubicacion_nombre,
+                   {permite_reparacion_sql}
+              FROM ingresos t
+              LEFT JOIN locations loc ON loc.id=t.ubicacion_id
+             WHERE t.id=%s
             """,
             [ingreso_id],
             one=True,
@@ -8560,18 +8645,86 @@ class IngresoDetalleView(APIView):
         motivo_actual = row_est.get("motivo")
         fecha_entrega_actual = row_est.get("fecha_entrega")
         alquiler_remito_actual = (row_est.get("alquiler_remito") or "").strip()
+        alquiler_con_salida_confirmada = bool(alquilado_actual and alquiler_remito_actual)
+
+        if alquiler_con_salida_confirmada and any(
+            key in d for key in ("alquilado", "alquiler_a", "alquiler_remito", "alquiler_fecha")
+        ):
+            cambios = {
+                "alquilado": bool(d.get("alquilado")),
+                "alquiler_remito": (d.get("alquiler_remito") or "").strip(),
+            }
+            if (
+                ("alquilado" in d and not cambios["alquilado"])
+                or ("alquiler_remito" in d and cambios["alquiler_remito"] != alquiler_remito_actual)
+                or "alquiler_a" in d
+                or "alquiler_fecha" in d
+            ):
+                return Response(
+                    {"detail": "No se puede modificar el alquiler: el equipo ya fue entregado con RTA."},
+                    status=409,
+                )
 
         sets_no_estado, params_no_estado = [], []
         needs_warranty_recompute = False
         fecha_entrega_nueva = fecha_entrega_actual
 
+        rental_shelf_requested = False
+        rental_shelf_applies = False
+        location_sync_plan = None
+        location_sync_result = None
         if "ubicacion_id" in d:
             ubicacion_id = d.get("ubicacion_id")
             if not ubicacion_id:
                 raise ValidationError("ubicacion_id requerido")
-            u = q("SELECT id FROM locations WHERE id=%s", [ubicacion_id], one=True)
+            u = q("SELECT id, nombre FROM locations WHERE id=%s", [ubicacion_id], one=True)
             if not u:
                 raise ValidationError("Ubicación inexistente")
+            rental_shelf_requested = is_rental_shelf_location_name(u.get("nombre"))
+            source_location = (row_est.get("ubicacion_nombre") or "").strip()
+            target_location = (u.get("nombre") or "").strip()
+            source_deposit = bejerman_deposit_for_location(source_location)
+            target_deposit = bejerman_deposit_for_location(target_location)
+            if rental_shelf_requested:
+                rental_shelf_applies = ingreso_targets_rental_stock(ingreso_id)
+
+            # Sólo las ubicaciones físicas con origen y destino distintos generan
+            # movimiento. El guion y las ubicaciones sin mapeo Bejerman siguen siendo
+            # referencias locales, por lo que no se les inventa un depósito de origen.
+            if source_deposit and target_deposit and source_deposit != target_deposit:
+                if rental_shelf_requested:
+                    if rental_shelf_applies:
+                        location_sync_plan = {
+                            "kind": "rental_shelf",
+                            "source_deposit": source_deposit,
+                            "target_deposit": target_deposit,
+                            "source_location": source_location,
+                            "target_location": target_location,
+                        }
+                else:
+                    location_sync_plan = {
+                        "kind": "location_transfer",
+                        "source_deposit": source_deposit,
+                        "target_deposit": target_deposit,
+                        "source_location": source_location,
+                        "target_location": target_location,
+                    }
+
+            confirmed = d.get("confirm_bejerman_location_change") is True or str(
+                d.get("confirm_bejerman_location_change") or ""
+            ).strip().lower() in {"1", "true", "si", "sí"}
+            if location_sync_plan and not confirmed:
+                return Response(
+                    {
+                        "detail": (
+                            "Confirmá el cambio de ubicación: también solicita un traslado de stock en Bejerman."
+                        ),
+                        "confirmation_required": True,
+                        "source_deposit": location_sync_plan["source_deposit"],
+                        "target_deposit": location_sync_plan["target_deposit"],
+                    },
+                    status=400,
+                )
             sets_no_estado.append("ubicacion_id=%s")
             params_no_estado.append(ubicacion_id)
 
@@ -8652,15 +8805,12 @@ class IngresoDetalleView(APIView):
             if val and device_id:
                 # Verificar conflicto con otro device por MG normalizado
                 conflict = q(
-                    """
+                    f"""
                     SELECT id
                       FROM devices
                      WHERE id <> %s
-                       AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                       AND UPPER(REGEXP_REPLACE(numero_interno,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                           UPPER(REGEXP_REPLACE(%s,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                       AND {sql_is_mg_code('numero_interno')}
+                       AND {sql_mg_key('numero_interno')} = {sql_mg_key('%s')}
                      LIMIT 1
                     """,
                     [device_id, val],
@@ -8931,8 +9081,14 @@ class IngresoDetalleView(APIView):
             sets_no_estado.append("alquiler_a=NULLIF(%s,'')")
             params_no_estado.append((d.get("alquiler_a") or "").strip())
         if "alquiler_remito" in d:
+            alquiler_remito_nuevo = (d.get("alquiler_remito") or "").strip()
             sets_no_estado.append("alquiler_remito=NULLIF(%s,'')")
-            params_no_estado.append((d.get("alquiler_remito") or "").strip())
+            params_no_estado.append(alquiler_remito_nuevo)
+            # El RTA es un remito de salida: mantener ambas proyecciones evita que la
+            # cabecera de la hoja oculte un equipo que ya está con el cliente.
+            if alquiler_remito_nuevo.upper().startswith("RTA"):
+                sets_no_estado.append("remito_salida=COALESCE(NULLIF(remito_salida,''), %s)")
+                params_no_estado.append(alquiler_remito_nuevo)
         if "alquiler_fecha" in d:
             sets_no_estado.append("alquiler_fecha=%s")
             params_no_estado.append(d.get("alquiler_fecha") or None)
@@ -8967,26 +9123,82 @@ class IngresoDetalleView(APIView):
             except Exception:
                 pass
 
+        def _with_location_sync(payload: dict) -> dict:
+            """Adjunta el resultado de la sincronización ya encolada con el cambio."""
+            if location_sync_result:
+                payload["bejerman_location_sync"] = location_sync_result
+            if rental_shelf_requested:
+                payload["rental_shelf"] = {
+                    "applies": bool(rental_shelf_applies),
+                    "stock_queued": bool((location_sync_result or {}).get("queued")),
+                    "stock_error": (location_sync_result or {}).get("error") or "",
+                    "reason": (
+                        ""
+                        if rental_shelf_applies
+                        else "El equipo no es del parque de alquiler: su stock no va a STL."
+                    ),
+                }
+            return payload
+
+        def _enqueue_location_sync() -> None:
+            """Encola dentro de la misma transacción que persiste la ubicación."""
+            nonlocal location_sync_result
+            if not location_sync_plan:
+                return
+            if location_sync_plan["kind"] == "rental_shelf":
+                job = enqueue_stock_transfer_for_ingreso(
+                    ingreso_id,
+                    actor_user_id=sync_actor_id,
+                    source_deposit=location_sync_plan["source_deposit"],
+                    requeue_succeeded=True,
+                )
+            else:
+                job = enqueue_location_transfer_for_ingreso(
+                    ingreso_id,
+                    source_deposit=location_sync_plan["source_deposit"],
+                    target_deposit=location_sync_plan["target_deposit"],
+                    source_location=location_sync_plan["source_location"],
+                    target_location=location_sync_plan["target_location"],
+                    actor_user_id=sync_actor_id,
+                )
+            location_sync_result = {
+                "queued": True,
+                "job_id": job.get("id"),
+                "source_deposit": location_sync_plan["source_deposit"],
+                "target_deposit": location_sync_plan["target_deposit"],
+                "source_location": location_sync_plan["source_location"],
+                "target_location": location_sync_plan["target_location"],
+            }
+
         diag_present = desc_present or trab_present or fecha_present
         promote_from_ingresado = diag_present and estado_actual == "ingresado"
         promote_from_asignado = diag_present and estado_actual == "asignado"
         if promote_from_ingresado:
             if not asignado_a:
                 raise ValidationError("Antes de diagnosticar, asigne un técnico al ingreso")
-            with transaction.atomic():
-                # Auto-setear fecha_servicio solo en la transición ingresado -> diagnosticado
-                # si no vino explícita en el payload y aún está NULL en DB.
-                sets_tmp = list(sets_no_estado)
-                params_tmp = list(params_no_estado)
-                if not fecha_present:
-                    # Establecer solo si actualmente es NULL (COALESCE mantiene existente)
-                    sets_tmp.append("fecha_servicio=COALESCE(fecha_servicio, %s)")
-                    params_tmp.append(timezone.now())
-                    should_sync_preventivo = True
-                if sets_tmp:
-                    params_all = list(params_tmp) + [ingreso_id]
-                    q(f"UPDATE ingresos SET {', '.join(sets_tmp)} WHERE id=%s", params_all)
-                q("UPDATE ingresos SET estado='diagnosticado' WHERE id=%s AND estado='ingresado'", [ingreso_id])
+            try:
+                with transaction.atomic():
+                    # Auto-setear fecha_servicio solo en la transición ingresado -> diagnosticado
+                    # si no vino explícita en el payload y aún está NULL en DB.
+                    sets_tmp = list(sets_no_estado)
+                    params_tmp = list(params_no_estado)
+                    if not fecha_present:
+                        # Establecer solo si actualmente es NULL (COALESCE mantiene existente)
+                        sets_tmp.append("fecha_servicio=COALESCE(fecha_servicio, %s)")
+                        params_tmp.append(timezone.now())
+                        should_sync_preventivo = True
+                    if sets_tmp:
+                        params_all = list(params_tmp) + [ingreso_id]
+                        q(f"UPDATE ingresos SET {', '.join(sets_tmp)} WHERE id=%s", params_all)
+                    q("UPDATE ingresos SET estado='diagnosticado' WHERE id=%s AND estado='ingresado'", [ingreso_id])
+                    _enqueue_location_sync()
+            except Exception as exc:
+                if location_sync_plan:
+                    return Response(
+                        {"detail": f"No se pudo encolar el traslado de ubicación en Bejerman: {exc}"},
+                        status=409,
+                    )
+                raise
             registrar_ingreso_event(
                 ingreso_id,
                 "diagnosticado",
@@ -9001,13 +9213,23 @@ class IngresoDetalleView(APIView):
                         "preventivo sync returned error status after promote_from_ingresado: ingreso_id=%s",
                         ingreso_id,
                     )
-            return Response({"ok": True})
+            return Response(_with_location_sync({"ok": True}))
         if promote_from_asignado:
             sets_no_estado.append("estado='diagnosticado'")
         if not sets_no_estado:
             return Response({"ok": True})
         params_no_estado.append(ingreso_id)
-        q(f"UPDATE ingresos SET {', '.join(sets_no_estado)} WHERE id=%s", params_no_estado)
+        try:
+            with transaction.atomic():
+                q(f"UPDATE ingresos SET {', '.join(sets_no_estado)} WHERE id=%s", params_no_estado)
+                _enqueue_location_sync()
+        except Exception as exc:
+            if location_sync_plan:
+                return Response(
+                    {"detail": f"No se pudo encolar el traslado de ubicación en Bejerman: {exc}"},
+                    status=409,
+                )
+            raise
         if promote_from_asignado:
             registrar_ingreso_event(
                 ingreso_id,
@@ -9023,7 +9245,7 @@ class IngresoDetalleView(APIView):
                     "preventivo sync returned error status after ingreso patch: ingreso_id=%s",
                     ingreso_id,
                 )
-        return Response({"ok": True})
+        return Response(_with_location_sync({"ok": True}))
 
 
 # Nuevo: marcar controlado sin defecto (equipos propios revisados sin falla)
@@ -9046,14 +9268,23 @@ class MarcarControladoSinDefectoView(APIView):
 
         _prev_estado = _estado_actual_txt(ingreso_id)
         _set_audit_user(request)
-        # El 'no_aplica' se marca primero en `quotes`, que es lo que manda: el trigger
-        # sync_quote_with_ingreso copia el estado de la versión vigente al ingreso y le
-        # pisaba el 'no_aplica' apenas alguien abría la pestaña Presupuesto.
-        presupuesto_no_aplica = marcar_quote_no_aplica(ingreso_id)
+        # El pase automático a 'no_aplica' solo aplica a los equipos propios de MG BIO
+        # (patrimonio de la empresa / alquiler / demo). Para los equipos de clientes, no
+        # se toca el presupuesto: queda en el estado que tenga (ej: 'pendiente') para
+        # permitir cotizar la revisión técnica o definir su cobro manualmente.
+        mg_ctx = _fetch_ingreso_device_mg_context(ingreso_id)
+        es_propio_mg = bool(mg_ctx and mg_ctx.get("es_propietario_mg"))
+
+        presupuesto_set = []
+        if es_propio_mg:
+            presupuesto_no_aplica = marcar_quote_no_aplica(ingreso_id)
+            if presupuesto_no_aplica:
+                presupuesto_set = ["presupuesto_estado='no_aplica'"]
+
         sets = sets_con_limpieza_de_cambio(
             "estado='controlado_sin_defecto'",
             "resolucion='no_se_encontro_falla'",
-            *(["presupuesto_estado='no_aplica'"] if presupuesto_no_aplica else []),
+            *presupuesto_set,
         )
         exec_void(f"UPDATE ingresos SET {sets} WHERE id=%s", [ingreso_id])
         if _prev_estado != "controlado_sin_defecto":
@@ -9065,60 +9296,14 @@ class MarcarControladoSinDefectoView(APIView):
                 comentario="Marcado como controlado sin defecto",
             )
 
-        auto_moved = False
-        auto_moved_to = None
-        new_ubic_id = None
-        should_enqueue_stl = False
-        should_enqueue_demo_val = False
-        try:
-            info = q(
-                """
-                SELECT COALESCE(d.numero_serie,'') AS numero_serie,
-                       COALESCE(d.numero_interno,'') AS numero_interno,
-                       t.ubicacion_id,
-                       COALESCE(loc.nombre,'') AS ubicacion_nombre
-                  FROM ingresos t
-                  LEFT JOIN devices d ON d.id = t.device_id
-                  LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-                 WHERE t.id=%s
-                """,
-                [ingreso_id],
-                one=True,
-            ) or {}
-            if ingreso_targets_rental_stock(ingreso_id):
-                should_enqueue_stl = True
-                try:
-                    ensure_default_locations()
-                except Exception:
-                    pass
-                target_name = "Estantería de Alquiler"
-                loc_row = q(
-                    "SELECT id, nombre FROM locations WHERE LOWER(nombre)=LOWER(%s) LIMIT 1",
-                    [target_name],
-                    one=True,
-                )
-                if loc_row:
-                    target_id = loc_row.get("id")
-                    cur_id = info.get("ubicacion_id")
-                    if target_id and int(cur_id or 0) != int(target_id):
-                        exec_void("UPDATE ingresos SET ubicacion_id=%s WHERE id=%s", [target_id, ingreso_id])
-                        auto_moved = True
-                        auto_moved_to = loc_row.get("nombre") or target_name
-                        new_ubic_id = target_id
-            elif ingreso_is_demo_return(ingreso_id):
-                should_enqueue_demo_val = True
-        except Exception:
-            pass
-        if should_enqueue_stl:
+        # Revisado y sin falla es fin de taller igual que reparado: el equipo propio
+        # vuelve al parque de alquiler.
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
+        shelf = move_ingreso_to_rental_shelf(ingreso_id, actor_user_id=actor_user_id)
+        if not shelf.get("applies"):
             try:
-                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
-            except Exception:
-                logger.exception("No se pudo encolar transferencia Bejerman STR a STL", extra={"ingreso_id": ingreso_id})
-        if should_enqueue_demo_val:
-            try:
-                user_id = getattr(getattr(request, "user", None), "id", None) or getattr(request, "user_id", None)
-                enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=user_id)
+                if ingreso_is_demo_return(ingreso_id):
+                    enqueue_demo_ready_transfer_for_ingreso(ingreso_id, actor_user_id=actor_user_id)
             except Exception:
                 logger.exception("No se pudo encolar transferencia Bejerman STR a VAL", extra={"ingreso_id": ingreso_id})
 
@@ -9127,11 +9312,12 @@ class MarcarControladoSinDefectoView(APIView):
             "estado": "controlado_sin_defecto",
             "presupuesto_estado": _presupuesto_estado_actual_txt(ingreso_id),
         }
-        if auto_moved:
+        if shelf.get("moved"):
+            location_name = shelf.get("location_name") or RENTAL_SHELF_LOCATION_NAME
             resp["auto_moved"] = True
-            resp["auto_moved_to"] = auto_moved_to
-            resp["ubicacion_id"] = new_ubic_id
-            resp["ubicacion_nombre"] = auto_moved_to
+            resp["auto_moved_to"] = location_name
+            resp["ubicacion_id"] = shelf.get("location_id")
+            resp["ubicacion_nombre"] = location_name
         return Response(resp)
 
 

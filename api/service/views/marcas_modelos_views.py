@@ -12,6 +12,7 @@ from .helpers import (
     _set_audit_user,
     require_roles,
 )
+from ..constants import bejerman_deposit_for_location, location_display_name
 from .tipo_equipo_utils import (
     clean_tipo_equipo,
     preferred_row,
@@ -206,7 +207,13 @@ class CatalogoUbicacionesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         ensure_default_locations()
-        return Response(q("SELECT id, nombre FROM locations ORDER BY id"))
+        rows = q("SELECT id, nombre FROM locations ORDER BY id") or []
+        for row in rows:
+            deposit = bejerman_deposit_for_location(row.get("nombre"))
+            row["label"] = location_display_name(row.get("nombre"))
+            row["bejerman_deposit"] = deposit
+            row["syncs_bejerman"] = bool(deposit)
+        return Response(rows)
 
 
 class ModeloVarianteView(APIView):

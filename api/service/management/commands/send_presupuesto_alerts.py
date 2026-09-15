@@ -5,6 +5,7 @@ from django.core.mail import EmailMessage, get_connection, send_mail
 from django.utils import timezone
 
 from service.views.helpers import _email_append_footer_text, exec_void, mg_estado_select_sql, os_label, q
+from service.derivations import sql_derivacion_activa
 from service.notifications import emit_notification, filter_email_recipients_by_preference
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,13 @@ class Command(BaseCommand):
             self.stdout.write("No hay destinatarios (rol jefe).")
             return
 
+        loc_filter = ""
+        params_base = []
+        if location and location.lower() not in {"*", "all", "todas", "todas_ubicaciones", "cualquiera"}:
+            # Taller o derivado, igual que la alerta del tablero (`_alert_rows_presupuesto`).
+            loc_filter = f"AND (LOWER(loc.nombre) = LOWER(%s) OR {sql_derivacion_activa('t')})"
+            params_base.append(location)
+
         rows = q(
             f"""
             WITH base AS (
@@ -189,7 +197,7 @@ class Command(BaseCommand):
                       q.estado::text IN ('emitido','enviado','presupuestado')
                       OR t.presupuesto_estado = 'presupuestado'
                     )
-                AND LOWER(loc.nombre) = LOWER(%s)
+                {loc_filter}
                 AND t.estado NOT IN ('entregado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
             )
             SELECT *,
@@ -199,7 +207,7 @@ class Command(BaseCommand):
                AND (last_sent_at IS NULL OR now() - last_sent_at >= (%s * interval '1 day'))
              ORDER BY presupuesto_fecha_emision ASC, id ASC
             """,
-            [location, first_days, repeat_days],
+            params_base + [first_days, repeat_days],
         ) or []
 
         limit = int(opts.get("limit") or 0)

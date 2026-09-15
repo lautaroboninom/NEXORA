@@ -177,6 +177,18 @@ class FakeBejermanClient:
         return {"Resultado": "OK", "DatosJSON": "{}"}
 
 
+# Maestro de artículos que devuelve el doble en `list_articulos`. Para RDA el código exige
+# la descripción literal de Bejerman y no acepta ningún respaldo local (ver
+# `_apply_bejerman_article_descriptions`), así que un artículo que no esté acá bloquea la
+# emisión igual que en producción: si un test nuevo usa otro código, va agregado acá.
+FAKE_MASTER_ARTICLES = {
+    "SERVICIO": "Servicio tecnico",
+    "ART-CPAP": "CPAP ResMed AirSense 10",
+    "ART-MGBIO": "Equipo MG BIO",
+    "1111002": "Calentador humidificador BMC H60-GII",
+}
+
+
 class FakeRisClient:
     def __init__(
         self,
@@ -187,6 +199,7 @@ class FakeRisClient:
         sales_error=None,
         ingresar_side_effects=None,
         stock_records=None,
+        article_descriptions=None,
     ):
         self.number = number
         self.clients = clients
@@ -202,6 +215,10 @@ class FakeRisClient:
         self.sales_list_calls = 0
         self.sales_filters = []
         self.list_clientes_calls = 0
+        self.list_articulos_calls = 0
+        self.article_descriptions = dict(
+            FAKE_MASTER_ARTICLES if article_descriptions is None else article_descriptions
+        )
 
     def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
         self.ingresar_calls += 1
@@ -225,6 +242,18 @@ class FakeRisClient:
                     "Comprobante_PtoVenta": point,
                     "Comprobante_Numero": number,
                 }
+            ),
+        }
+
+    def list_articulos(self, filters=None, limit=20):
+        self.list_articulos_calls += 1
+        return {
+            "Resultado": "OK",
+            "DatosJSON": json.dumps(
+                [
+                    {"Articulo_Codigo": code, "Articulo_Descripcion": description}
+                    for code, description in self.article_descriptions.items()
+                ]
             ),
         }
 
@@ -776,7 +805,7 @@ class BejermanSyncTest(TestCase):
         customer_id=None,
         device_id=None,
         mg_estado="activo",
-        motivo="reparacion",
+        motivo="reparación",
         empresa_bejerman="SEPID",
         propietario_nombre="",
         propietario_doc="",
@@ -929,6 +958,7 @@ class BejermanSyncTest(TestCase):
                 """,
                 ["order-rss-salida", "OS-29444", ingreso_id, "service_release", "RUSSO PABLO MATIAS", "grp-rss-salida"],
             )
+            cur.execute("INSERT INTO delivery_order_remito_links(id, order_id, remito_group_id, batch_id, sequence, expected_count, allocation_status) VALUES ('link-rss-salida', 'order-rss-salida', 'grp-rss-salida', 'grp-rss-salida', 1, 1, 'external_unknown')")
 
         response = self.client.get(f"/api/ingresos/{ingreso_id}/")
 
@@ -960,7 +990,7 @@ class BejermanSyncTest(TestCase):
         self,
         *,
         serial="SN-BEJ-001",
-        numero_interno="MG 9999",
+        numero_interno="",
         customer_id=None,
         equipo_variante="",
         empresa_bejerman="SEPID",
@@ -1422,6 +1452,69 @@ class BejermanSyncTest(TestCase):
             cur.execute("SELECT remito_ingreso FROM ingresos WHERE id = %s", [ingreso_id])
             self.assertEqual(cur.fetchone()[0], "4439")
 
+    def test_ris_emitir_no_reemite_remito_ingreso_corto_sin_punto_venta(self):
+        """El botón Ver/Emitir no debe emitir de nuevo un ingreso con remito legado sin adoptar.
+
+        Mismo caso que el test de arriba (remito corto, sin tipo/letra/punto de venta,
+        de un ingreso de antes de que NEXORA emitiera) pero desde el endpoint que sí
+        llama a Bejerman. Antes, no poder adoptarlo caía a la emisión real y mandaba un
+        comprobante nuevo para algo que ya tenía uno anotado hacía meses (OS 29236,
+        duplicado el 14/09/2026: ver `_pending_legacy_remito_reference`).
+        """
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-LEGACY-EMIT")
+        fake = FakeRisClient(number="00004566")
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET remito_ingreso = '4439' WHERE id = %s", [ingreso_id])
+
+        with (
+            _bejerman_settings(),
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["code"], "BEJERMAN_RIS_REQUIRES_REVIEW")
+        self.assertIn("4439", response.data["detail"])
+        self.assertEqual(fake.ingresar_calls, 0)
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT status, remito_number FROM bejerman_ingreso_remitos WHERE ingreso_id = %s",
+                [ingreso_id],
+            )
+            self.assertEqual(cur.fetchone(), ("failed_review", None))
+            cur.execute("SELECT remito_ingreso FROM ingresos WHERE id = %s", [ingreso_id])
+            self.assertEqual(cur.fetchone()[0], "4439")
+
+    def test_ris_emitir_reintenta_tras_revision_confirma_no_emitido(self):
+        """El guard nuevo no debe tapar la vía de escape ya existente para revisión manual.
+
+        Si un humano ya resolvió la revisión con `resolve_bejerman_ingreso_remito_review`
+        (decisión "not_emitted": miró Bejerman y confirmó que no está), la fila queda en
+        `failed` con `reviewState=ready_to_reissue` y el reintento sí debe llegar a
+        Bejerman, aunque el ingreso siga teniendo la misma referencia corta sin adoptar.
+        """
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-LEGACY-RETRY")
+        fake = FakeRisClient(number="00004567")
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET remito_ingreso = '4439' WHERE id = %s", [ingreso_id])
+            cur.execute(
+                """
+                INSERT INTO bejerman_ingreso_remitos (ingreso_id, status, response_payload)
+                VALUES (%s, 'failed', %s::jsonb)
+                """,
+                [ingreso_id, json.dumps({"reviewState": "ready_to_reissue"})],
+            )
+
+        with (
+            _bejerman_settings(),
+            _valid_ris_preflight(fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=_ris_customer_fields()),
+        ):
+            response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/emitir/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(fake.ingresar_calls, 1)
+
     def test_ris_status_adopta_remito_ingreso_completo_sin_emitir(self):
         ingreso_id = self._insert_ingreso(serial="SN-RIS-LEGACY-FULL")
         fake = FakeRisClient(number="00004565")
@@ -1466,31 +1559,66 @@ class BejermanSyncTest(TestCase):
             self.assertEqual(cur.fetchone()[0], "RDN R 00001-00025310")
 
     def test_ris_pdf_usa_remito_ingreso_existente_sin_emitir(self):
+        """El comprobante viejo se lee de la carpeta, no se le pide al ERP que lo rehaga.
+
+        `RegenPDFSDK='N'` hace que Bejerman se niegue a regenerar un PDF que no esté
+        ya escrito, así que encolar una generación para un comprobante que NEXORA no
+        emitió sólo consigue que el operador espere hasta el deadline para nada.
+        """
+
         ingreso_id = self._insert_ingreso(serial="SN-RIS-LEGACY-PDF")
         fake = FakeRisClient(number="00004565")
         references = []
+        scans = []
         with connection.cursor() as cur:
             cur.execute("UPDATE ingresos SET remito_ingreso = 'RIS R 00004-00004439' WHERE id = %s", [ingreso_id])
 
-        def capture_pdf(_client, reference, *, actor_user_id=None, remito_group_id=None):
+        def capture_probe(_client, reference, *, interactive=True, allow_directory_scan=True):
             references.append(reference)
-            return b"%PDF-1.4\nlegacy", "application/pdf"
+            scans.append(allow_directory_scan)
+            return b"%PDF-1.4\nlegacy", "found"
 
         with (
             _bejerman_settings(),
             patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
-            patch("service.bejerman_ris.fetch_or_enqueue_comprobante_pdf", side_effect=capture_pdf),
+            patch("service.bejerman_ris.probe_comprobante_pdf_copy", side_effect=capture_probe),
+            patch("service.bejerman_ris.fetch_or_enqueue_comprobante_pdf") as enqueue,
         ):
             response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertEqual(fake.ingresar_calls, 0)
+        enqueue.assert_not_called()
         self.assertEqual(len(references), 1)
         self.assertEqual(references[0].type, "RIS")
         self.assertEqual(references[0].letter, "R")
         self.assertEqual(references[0].point_of_sale, "00004")
         self.assertEqual(references[0].number, "00004439")
+        # El barrido por prefijo es la red para los nombres de archivo que no adivinamos.
+        self.assertEqual(scans, [True])
+
+    def test_ris_pdf_de_remito_viejo_ausente_dice_que_hay_que_imprimirlo_desde_bejerman(self):
+        ingreso_id = self._insert_ingreso(serial="SN-RIS-LEGACY-SIN-PDF")
+        fake = FakeRisClient(number="00004566")
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET remito_ingreso = 'RIS R 00004-00004440' WHERE id = %s", [ingreso_id])
+
+        with (
+            _bejerman_settings(),
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.probe_comprobante_pdf_copy", return_value=(None, "missing")),
+            patch("service.bejerman_ris.fetch_or_enqueue_comprobante_pdf") as enqueue,
+        ):
+            response = self.client.get(f"/api/ingresos/{ingreso_id}/ris/pdf/")
+
+        self.assertNotEqual(response.status_code, 200)
+        self.assertEqual(fake.ingresar_calls, 0)
+        # Nada de encolar una generación que Bejerman no va a hacer.
+        enqueue.assert_not_called()
+        detail = str(response.data.get("detail") or "")
+        self.assertIn("RIS R 00004-00004440", detail)
+        self.assertIn("imprimirlo desde Bejerman", detail)
 
     def test_ris_pdf_carpeta_inaccesible_devuelve_503_con_estado_del_coordinador(self):
         ingreso_id = self._insert_ingreso(serial="SN-RIS-PDF-FOLDER-ERROR")
@@ -1658,10 +1786,10 @@ class BejermanSyncTest(TestCase):
         html = response.content.decode("utf-8")
         self.assertIn("Retry-After", html)
         self.assertIn("retry_after_ms", html)
-        self.assertIn("NEXORA volverá a buscar el remito automáticamente", html)
+        self.assertIn("NEXORA volverá a comprobarlo automáticamente", html)
         self.assertIn("no se encontro el comprobante asociado", html)
         self.assertIn("Cerrar pestaña", html)
-        self.assertIn("Esta pestaña seguirá esperando", html)
+        self.assertIn("NEXORA volverá a comprobarlo automáticamente", html)
         self.assertIn("Volver a comprobar", html)
         self.assertIn("Abrir e imprimir", html)
         self.assertNotIn("Abrir PDF directo", html)
@@ -1796,7 +1924,7 @@ class BejermanSyncTest(TestCase):
         cases = [
             ("SN-RDA-NO-STOCK", "baja alquiler", {}, "RDA"),
             ("SN-RDN-NO-STOCK", "devolución demo", {}, "RDN"),
-            ("SN-RIS-NO-STOCK", "reparación", {"BEJERMAN_RIS_UPDATE_STOCK": True}, "RIS"),
+            ("SN-RIS-NO-STOCK", "reparación", {"BEJERMAN_RIS_UPDATE_STOCK": True, "BEJERMAN_SDK_NEGATIVE_QUANTITY_TYPES": "RD,RDN,RDA,RIS"}, "RIS"),
         ]
         for serial, motivo, settings_extra, document_type in cases:
             with self.subTest(document_type=document_type):
@@ -1806,8 +1934,8 @@ class BejermanSyncTest(TestCase):
                 with (
                     _bejerman_settings(**settings_extra),
                     patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
-                    patch("service.bejerman_ris._stock_article_candidates") as stock_candidates,
-                    patch("service.bejerman_ris.validate_bejerman_article_choice") as validate_article,
+                    patch("service.bejerman_ris._stock_article_candidates", return_value=[]) as stock_candidates,
+                    patch("service.bejerman_ris.validate_bejerman_article_choice", return_value={}) as validate_article,
                 ):
                     response = self.client.post(f"/api/ingresos/{ingreso_id}/ris/preflight/")
 
@@ -2036,7 +2164,93 @@ class BejermanSyncTest(TestCase):
         self.assertIn("model_id", mapping_columns)
         self.assertIn("variante_norm", mapping_columns)
         self.assertIn("article_code", mapping_columns)
-        self.assertIn("uq_bejerman_article_mappings_model_variant", all_indexes)
+        # SEPID y MG BIO tienen catálogos de artículos independientes: el índice por
+        # (modelo, variante) sin empresa se reemplazó por el que la incluye.
+        self.assertIn("uq_bejerman_article_mappings_model_variant_company", all_indexes)
+        self.assertNotIn("uq_bejerman_article_mappings_model_variant", all_indexes)
+
+    def test_apply_schema_permite_jobs_de_stock_sin_orden_de_servicio(self):
+        """El alta de un equipo propio mueve stock sin que exista ningún ingreso.
+
+        `device_id` pasa a ser la identidad del job, y la unicidad se parte en dos índices
+        parciales: sin el de equipo, dos altas de la misma partida crearían dos jobs y
+        duplicarían el ENT (el incidente de los ENT del 08/06/2026).
+        """
+        call_command("apply_bejerman_sync_schema")
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT is_nullable
+                  FROM information_schema.columns
+                 WHERE table_name = 'bejerman_sync_jobs' AND column_name = 'ingreso_id'
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], "YES")
+            cur.execute(
+                """
+                SELECT indexname, indexdef
+                  FROM pg_indexes
+                 WHERE tablename = 'bejerman_sync_jobs'
+                   AND indexname IN ('uq_bejerman_sync_jobs_type_ingreso','uq_bejerman_sync_jobs_type_device')
+                """
+            )
+            definiciones = {name: definition for name, definition in cur.fetchall()}
+
+        self.assertEqual(len(definiciones), 2)
+        por_ingreso = definiciones["uq_bejerman_sync_jobs_type_ingreso"]
+        self.assertIn("ingreso_id", por_ingreso)
+        self.assertIn("ingreso_id IS NOT NULL", por_ingreso)
+        por_equipo = definiciones["uq_bejerman_sync_jobs_type_device"]
+        self.assertIn("device_id", por_equipo)
+        self.assertIn("ingreso_id IS NULL", por_equipo)
+
+    def test_el_panel_muestra_un_job_de_stock_sin_orden_de_servicio(self):
+        """El alta de un equipo propio encola un job sin ingreso: tiene que verse igual.
+
+        Dos cosas lo escondían. El `JOIN ingresos` lo descartaba de entrada; y con el LEFT
+        JOIN, el filtro que oculta los fallidos de OS ya cerradas evaluaba a NULL en vez de
+        a falso (lógica ternaria) y el `NOT (...)` lo tiraba justo cuando el job falla, que
+        es cuando alguien tiene que verlo.
+        """
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, numero_interno, mg_estado)
+                VALUES (%s,%s,%s,'SN-PROPIO-PANEL','MG 7450','activo')
+                RETURNING id
+                """,
+                [self.customer_id, self.marca_id, self.model_id],
+            )
+            device_id = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                INSERT INTO bejerman_sync_jobs(
+                  sync_type, ingreso_id, device_id, numero_serie,
+                  source_deposit, target_deposit, company_key, status, last_error
+                )
+                VALUES ('stock_val_to_stl', NULL, %s, 'SN-PROPIO-PANEL',
+                        'VAL', 'STL', 'SEPID', 'blocked', 'sin mapeo de articulo')
+                RETURNING id
+                """,
+                [device_id],
+            )
+            job_id = int(cur.fetchone()[0])
+
+        # Lo que se prueba acá es la consulta del panel, no quién puede abrirlo.
+        with (
+            override_settings(SECURE_SSL_REDIRECT=False),
+            patch("service.views.bejerman_views.require_permission", return_value=None),
+        ):
+            resp = self.client.get("/api/bejerman/jobs/")
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        items = {int(item["id"]): item for item in (resp.data.get("items") or [])}
+        self.assertIn(job_id, items, "el job sin OS no aparece en el panel")
+        fila = items[job_id]
+        self.assertIsNone(fila.get("ingreso_id"))
+        self.assertEqual(fila.get("numero_interno"), "MG 7450")
+        self.assertTrue(fila.get("retryable"), "sin retryable no hay forma de destrabarlo")
+        self.assertGreaterEqual(int((resp.data.get("counters") or {}).get("blocked") or 0), 1)
 
     def test_sync_sdk_registra_empresa_mgbio(self):
         client = BejermanSDKClient(
@@ -2173,18 +2387,21 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(event_count, 0)
         self.assertEqual(job_count, 0)
 
-    def test_remito_venta_pendiente_no_se_trata_como_comprobante_ya_entregado(self):
+    def test_reimprimir_orden_venta_pendiente_no_marca_entrega_fisica(self):
         ingreso_id = self._insert_ingreso(
             serial="SN-REMITO-VENTA-PENDIENTE-001",
             estado="vendido_pendiente_entrega",
             resolucion=None,
         )
 
-        with patch("service.views.reportes_views.render_remito_salida_pdf") as render_pdf:
+        with patch("service.views.reportes_views.render_remito_salida_pdf", return_value=(b"%PDF-1.4", "orden.pdf")) as render_pdf:
             response = self.client.get(f"/api/ingresos/{ingreso_id}/remito/?reprint=1")
 
-        self.assertEqual(response.status_code, 409)
-        render_pdf.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        render_pdf.assert_called_once()
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado, fecha_entrega FROM ingresos WHERE id = %s", [ingreso_id])
+            self.assertEqual(cur.fetchone(), ("vendido_pendiente_entrega", None))
 
     def test_remitos_salida_bulk_devuelve_un_pdf_y_libera_todos_los_ingresos(self):
         first_id = self._insert_ingreso(serial="SN-REMITO-BULK-001")
@@ -2533,7 +2750,8 @@ class BejermanSyncTest(TestCase):
         self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [-1])
         self.assertEqual({item["Item_Deposito"] for item in article_lines}, {"STR"})
         self.assertEqual([item["Item_Partida"] for item in article_lines], ["SN-RDA-001"])
-        self.assertIn("Motivo: baja alquiler", legend_lines)
+        # El RDA identifica el equipo alquilado con su interno (ver service_ingress_reason_legend).
+        self.assertIn("Motivo: baja alquiler (MG 1234)", legend_lines)
         self.assertEqual(fake.stock_comprobantes, [])
 
     def test_nuevo_ingreso_lote_rda_usa_serie_sin_reintento_de_partida(self):
@@ -2869,7 +3087,7 @@ class BejermanSyncTest(TestCase):
 
         self.assertEqual(response.status_code, 409, response.data)
         self.assertTrue(any(issue["code"] == "INGRESO_REMITO_EQUIPMENT_DUPLICATE_LOCAL" for issue in response.data["issues"]))
-        self.assertIn("RIS R 00004-00004581", response.data["issues"][-1]["message"])
+        self.assertIn("RIS R 00004-00004581", next(issue["message"] for issue in response.data["issues"] if issue["code"] == "INGRESO_REMITO_EQUIPMENT_DUPLICATE_LOCAL"))
         self.assertEqual(fake.ingresar_calls, 0)
         with connection.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM devices WHERE numero_serie = 'SN-DUP-LOCAL'")
@@ -3152,7 +3370,7 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(response.data["document_mode"], "register")
         self.assertEqual(response.data["remito_number"], "RIS R 00001-00026249")
         self.assertEqual(fake.sales_list_calls, 0)
-        self.assertEqual(fake.ingresar_calls, 1)
+        self.assertEqual(fake.ingresar_calls, 0)
 
     def test_nuevo_ingreso_lote_registrar_rechaza_punto_venta_invalido(self):
         fake = FakeRisClient()
@@ -3429,7 +3647,8 @@ class BejermanSyncTest(TestCase):
                 """
             )
             self.assertEqual(cur.fetchone()[0], 1)
-        self.assertEqual(existing_id, response.data["ingreso_id"])
+        self.assertEqual(response.data["conflict_type"], "INGRESO_DUPLICADO_HOY")
+        self.assertEqual(existing_id, response.data["payload"]["ingreso_id"])
 
     def test_nuevo_ingreso_lote_falla_ris_conserva_ingresos_con_estado_visible(self):
         payload = self._lote_payload("SN-LOTE-FAIL-1", "SN-LOTE-FAIL-2")
@@ -3574,7 +3793,7 @@ class BejermanSyncTest(TestCase):
                 serial = f"SN-BAJA-{deposit}"
                 ingreso_id = self._insert_ingreso(
                     serial=serial,
-                    numero_interno="MG 7790",
+                    numero_interno="",
                     customer_id=self.mg_customer_id,
                 )
                 queued = enqueue_stock_baja_for_ingreso(ingreso_id, actor_user_id=self.admin.id)
@@ -3719,7 +3938,7 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(response.data.get("bejerman_sync_job", {}).get("status"), "pending")
         job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_FROM_DESGUACE)
         self.assertIsNotNone(job)
-        self.assertEqual(job["source_deposit"], "DES")
+        self.assertEqual(job["source_deposit"], "AUTO")
         self.assertEqual(job["target_deposit"], "STR")
         self.assertEqual(job["actor_user_id"], self.admin.id)
 
@@ -3823,9 +4042,11 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(fake.movements, [])
         job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_FROM_DESGUACE)
         self.assertEqual(job["status"], "blocked")
-        self.assertIn("No se encontró stock positivo", job["last_error"])
+        self.assertIn("no tiene stock positivo en ningún depósito", job["last_error"])
 
-    def test_alta_con_stock_en_otro_deposito_bloquea(self):
+    def test_alta_mueve_partida_desde_el_deposito_real_sin_pasar_por_des(self):
+        # La baja histórica nunca llegó a Bejerman: el equipo sigue en STL. El alta tiene que
+        # traerlo desde donde está, no exigir que alguien lo haya dejado en DES.
         ingreso_id = self._insert_ingreso(
             serial="SN-ALTA-STL",
             numero_interno="MG 7798",
@@ -3849,11 +4070,22 @@ class BejermanSyncTest(TestCase):
         with _bejerman_settings():
             stats = process_bejerman_jobs(job_id=queued["id"], client=fake)
 
-        self.assertEqual(stats["blocked"], 1)
-        self.assertEqual(fake.movements, [])
+        self.assertEqual(stats["succeeded"], 1)
+        self.assertEqual(len(fake.movements), 2)
+        sal = fake.movements[0][0]
+        ent = fake.movements[1][0]
+        self.assertEqual(sal["Comprobante_Tipo"], "SAL")
+        self.assertEqual(sal["Comprobante_ArtDeposito"], "STL")
+        self.assertEqual(sal["Comprobante_CantidadUM1"], -1)
+        self.assertEqual(ent["Comprobante_Tipo"], "ENT")
+        self.assertEqual(ent["Comprobante_ArtDeposito"], "STR")
+        self.assertEqual(ent["Comprobante_CantidadUM1"], 1)
+        self.assertIn("SAL-STL-STR", sal["Comprobante_IdOrigen"])
         job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_FROM_DESGUACE)
-        self.assertEqual(job["status"], "blocked")
-        self.assertIn("se esperaba DES", job["last_error"])
+        self.assertEqual(job["status"], "succeeded")
+        request_payload = self._json_value(job["request_payload"])
+        self.assertEqual(request_payload["source_stock_deposit"], "STL")
+        self.assertEqual(request_payload["target_deposit"], "STR")
 
     def test_alta_con_stock_en_multiples_depositos_bloquea(self):
         ingreso_id = self._insert_ingreso(
@@ -4161,7 +4393,7 @@ class BejermanSyncTest(TestCase):
         ingreso_id = self._insert_ingreso(
             serial="SN-OWN-READY",
             numero_interno="MG 0001",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
             customer_id=self.mg_customer_id,
         )
@@ -4179,7 +4411,7 @@ class BejermanSyncTest(TestCase):
         ingreso_id = self._insert_ingreso(
             serial="SN-OWN-CONTROL",
             numero_interno="MG 0002",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
             customer_id=self.mg_customer_id,
         )
@@ -4195,7 +4427,7 @@ class BejermanSyncTest(TestCase):
     def test_controlado_sin_defecto_devolucion_demo_encola_str_a_val(self):
         ingreso_id = self._insert_ingreso(
             serial="SN-DEMO-CONTROL",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
             motivo="devolución demo",
         )
@@ -4215,7 +4447,7 @@ class BejermanSyncTest(TestCase):
         ingreso_id = self._insert_ingreso(
             serial="SN-DEMO-MG-CONTROL",
             numero_interno="MG 0009",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
             customer_id=self.mg_customer_id,
             motivo="devolución demo",
@@ -4234,7 +4466,7 @@ class BejermanSyncTest(TestCase):
         ingreso_id = self._insert_ingreso(
             serial="SN-CLIENT-MG-CODE",
             numero_interno="MG 0007",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
         )
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
@@ -4251,7 +4483,7 @@ class BejermanSyncTest(TestCase):
         ingreso_id = self._insert_ingreso(
             serial="SN-CE-READY",
             numero_interno="CE 0002",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
         )
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
@@ -4267,7 +4499,7 @@ class BejermanSyncTest(TestCase):
         ingreso_id = self._insert_ingreso(
             serial="SN-CONTROL-MG",
             n_de_control="MG 2562",
-            estado="en_reparacion",
+            estado="reparar",
             ubicacion_id=self.taller_id,
         )
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
@@ -4952,7 +5184,7 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["article_code"], "ART-MAPPED")
 
-    def test_partida_sin_stock_positivo_asienta_articulo_por_serie(self):
+    def test_partida_sin_stock_positivo_resuelve_articulo_del_job_sin_cambiar_mapeo_global(self):
         ingreso_id = self._enqueue_job(serial="SN-ZERO-STOCK")
         fake = FakeBejermanClient(
             source_records=[
@@ -4989,12 +5221,15 @@ class BejermanSyncTest(TestCase):
                 [self.model_id, normalize_article_variant("")],
             )
             row = cur.fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(row[0], "ART-ZERO")
-        self.assertEqual(row[1], "auto")
-        self.assertEqual(self._json_value(row[2])["source"], "stock_transfer_partida")
+        # La evidencia de esta partida resuelve este movimiento. No demuestra
+        # que todos los equipos del modelo correspondan al mismo artículo.
+        self.assertIsNone(row)
+        self.assertEqual(self._json_value(job["request_payload"])["article_code"], "ART-ZERO")
 
-    def test_partida_en_destino_positivo_cierra_idempotente_sin_emitir_comprobantes(self):
+    def test_partida_en_destino_con_el_origen_todavia_cargado_emite_solo_la_sal(self):
+        # Una unidad no puede estar en los dos depósitos: si el destino ya la tiene y el origen
+        # también, la SAL de este traslado nunca se hizo. Cerrarlo sin movimientos dejaba el
+        # stock duplicado con el job en verde (OS 28054, 09/2026).
         ingreso_id = self._enqueue_job(serial="SN-DUP-DEP")
         fake = FakeBejermanClient(
             source_records=[
@@ -5019,10 +5254,19 @@ class BejermanSyncTest(TestCase):
             stats = process_bejerman_jobs(client=fake)
 
         self.assertEqual(stats["succeeded"], 1)
-        self.assertEqual(fake.movements, [])
+        self.assertEqual(len(fake.movements), 1)
+        sal = fake.movements[0][0]
+        self.assertEqual(sal["Comprobante_Tipo"], "SAL")
+        self.assertEqual(sal["Comprobante_ArtDeposito"], "STR")
+        self.assertEqual(sal["Comprobante_ArtPartida"], "SN-DUP-DEP")
+        self.assertEqual(sal["Comprobante_Art_CodGen"], "ART-CPAP")
+        self.assertTrue(sal["Comprobante_IdOrigen"].endswith("-DUP"))
         job = self._job_row(ingreso_id)
         self.assertEqual(job["status"], "succeeded")
-        self.assertTrue(self._json_value(job["request_payload"])["idempotent"])
+        request_payload = self._json_value(job["request_payload"])
+        self.assertTrue(request_payload["idempotent"])
+        self.assertTrue(request_payload["sal_done"])
+        self.assertEqual(request_payload["stock_duplicado_corregido"]["source_deposit"], "STR")
 
     def test_partida_en_otro_deposito_no_frena_la_transferencia_desde_el_origen(self):
         # Que Bejerman la tenga anotada también en VAL es una diferencia para
@@ -5328,6 +5572,7 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(job["status"], "blocked")
         self.assertIn("ya tiene stock positivo", job["last_error"])
 
+    @override_settings(BEJERMAN_SYNC_ENABLED=True)
     def test_endpoints_listado_retry_y_mapeo(self):
         ingreso_id = self._enqueue_job(serial="SN-ENDPOINTS")
         job = self._job_row(ingreso_id, SYNC_TYPE_STOCK_STR_TO_STL)
@@ -5344,7 +5589,9 @@ class BejermanSyncTest(TestCase):
         self.assertEqual(response.data["counters"]["blocked"], 1)
         self.assertEqual(response.data["items"][0]["id"], job["id"])
 
-        response = self.client.post(f"/api/bejerman/jobs/{job['id']}/retry/", {}, format="json")
+        with patch("service.views.bejerman_views.process_bejerman_jobs", return_value={"succeeded": 0}) as process:
+            response = self.client.post(f"/api/bejerman/jobs/{job['id']}/retry/", {}, format="json")
+        process.assert_called_once_with(job_id=job["id"], actor_user_id=self.jefe.id)
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["status"], "pending")
@@ -5785,6 +6032,30 @@ class BejermanSyncTest(TestCase):
 
         self.assertEqual(response.status_code, 409, response.data)
         self.assertIn("NEXORA no emite ENT/RIS de ingreso", response.data["detail"])
+
+    def test_listado_bejerman_muestra_el_pase_a_des_trabado_de_una_os_en_baja(self):
+        # La baja es la que encola el pase a DES: esconderlo por el estado de su propia OS
+        # dejaba invisible cualquier pase a DES trabado (OS 29587, 09/2026). Otro job
+        # trabado de la misma OS sí queda viejo con la baja y sigue oculto.
+        ingreso_id = self._insert_ingreso(
+            serial="SN-BAJA-VISIBLE",
+            numero_interno="MG 7794",
+            customer_id=self.mg_customer_id,
+        )
+        baja = enqueue_stock_baja_for_ingreso(ingreso_id, actor_user_id=self.admin.id)
+        transfer = enqueue_stock_transfer_for_ingreso(ingreso_id, actor_user_id=self.admin.id)
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET estado='baja' WHERE id=%s", [ingreso_id])
+            cur.execute(
+                "UPDATE bejerman_sync_jobs SET status='blocked', last_error='trabado' WHERE id = ANY(%s)",
+                [[baja["id"], transfer["id"]]],
+            )
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_token(self.jefe)}")
+        response = self.client.get("/api/bejerman/jobs/?q=SN-BAJA-VISIBLE")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual([item["id"] for item in response.data["items"]], [baja["id"]])
 
     def test_listado_bejerman_filtra_y_muestra_empresa(self):
         sepid_ingreso_id = self._insert_ingreso(

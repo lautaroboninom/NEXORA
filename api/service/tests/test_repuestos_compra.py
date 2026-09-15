@@ -1,21 +1,25 @@
 import datetime as dt
+from unittest import skipUnless
+from unittest.mock import patch
 
-from django.db import connection
+from django.core.management import call_command
+from django.db import connection, transaction
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from service.models import User
+from service.views import repuestos_views
 
 
 class RepuestosCompraMovimientoAPITest(TestCase):
     @classmethod
     def setUpClass(cls):
         vendor = connection.vendor
-        auto_inc = "INT AUTO_INCREMENT PRIMARY KEY" if vendor != "sqlite" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        auto_inc = "BIGSERIAL PRIMARY KEY" if vendor == "postgresql" else "INT AUTO_INCREMENT PRIMARY KEY" if vendor != "sqlite" else "INTEGER PRIMARY KEY AUTOINCREMENT"
         bool_type = "BOOLEAN" if vendor != "sqlite" else "INTEGER"
-        datetime_type = "DATETIME"
-        engine_suffix = "" if vendor == "sqlite" else " ENGINE=InnoDB"
+        datetime_type = "TIMESTAMPTZ" if vendor == "postgresql" else "DATETIME"
+        engine_suffix = "" if vendor in {"sqlite", "postgresql"} else " ENGINE=InnoDB"
 
         users_sql = f"""
             CREATE TABLE IF NOT EXISTS users (
@@ -24,7 +28,9 @@ class RepuestosCompraMovimientoAPITest(TestCase):
                 email VARCHAR(320) UNIQUE,
                 hash_pw TEXT,
                 rol TEXT,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT {'TRUE' if vendor == 'postgresql' else '1'},
+                bejerman_seller_code TEXT NULL,
+                bejerman_seller_code_confirmed_at {datetime_type} NULL
             ){engine_suffix}
         """
 
@@ -50,7 +56,7 @@ class RepuestosCompraMovimientoAPITest(TestCase):
                 fecha_ultima_compra DATE NULL,
                 fecha_ultimo_conteo DATE NULL,
                 fecha_vencimiento DATE NULL,
-                activo {bool_type} DEFAULT 1,
+                activo {bool_type} DEFAULT {'TRUE' if vendor == 'postgresql' else '1'},
                 updated_at {datetime_type} DEFAULT CURRENT_TIMESTAMP
             ){engine_suffix}
         """
@@ -121,18 +127,27 @@ class RepuestosCompraMovimientoAPITest(TestCase):
 
         with connection.cursor() as cur:
             cur.execute(users_sql)
+            if vendor == "postgresql":
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bejerman_seller_code TEXT NULL")
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                    "bejerman_seller_code_confirmed_at TIMESTAMPTZ NULL"
+                )
             cur.execute(catalogo_repuestos_sql)
             cur.execute(proveedores_sql)
             cur.execute(repuestos_proveedores_sql)
             cur.execute(repuestos_movimientos_sql)
             cur.execute(repuestos_stock_permisos_sql)
             cur.execute(repuestos_config_sql)
+        call_command("apply_user_permissions_schema", verbosity=0)
         super().setUpClass()
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
+        elif connection.vendor == "postgresql":
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return cur.fetchone()[0]
@@ -146,7 +161,10 @@ class RepuestosCompraMovimientoAPITest(TestCase):
             cur.execute("DELETE FROM catalogo_repuestos")
             cur.execute("DELETE FROM proveedores_externos")
             cur.execute("DELETE FROM repuestos_config")
-        User.objects.all().delete()
+            # Los modelos operativos son unmanaged. El collector del ORM intenta
+            # borrar relaciones de tablas que este fixture reducido no crea.
+            cur.execute("DELETE FROM user_permission_overrides")
+            cur.execute("DELETE FROM users")
 
         cls.jefe_user = User.objects.create(
             nombre="Jefe",
@@ -177,9 +195,9 @@ class RepuestosCompraMovimientoAPITest(TestCase):
                   (codigo, nombre, stock_on_hand, stock_min, activo, updated_at, fecha_ultima_compra)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
-                ["1517001", "Valvula test", 10, 2, 1, timezone.now(), None],
+                ["1517001", "Valvula test", 10, 2, True, timezone.now(), None],
             )
-            cls.repuesto_id = cls._last_insert_id(cur)
+            cls.repuesto_id = cls._last_insert_id(cur, "catalogo_repuestos")
             cur.execute(
                 """
                 INSERT INTO proveedores_externos (nombre)
@@ -187,7 +205,7 @@ class RepuestosCompraMovimientoAPITest(TestCase):
                 """,
                 ["Proveedor Base"],
             )
-            cls.proveedor_id = cls._last_insert_id(cur)
+            cls.proveedor_id = cls._last_insert_id(cur, "proveedores_externos")
             cur.execute(
                 """
                 INSERT INTO repuestos_config (dolar_ars, multiplicador_general)
@@ -334,6 +352,28 @@ class RepuestosCompraMovimientoAPITest(TestCase):
             self.assertIsNotNone(rel)
             self.assertEqual(str(rel[0]), "2026-02-10")
 
+    @skipUnless(connection.vendor == "postgresql", "La carrera afecta transacciones PostgreSQL")
+    def test_carrera_al_crear_proveedor_recupera_el_existente_sin_abortar(self):
+        original_q = repuestos_views.q
+        first_lookup = True
+
+        def simulate_race(sql, params=None, one=False):
+            nonlocal first_lookup
+            if first_lookup:
+                first_lookup = False
+                # La primera lectura no vio todavía la inserción concurrente.
+                return None
+            return original_q(sql, params, one=one)
+
+        with transaction.atomic():
+            with patch.object(repuestos_views, "q", side_effect=simulate_race):
+                proveedor_id = repuestos_views._get_or_create_proveedor("Proveedor Base")
+
+            self.assertEqual(int(proveedor_id), int(self.proveedor_id))
+            with connection.cursor() as cur:
+                cur.execute("SELECT 1")
+                self.assertEqual(cur.fetchone()[0], 1)
+
     def test_compra_sin_proveedor_es_valida(self):
         resp = self._post_compra(
             self.jefe_user,
@@ -423,5 +463,5 @@ class RepuestosCompraMovimientoAPITest(TestCase):
         self.assertTrue(len(resp.data) >= 1)
         first = resp.data[0]
         self.assertEqual(first.get("tipo"), "ingreso_compra")
-        self.assertEqual(first.get("fecha_compra"), "2026-02-09")
+        self.assertEqual(resp.json()[0].get("fecha_compra"), "2026-02-09")
         self.assertEqual(first.get("proveedor_nombre"), "Proveedor Base")

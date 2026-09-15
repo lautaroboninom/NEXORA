@@ -23,6 +23,7 @@ from ..quote_mg_notifications import notify_quote_mg_approved
 from ..repair_ready_notifications import notify_repair_ready_for_remito
 from ..permissions import user_has_permission
 from ..rejected_budget import ensure_rejected_budget_charge_schema
+from ..rental_shelf import ingreso_is_ready_for_rental_shelf, move_ingreso_to_rental_shelf
 from ..serializers import (
     QuoteDetailSerializer,
 )
@@ -1868,7 +1869,11 @@ class NoAplicaPresupuestoView(APIView):
 
     def post(self, request, ingreso_id: int):
         require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        ingreso = q("SELECT id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        if not ingreso:
+            raise ValidationError("Ingreso no encontrado")
         with transaction.atomic():
+            _ensure_current_quote(ingreso_id)
             current = _get_current_quote_row(ingreso_id, for_update=True)
             if not current:
                 raise ValidationError("Ingreso no encontrado o sin presupuesto")
@@ -1889,6 +1894,17 @@ class NoAplicaPresupuestoView(APIView):
                 [current["id"]],
             )
             exec_void("UPDATE ingresos SET presupuesto_estado='no_aplica' WHERE id=%s", [ingreso_id])
+
+        # Con el taller terminado y el presupuesto resuelto, un equipo propio ya no espera
+        # nada: su lugar es la estantería de alquiler, que es lo que "Listos para liberar"
+        # es para los equipos de clientes. El pase va fuera de la transacción porque toca
+        # Bejerman y no debe poder tumbar el 'No aplica' que ya quedó escrito.
+        if ingreso_is_ready_for_rental_shelf(ingreso_id):
+            move_ingreso_to_rental_shelf(
+                ingreso_id,
+                actor_user_id=getattr(getattr(request, "user", None), "id", None)
+                or getattr(request, "user_id", None),
+            )
         return _quote_response(request, ingreso_id)
 
 
@@ -1897,7 +1913,11 @@ class QuitarNoAplicaPresupuestoView(APIView):
 
     def post(self, request, ingreso_id: int):
         require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        ingreso = q("SELECT id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
+        if not ingreso:
+            raise ValidationError("Ingreso no encontrado")
         with transaction.atomic():
+            _ensure_current_quote(ingreso_id)
             current = _get_current_quote_row(ingreso_id, for_update=True)
             if not current:
                 raise ValidationError("Ingreso no encontrado o sin presupuesto")

@@ -343,8 +343,8 @@ class MetricasActividadTecnicosAPITest(TestCase):
         )
         self.ingreso_id = self._insert_returning_id(
             """
-            INSERT INTO ingresos (device_id, estado, presupuesto_estado, fecha_ingreso, fecha_creacion, asignado_a, descripcion_problema)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO ingresos (device_id, estado, presupuesto_estado, fecha_ingreso, fecha_creacion, asignado_a, descripcion_problema, motivo)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'reparación')
             RETURNING id
             """,
             [device_id, "ingresado", "pendiente", now, now, self.tecnico.id, "Sin diagnóstico"],
@@ -358,7 +358,7 @@ class MetricasActividadTecnicosAPITest(TestCase):
             ["REP-001", "Placa lógica"],
         )
         self._insert_returning_id(
-            "INSERT INTO quote_items (quote_id, repuesto_id, descripcion) VALUES (%s, %s, %s) RETURNING id",
+            "INSERT INTO quote_items (quote_id, repuesto_id, descripcion, tipo, precio_u) VALUES (%s, %s, %s, 'repuesto', 0) RETURNING id",
             [quote_id, self.repuesto_id, "Placa lógica"],
         )
 

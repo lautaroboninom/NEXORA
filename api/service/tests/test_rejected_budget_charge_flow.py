@@ -178,11 +178,11 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return int(cur.fetchone()[0])
@@ -213,11 +213,11 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
         now = timezone.now()
         with connection.cursor() as cur:
             cur.execute("INSERT INTO customers (razon_social) VALUES (%s)", ["Cliente Test"])
-            customer_id = self._last_insert_id(cur)
+            customer_id = self._last_insert_id(cur, "customers")
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Marca Test"])
-            marca_id = self._last_insert_id(cur)
-            cur.execute("INSERT INTO models (nombre, tipo_equipo) VALUES (%s, %s)", ["Modelo Test", "Bomba"])
-            model_id = self._last_insert_id(cur)
+            marca_id = self._last_insert_id(cur, "marcas")
+            cur.execute("INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s, %s, %s)", [marca_id, "Modelo Test", "Bomba"])
+            model_id = self._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno)
@@ -225,7 +225,7 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
                 """,
                 [customer_id, marca_id, model_id, "SN-REJECTED-001", "MG-001"],
             )
-            device_id = self._last_insert_id(cur)
+            device_id = self._last_insert_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO ingresos (
@@ -236,8 +236,8 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
                     fecha_ingreso,
                     asignado_a,
                     presupuesto_rechazado_cobro_neto
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                , motivo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'reparación')
                 """,
                 [
                     device_id,
@@ -249,7 +249,7 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
                     Decimal(str(charge_neto)) if charge_neto is not None else None,
                 ],
             )
-            ingreso_id = self._last_insert_id(cur)
+            ingreso_id = self._last_insert_id(cur, "ingresos")
 
             quote_ids = []
             for version_num, subtotal in ((1, Decimal("48000.00")), (2, Decimal("52000.00"))):
@@ -257,7 +257,7 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
                     "INSERT INTO quotes (ingreso_id, version_num, estado) VALUES (%s, %s, %s)",
                     [ingreso_id, version_num, "rechazado"],
                 )
-                quote_id = self._last_insert_id(cur)
+                quote_id = self._last_insert_id(cur, "quotes")
                 quote_ids.append(quote_id)
                 cur.execute(
                     """
@@ -276,13 +276,40 @@ class RejectedBudgetChargeFlowAPITest(TestCase):
                 """,
                 [linked_quote_id, ingreso_id],
             )
-            cur.execute(
-                """
-                INSERT INTO ingreso_events (ticket_id, ingreso_id, a_estado, usuario_id, ts, comentario)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                [ingreso_id, ingreso_id, "liberado", self.jefe.id, now, "Liberado para métricas"],
-            )
+            # En producción `ingreso_events.ingreso_id` es una columna generada a partir de
+            # `ticket_id`, y ahí escribirla explícitamente es un error. En una base de test
+            # sembrada por otro módulo puede ser una columna común, así que se mira el
+            # esquema en vez de asumir uno de los dos.
+            ingreso_id_generado = False
+            if connection.vendor == "postgresql":
+                cur.execute(
+                    """
+                    SELECT COALESCE(is_generated, 'NEVER')
+                      FROM information_schema.columns
+                     WHERE table_name='ingreso_events'
+                       AND column_name='ingreso_id'
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """
+                )
+                fila = cur.fetchone()
+                ingreso_id_generado = bool(fila) and str(fila[0]).upper() == "ALWAYS"
+            if ingreso_id_generado:
+                cur.execute(
+                    """
+                    INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, ts, comentario)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [ingreso_id, "liberado", self.jefe.id, now, "Liberado para métricas"],
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO ingreso_events (ticket_id, ingreso_id, a_estado, usuario_id, ts, comentario)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    [ingreso_id, ingreso_id, "liberado", self.jefe.id, now, "Liberado para métricas"],
+                )
 
         return {
             "ingreso_id": ingreso_id,

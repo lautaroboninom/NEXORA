@@ -66,7 +66,7 @@ from .views import (
     ProveedoresExternosView,
 
     # detalle de ingreso
-    IngresoDetalleView, IngresoBejermanEstadoView, IngresoBejermanEstadoAccionView, IngresoAlquilerRemitoView, IngresoAlquilerRemitoAccionView,
+    IngresoDetalleView, IngresoBejermanEstadoView, IngresoBejermanEstadoAccionView, IngresoAlquilerRemitoView, IngresoAlquilerRemitoPdfView, IngresoAlquilerRemitoAccionView,
     IngresoAsignarTecnicoView, CatalogoTecnicosView,
     IngresoTestView, IngresoTestPdfView,
     TestProtocolCatalogView, TestProtocolDetailView,
@@ -125,11 +125,17 @@ from .views.ingreso_conflicts_views import (
 )
 from .views.devices_views import (
     DeviceDirectCreateView,
+    DeviceStockCandidatosView,
     DeviceIdentificadoresView,
     DevicesListView,
     DeviceMgVentaView,
     DeviceMgReactivarView,
 )
+from .views.devices_alta_masiva_views import (
+    DeviceAltaMasivaValidarView,
+    DeviceAltaMasivaView,
+)
+from .views.delivery_order_partidas_masivas_views import DeliveryOrderPartidasMasivasValidarView
 from .views.preventivos_views import (
     DevicePreventivoPlanView,
     DevicePreventivoRevisionCreateView,
@@ -256,6 +262,7 @@ urlpatterns = [
     path("ordenes-entrega/bejerman-articulos/", DeliveryOrderBejermanArticlesView.as_view()),
     path("ordenes-entrega/bejerman-depositos/", DeliveryOrderBejermanDepositsView.as_view()),
     path("ordenes-entrega/bejerman-articulos-stock/", DeliveryOrderBejermanArticleStockView.as_view()),
+    path("ordenes-entrega/partidas-masivas/validar/", DeliveryOrderPartidasMasivasValidarView.as_view()),
     path("ordenes-entrega/alquiler/equipos-disponibles/", DeliveryOrderRentalEquipmentView.as_view()),
     path("ordenes-entrega/remito-bejerman/", DeliveryOrderBejermanRemitoView.as_view()),
     path("ordenes-entrega/remito-bejerman/preflight/", DeliveryOrderBejermanRemitoPreflightView.as_view()),
@@ -372,6 +379,9 @@ urlpatterns = [
     path("equipos/<int:device_id>/mg/venta/", DeviceMgVentaView.as_view()),
     path("equipos/<int:device_id>/mg/reactivar/", DeviceMgReactivarView.as_view()),
     path("devices/alta-directa/", DeviceDirectCreateView.as_view()),
+    path("devices/stock-candidatos/", DeviceStockCandidatosView.as_view()),
+    path("devices/alta-masiva/", DeviceAltaMasivaView.as_view()),
+    path("devices/alta-masiva/validar/", DeviceAltaMasivaValidarView.as_view()),
     path("equipos/<int:device_id>/preventivo-plan/", DevicePreventivoPlanView.as_view()),
     path("equipos/<int:device_id>/preventivo-revisiones/", DevicePreventivoRevisionCreateView.as_view()),
     path("equipos/<int:device_id>/preventivo-repuestos/", DevicePreventivoRepuestosView.as_view()),
@@ -479,6 +489,7 @@ urlpatterns = [
     path("ingresos/<int:ingreso_id>/alquiler/accesorios/<int:item_id>/", IngresoAlquilerAccesorioDetailView.as_view()),
     # diagnóstico y corrección del RTA/stock de alquiler en Bejerman
     path("ingresos/<int:ingreso_id>/alquiler/remito/", IngresoAlquilerRemitoView.as_view()),
+    path("ingresos/<int:ingreso_id>/alquiler/remito/pdf/", IngresoAlquilerRemitoPdfView.as_view()),
     path("ingresos/<int:ingreso_id>/alquiler/remito/accion/", IngresoAlquilerRemitoAccionView.as_view()),
     path("accesorios/buscar/", BuscarAccesorioPorReferenciaView.as_view()),
     path("ingresos/<int:ingreso_id>/fotos/", IngresoMediaListCreateView.as_view()),

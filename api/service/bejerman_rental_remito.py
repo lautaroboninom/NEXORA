@@ -14,8 +14,10 @@ from django.utils import timezone
 from .bejerman_companies import require_company
 from .bejerman_particular_customers import ensure_particular_customer_enabled
 from .bejerman_documents import parse_bejerman_remito_number
+from .bejerman_partida_observacion import observacion_partida
 from .bejerman_sdk import (
     BEJERMAN_OCCASIONAL_CUSTOMER_CODE,
+    BejermanPdfReference,
     BejermanSDKClient as SalesSDKClient,
     BejermanSdkResponseError,
     as_number,
@@ -27,6 +29,7 @@ from .bejerman_sdk import (
     delivery_remito_config,
     first_value,
     parse_remito_response,
+    probe_comprobante_pdf_copy,
     records_from_response,
     resolve_customer_document_fields,
 )
@@ -176,7 +179,7 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
                    COALESCE(t.propietario_nombre, '') AS propietario_nombre,
                    COALESCE(t.propietario_contacto, '') AS propietario_contacto,
                    COALESCE(t.propietario_doc, '') AS propietario_doc,
-                   d.numero_serie, d.numero_interno, d.n_de_control,
+                   d.numero_serie, d.numero_interno, d.n_de_control, d.mg_estado,
                    d.marca_id, d.model_id, COALESCE(NULLIF(t.equipo_variante, ''), d.variante, '') AS variante,
                    c.id AS customer_id, c.cod_empresa AS owner_customer_code,
                    c.razon_social AS owner_customer_name,
@@ -700,7 +703,7 @@ def _upsert_trace_job(
               article_code, actor_user_id, request_payload, response_payload
             )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)
-            ON CONFLICT (sync_type, ingreso_id) DO UPDATE
+            ON CONFLICT (sync_type, ingreso_id) WHERE ingreso_id IS NOT NULL DO UPDATE
                SET ingreso_event_id = COALESCE(EXCLUDED.ingreso_event_id, bejerman_sync_jobs.ingreso_event_id),
                    numero_serie = EXCLUDED.numero_serie,
                    source_deposit = EXCLUDED.source_deposit,
@@ -765,23 +768,68 @@ def save_rental_remito(
                 """
                 UPDATE ingresos
                    SET alquiler_remito = %s,
+                       remito_salida = COALESCE(NULLIF(remito_salida, ''), %s),
                        alquiler_fecha = COALESCE(alquiler_fecha, %s),
                        alquiler_a = CASE WHEN %s IS NULL THEN alquiler_a ELSE NULLIF(%s, '') END
                  WHERE id = %s
                 """,
-                [document_number, issue_date, alquiler_a, _clean_text(customer_text), ingreso_id],
+                [document_number, document_number, issue_date, alquiler_a, _clean_text(customer_text), ingreso_id],
             )
         else:
             cur.execute(
                 """
                 UPDATE ingresos
                    SET alquiler_remito = %s,
+                       remito_salida = COALESCE(NULLIF(remito_salida, ''), %s),
                        alquiler_a = CASE WHEN %s IS NULL THEN alquiler_a ELSE NULLIF(%s, '') END
                  WHERE id = %s
                 """,
-                [document_number, alquiler_a, _clean_text(customer_text), ingreso_id],
+                [document_number, document_number, alquiler_a, _clean_text(customer_text), ingreso_id],
             )
     return state
+
+
+def fetch_rental_remito_pdf(
+    ingreso_id: int,
+    *,
+    actor_user_id: int | None = None,
+    sales_client: SalesSDKClient | None = None,
+) -> tuple[bytes, str, str]:
+    """Abre únicamente la copia ya publicada del RTA, sin emitir ni regenerar nada."""
+    row = _ingreso_context(int(ingreso_id))
+    remito = _clean_text(row.get("alquiler_remito"))
+    if not remito:
+        raise RentalRemitoError("RENTAL_REMITO_REQUIRED", "El equipo no tiene un RTA asociado.", status_code=409)
+    document = normalize_rental_remito_number(remito, fallback_company_key=_company_key_for_context(row))
+    customer = _resolve_customer_from_text(row.get("alquiler_a"))
+    reference = BejermanPdfReference(
+        type=document.type,
+        number=document.number,
+        letter=document.letter,
+        point_of_sale=document.point,
+        issue_date=_clean_text(row.get("alquiler_fecha"))[:10],
+        customer_code=_clean_text(customer.get("code")),
+    )
+    client = sales_client or SalesSDKClient(company_key=document.company_key, actor_user_id=actor_user_id)
+    try:
+        pdf, status = probe_comprobante_pdf_copy(
+            client, reference, interactive=True, allow_directory_scan=True,
+        )
+    except Exception as exc:
+        raise RentalRemitoError("RENTAL_REMITO_PDF_LOOKUP_FAILED", str(exc), status_code=502) from exc
+    if not pdf:
+        if status == "error":
+            raise RentalRemitoError(
+                "RENTAL_REMITO_PDF_LOOKUP_FAILED",
+                f"No se pudo leer la carpeta de PDFs de Bejerman para buscar el {document.remito_number}.",
+                status_code=502,
+            )
+        raise RentalRemitoError(
+            "RENTAL_REMITO_PDF_NOT_FOUND",
+            f"No se encontró el PDF ya impreso del {document.remito_number} en Bejerman.",
+            status_code=404,
+        )
+    return pdf, "application/pdf", f"remito-{document.remito_number}.pdf".replace("/", "-")
 
 
 def _delivery_request_for_rta(row: dict[str, Any], state: dict[str, Any], document: RentalRemitoDocument) -> dict[str, Any]:
@@ -920,11 +968,12 @@ def _register_rta(
                SET estado = 'alquilado',
                    alquilado = TRUE,
                    alquiler_remito = %s,
+                   remito_salida = COALESCE(NULLIF(remito_salida, ''), %s),
                    alquiler_fecha = COALESCE(alquiler_fecha, %s),
                    alquiler_a = COALESCE(NULLIF(alquiler_a, ''), %s)
              WHERE id = %s
             """,
-            [document.remito_number, timezone.localdate().isoformat(), bridge_request["customerName"], ingreso_id],
+            [document.remito_number, document.remito_number, timezone.localdate().isoformat(), bridge_request["customerName"], ingreso_id],
         )
     return {"status": "succeeded", "idempotent": False, "response": response_summary}
 
@@ -948,7 +997,9 @@ def _stock_exit_payload(row: dict[str, Any], state: dict[str, Any], document: Re
             "Comprobante_CantidadUM1": -1,
             "Comprobante_CantidadUM2": -1,
             "Comprobante_PrecioTotalMonLocal": 0,
-            "Partida_Observaciones": f"RTA {document.point}-{document.number}"[:20],
+            "Partida_Observaciones": observacion_partida(
+                row.get("numero_interno"), row.get("n_de_control"), mg_estado=row.get("mg_estado")
+            ),
             "Comprobante_IdOrigen": f"NEXORA-OS-{row['id']}-SAL-STL-{document.point}-{document.number}",
         }
     ]

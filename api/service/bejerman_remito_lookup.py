@@ -41,8 +41,9 @@ from .bejerman_sdk import BEJERMAN_OCCASIONAL_CUSTOMER_CODE, OCCASIONAL_CUSTOMER
 REMITO_TYPES_BY_FLOW = {
     "service_release": ("RSS",),
     "rental": ("RTA",),
-    # "RT" es match exacto contra `spvtco_Cod`, así que no arrastra RTA/RTN.
-    "sale": ("RT",),
+    # Match exacto contra `spvtco_Cod`, así que no arrastra RTA. El RTN entra porque los aportes
+    # a NOVAMED salen con RTN, que no se factura (OS 29131); la venta la marca el operador.
+    "sale": ("RT", "RTN"),
 }
 SEARCH_LIMIT = 50
 # El detalle de cada comprobante multiplica las filas: se acota el total que viaja por SSH

@@ -1,3 +1,4 @@
+from service.tests.schema_helpers import create_fixture_device
 from decimal import Decimal
 
 from django.db import connection
@@ -23,11 +24,11 @@ def _schema_bits():
     return auto_inc, datetime_type, bool_type, engine_suffix
 
 
-def _last_insert_id(cur):
+def _last_insert_id(cur, table):
     if connection.vendor == "sqlite":
         cur.execute("SELECT last_insert_rowid()")
     elif connection.vendor == "postgresql":
-        cur.execute("SELECT LASTVAL()")
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
     else:
         cur.execute("SELECT LAST_INSERT_ID()")
     return int(cur.fetchone()[0])
@@ -45,14 +46,14 @@ class RepuestosCostCurrencyAPITest(TestCase):
                 email VARCHAR(320) UNIQUE,
                 hash_pw TEXT,
                 rol TEXT,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT {'TRUE' if connection.vendor == 'postgresql' else '1'}
             ){engine_suffix}
         """
         subrubros_sql = f"""
             CREATE TABLE IF NOT EXISTS repuestos_subrubros (
                 codigo VARCHAR(8) PRIMARY KEY,
                 nombre TEXT NOT NULL,
-                activo {bool_type} DEFAULT 1,
+                activo {bool_type} DEFAULT {'TRUE' if connection.vendor == 'postgresql' else '1'},
                 created_at {datetime_type} DEFAULT CURRENT_TIMESTAMP,
                 updated_at {datetime_type} DEFAULT CURRENT_TIMESTAMP
             ){engine_suffix}
@@ -80,7 +81,7 @@ class RepuestosCostCurrencyAPITest(TestCase):
                 fecha_ultima_compra DATE NULL,
                 fecha_ultimo_conteo DATE NULL,
                 fecha_vencimiento DATE NULL,
-                activo {bool_type} DEFAULT 1,
+                activo {bool_type} DEFAULT {'TRUE' if connection.vendor == 'postgresql' else '1'},
                 updated_at {datetime_type} DEFAULT CURRENT_TIMESTAMP
             ){engine_suffix}
         """
@@ -147,7 +148,7 @@ class RepuestosCostCurrencyAPITest(TestCase):
                 INSERT INTO repuestos_subrubros (codigo, nombre, activo)
                 VALUES (%s,%s,%s)
                 """,
-                ["1517", "Repuesto generico", 1],
+                ["1517", "Repuesto genérico", True],
             )
             cur.execute(
                 """
@@ -187,7 +188,7 @@ class RepuestosCostCurrencyAPITest(TestCase):
             "stock_on_hand": kwargs.get("stock_on_hand", Decimal("0.00")),
             "stock_min": kwargs.get("stock_min", Decimal("0.00")),
             "estado": kwargs.get("estado"),
-            "activo": 1,
+            "activo": True,
         }
         with connection.cursor() as cur:
             cur.execute(
@@ -209,7 +210,7 @@ class RepuestosCostCurrencyAPITest(TestCase):
                     payload["activo"],
                 ],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "catalogo_repuestos")
 
     def test_post_repuesto_ars_persiste_costo_en_pesos(self):
         resp = self.client.post(
@@ -330,7 +331,7 @@ class QuoteCostCurrencyAPITest(TestCase):
                 email VARCHAR(320) UNIQUE,
                 hash_pw TEXT,
                 rol TEXT,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT {'TRUE' if connection.vendor == 'postgresql' else '1'}
             ){engine_suffix}
         """
         ingresos_sql = f"""
@@ -386,7 +387,7 @@ class QuoteCostCurrencyAPITest(TestCase):
                 costo_moneda VARCHAR(3) DEFAULT 'USD',
                 precio_venta NUMERIC(12,2) NULL,
                 multiplicador NUMERIC(10,4) NULL,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT {'TRUE' if connection.vendor == 'postgresql' else '1'}
             ){engine_suffix}
         """
         repuestos_config_sql = f"""
@@ -441,12 +442,13 @@ class QuoteCostCurrencyAPITest(TestCase):
             cur.execute("DELETE FROM catalogo_repuestos")
 
     def _seed_ingreso(self):
+        device_id = create_fixture_device()
         with connection.cursor() as cur:
             cur.execute(
-                "INSERT INTO ingresos (estado, presupuesto_estado) VALUES (%s,%s)",
-                ["diagnosticado", "pendiente"],
+                "INSERT INTO ingresos (estado, presupuesto_estado, motivo, device_id) VALUES (%s,%s, 'reparación', %s)",
+                ["diagnosticado", "pendiente", device_id],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "ingresos")
 
     def _seed_repuesto(self, *, codigo, nombre, costo_moneda, costo_usd=None, costo_neto=Decimal("0.00"), multiplicador=None):
         with connection.cursor() as cur:
@@ -456,9 +458,9 @@ class QuoteCostCurrencyAPITest(TestCase):
                   (codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, activo)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, 1],
+                [codigo, nombre, costo_neto, costo_usd, costo_moneda, multiplicador, True],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "catalogo_repuestos")
 
     def test_quote_item_ars_cost_normaliza_y_autocompleta_precio(self):
         ingreso_id = self._seed_ingreso()

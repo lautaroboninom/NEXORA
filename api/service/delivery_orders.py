@@ -16,6 +16,7 @@ from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.utils import timezone
 
 from .bejerman_sdk import bejerman_customer_code_for, is_occasional_customer_name
+from .constants import is_rental_shelf_location_name
 from .bejerman_particular_customers import disable_particular_customer_if_idle
 from .notifications import active_users_for_notification, emit_notification, notification_email_recipients_for_users
 from .notification_email_outbox import queue_notification_email
@@ -460,6 +461,21 @@ def _normalize_order_items(
                 "articleName": _optional_text(item.get("articleName")),
                 "articleRequiresPartida": article_requires_partida,
                 "description": description,
+                "remitoArticleLegend": _optional_text(
+                    item.get("remitoArticleLegend")
+                    if "remitoArticleLegend" in item
+                    else item.get("remito_article_legend")
+                    if "remito_article_legend" in item
+                    else item.get("accessories")
+                    if "accessories" in item
+                    else item.get("equipmentAccessories")
+                    if "equipmentAccessories" in item
+                    else current_item.get("remitoArticleLegend")
+                    if current_item and "remitoArticleLegend" in current_item
+                    else current_item.get("remito_article_legend")
+                    if current_item
+                    else None
+                ),
                 "quantity": quantity,
                 "unitPrice": _decimal(item.get("unitPrice"), "0") if item.get("unitPrice") not in (None, "") else None,
                 "priceCurrency": price_currency,
@@ -1261,7 +1277,10 @@ def _sync_rental_ingresos_delivery(
     dash_id = _dash_location_id()
     cliente = _clean_text(alquiler_a)
     synced_ids: list[int] = []
-    with connection.cursor() as cur:
+    # El `FOR UPDATE` de abajo necesita transacción, y un backfill corre en autocommit: sin
+    # esto el UPDATE del equipo se compromete solo y un fallo posterior deja el alquiler
+    # marcado sin su evento. Pasó el 08/09/2026 con la columna generada de `ingreso_events`.
+    with transaction.atomic(), connection.cursor() as cur:
         cur.execute(
             """
             SELECT id, estado
@@ -1281,9 +1300,10 @@ def _sync_rental_ingresos_delivery(
                 "alquilado = TRUE",
                 "alquiler_a = COALESCE(NULLIF(alquiler_a, ''), NULLIF(%s, ''))",
                 "alquiler_remito = COALESCE(NULLIF(alquiler_remito, ''), %s)",
+                "remito_salida = COALESCE(NULLIF(remito_salida, ''), %s)",
                 "alquiler_fecha = COALESCE(alquiler_fecha, %s)",
             ]
-            params: list[Any] = [cliente, remito, alquiler_fecha]
+            params: list[Any] = [cliente, remito, remito, alquiler_fecha]
             if dash_id is not None:
                 # El equipo alquilado no vive en ningun deposito nuestro: ver
                 # `_sync_rental_ingresos_after_remito`, que hace lo mismo en el circuito.
@@ -1291,17 +1311,20 @@ def _sync_rental_ingresos_delivery(
                 params.append(dash_id)
             params.append(ingreso_id)
             cur.execute("UPDATE ingresos SET " + ", ".join(sets) + " WHERE id = %s", params)
+            # Sólo `ticket_id`: en producción `ingreso_events.ingreso_id` es una columna
+            # generada que lo espeja, y escribirla revienta con "cannot insert a non-DEFAULT
+            # value into a generated column". Es el mismo INSERT que
+            # `_insert_rental_delivery_event`, que nunca la nombró.
             cur.execute(
                 """
-                INSERT INTO ingreso_events (ticket_id, ingreso_id, a_estado, usuario_id, comentario)
-                SELECT %s, %s, 'alquilado', %s, %s
+                INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, comentario)
+                SELECT %s, 'alquilado', %s, %s
                  WHERE NOT EXISTS (
                     SELECT 1 FROM ingreso_events
                      WHERE ticket_id = %s AND a_estado = 'alquilado'
                  )
                 """,
                 [
-                    ingreso_id,
                     ingreso_id,
                     actor_user_id,
                     f"Alquiler registrado por RTA Bejerman {remito}",
@@ -1614,6 +1637,7 @@ def serialize_order(row: dict[str, Any]) -> dict[str, Any]:
         "remitoPrintUrl": _delivery_order_remito_print_path(order_id) if has_remito else "",
         "bejermanRemitoGroupId": row.get("bejerman_remito_group_id") or "",
         "remitoLocation": row.get("remito_location") or "",
+        "remitoGeneralLegend": row.get("remito_general_legend") or "",
         "invoiceNumber": row.get("invoice_number") or "",
         "billingPostponedUntil": _iso(row.get("billing_postponed_until")),
         "billingPostponedByUserId": row.get("billing_postponed_by_user_id"),
@@ -1636,6 +1660,7 @@ def serialize_order(row: dict[str, Any]) -> dict[str, Any]:
         "invoicedAt": _iso(row.get("invoiced_at")),
         "cancelledAt": _iso(row.get("cancelled_at")),
         "createdAt": _iso(row.get("created_at")),
+        "effectiveSortAt": _iso(row.get("effective_sort_at") or row.get("created_at")),
         "updatedAt": _iso(row.get("updated_at")),
         "serviceReleaseCount": len(service_release_references),
         "serviceReleaseReferences": service_release_references,
@@ -1676,6 +1701,7 @@ def _serialize_item(row: dict[str, Any]) -> dict[str, Any]:
         "articleName": row.get("article_name") or "",
         "articleRequiresPartida": _nullable_bool(row.get("article_requires_partida")),
         "description": row.get("description") or "",
+        "remitoArticleLegend": row.get("remito_article_legend") or "",
         "quantity": float(row.get("quantity") or 0),
         "unitPrice": float(row["unit_price"]) if row.get("unit_price") is not None else None,
         "priceCurrency": _price_currency(row.get("price_currency")),
@@ -2895,6 +2921,27 @@ def process_due_delivery_order_billing_postponements(limit: int = 100) -> dict[s
     return {"due": len(due_rows), "notifications": inserted}
 
 
+DELIVERY_ORDER_URGENT_FIRST_SQL = "CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC"
+DELIVERY_ORDER_EFFECTIVE_RECENCY_SQL = """
+    CASE
+      WHEN o.delivery_type = 'service_release' THEN GREATEST(
+        o.created_at,
+        COALESCE((
+          SELECT MAX(
+            COALESCE((
+              SELECT MAX(ie.ts)
+                FROM ingreso_events ie
+               WHERE ie.ingreso_id = oi.ingreso_id
+                 AND ie.a_estado = 'liberado'
+            ), oi.created_at)
+          )
+            FROM delivery_order_items oi
+           WHERE oi.order_id = o.id
+        ), o.created_at)
+      )
+      ELSE o.created_at
+    END
+"""
 DELIVERY_ORDER_SORT_MAP = {
     "orden": "NULLIF(LOWER(BTRIM(COALESCE(o.order_number, ''))), '')",
     "cliente": "NULLIF(LOWER(BTRIM(COALESCE(o.customer_name, ''))), '')",
@@ -2924,7 +2971,7 @@ DELIVERY_ORDER_SORT_MAP = {
     """,
     "remito": "NULLIF(LOWER(BTRIM(COALESCE(o.remito_number, ''))), '')",
     "factura": "NULLIF(LOWER(BTRIM(COALESCE(o.invoice_number, ''))), '')",
-    "fecha": "COALESCE(o.order_date::timestamptz, o.created_at)",
+    "fecha": DELIVERY_ORDER_EFFECTIVE_RECENCY_SQL,
 }
 
 
@@ -2934,16 +2981,18 @@ def delivery_order_order_sql(sort_raw: Any, pending_billing_requested: bool = Fa
     sort_expression = DELIVERY_ORDER_SORT_MAP.get(sort_field)
     if sort_expression:
         direction = "DESC" if raw.startswith("-") else "ASC"
-        return f"{sort_expression} {direction} NULLS LAST, o.id {direction}"
+        return f"{DELIVERY_ORDER_URGENT_FIRST_SQL}, {sort_expression} {direction} NULLS LAST, o.id {direction}"
     if pending_billing_requested:
         return """
+          CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC,
           COALESCE(g.generated_at, o.order_date::timestamptz, g.created_at, o.delivered_at, o.created_at) ASC,
           o.order_date ASC NULLS LAST,
           o.created_at ASC,
           o.id ASC
         """
     return """
-          o.created_at DESC,
+          CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC,
+          """ + DELIVERY_ORDER_EFFECTIVE_RECENCY_SQL + """ DESC,
           o.id DESC
         """
 
@@ -3118,7 +3167,7 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
         total = int(cur.fetchone()[0])
         cur.execute(
             f"""
-            SELECT o.*
+            SELECT o.*, {DELIVERY_ORDER_EFFECTIVE_RECENCY_SQL} AS effective_sort_at
             FROM delivery_orders o
             {join_sql}
             {where_sql}
@@ -3388,7 +3437,7 @@ def create_delivery_order(
               ingreso_id, device_id, equipment_model, equipment_serial, equipment_internal_number,
               seller_name, seller_code, order_date, operation_company_label, raw_pedido,
               commercial_terms, commercial_price, commercial_exchange_rate, price_currency, commercial_condition, commercial_deadline,
-              status, priority, remito_number, remito_location, invoice_number,
+              status, priority, remito_number, remito_location, remito_general_legend, invoice_number,
               created_by_user_id, prepared_at, delivered_at, invoiced_at
             )
             VALUES (
@@ -3398,7 +3447,7 @@ def create_delivery_order(
               %s, %s, %s, %s, %s, %s,
               %s, %s, %s, %s, %s,
               %s, %s, %s, %s, %s,
-              %s, %s, %s, %s, %s,
+              %s, %s, %s, %s, %s, %s,
               %s,
               CASE WHEN %s IN ('armado_pendiente_entrega','entregado_pendiente_facturacion','entregado_no_facturable','facturado') THEN CURRENT_TIMESTAMP ELSE NULL END,
               CASE WHEN %s IN ('entregado_pendiente_facturacion','entregado_no_facturable','facturado') THEN CURRENT_TIMESTAMP ELSE NULL END,
@@ -3444,6 +3493,7 @@ def create_delivery_order(
                 priority,
                 remito_number,
                 "recepcion" if remito_number else _optional_text(payload.get("remitoLocation")),
+                _optional_text(payload.get("remitoGeneralLegend") or payload.get("remito_general_legend")),
                 invoice_number,
                 actor_user_id,
                 status,
@@ -3456,11 +3506,11 @@ def create_delivery_order(
             cur.execute(
                 """
                 INSERT INTO delivery_order_items (
-                  id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida, description, quantity, unit_price, price_currency, discount_percent,
+                  id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida, description, remito_article_legend, quantity, unit_price, price_currency, discount_percent,
                   source_text, partida, partida_expiration_date, stock_deposit_code,
                   stock_available_quantity, stock_checked_at, sort_order
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     item_id,
@@ -3471,6 +3521,7 @@ def create_delivery_order(
                     _optional_text(item.get("articleName")),
                     item["articleRequiresPartida"],
                     item["description"],
+                    _optional_text(item.get("remitoArticleLegend") or item.get("remito_article_legend")),
                     item["quantity"],
                     item["unitPrice"],
                     item["priceCurrency"],
@@ -3763,6 +3814,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                    price_currency = %s,
                    commercial_condition = %s,
                    commercial_deadline = %s,
+                   remito_general_legend = %s,
                    priority = %s,
                    status = %s
              WHERE id = %s
@@ -3806,6 +3858,13 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                     else current.get("commercialCondition")
                 ),
                 _optional_text(payload.get("commercialDeadline") if "commercialDeadline" in payload else current.get("commercialDeadline")),
+                _optional_text(
+                    payload.get("remitoGeneralLegend")
+                    if "remitoGeneralLegend" in payload
+                    else payload.get("remito_general_legend")
+                    if "remito_general_legend" in payload
+                    else current.get("remitoGeneralLegend")
+                ),
                 priority,
                 next_status,
                 order_id,
@@ -3827,6 +3886,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                            article_name = %s,
                            article_requires_partida = %s,
                            description = %s,
+                           remito_article_legend = %s,
                            quantity = %s,
                            unit_price = %s,
                            price_currency = %s,
@@ -3847,6 +3907,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                         item["articleName"],
                         item["articleRequiresPartida"],
                         item["description"],
+                        _optional_text(item.get("remitoArticleLegend") or item.get("remito_article_legend")),
                         item["quantity"],
                         item["unitPrice"],
                         item["priceCurrency"],
@@ -3869,11 +3930,11 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                 cur.execute(
                     """
                     INSERT INTO delivery_order_items (
-                      id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida, description, quantity, unit_price, price_currency, discount_percent,
+                      id, order_id, ingreso_id, device_id, article_code, article_name, article_requires_partida, description, remito_article_legend, quantity, unit_price, price_currency, discount_percent,
                       source_text, partida, partida_expiration_date, stock_deposit_code,
                       stock_available_quantity, stock_checked_at, sort_order
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         item_id,
@@ -3884,6 +3945,7 @@ def update_delivery_order(order_id: str, payload: dict[str, Any], actor_user_id:
                         item["articleName"],
                         item["articleRequiresPartida"],
                         item["description"],
+                        _optional_text(item.get("remitoArticleLegend") or item.get("remito_article_legend")),
                         item["quantity"],
                         item["unitPrice"],
                         item["priceCurrency"],
@@ -5036,11 +5098,6 @@ def _article_code_key(value: Any) -> str:
     return "".join(char for char in _clean_text(value).upper() if char not in {" ", "-"})
 
 
-def is_rental_shelf_location_name(value: Any) -> bool:
-    text = _clean_text(value).casefold()
-    return "estanter" in text and "alquiler" in text
-
-
 def _equipment_label(row: dict[str, Any]) -> str:
     model_text = " ".join(
         part
@@ -5214,46 +5271,54 @@ def rental_item_from_context(row: dict[str, Any], mapping: dict[str, Any], *, st
     }
 
 
-def _rental_equipment_contexts_by_serial(serial: str) -> list[dict[str, Any]]:
-    serial_text = _optional_text(serial)
-    if not serial_text:
-        return []
+def _rental_equipment_context_by_serial_sql(where_sql: str) -> str:
+    """Contexto de alquiler de las OS de un equipo, filtrado por `where_sql` sobre `d`.
+
+    Lo comparten la búsqueda de un NS al guardar y la de todos los NS de STL juntos que arma
+    el recuadro "NS disponibles": los dos tienen que leer exactamente las mismas filas.
+    """
     company_expr = "COALESCE(t.empresa_bejerman, 'SEPID')" if _has_table_column("ingresos", "empresa_bejerman") else "'SEPID'"
     has_location = _has_table_column("ingresos", "ubicacion_id")
     has_alquilado = _has_table_column("ingresos", "alquilado")
     location_select = "t.ubicacion_id, COALESCE(loc.nombre, '') AS ubicacion_nombre" if has_location else "NULL AS ubicacion_id, '' AS ubicacion_nombre"
     location_join = "LEFT JOIN locations loc ON loc.id = t.ubicacion_id" if has_location else ""
     alquilado_expr = "COALESCE(t.alquilado, FALSE)" if has_alquilado else "FALSE"
+    return f"""
+        SELECT t.id AS ingreso_id,
+               t.device_id,
+               t.estado,
+               {alquilado_expr} AS alquilado,
+               {company_expr} AS company_key,
+               {location_select},
+               COALESCE(t.equipo_variante, '') AS equipo_variante,
+               c.id AS owner_customer_id,
+               COALESCE(c.razon_social, '') AS owner_customer_name,
+               COALESCE(d.numero_serie, '') AS equipment_serial,
+               COALESCE(d.numero_interno, '') AS equipment_internal_number,
+               d.model_id,
+               COALESCE(d.variante, '') AS device_variante,
+               COALESCE(m.nombre, '') AS modelo,
+               COALESCE(m.tipo_equipo, '') AS tipo_equipo,
+               COALESCE(m.variante, '') AS modelo_variante,
+               COALESCE(b.nombre, '') AS marca
+          FROM ingresos t
+          JOIN devices d ON d.id = t.device_id
+          JOIN customers c ON c.id = d.customer_id
+          LEFT JOIN models m ON m.id = d.model_id
+          LEFT JOIN marcas b ON b.id = d.marca_id
+          {location_join}
+         WHERE {where_sql}
+    """
+
+
+def _rental_equipment_contexts_by_serial(serial: str) -> list[dict[str, Any]]:
+    serial_text = _optional_text(serial)
+    if not serial_text:
+        return []
     with connection.cursor() as cur:
         cur.execute(
-            f"""
-            SELECT t.id AS ingreso_id,
-                   t.device_id,
-                   t.estado,
-                   {alquilado_expr} AS alquilado,
-                   {company_expr} AS company_key,
-                   {location_select},
-                   COALESCE(t.equipo_variante, '') AS equipo_variante,
-                   c.id AS owner_customer_id,
-                   COALESCE(c.razon_social, '') AS owner_customer_name,
-                   COALESCE(d.numero_serie, '') AS equipment_serial,
-                   COALESCE(d.numero_interno, '') AS equipment_internal_number,
-                   d.model_id,
-                   COALESCE(d.variante, '') AS device_variante,
-                   COALESCE(m.nombre, '') AS modelo,
-                   COALESCE(m.tipo_equipo, '') AS tipo_equipo,
-                   COALESCE(m.variante, '') AS modelo_variante,
-                   COALESCE(b.nombre, '') AS marca
-              FROM ingresos t
-              JOIN devices d ON d.id = t.device_id
-              JOIN customers c ON c.id = d.customer_id
-              LEFT JOIN models m ON m.id = d.model_id
-              LEFT JOIN marcas b ON b.id = d.marca_id
-              {location_join}
-             WHERE LOWER(TRIM(COALESCE(d.numero_serie, ''))) = LOWER(TRIM(%s))
-             ORDER BY t.id DESC
-             LIMIT 20
-            """,
+            _rental_equipment_context_by_serial_sql("LOWER(TRIM(COALESCE(d.numero_serie, ''))) = LOWER(TRIM(%s))")
+            + " ORDER BY t.id DESC LIMIT 20",
             [serial_text],
         )
         return _rows(cur)
@@ -5434,11 +5499,13 @@ def _device_exists_by_serial(serial: str) -> bool:
         return cur.fetchone() is not None
 
 
-def _rental_serial_unlinked_error(serial: str) -> DeliveryOrderError:
+def _rental_serial_unlinked_error(serial: str, *, device_exists: bool | None = None) -> DeliveryOrderError:
     # Los equipos sin OS ya se resuelven por `_rental_device_contexts_by_serial`, así que
     # acá sólo cae el equipo que tiene OS pero que ninguna de las dos consultas puede
     # armar: le falta el cliente, que es lo único que ambas necesitan.
-    if _device_exists_by_serial(serial):
+    if device_exists is None:
+        device_exists = _device_exists_by_serial(serial)
+    if device_exists:
         return DeliveryOrderError(
             "RENTAL_EQUIPMENT_WITHOUT_CUSTOMER",
             f"El NS {serial} está dado de alta como equipo pero no tiene cliente cargado. Completalo en Equipos.",
@@ -5496,6 +5563,88 @@ def _resolve_rental_context_for_partida(partida: str, ingreso_id: int | None, de
     if device_id and int(available.get("device_id") or 0) != int(device_id):
         raise DeliveryOrderError("RENTAL_EQUIPMENT_MISMATCH", f"El NS {partida_text} no corresponde al equipo seleccionado", status_code=409)
     return available
+
+
+def _rental_serial_verdict(
+    serial: str,
+    rows: list[dict[str, Any]],
+    *,
+    device_exists: bool,
+    order_id: str | None,
+) -> tuple[dict[str, Any] | None, DeliveryOrderError | None]:
+    """El equipo de un NS elegido sin OS ni equipo, o el error con que lo rechaza el guardado.
+
+    Es la rama por serie de `_resolve_rental_context_for_partida` más el control de reserva de
+    `resolve_rental_item_partidas`, pero con las filas ya consultadas: `rows` son las OS del NS
+    o, si no tiene ninguna, sus equipos sin OS.
+    """
+    if not rows:
+        return None, _rental_serial_unlinked_error(serial, device_exists=device_exists)
+    available = next((row for row in rows if _rental_context_available(row)), None)
+    if not available:
+        return None, _rental_serial_unavailable_error(serial, rows)
+    ingreso_id = _optional_int(available.get("ingreso_id"))
+    device_id = None if ingreso_id else _optional_int(available.get("device_id"))
+    duplicate = _rental_duplicate_reservation(ingreso_id, order_id, device_id=device_id)
+    if duplicate:
+        error = DeliveryOrderError("RENTAL_EQUIPMENT_RESERVED", f"NS ya reservado en la orden {duplicate}: {serial}", status_code=409)
+        return available, error
+    return available, None
+
+
+def rental_stock_lot_availability(serials: list[Any], order_id: str | None = None) -> list[dict[str, Any] | None]:
+    """Si cada NS con stock en STL se puede alquilar, con el mismo criterio que el guardado.
+
+    El recuadro "NS disponibles" listaba el stock de Bejerman tal cual y NEXORA recién miraba el
+    equipo al guardar, así que ofrecía NS que después rechazaba: E2321905419 tenía stock en STL
+    por un remito manual que no lo descontó y figuraba alquilado desde 2024 (OS 25863).
+
+    Devuelve una entrada por serie, en el mismo orden (None para la vacía). Las series se buscan
+    todas juntas porque se consulta cada vez que se abre un renglón; sólo la reserva va de a un
+    equipo, y únicamente para los que están disponibles.
+    """
+    keys = [_clean_text(serial).lower() for serial in serials]
+    originals: dict[str, str] = {}
+    for serial, key in zip(serials, keys):
+        if key:
+            originals.setdefault(key, _clean_text(serial))
+    if not originals:
+        return [None for _ in keys]
+    wanted = sorted(originals)
+    serial_filter = "LOWER(TRIM(COALESCE(d.numero_serie, ''))) = ANY(%s)"
+    with connection.cursor() as cur:
+        cur.execute(_rental_equipment_context_by_serial_sql(serial_filter) + " ORDER BY t.id DESC", [wanted])
+        equipment_rows = _rows(cur)
+        cur.execute(_rental_device_context_sql(serial_filter) + " ORDER BY d.id DESC", [wanted])
+        device_rows = _rows(cur)
+        cur.execute(
+            """
+            SELECT DISTINCT LOWER(TRIM(COALESCE(numero_serie, '')))
+              FROM devices
+             WHERE LOWER(TRIM(COALESCE(numero_serie, ''))) = ANY(%s)
+            """,
+            [wanted],
+        )
+        existing = {row[0] for row in cur.fetchall()}
+
+    equipment_by_serial: dict[str, list[dict[str, Any]]] = {}
+    device_by_serial: dict[str, list[dict[str, Any]]] = {}
+    for grouped, source in ((equipment_by_serial, equipment_rows), (device_by_serial, device_rows)):
+        for row in source:
+            grouped.setdefault(_clean_text(row.get("equipment_serial")).lower(), []).append(row)
+
+    verdicts: dict[str, dict[str, Any]] = {}
+    for key, serial in originals.items():
+        # Mismo tope que la búsqueda de a un NS (LIMIT 20), que es la que redacta el error al guardar.
+        rows = (equipment_by_serial.get(key) or device_by_serial.get(key) or [])[:20]
+        context, error = _rental_serial_verdict(serial, rows, device_exists=key in existing, order_id=order_id)
+        verdicts[key] = {
+            "available": error is None,
+            "code": error.code if error else None,
+            "reason": str(error) if error else None,
+            "equipmentInternalNumber": _optional_text((context or {}).get("equipment_internal_number")),
+        }
+    return [verdicts.get(key) if key else None for key in keys]
 
 
 def rental_partida_from_identifier(order_id: str, identifier: Any, actor_user_id: int | None) -> dict[str, Any]:
@@ -6008,22 +6157,26 @@ def _article_mapping_for_service_release(row: dict[str, Any]) -> dict[str, Any] 
     except ValueError:
         resolved_company = "SEPID"
     try:
-        with connection.cursor() as cur:
-            cur.execute(
-                """
-                SELECT article_code, article_description
-                  FROM bejerman_article_mappings
-                 WHERE model_id = %s
-                   AND variante_norm = %s
-                   AND company_key = %s
-                 ORDER BY CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END,
-                          confirmed_at DESC NULLS LAST,
-                          updated_at DESC
-                 LIMIT 1
-                """,
-                [model_id, normalize_article_variant(variant), resolved_company],
-            )
-            return _one(cur)
+        # Este mapeo es opcional. Si su esquema todavía no está disponible, el
+        # rollback del savepoint debe ocurrir antes de aplicar el fallback para
+        # que la transacción exterior de la orden siga siendo utilizable.
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT article_code, article_description
+                      FROM bejerman_article_mappings
+                     WHERE model_id = %s
+                       AND variante_norm = %s
+                       AND company_key = %s
+                     ORDER BY CASE WHEN match_source = 'manual' THEN 0 ELSE 1 END,
+                              confirmed_at DESC NULLS LAST,
+                              updated_at DESC
+                     LIMIT 1
+                    """,
+                    [model_id, normalize_article_variant(variant), resolved_company],
+                )
+                return _one(cur)
     except DatabaseError:
         return None
 
@@ -6168,13 +6321,10 @@ def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str |
     raw_pedido = _service_release_raw_pedido(row)
     params: list[Any] = [
         company_key,
-        raw_pedido,
         service_release_max_items_per_order(),
-        customer_code,
-        customer_code,
-        customer_code,
         customer_id,
-        customer_id,
+        customer_code,
+        customer_code,
     ]
     # Dos equipos del mismo particular si van juntos; los de dos particulares distintos no,
     # porque el remito viaja con un solo propietario como cliente ocasional.
@@ -6198,17 +6348,16 @@ def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str |
                AND o.status IN ('pendiente_armado', 'armado_pendiente_entrega')
                AND NULLIF(BTRIM(COALESCE(o.remito_number, '')), '') IS NULL
                AND o.bejerman_remito_group_id IS NULL
-               AND COALESCE(o.company_key, 'SEPID') = %s
-               AND LOWER(BTRIM(COALESCE(o.raw_pedido, ''))) = LOWER(BTRIM(%s))
-               AND (
-                    SELECT COUNT(*)
-                      FROM delivery_order_items doi
-                     WHERE doi.order_id = o.id
-                   ) < %s
-               AND (
-                    (%s <> '' AND UPPER(BTRIM(COALESCE(o.bejerman_customer_code, ''))) = UPPER(BTRIM(%s)))
-                    OR (%s = '' AND %s IS NOT NULL AND o.customer_id = %s)
-                   )
+           AND COALESCE(o.company_key, 'SEPID') = %s
+           AND (
+                SELECT COUNT(*)
+                  FROM delivery_order_items doi
+                 WHERE doi.order_id = o.id
+               ) < %s
+           AND (
+                (o.customer_id IS NOT NULL AND o.customer_id = %s)
+                OR (%s <> '' AND UPPER(BTRIM(COALESCE(o.bejerman_customer_code, ''))) = UPPER(BTRIM(%s)))
+               )
                {occasional_sql}
              ORDER BY o.created_at ASC NULLS LAST, o.id ASC
              LIMIT 1
@@ -6400,13 +6549,16 @@ def _refresh_service_release_order(order_id: str, row: dict[str, Any], mapping: 
     return get_delivery_order(order_id)
 
 
-@transaction.atomic
 def _ingreso_belongs_to_rental_fleet(ingreso_id: int) -> bool:
     # Import diferido: bejerman_sync es pesado y delivery_orders se importa desde las views.
     from .bejerman_sync import ingreso_targets_rental_stock
 
     try:
-        return bool(ingreso_targets_rental_stock(ingreso_id))
+        # La consulta puede fallar en instalaciones todavía incompletas. El savepoint
+        # debe cerrarse antes de capturar el error para no contaminar la transacción
+        # exterior que protege la agrupación de órdenes de servicio.
+        with transaction.atomic():
+            return bool(ingreso_targets_rental_stock(ingreso_id))
     except Exception:
         # Ante la duda no se frena la liberación del equipo: se cae al comportamiento viejo.
         logger.exception(
@@ -6416,6 +6568,7 @@ def _ingreso_belongs_to_rental_fleet(ingreso_id: int) -> bool:
         return False
 
 
+@transaction.atomic
 def ensure_service_release_order_for_ingreso(ingreso_id: int, actor_user_id: int | None = None) -> dict[str, Any] | None:
     row = _service_release_context(ingreso_id)
     if not row:

@@ -528,8 +528,8 @@ class IngresoTestView(APIView):
         else:
             references = references_snapshot if references_snapshot else copy.deepcopy(protocol.get("references") or [])
 
-        template_key = (row or {}).get("template_key") or protocol.get("template_key")
-        template_version = (row or {}).get("template_version") or protocol.get("template_version")
+        template_key = protocol.get("template_key") or (row or {}).get("template_key")
+        template_version = protocol.get("template_version") or (row or {}).get("template_version")
         instrumentos = (row or {}).get("instrumentos") or _default_instrumentos_for_protocol(protocol)
 
         return Response(

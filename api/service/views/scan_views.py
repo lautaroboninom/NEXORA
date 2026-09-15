@@ -6,9 +6,15 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .helpers import q, require_roles, _set_audit_user
+from .helpers import q, require_roles, _set_audit_user, os_label
 from .mg_state import resolve_mg_flags
+from ..mg_codes import normalize_mg_code, sql_mg_key
 from ..bejerman_companies import company_for_key
+from ..ingreso_duplicados import (
+    INGRESO_ESTADOS_NO_BLOQUEAN_ALTA,
+    ingreso_es_de_hoy,
+    ingreso_esta_abierto,
+)
 from ..bejerman_sales import (
     bejerman_sale_response,
     find_latest_sale_by_serial_any_company,
@@ -20,18 +26,8 @@ from ..bejerman_sdk import BejermanSDKClient, is_bejerman_sales_query_schema_mes
 logger = logging.getLogger(__name__)
 
 
-INGRESO_ESTADOS_NO_BLOQUEAN_ALTA = {
-    "entregado",
-    "alquilado",
-    "baja",
-    "vendido_pendiente_entrega",
-    "vendido_entregado",
-}
-
-
 def _ingreso_en_curso(row: dict | None) -> bool:
-    estado = str((row or {}).get("estado") or "").strip().lower()
-    return bool(estado) and estado not in INGRESO_ESTADOS_NO_BLOQUEAN_ALTA
+    return ingreso_esta_abierto(row)
 
 
 def _normalize_ingreso_summary(row: dict | None, ingreso_en_curso: bool | None = None):
@@ -40,6 +36,10 @@ def _normalize_ingreso_summary(row: dict | None, ingreso_en_curso: bool | None =
     if row.get("fecha_ingreso") is None and row.get("fecha_creacion") is not None:
         row["fecha_ingreso"] = row.get("fecha_creacion")
     row["ingreso_en_curso"] = _ingreso_en_curso(row) if ingreso_en_curso is None else bool(ingreso_en_curso)
+    # Con esto el autocompletado puede frenar al operador antes de que cargue el equipo por
+    # segunda vez: una OS abierta de hoy sobre el mismo equipo es el remito cargado dos veces.
+    row["ingreso_hoy"] = ingreso_es_de_hoy(row)
+    row["os"] = os_label(row.get("id"))
     row.pop("fecha_creacion", None)
     return row
 
@@ -229,21 +229,20 @@ def _fetch_device_by_code(raw: str, mg_select_sql: str, device_id=None):
     if not raw:
         return None, None, []
     ns_key = re.sub(r"[\s-]+", "", raw).upper()
-    mg_match = re.match(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", raw, re.IGNORECASE)
-    mg_no_space = None
-    if mg_match:
-        mg_no_space = f"{mg_match.group(1).upper()}{mg_match.group(2).zfill(4)}"
+    # Criterio único de número interno (`mg_codes`): "MG1678", "MG 1678" y "MG 001678" traen el
+    # mismo equipo, esté guardado de la forma que esté.
+    es_codigo_mg = normalize_mg_code(raw) is not None
 
     wh = []
     params = []
     if ns_key:
         wh.append("REPLACE(REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ',''),'-','') = %s")
         params.append(ns_key)
-    if mg_no_space:
-        wh.append("REPLACE(UPPER(COALESCE(d.numero_interno,'')),' ','') = %s")
-        params.append(mg_no_space)
-        wh.append("REPLACE(UPPER(COALESCE(d.numero_serie,'')),' ','') = %s")
-        params.append(mg_no_space)
+    if es_codigo_mg:
+        wh.append(f"{sql_mg_key('d.numero_interno')} = {sql_mg_key('%s')}")
+        params.append(raw)
+        wh.append(f"{sql_mg_key('d.numero_serie')} = {sql_mg_key('%s')}")
+        params.append(raw)
     if not wh:
         return None, ns_key, []
 

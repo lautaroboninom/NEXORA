@@ -97,8 +97,9 @@ class SuplenciaTests(TestCase):
         # Se calcula, no está escrita a mano: un aviso nuevo para jefatura entra solo.
         self.assertIn("presupuesto_pendiente", claves)
         self.assertIn("solicitud_baja", claves)
-        # `resumen_operativo` ya le llega a jefe_veedor por su rol: no hay que tocarla.
-        self.assertNotIn("resumen_operativo", claves)
+        # `resumen_operativo` es sólo para jefatura real, no para jefe_veedor:
+        # la suplencia tiene que prenderla porque el veedor no la tiene por defecto.
+        self.assertIn("resumen_operativo", claves)
 
     # -- simulación ----------------------------------------------------------
 

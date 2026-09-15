@@ -1,3 +1,5 @@
+import re
+from contextlib import nullcontext
 from datetime import datetime
 
 from django.db import connection, transaction
@@ -9,69 +11,98 @@ from rest_framework.views import APIView
 
 from ..permissions import MappedPermissionGuard
 from ..patrimonial_notifications import notify_patrimonial_email
-from .helpers import q, exec_void, exec_returning, require_roles, _fetchall_dicts, _set_audit_user
+from ..bejerman_companies import (
+    DEFAULT_INGRESS_COMPANY_KEY,
+    list_ingress_companies,
+    require_company,
+)
+from ..bejerman_sdk import (
+    BejermanSdkConfigError,
+    BejermanSdkResponseError,
+    BejermanSdkUnavailable,
+)
+from ..bejerman_sync import (
+    BejermanBlockedError,
+    _mg_owner_customer_id,
+    enqueue_stock_val_to_stl_for_device,
+)
+from .helpers import (
+    q,
+    exec_void,
+    exec_returning,
+    ensure_default_locations,
+    require_roles,
+    _fetchall_dicts,
+    _set_audit_user,
+)
 from .mg_state import normalize_mg, resolve_mg_flags
+from ..mg_codes import MG_CODE_PATTERN, MG_CODE_RE, MG_KEY_SQL, sql_is_mg_code, sql_mg_key
 from .tipo_equipo_utils import sentence_case_tipo_equipo
 
 
 def _has_mg_schema() -> bool:
     try:
-        if connection.vendor == "postgresql":
+        # Estas detecciones son opcionales y se invocan dentro de endpoints
+        # atómicos. Un savepoint evita que una falla de introspección deshaga una
+        # edición que luego termina respondiendo correctamente.
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            if connection.vendor == "postgresql":
+                row = q(
+                    """
+                    SELECT 1
+                      FROM information_schema.columns
+                     WHERE table_name='devices'
+                       AND column_name='mg_estado'
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """,
+                    one=True,
+                )
+                return bool(row)
             row = q(
                 """
                 SELECT 1
                   FROM information_schema.columns
                  WHERE table_name='devices'
                    AND column_name='mg_estado'
-                   AND table_schema = ANY(current_schemas(true))
                  LIMIT 1
                 """,
                 one=True,
             )
             return bool(row)
-        row = q(
-            """
-            SELECT 1
-              FROM information_schema.columns
-             WHERE table_name='devices'
-               AND column_name='mg_estado'
-             LIMIT 1
-            """,
-            one=True,
-        )
-        return bool(row)
     except Exception:
         return False
 
 
 def _has_table_column(table_name: str, column_name: str) -> bool:
     try:
-        if connection.vendor == "postgresql":
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            if connection.vendor == "postgresql":
+                row = q(
+                    """
+                    SELECT 1
+                      FROM information_schema.columns
+                     WHERE table_name=%s
+                       AND column_name=%s
+                       AND table_schema = ANY(current_schemas(true))
+                     LIMIT 1
+                    """,
+                    [table_name, column_name],
+                    one=True,
+                )
+                return bool(row)
             row = q(
                 """
                 SELECT 1
                   FROM information_schema.columns
                  WHERE table_name=%s
                    AND column_name=%s
-                   AND table_schema = ANY(current_schemas(true))
                  LIMIT 1
                 """,
                 [table_name, column_name],
                 one=True,
             )
             return bool(row)
-        row = q(
-            """
-            SELECT 1
-              FROM information_schema.columns
-             WHERE table_name=%s
-               AND column_name=%s
-             LIMIT 1
-            """,
-            [table_name, column_name],
-            one=True,
-        )
-        return bool(row)
     except Exception:
         return False
 
@@ -117,11 +148,37 @@ def _parse_sale_datetime(raw):
     return dt
 
 
+MG_PREFIXES = ("MG", "NM", "NV", "CE")
+
+# El número interno se compara con la clave de `mg_codes` (`MG_KEY_SQL`, importada arriba), el
+# criterio único de NEXORA: mayúsculas, un espacio y sin ceros a la izquierda, para que `mg1234`,
+# `MG 1234` y `MG 001234` den lo mismo. Estos alias quedan porque los importan el alta masiva, la
+# carga masiva de partidas y sus tests.
+MG_KEY_PATTERN = MG_CODE_PATTERN
+_MG_CANONICAL_RE = MG_CODE_RE
+
+
 def _normalize_mg(numero_interno: str) -> str:
+    """Forma canónica del número interno: `MG 1234`.
+
+    `MG1234`, `mg 1234`, `MG 001678` y `1234` son la misma etiqueta escrita distinto, y hasta
+    ahora se guardaban tal cual: dos fichas del mismo equipo convivían sin que nada avisara,
+    porque las comparaciones exactas (y el índice `uq_devices_numint_norm`, que espera
+    `XX ####`) las veían como distintas. Normalizar al escribir hace que el valor guardado y
+    el que compara la base sean literalmente el mismo.
+
+    Lo que no encaja en el patrón numérico (`MG SM-004`) se deja como está: no es un código
+    canónico y forzarlo sería inventar un número que nadie escribió.
+    """
     value = (numero_interno or "").strip()
-    if value and not value.upper().startswith(("MG", "NM", "NV", "CE")):
+    if not value:
+        return ""
+    if not value.upper().startswith(MG_PREFIXES):
         value = "MG " + value
-    return value
+    match = _MG_CANONICAL_RE.match(value)
+    if not match:
+        return value
+    return f"{match.group(1).upper()} {match.group(2).zfill(4)}"
 
 
 def _fetch_device_editable(device_id: int):
@@ -302,16 +359,16 @@ class DeviceIdentificadoresView(APIView):
 
         if "numero_interno" in data and next_numero_interno:
             if connection.vendor == "postgresql":
+                # Mismo criterio que el alta: el espacio y los ceros a la izquierda son
+                # formato, no identidad. Si acá se comparara con otra regla, el alta y la
+                # edición discreparían sobre qué es un duplicado.
                 conflict = q(
-                    """
+                    f"""
                     SELECT id
                       FROM devices
                      WHERE id <> %s
-                       AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                       AND UPPER(REGEXP_REPLACE(numero_interno,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                           UPPER(REGEXP_REPLACE(%s,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                       AND numero_interno ~* '{MG_KEY_PATTERN}'
+                       AND {MG_KEY_SQL.format(col="numero_interno")} = {MG_KEY_SQL.format(col="%s")}
                      LIMIT 1
                     """,
                     [device_id, next_numero_interno],
@@ -553,12 +610,7 @@ class DevicesListView(APIView):
                 wh.append("(" + " OR ".join(clauses) + ")")
                 params.extend([like] * len(clauses))
 
-            mg_code_sql = (
-                "("
-                "COALESCE(d.numero_interno,'') ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$' OR "
-                "COALESCE(d.numero_serie,'') ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'"
-                ")"
-            )
+            mg_code_sql = f"({sql_is_mg_code('d.numero_interno')} OR {sql_is_mg_code('d.numero_serie')})"
             mg_estado_sql = "COALESCE(d.mg_estado, 'activo')" if has_mg_schema else "'activo'"
             if mg_owner_id:
                 active_mg_sql = f"(d.customer_id = %s OR ({mg_code_sql} AND {mg_estado_sql} <> 'inactivo_venta'))"
@@ -597,12 +649,7 @@ class DevicesListView(APIView):
                 params.append(ubicacion_id_val)
 
             if propio_raw in ("1", "true", "yes", "y", "t"):
-                wh.append(
-                    "("
-                    "d.numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$' OR "
-                    "d.numero_serie ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'"
-                    ")"
-                )
+                wh.append(f"({sql_is_mg_code('d.numero_interno')} OR {sql_is_mg_code('d.numero_serie')})")
             if alquilado_raw in ("1", "true", "yes", "y", "t"):
                 wh.append("COALESCE(d.alquilado,false) = true")
             elif alquilado_raw in ("0", "false", "no", "n"):
@@ -646,12 +693,7 @@ class DevicesListView(APIView):
             mg_owner_sql = "FALSE"
             if mg_owner_id is not None:
                 mg_owner_sql = f"d.customer_id = {int(mg_owner_id)}"
-            mg_code_sql = """
-                (
-                  COALESCE(d.numero_interno, '') ~* '^(MG|NM|NV|CE)[[:space:]]*[0-9]{1,4}$'
-                  OR COALESCE(d.numero_serie, '') ~* '^(MG|NM|NV|CE)[[:space:]]*[0-9]{1,4}$'
-                )
-            """
+            mg_code_sql = f"({sql_is_mg_code('d.numero_interno')} OR {sql_is_mg_code('d.numero_serie')})"
             property_sort_sql = f"""
                 CASE
                   WHEN ({mg_owner_sql}) OR (({mg_code_sql}) AND {mg_status_sql} <> 'inactivo_venta') THEN 0
@@ -855,10 +897,106 @@ def _parse_bool_or_default(raw, default=False):
     return bool(default)
 
 
+RENTAL_SHELF_LOCATION_NAME = "Estantería de Alquiler"
+
+
+def _rental_shelf_location_id():
+    """Id de la estantería de alquiler, resuelto por nombre.
+
+    Los ids de `locations` son datos de instancia (en producción la ubicación '-' es la 10),
+    así que clavar un número acá funcionaría en dev y mandaría los equipos a cualquier lado
+    en producción. Mismo patrón que el pase automático a la estantería en ingresos_views.
+    """
+    ensure_default_locations()
+    row = q(
+        "SELECT id FROM locations WHERE LOWER(nombre) = LOWER(%s) LIMIT 1",
+        [RENTAL_SHELF_LOCATION_NAME],
+        one=True,
+    )
+    return row.get("id") if row else None
+
+
+def _bejerman_company_key_or_default(raw):
+    try:
+        return require_company(raw or DEFAULT_INGRESS_COMPANY_KEY).key
+    except ValueError:
+        return None
+
+
+# Depósitos de donde puede venir un equipo propio nuevo para la estantería: VAL (central) y SAR
+# (Sarmiento). Hasta el 10/09/2026 el alta usaba sólo la lista del cambio de equipo y SAR quedaba
+# afuera; esa lista se suma pero no se amplía, para no cambiar de rebote dónde busca el cambio de
+# equipo la unidad que entrega.
+ALTA_PROPIO_SOURCE_DEPOSITS = ("VAL", "SAR")
+
+
+def _alta_propio_source_deposits() -> list[str]:
+    # Import diferido, como en DeviceStockCandidatosView: `ingresos_views` es pesado.
+    from .ingresos_views import _swap_source_deposits
+
+    return list(dict.fromkeys([*ALTA_PROPIO_SOURCE_DEPOSITS, *_swap_source_deposits()]))
+
+
+class DeviceStockCandidatosView(APIView):
+    """Unidades del stock real de Bejerman que se pueden dar de alta como equipo propio.
+
+    El alta de un equipo nuevo arranca por la partida que ya está en el depósito central: la
+    serie se toma de ahí, no se tipea. Es la misma lista que usa el cambio de equipo —stock
+    real, filtrado a artículos de equipo, con el artículo mapeado a marca/modelo—, pero sin
+    colgar de una orden de servicio, porque acá no hay ninguna.
+    """
+
+    permission_classes = [permissions.IsAuthenticated, MappedPermissionGuard]
+
+    def get(self, request):
+        # Import diferido: `ingresos_views` es pesado y sólo hace falta cuando alguien abre
+        # el buscador de stock.
+        from .ingresos_views import _swap_stock_candidates
+
+        company_key = _bejerman_company_key_or_default(
+            request.GET.get("empresa") or request.GET.get("company_key")
+        )
+        if not company_key:
+            return Response({"detail": "Empresa Bejerman no válida"}, status=400)
+
+        disponibles = _alta_propio_source_deposits()
+        pedido = (request.GET.get("deposito") or "").strip().upper()
+        depositos = [pedido] if pedido else disponibles
+        term = (request.GET.get("q") or "").strip()
+
+        actor_user_id = getattr(getattr(request, "user", None), "id", None) or getattr(
+            request, "user_id", None
+        )
+        try:
+            items = _swap_stock_candidates(company_key, actor_user_id, depositos, term)
+        except (BejermanSdkConfigError, BejermanSdkUnavailable, BejermanSdkResponseError) as exc:
+            # Sin Bejerman no hay lista posible: se dice por qué, en vez de mostrar vacío.
+            return Response({"detail": str(exc), "conflict_type": "BEJERMAN_UNAVAILABLE"}, status=502)
+
+        return Response(
+            {
+                "items": items,
+                "depositos": disponibles,
+                "deposito": depositos[0] if len(depositos) == 1 else "",
+                "empresa": company_key,
+                "empresas": [
+                    {"key": company.key, "label": company.label}
+                    for company in list_ingress_companies()
+                    if not company.is_test
+                ],
+            }
+        )
+
+
 class DeviceDirectCreateView(APIView):
     """
     Alta directa de equipo en tabla devices sin generar un ingreso.
     Pensado para equipos bajo tutela del servicio técnico instalados en instituciones.
+
+    Con `propio` marcado el alta es la de un equipo nuestro nuevo para el parque de alquiler:
+    queda a nombre de MG BIO, en la estantería, y encola la transferencia de stock que lo deja
+    en STL —sin ese movimiento el equipo no figura como disponible y, si igual se alquila, el
+    RTA deja STL en negativo en silencio.
     """
 
     permission_classes = [permissions.IsAuthenticated, MappedPermissionGuard]
@@ -869,7 +1007,24 @@ class DeviceDirectCreateView(APIView):
         _set_audit_user(request)
         data = request.data or {}
 
+        propio = bool(_parse_bool_or_default(data.get("propio"), False))
+
         customer_id = _parse_int_or_none(data.get("customer_id"))
+        if propio:
+            # Un equipo propio es de MG BIO por definición: el cliente no se elige. Es el
+            # mismo dueño que reconocen los ruteos de stock (`_is_mg_owner_customer`).
+            customer_id = _mg_owner_customer_id()
+            if not customer_id:
+                return Response(
+                    {
+                        "detail": (
+                            "No hay un cliente MG BIO cargado en el sistema: sin él no se puede "
+                            "registrar un equipo propio."
+                        ),
+                        "conflict_type": "MG_OWNER_MISSING",
+                    },
+                    status=400,
+                )
         if not customer_id:
             return Response({"detail": "customer_id requerido"}, status=400)
         customer = q(
@@ -883,6 +1038,30 @@ class DeviceDirectCreateView(APIView):
         marca_id = _parse_int_or_none(data.get("marca_id"))
         model_id = _parse_int_or_none(data.get("model_id"))
         ubicacion_id = _parse_int_or_none(data.get("ubicacion_id"))
+
+        company_key = None
+        stock_deposito = ""
+        if propio:
+            company_key = _bejerman_company_key_or_default(
+                data.get("empresa") or data.get("company_key")
+            )
+            if not company_key:
+                return Response({"detail": "Empresa Bejerman no válida"}, status=400)
+            stock_deposito = (data.get("stock_deposito") or "").strip().upper()
+            # Disponible para alquiler = ubicación de estantería ∩ stock en STL. Dejar la
+            # ubicación en blanco haría el equipo invisible aunque el stock quede bien.
+            ubicacion_id = _rental_shelf_location_id()
+            if not ubicacion_id:
+                return Response(
+                    {
+                        "detail": (
+                            f"No existe la ubicación «{RENTAL_SHELF_LOCATION_NAME}»: "
+                            "no se puede dejar el equipo en la estantería de alquiler."
+                        ),
+                        "conflict_type": "RENTAL_SHELF_MISSING",
+                    },
+                    status=400,
+                )
 
         if marca_id:
             marca = q("SELECT id FROM marcas WHERE id=%s", [marca_id], one=True)
@@ -905,16 +1084,37 @@ class DeviceDirectCreateView(APIView):
                 return Response({"detail": "ubicacion_id inexistente"}, status=400)
 
         numero_serie = (data.get("numero_serie") or "").strip()
-        numero_interno = (data.get("numero_interno") or "").strip()
-        if numero_interno and not numero_interno.upper().startswith(("MG", "NM", "NV", "CE")):
-            numero_interno = "MG " + numero_interno
+        numero_interno = _normalize_mg(data.get("numero_interno"))
 
         tipo_equipo = sentence_case_tipo_equipo(data.get("tipo_equipo"))
         variante = (data.get("variante") or "").strip()
         alquilado = bool(_parse_bool_or_default(data.get("alquilado"), False))
         alquiler_a = (data.get("alquiler_a") or "").strip()
+        if propio:
+            # "Nunca estuvo alquilado ni vendido" es lo que declara el modo propio.
+            alquilado = False
         if not alquilado:
             alquiler_a = ""
+
+        if propio:
+            # La serie es la partida de Bejerman: sin ella no hay nada que transferir, y el MG
+            # es lo que identifica al equipo como nuestro para el ruteo de stock.
+            if not numero_serie:
+                return Response(
+                    {
+                        "detail": "Elegí la unidad en el stock de Bejerman: el número de serie es obligatorio.",
+                        "conflict_type": "PROPIO_SERIE_REQUERIDA",
+                    },
+                    status=400,
+                )
+            if not numero_interno:
+                return Response(
+                    {
+                        "detail": "Cargá el número interno (MG) del equipo propio.",
+                        "conflict_type": "PROPIO_MG_REQUERIDO",
+                    },
+                    status=400,
+                )
 
         if not (numero_serie or numero_interno or tipo_equipo or variante or model_id):
             return Response(
@@ -955,15 +1155,15 @@ class DeviceDirectCreateView(APIView):
 
         if numero_interno:
             if connection.vendor == "postgresql":
+                # Hasta 6 dígitos, igual que INTERNAL_CODE_RE: el número interno también se
+                # carga con ceros a la izquierda ("MG 001678"). Con el tope en 4, esos MG no
+                # entraban en la comparación y se podían duplicar sin que nadie avisara.
                 other_mg = q(
-                    """
+                    f"""
                     SELECT id
                       FROM devices
-                     WHERE numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                       AND UPPER(REGEXP_REPLACE(numero_interno,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                           UPPER(REGEXP_REPLACE(%s,
-                           '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                     WHERE numero_interno ~* '{MG_KEY_PATTERN}'
+                       AND {MG_KEY_SQL.format(col="numero_interno")} = {MG_KEY_SQL.format(col="%s")}
                      LIMIT 1
                     """,
                     [numero_interno],
@@ -1007,6 +1207,24 @@ class DeviceDirectCreateView(APIView):
             ],
         )
 
+        stock_job = None
+        stock_job_error = ""
+        if propio:
+            # El job se encola acá y lo ejecuta el worker después del commit: no se llama a
+            # Bejerman dentro de la transacción del alta. Si el encolado falla, el equipo ya
+            # está bien registrado y lo que falta es el movimiento de stock, así que se
+            # informa en la respuesta en vez de tirar abajo el alta entera.
+            try:
+                stock_job = enqueue_stock_val_to_stl_for_device(
+                    device_id,
+                    company_key=company_key,
+                    source_deposit=stock_deposito or None,
+                    article_code=(data.get("stock_article_code") or "").strip(),
+                    actor_user_id=getattr(getattr(request, "user", None), "id", None),
+                )
+            except BejermanBlockedError as exc:
+                stock_job_error = str(exc)
+
         row = q(
             """
             SELECT
@@ -1035,7 +1253,20 @@ class DeviceDirectCreateView(APIView):
             [device_id],
             one=True,
         )
-        return Response({"ok": True, "device": row}, status=201)
+        payload = {"ok": True, "device": row}
+        if propio:
+            payload["propio"] = True
+            payload["stock_job"] = (
+                {
+                    "id": stock_job.get("id"),
+                    "status": stock_job.get("status"),
+                    "source_deposit": stock_deposito or "VAL",
+                    "target_deposit": "STL",
+                }
+                if stock_job
+                else {"status": "blocked", "last_error": stock_job_error}
+            )
+        return Response(payload, status=201)
 
 
 def _norm_mg(value: str):
@@ -1182,15 +1413,12 @@ class DevicesMergeView(APIView):
         # Si vamos a aplicar MG (nuevo o distinto), validar que no choque con otros
         if mg_to_apply and mg_to_apply != mg_target:
             mg_conflict = q(
-                """
+                f"""
                 SELECT id
                   FROM devices
                  WHERE id NOT IN (%s,%s)
-                   AND numero_interno ~* '^(MG|NM|NV|CE)\\s*\\d{1,4}$'
-                   AND UPPER(REGEXP_REPLACE(numero_interno,
-                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0'))) =
-                       UPPER(REGEXP_REPLACE(%s,
-                       '^(MG|NM|NV|CE)\\s*(\\d{1,4})$', '\\1 ' || LPAD('\\2',4,'0')))
+                   AND {sql_is_mg_code('numero_interno')}
+                   AND {sql_mg_key('numero_interno')} = {sql_mg_key('%s')}
                  LIMIT 1
                 """,
                 [target_id, source_id, mg_to_apply],
@@ -1244,6 +1472,168 @@ class DevicesMergeView(APIView):
             "applied_numero_serie": new_ns,
             "applied_numero_interno": mg_to_apply,
         })
+
+
+# Estados en los que una venta registrada fuera de la hoja de servicio (página Equipos, planilla
+# MADRE) le cambia sola el estado a la OS del equipo: el taller ya terminó o el equipo está
+# alquilado. Una reparación en curso sigue con el técnico, y una OS ya entregada o dada de baja
+# no se reescribe.
+ESTADOS_OS_VENTA_AUTOMATICA = frozenset(
+    {"reparado", "controlado_sin_defecto", "no_se_repara", "liberado", "alquilado"}
+)
+
+
+def ingreso_para_venta_mg(device_id):
+    """La OS que acompaña una venta registrada sin elegir OS, o `None`.
+
+    Es la última del equipo, y sólo si está en `ESTADOS_OS_VENTA_AUTOMATICA`. Caso que lo
+    motivó: OS 29131 (14/09/2026). El MG 6770 quedó "controlado sin defecto" en la estantería
+    de alquiler; la planilla MADRE registró la venta a NOVAMED y la OS quedó ahí, con el equipo
+    vendido y afuera de todas las colas.
+    """
+    row = q(
+        """
+        SELECT id, LOWER(COALESCE(estado::text, '')) AS estado
+          FROM ingresos
+         WHERE device_id = %s
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        [device_id],
+        one=True,
+    )
+    if not row or row.get("estado") not in ESTADOS_OS_VENTA_AUTOMATICA:
+        return None
+    return int(row["id"])
+
+
+def aplicar_venta_mg_a_ingreso(ingreso_id, *, fecha_venta, factura_numero="", remito_numero="", usuario_id=None):
+    """Pasa la OS al estado de venta que corresponde y devuelve el estado nuevo.
+
+    Si el cliente ya tiene el equipo, `vendido_entregado` en la ubicación '-'. Si no,
+    `vendido_pendiente_entrega` en el Taller, para que aparezca en Liberados y se cierre con el
+    RT o el RTN por el que sale. La usan la venta desde la hoja de servicio, desde Equipos y la
+    planilla MADRE, para que las tres dejen la OS igual.
+    """
+    has_ingreso_alquilado = _has_table_column("ingresos", "alquilado")
+    alquilado_sql = "COALESCE(alquilado,false) AS alquilado" if has_ingreso_alquilado else "FALSE AS alquilado"
+    ingreso_row = q(
+        f"""
+        SELECT id, estado, {alquilado_sql}
+          FROM ingresos
+         WHERE id=%s
+        """,
+        [ingreso_id],
+        one=True,
+    ) or {}
+    estado_anterior = (ingreso_row.get("estado") or "").strip().lower()
+    estaba_alquilado = bool(ingreso_row.get("alquilado")) or estado_anterior == "alquilado"
+    # La venta no vuelve a traer el equipo: si el cliente ya lo tiene, la entrega está
+    # hecha y la OS cierra como `vendido_entregado`. Mirar sólo `alquilado` mandaba una
+    # OS ya entregada para atrás, a "pendiente de entrega" (OS 29534: se entregó el
+    # 04/09/2026 y la venta registrada el 07/09 la reabrió).
+    ya_lo_tiene_el_cliente = estaba_alquilado or estado_anterior in (
+        "entregado",
+        "vendido_entregado",
+    )
+    nuevo_estado = "vendido_entregado" if ya_lo_tiene_el_cliente else "vendido_pendiente_entrega"
+    ingreso_sets = ["estado=%s"]
+    ingreso_params = [nuevo_estado]
+
+    if _has_table_column("ingresos", "factura_numero"):
+        ingreso_sets.append("factura_numero = COALESCE(NULLIF(%s,''), factura_numero)")
+        ingreso_params.append(factura_numero)
+    # Fecha y remito de la venta sólo rellenan lo que falte. En un alquiler no había
+    # nada cargado y quedan ellos; sobre una OS ya entregada el `remito_salida` es el
+    # comprobante real por el que salió el equipo -un RSS, por ejemplo- y el remito de
+    # la venta no tiene por qué pisarlo. La factura sí se actualiza: la de la venta es
+    # la que vale.
+    if ya_lo_tiene_el_cliente and _has_table_column("ingresos", "fecha_entrega"):
+        ingreso_sets.append("fecha_entrega = COALESCE(fecha_entrega, %s)")
+        ingreso_params.append(fecha_venta)
+    if ya_lo_tiene_el_cliente and _has_table_column("ingresos", "remito_salida"):
+        ingreso_sets.append("remito_salida = COALESCE(NULLIF(remito_salida,''), NULLIF(%s,''))")
+        ingreso_params.append(remito_numero)
+    if has_ingreso_alquilado:
+        ingreso_sets.append("alquilado = FALSE")
+    if _has_table_column("ingresos", "alquiler_a"):
+        ingreso_sets.append("alquiler_a = NULL")
+    if _has_table_column("ingresos", "alquiler_remito"):
+        ingreso_sets.append("alquiler_remito = NULL")
+    if _has_table_column("ingresos", "alquiler_fecha"):
+        ingreso_sets.append("alquiler_fecha = NULL")
+    # El equipo (`devices`) sí se va a '-': vendido, ya no es patrimonio nuestro ni
+    # stock de alquiler. La OS es otra cosa: dice dónde está físicamente el equipo
+    # dentro de nuestro circuito.
+    #
+    # Si la entrega quedó pendiente, el equipo sigue acá esperando el RT, así que la
+    # OS va al taller. Mandarla a '-' la hacía desaparecer de todas las colas -todas
+    # filtran por ubicación 'taller'-, incluida "Listos", que sí contempla
+    # 'vendido_pendiente_entrega' en su WHERE y en la fila del listado: ese camino
+    # nunca se ejecutaba porque la misma transacción sacaba la OS del taller.
+    # Tampoco puede quedarse en la Estantería de Alquiler: un equipo vendido no se
+    # ofrece más para alquilar.
+    if _has_table_column("ingresos", "ubicacion_id"):
+        if nuevo_estado == "vendido_entregado":
+            destino_row = q("SELECT id FROM locations WHERE nombre='-' LIMIT 1", one=True)
+        else:
+            destino_row = q(
+                "SELECT id FROM locations WHERE LOWER(nombre)='taller' ORDER BY id LIMIT 1",
+                one=True,
+            )
+        destino_id = destino_row.get("id") if destino_row else None
+        if destino_id:
+            ingreso_sets.append("ubicacion_id = %s")
+            ingreso_params.append(destino_id)
+
+    ingreso_params.append(ingreso_id)
+    exec_void(
+        f"UPDATE ingresos SET {', '.join(ingreso_sets)} WHERE id=%s",
+        ingreso_params,
+    )
+    try:
+        with transaction.atomic():
+            exec_void(
+                """
+                INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, ts, comentario)
+                VALUES (%s, NULLIF(%s,'')::ticket_state, %s::ticket_state, %s, %s, %s)
+                """,
+                [
+                    ingreso_id,
+                    estado_anterior,
+                    nuevo_estado,
+                    usuario_id,
+                    fecha_venta,
+                    (
+                        "Venta registrada y entrega confirmada"
+                        if nuevo_estado == "vendido_entregado"
+                        else "Venta registrada; entrega pendiente"
+                    ),
+                ],
+            )
+    except Exception:
+        try:
+            with transaction.atomic():
+                exec_void(
+                    """
+                    INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, ts, comentario)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [
+                        ingreso_id,
+                        nuevo_estado,
+                        usuario_id,
+                        fecha_venta,
+                        (
+                            "Venta registrada y entrega confirmada"
+                            if nuevo_estado == "vendido_entregado"
+                            else "Venta registrada; entrega pendiente"
+                        ),
+                    ],
+                )
+        except Exception:
+            pass
+    return nuevo_estado
 
 
 class DeviceMgVentaView(APIView):
@@ -1395,6 +1785,15 @@ class DeviceMgVentaView(APIView):
             """,
             device_params,
         )
+        # La OS que acompaña la venta. Desde la hoja de servicio es la que eligió el operador;
+        # desde Equipos o la planilla MADRE, la última del equipo si el taller ya terminó con
+        # ella o si está alquilada. Sin esto el equipo quedaba vendido y la OS varada en la
+        # estantería de alquiler, afuera de todas las colas (OS 29131, 14/09/2026).
+        if source == "service_sheet" and ingreso_id is not None:
+            ingreso_venta_id = ingreso_id
+        else:
+            ingreso_venta_id = ingreso_para_venta_mg(device_id)
+
         exec_void(
             """
             INSERT INTO device_mg_events(
@@ -1412,102 +1811,21 @@ class DeviceMgVentaView(APIView):
                 remito_numero,
                 observaciones,
                 uid,
-                ingreso_id,
+                ingreso_venta_id or ingreso_id,
                 venta_customer_id,
                 venta_numero_alternativo,
                 source,
             ],
         )
 
-        if source == "service_sheet" and ingreso_id is not None:
-            has_ingreso_alquilado = _has_table_column("ingresos", "alquilado")
-            alquilado_sql = "COALESCE(alquilado,false) AS alquilado" if has_ingreso_alquilado else "FALSE AS alquilado"
-            ingreso_row = q(
-                f"""
-                SELECT id, estado, {alquilado_sql}
-                  FROM ingresos
-                 WHERE id=%s
-                """,
-                [ingreso_id],
-                one=True,
-            ) or {}
-            estado_anterior = (ingreso_row.get("estado") or "").strip().lower()
-            estaba_alquilado = bool(ingreso_row.get("alquilado")) or estado_anterior == "alquilado"
-            nuevo_estado = "vendido_entregado" if estaba_alquilado else "vendido_pendiente_entrega"
-            ingreso_sets = ["estado=%s"]
-            ingreso_params = [nuevo_estado]
-
-            if _has_table_column("ingresos", "factura_numero"):
-                ingreso_sets.append("factura_numero = COALESCE(NULLIF(%s,''), factura_numero)")
-                ingreso_params.append(factura_numero)
-            if estaba_alquilado and _has_table_column("ingresos", "fecha_entrega"):
-                ingreso_sets.append("fecha_entrega = COALESCE(fecha_entrega, %s)")
-                ingreso_params.append(fecha_venta)
-            if estaba_alquilado and _has_table_column("ingresos", "remito_salida"):
-                ingreso_sets.append("remito_salida = COALESCE(NULLIF(%s,''), remito_salida)")
-                ingreso_params.append(remito_numero)
-            if has_ingreso_alquilado:
-                ingreso_sets.append("alquilado = FALSE")
-            if _has_table_column("ingresos", "alquiler_a"):
-                ingreso_sets.append("alquiler_a = NULL")
-            if _has_table_column("ingresos", "alquiler_remito"):
-                ingreso_sets.append("alquiler_remito = NULL")
-            if _has_table_column("ingresos", "alquiler_fecha"):
-                ingreso_sets.append("alquiler_fecha = NULL")
-            if _has_table_column("ingresos", "ubicacion_id"):
-                dash_row = q("SELECT id FROM locations WHERE nombre='-' LIMIT 1", one=True)
-                dash_id = dash_row.get("id") if dash_row else None
-                if dash_id:
-                    ingreso_sets.append("ubicacion_id = %s")
-                    ingreso_params.append(dash_id)
-
-            ingreso_params.append(ingreso_id)
-            exec_void(
-                f"UPDATE ingresos SET {', '.join(ingreso_sets)} WHERE id=%s",
-                ingreso_params,
+        if ingreso_venta_id is not None:
+            aplicar_venta_mg_a_ingreso(
+                ingreso_venta_id,
+                fecha_venta=fecha_venta,
+                factura_numero=factura_numero,
+                remito_numero=remito_numero,
+                usuario_id=uid,
             )
-            try:
-                with transaction.atomic():
-                    exec_void(
-                        """
-                        INSERT INTO ingreso_events (ticket_id, de_estado, a_estado, usuario_id, ts, comentario)
-                        VALUES (%s, NULLIF(%s,'')::ticket_state, %s::ticket_state, %s, %s, %s)
-                        """,
-                        [
-                            ingreso_id,
-                            estado_anterior,
-                            nuevo_estado,
-                            uid,
-                            fecha_venta,
-                            (
-                                "Venta registrada y entrega confirmada"
-                                if nuevo_estado == "vendido_entregado"
-                                else "Venta registrada; entrega pendiente"
-                            ),
-                        ],
-                    )
-            except Exception:
-                try:
-                    with transaction.atomic():
-                        exec_void(
-                            """
-                            INSERT INTO ingreso_events (ticket_id, a_estado, usuario_id, ts, comentario)
-                            VALUES (%s, %s, %s, %s, %s)
-                            """,
-                            [
-                                ingreso_id,
-                                nuevo_estado,
-                                uid,
-                                fecha_venta,
-                                (
-                                    "Venta registrada y entrega confirmada"
-                                    if nuevo_estado == "vendido_entregado"
-                                    else "Venta registrada; entrega pendiente"
-                                ),
-                            ],
-                        )
-                except Exception:
-                    pass
 
         row = q(
             """
@@ -1538,7 +1856,7 @@ class DeviceMgVentaView(APIView):
             request,
             evento="venta_mg",
             device_id=device_id,
-            ingreso_id=ingreso_id,
+            ingreso_id=ingreso_venta_id or ingreso_id,
             fecha_evento=fecha_venta,
             venta={
                 "comprador": row.get("mg_venta_customer_nombre") or "",
@@ -1691,6 +2009,7 @@ class DeviceMgReactivarView(APIView):
 
 __all__ = [
     "DeviceDirectCreateView",
+    "DeviceStockCandidatosView",
     "DeviceIdentificadoresView",
     "DevicesListView",
     "DevicesMergeView",

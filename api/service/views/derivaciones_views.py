@@ -1,5 +1,7 @@
 from django.conf import settings
-from django.db import transaction
+from contextlib import nullcontext
+
+from django.db import connection, transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions
@@ -17,6 +19,69 @@ from ..notifications import notify_derivacion_devuelta
 logger = logging.getLogger(__name__)
 
 
+def _avisar_derivacion_devuelta(ingreso_id: int, estado_operativo: str) -> None:
+    """Envía avisos una vez confirmada la devolución en la base."""
+    info = None
+    try:
+        info = q(
+            """
+            SELECT u.email AS tech_email, COALESCE(u.nombre,'') AS tech_nombre,
+                   c.razon_social,
+                   d.numero_serie,
+                   COALESCE(b.nombre,'') AS marca,
+                   COALESCE(m.nombre,'') AS modelo,
+                   COALESCE(m.tipo_equipo,'') AS tipo_equipo,
+                   COALESCE(d.numero_interno,'') AS numero_interno
+              FROM ingresos t
+              JOIN devices d   ON d.id = t.device_id
+              JOIN customers c ON c.id = d.customer_id
+              LEFT JOIN marcas b ON b.id = d.marca_id
+              LEFT JOIN models m ON m.id = d.model_id
+              LEFT JOIN users  u ON u.id = t.asignado_a
+             WHERE t.id=%s
+            """,
+            [ingreso_id],
+            one=True,
+        )
+    except Exception:
+        logger.exception(
+            "No se pudieron obtener los datos para avisar la devolución",
+            extra={"ingreso_id": ingreso_id},
+        )
+
+    email = (info or {}).get("tech_email")
+    if email:
+        ns_text = " ".join(
+            p for p in [info.get("numero_interno", ""), info.get("numero_serie", "")] if p
+        ).strip()
+        subj = f"Aviso: equipo derivado devuelto - OS #{ingreso_id}"
+        txt = (
+            f"Hola {info.get('tech_nombre','')},\n\n"
+            f"El equipo derivado fue devuelto y conserva el estado operativo '{estado_operativo}'.\n\n"
+            f"Cliente: {info.get('razon_social','')}\n"
+            f"Equipo: {info.get('marca','')} {info.get('modelo','')}\n"
+            f"Número de serie: {ns_text}\n\n"
+            f"Hoja de servicio: /ingresos/{ingreso_id}\n"
+        )
+        try:
+            txt = _email_append_footer_text(txt)
+            from django.core.mail import send_mail
+            send_mail(subj, txt, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=True)
+        except Exception:
+            logger.exception(
+                "No se pudo enviar el correo de derivación devuelta",
+                extra={"ingreso_id": ingreso_id},
+            )
+
+    try:
+        notify_derivacion_devuelta(ingreso_id)
+    except Exception:
+        logger.exception(
+            "No se pudo crear la notificación de derivación devuelta",
+            extra={"ingreso_id": ingreso_id},
+        )
+
+
 class DerivarIngresoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -26,9 +91,14 @@ class DerivarIngresoView(APIView):
         _set_audit_user(request)
         # Serializar concurrencia por ingreso para evitar inserts duplicados en carreras
         try:
-            exec_void("SELECT pg_advisory_xact_lock(%s)", [ingreso_id])
+            with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+                exec_void("SELECT pg_advisory_xact_lock(%s)", [ingreso_id])
         except Exception:
-            pass
+            logger.warning(
+                "No se pudo tomar el bloqueo de concurrencia para la derivación",
+                extra={"ingreso_id": ingreso_id},
+                exc_info=True,
+            )
 
         data = request.data or {}
         # `external_service_id` queda sólo como alias de compatibilidad para
@@ -98,6 +168,14 @@ class DevolverDerivacionView(APIView):
         require_permission(request, "action.ingreso.manage_derivations")
         _set_audit_user(request)
 
+        # Tomar primero la OS, igual que al derivar: evita el orden inverso
+        # de bloqueos entre ingresos y equipos_derivados en solicitudes simultáneas.
+        ingreso = q(
+            "SELECT estado::text AS estado FROM ingresos WHERE id=%s FOR UPDATE",
+            [ingreso_id],
+            one=True,
+        ) or {}
+
         row = q(
             """
             SELECT ed.id,
@@ -120,11 +198,6 @@ class DevolverDerivacionView(APIView):
                 pass
             return Response({"detail": "Derivación no encontrada"}, status=404)
 
-        ingreso = q(
-            "SELECT estado::text AS estado FROM ingresos WHERE id=%s FOR UPDATE",
-            [ingreso_id],
-            one=True,
-        ) or {}
         estado_operativo = str(ingreso.get("estado") or "").strip().lower()
         estado_derivacion = str(row.get("estado") or "").strip().lower()
         if row.get("fecha_entrega") is not None or estado_derivacion not in ACTIVE_DERIVATION_STATES:
@@ -133,7 +206,7 @@ class DevolverDerivacionView(APIView):
                     "ok": True,
                     "already_returned": True,
                     "estado": estado_operativo,
-                    **active_derivation_payload(None),
+                    **active_derivation_payload(get_active_derivation(ingreso_id)),
                 }
             )
 
@@ -152,56 +225,11 @@ class DevolverDerivacionView(APIView):
             [fecha, deriv_id],
         )
 
-        try:
-            info = q(
-                """
-                SELECT u.email AS tech_email, COALESCE(u.nombre,'') AS tech_nombre,
-                       c.razon_social,
-                       d.numero_serie,
-                       COALESCE(b.nombre,'') AS marca,
-                       COALESCE(m.nombre,'') AS modelo,
-                       COALESCE(m.tipo_equipo,'') AS tipo_equipo,
-                       COALESCE(d.numero_interno,'') AS numero_interno
-                  FROM ingresos t
-                  JOIN devices d   ON d.id = t.device_id
-                  JOIN customers c ON c.id = d.customer_id
-                  LEFT JOIN marcas b ON b.id = d.marca_id
-                  LEFT JOIN models m ON m.id = d.model_id
-                  LEFT JOIN users  u ON u.id = t.asignado_a
-                 WHERE t.id=%s
-                """,
-                [ingreso_id],
-                one=True,
-            )
-            email = (info or {}).get("tech_email")
-            if email:
-                ns_text = " ".join(
-                    p for p in [info.get("numero_interno", ""), info.get("numero_serie", "")] if p
-                ).strip()
-                subj = f"Aviso: equipo derivado devuelto - OS #{ingreso_id}"
-                txt = (
-                    f"Hola {info.get('tech_nombre','')},\n\n"
-                    f"El equipo derivado fue devuelto y conserva el estado operativo '{estado_operativo}'.\n\n"
-                    f"Cliente: {info.get('razon_social','')}\n"
-                    f"Equipo: {info.get('marca','')} {info.get('modelo','')}\n"
-                    f"Número de serie: {ns_text}\n\n"
-                    f"Hoja de servicio: /ingresos/{ingreso_id}\n"
-                )
-                try:
-                    txt = _email_append_footer_text(txt)
-                    from django.core.mail import send_mail
-                    send_mail(subj, txt, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=True)
-                except Exception:
-                    pass
-            try:
-                notify_derivacion_devuelta(ingreso_id)
-            except Exception:
-                logger.exception(
-                    "No se pudo crear la notificación de derivación devuelta",
-                    extra={"ingreso_id": ingreso_id},
-                )
-        except Exception:
-            pass
+        # Correo y campana son efectos secundarios: se ejecutan sólo después de
+        # confirmar la devolución. Así nunca pueden abortar ni enmascarar el UPDATE.
+        transaction.on_commit(
+            lambda: _avisar_derivacion_devuelta(ingreso_id, estado_operativo)
+        )
 
         return Response(
             {

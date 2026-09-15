@@ -157,8 +157,8 @@ class DeliveryOrderServiceReleaseSyncTests(TestCase):
         with connection.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO ingresos(device_id, estado, remito_salida, alquilado, fecha_ingreso)
-                VALUES (%s, %s, %s, %s, COALESCE(%s::timestamptz, CURRENT_TIMESTAMP))
+                INSERT INTO ingresos(device_id, estado, remito_salida, alquilado, fecha_ingreso, motivo)
+                VALUES (%s, %s, %s, %s, COALESCE(%s::timestamptz, CURRENT_TIMESTAMP), 'reparación')
                 RETURNING id
                 """,
                 [device_id, estado, remito_salida, alquilado, fecha_ingreso],

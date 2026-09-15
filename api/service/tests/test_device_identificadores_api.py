@@ -97,8 +97,8 @@ class DeviceIdentificadoresApiTest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     @classmethod
@@ -125,33 +125,33 @@ class DeviceIdentificadoresApiTest(TestCase):
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["CLI001", "Clinica Uno", "123"],
             )
-            cls.customer_1_id = cls._last_id(cur)
+            cls.customer_1_id = cls._last_id(cur, "customers")
             cur.execute(
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["CLI002", "Clinica Dos", "456"],
             )
-            cls.customer_2_id = cls._last_id(cur)
+            cls.customer_2_id = cls._last_id(cur, "customers")
 
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["Marca A"])
-            cls.marca_1_id = cls._last_id(cur)
+            cls.marca_1_id = cls._last_id(cur, "marcas")
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["Marca B"])
-            cls.marca_2_id = cls._last_id(cur)
+            cls.marca_2_id = cls._last_id(cur, "marcas")
 
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [cls.marca_1_id, "Modelo A1", "Monitor"],
             )
-            cls.model_1_id = cls._last_id(cur)
+            cls.model_1_id = cls._last_id(cur, "models")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [cls.marca_2_id, "Modelo B1", "Desfibrilador"],
             )
-            cls.model_2_id = cls._last_id(cur)
+            cls.model_2_id = cls._last_id(cur, "models")
 
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
-            cls.loc_1_id = cls._last_id(cur)
+            cls.loc_1_id = cls._last_id(cur, "locations")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Depósito"])
-            cls.loc_2_id = cls._last_id(cur)
+            cls.loc_2_id = cls._last_id(cur, "locations")
 
             cur.execute(
                 """
@@ -171,7 +171,7 @@ class DeviceIdentificadoresApiTest(TestCase):
                     cls.loc_1_id,
                 ],
             )
-            cls.device_1_id = cls._last_id(cur)
+            cls.device_1_id = cls._last_id(cur, "devices")
 
             cur.execute(
                 """
@@ -191,7 +191,7 @@ class DeviceIdentificadoresApiTest(TestCase):
                     cls.loc_1_id,
                 ],
             )
-            cls.device_2_id = cls._last_id(cur)
+            cls.device_2_id = cls._last_id(cur, "devices")
 
     def setUp(self):
         super().setUp()
@@ -330,7 +330,7 @@ class DeviceIdentificadoresApiTest(TestCase):
                     self.loc_1_id,
                 ],
             )
-            humidificador_id = self._last_id(cur)
+            humidificador_id = self._last_id(cur, "devices")
 
         resp = self.client.patch(
             self._url(humidificador_id),

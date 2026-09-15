@@ -40,13 +40,13 @@ class SaleExitRemitoTests(SimpleTestCase):
             self.assertFalse(is_sale_exit_remito(remito), remito)
 
     def test_el_buscador_por_serie_conoce_el_flujo_de_venta(self):
-        self.assertEqual(REMITO_TYPES_BY_FLOW["sale"], ("RT",))
+        self.assertEqual(REMITO_TYPES_BY_FLOW["sale"], ("RT", "RTN"))
 
 
 class ResolveEntregaEstadoTests(SimpleTestCase):
-    def _resolver(self, remito, **overrides):
+    def _resolver(self, remito, venta=False, **overrides):
         with patch("service.views.ingresos_views.q", return_value=_ingreso(**overrides)):
-            return resolve_ingreso_entrega_estado(29629, remito_salida=remito)
+            return resolve_ingreso_entrega_estado(29629, remito_salida=remito, venta=venta)
 
     def test_un_rt_cierra_la_os_como_vendida(self):
         self.assertEqual(
@@ -76,3 +76,28 @@ class ResolveEntregaEstadoTests(SimpleTestCase):
             resultado = resolve_ingreso_entrega_estado(29629, remito_salida="RT R 00001-00024051")
         self.assertEqual(resultado["estado_to"], "vendido_entregado")
         self.assertTrue(resultado["clear_alquilado"])
+
+    def test_un_rtn_solo_no_es_una_venta(self):
+        # El RTN también es la entrega en alquiler: sin la marca del operador no cierra vendido.
+        self.assertEqual(self._resolver("RTN R 00004-00004033")["estado_to"], "entregado")
+
+    def test_un_rtn_de_aporte_marcado_como_venta_cierra_vendido(self):
+        # OS 29131: el MG 6770 salió a NOVAMED con RTN R 00004-00004033, un aporte que no se
+        # factura, desde la estantería de alquiler.
+        resultado = self._resolver(
+            "RTN R 00004-00004033",
+            venta=True,
+            numero_interno="MG 6770",
+            ubicacion_nombre="Estantería de Alquiler",
+        )
+        self.assertEqual(resultado["estado_to"], "vendido_entregado")
+        self.assertFalse(resultado["set_alquilado"])
+        self.assertTrue(resultado["clear_alquilado"])
+
+    def test_la_marca_de_venta_acepta_rt_o_rtn_y_nada_mas(self):
+        from service.views.ingresos_views import _SALE_MARKED_REMITO_RE
+
+        for remito in ("RT R 00001-00024051", "RTN R 00004-00004033", "  rtn r 00004-1"):
+            self.assertTrue(_SALE_MARKED_REMITO_RE.match(remito), remito)
+        for remito in ("RTA R 00004-00004833", "RSS R 00004-1", "RDN R 00007-747", ""):
+            self.assertFalse(_SALE_MARKED_REMITO_RE.match(remito), remito)

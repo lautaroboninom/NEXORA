@@ -35,7 +35,7 @@ class Command(BaseCommand):
              WHERE activo = TRUE
                AND email IS NOT NULL
                AND NULLIF(TRIM(email), '') IS NOT NULL
-               AND rol IN ('jefe','jefe_veedor','jefe_suplente','admin')
+               AND rol IN ('jefe','jefe_suplente','admin')
              ORDER BY rol, nombre
             """
         ) or []

@@ -126,11 +126,11 @@ class IngresoSolicitudBajaRechazarAPITest(TestCase):
             call_command("apply_bejerman_sync_schema", verbosity=0)
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return cur.fetchone()[0]
@@ -171,14 +171,14 @@ class IngresoSolicitudBajaRechazarAPITest(TestCase):
                 "INSERT INTO customers (cod_empresa, razon_social, telefono) VALUES (%s, %s, %s)",
                 ["MGBIO", "MG BIO", ""],
             )
-            customer_id = cls._last_insert_id(cur)
+            customer_id = cls._last_insert_id(cur, "customers")
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["ResMed"])
-            marca_id = cls._last_insert_id(cur)
+            marca_id = cls._last_insert_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s, %s, %s)",
                 [marca_id, "AirSense 10", "CPAP"],
             )
-            model_id = cls._last_insert_id(cur)
+            model_id = cls._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (
@@ -189,12 +189,12 @@ class IngresoSolicitudBajaRechazarAPITest(TestCase):
                 """,
                 [customer_id, marca_id, model_id, "SN-BAJA-REQUEST", "MG 7799", "",],
             )
-            device_id = cls._last_insert_id(cur)
+            device_id = cls._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado) VALUES (%s, %s)",
+                "INSERT INTO ingresos (device_id, estado, motivo) VALUES (%s, %s, 'reparación')",
                 [device_id, "diagnosticado"],
             )
-            cls.ingreso_id = cls._last_insert_id(cur)
+            cls.ingreso_id = cls._last_insert_id(cur, "ingresos")
 
     def setUp(self):
         super().setUp()

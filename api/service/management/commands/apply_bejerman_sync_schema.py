@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
 
-TABLES = ["bejerman_sync_jobs", "bejerman_article_mappings"]
+TABLES = ["bejerman_sync_jobs", "bejerman_article_mappings", "bejerman_stock_lotes"]
 
 
 class Command(BaseCommand):
@@ -144,10 +144,68 @@ class Command(BaseCommand):
                 cur.execute(
                     "DROP INDEX IF EXISTS uq_bejerman_article_mappings_model_variant"
                 )
+                # Un equipo propio nuevo se da de alta en Equipos con su MG y sin ingreso: la
+                # transferencia VAL->STL que lo deja disponible para alquiler no tiene ninguna OS
+                # de la que colgarse. `device_id` alcanza para identificar la fila.
+                cur.execute("ALTER TABLE bejerman_sync_jobs ALTER COLUMN ingreso_id DROP NOT NULL")
+                # El índice viejo era total, así que con `ingreso_id` NULL dejaba de deduplicar:
+                # dos altas de la misma partida crearían dos jobs y duplicarían el ENT (es el
+                # incidente de sql/ops/bejerman_borrar_ent_duplicados_20260608.sql). Se parte en
+                # dos parciales que cubren las dos formas de identificar el trabajo.
+                cur.execute("DROP INDEX IF EXISTS uq_bejerman_sync_jobs_type_ingreso")
                 cur.execute(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_ingreso
                       ON bejerman_sync_jobs(sync_type, ingreso_id)
+                      WHERE ingreso_id IS NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_device
+                      ON bejerman_sync_jobs(sync_type, device_id)
+                      WHERE ingreso_id IS NULL
+                    """
+                )
+                # Alta masiva de equipos propios: la transferencia VAL->STL de todos los equipos
+                # viaja en UNA SAL y UNA ENT. El lote guarda la composición congelada y la fase,
+                # porque un reenvío tiene que repetir exactamente el mismo comprobante (Bejerman
+                # deduplica por IdOrigen). Los jobs por equipo siguen existiendo y apuntan acá.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bejerman_stock_lotes (
+                      id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                      sync_type         TEXT NOT NULL,
+                      company_key       TEXT NOT NULL DEFAULT 'SEPID',
+                      source_deposit    TEXT NOT NULL,
+                      target_deposit    TEXT NOT NULL,
+                      phase             TEXT NOT NULL DEFAULT 'pending',
+                      last_error        TEXT NULL,
+                      actor_user_id     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                      request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      CONSTRAINT chk_bejerman_stock_lotes_phase CHECK (
+                        phase IN ('pending','sal_pending','sal_done','ent_pending','done','review')
+                      ),
+                      CONSTRAINT chk_bejerman_stock_lotes_deposits CHECK (
+                        NULLIF(TRIM(source_deposit), '') IS NOT NULL
+                        AND NULLIF(TRIM(target_deposit), '') IS NOT NULL
+                        AND source_deposit <> target_deposit
+                      )
+                    )
+                    """
+                )
+                cur.execute(
+                    "ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS lote_id INTEGER NULL "
+                    "REFERENCES bejerman_stock_lotes(id) ON DELETE SET NULL"
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_lote
+                      ON bejerman_sync_jobs(lote_id)
+                      WHERE lote_id IS NOT NULL
                     """
                 )
                 cur.execute(
@@ -220,6 +278,11 @@ class Command(BaseCommand):
                             BEFORE UPDATE ON bejerman_article_mappings
                             FOR EACH ROW EXECUTE FUNCTION set_updated_at();
                           END IF;
+                          IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_stock_lotes_set_updated_at') THEN
+                            CREATE TRIGGER trg_bejerman_stock_lotes_set_updated_at
+                            BEFORE UPDATE ON bejerman_stock_lotes
+                            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+                          END IF;
                         END $$;
                         """
                     )
@@ -244,6 +307,13 @@ class Command(BaseCommand):
                         "article_code",
                         "actor_user_id",
                         "company_key",
+                        "request_payload",
+                        "response_payload",
+                        "lote_id",
+                    },
+                    "bejerman_stock_lotes": {
+                        "phase",
+                        "last_error",
                         "request_payload",
                         "response_payload",
                     },

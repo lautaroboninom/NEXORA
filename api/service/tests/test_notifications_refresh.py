@@ -1,7 +1,8 @@
 from unittest import skipUnless
 from unittest.mock import patch
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from service.tests.schema_helpers import create_fixture_device
 from django.core.management import call_command
 
 from service.notifications import emit_notification, user_ids_subscribed_to
@@ -51,7 +52,7 @@ class NotificationsRefreshTests(TestCase):
             "presupuesto_pendiente",
             title="Primera",
             body="Cuerpo 1",
-            user_ids=[self.admin_id],
+            user_ids=[self.jefe_id],
             dedupe_key="test_refresh_1",
             refresh=True
         )
@@ -62,7 +63,7 @@ class NotificationsRefreshTests(TestCase):
             "presupuesto_pendiente",
             title="Segunda",
             body="Cuerpo 2",
-            user_ids=[self.admin_id],
+            user_ids=[self.jefe_id],
             dedupe_key="test_refresh_1",
             refresh=True
         )
@@ -81,7 +82,7 @@ class NotificationsRefreshTests(TestCase):
             "presupuesto_pendiente",
             title="Primera",
             body="Cuerpo 1",
-            user_ids=[self.admin_id],
+            user_ids=[self.jefe_id],
             dedupe_key="test_refresh_false_1",
             refresh=False
         )
@@ -89,7 +90,7 @@ class NotificationsRefreshTests(TestCase):
             "presupuesto_pendiente",
             title="Segunda",
             body="Cuerpo 2",
-            user_ids=[self.admin_id],
+            user_ids=[self.jefe_id],
             dedupe_key="test_refresh_false_1",
             refresh=False
         )
@@ -114,12 +115,13 @@ class NotificationsRefreshTests(TestCase):
         self.assertNotIn(self.jefe_id, subs)
 
     def test_notify_repair_ready_for_remito_includes_jefe(self):
+        device_id = create_fixture_device()
         with connection.cursor() as cur:
             cur.execute("""
-                INSERT INTO ingresos (equipo_id, cliente_id, tecnico_id, estado, remito_entrada)
-                VALUES (NULL, NULL, %s, 'reparado', 'RE-123')
+                INSERT INTO ingresos (device_id, asignado_a, estado, remito_ingreso, motivo)
+                VALUES (%s, %s, 'reparado', 'RE-123', 'reparación')
                 RETURNING id
-            """, [self.tecnico_id])
+            """, [device_id, self.tecnico_id])
             ingreso_id = cur.fetchone()[0]
             
         with connection.cursor() as cur:
@@ -135,26 +137,20 @@ class NotificationsRefreshTests(TestCase):
         self.assertIn(self.recepcion_id, user_ids)
         self.assertIn(self.tecnico_id, user_ids)
 
-    @patch("service.management.commands.send_presupuesto_alerts.queue_notification_email")
-    def test_send_presupuesto_alerts_updates_last_sent_even_if_mail_fails(self, mock_queue_email):
+    @override_settings(PRESUPUESTO_ALERT_ENABLED=True, PRESUPUESTO_ALERT_FIRST_DAYS=7)
+    @patch("service.management.commands.send_presupuesto_alerts._send_mail_with_fallback", return_value=(False, {"error": "Correo local fallido"}))
+    def test_send_presupuesto_alerts_updates_last_sent_even_if_mail_fails(self, mock_send):
+        device_id = create_fixture_device()
         with connection.cursor() as cur:
-            cur.execute("""
-                INSERT INTO ingresos (equipo_id, cliente_id, tecnico_id, estado, presupuestado_en)
-                VALUES (NULL, NULL, NULL, 'presupuesto_pendiente', CURRENT_TIMESTAMP - INTERVAL '5 days')
-                RETURNING id
-            """)
+            cur.execute("SELECT id FROM locations WHERE LOWER(nombre) = 'taller' LIMIT 1")
+            location_id = cur.fetchone()[0]
+            cur.execute("INSERT INTO ingresos(device_id, estado, presupuesto_estado, ubicacion_id, motivo) VALUES (%s, 'diagnosticado', 'presupuestado', %s, 'reparación') RETURNING id", [device_id, location_id])
             ingreso_id = cur.fetchone()[0]
-            
-        mock_queue_email.side_effect = Exception("Fallo el mail")
-        
-        try:
-            call_command("send_presupuesto_alerts")
-        except Exception:
-            pass
-        
+            cur.execute("INSERT INTO quotes(ingreso_id, estado, fecha_emitido) VALUES (%s, 'emitido', CURRENT_TIMESTAMP - INTERVAL '8 days')", [ingreso_id])
+        call_command("send_presupuesto_alerts")
+        mock_send.assert_called_once()
         with connection.cursor() as cur:
             cur.execute("SELECT last_sent_at FROM ingreso_presupuesto_alerts WHERE ingreso_id = %s", [ingreso_id])
             row = cur.fetchone()
-            
         self.assertIsNotNone(row)
         self.assertIsNotNone(row[0])

@@ -1,3 +1,4 @@
+from service.tests.schema_helpers import create_fixture_device
 from decimal import Decimal
 
 from django.db import connection
@@ -34,7 +35,7 @@ class CerrarReparacionPermissionsAPITest(TestCase):
                     email VARCHAR(320) UNIQUE,
                     hash_pw TEXT,
                     rol TEXT,
-                    activo {bool_type} DEFAULT 1
+                    activo {bool_type} DEFAULT {'TRUE' if vendor == 'postgresql' else '1'}
                 ){engine_suffix}
                 """
             )
@@ -113,11 +114,11 @@ class CerrarReparacionPermissionsAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return int(cur.fetchone()[0])
@@ -167,6 +168,7 @@ class CerrarReparacionPermissionsAPITest(TestCase):
     def setUp(self):
         super().setUp()
         self.client = APIClient()
+        device_id = create_fixture_device()
         with connection.cursor() as cur:
             cur.execute("DELETE FROM ingresos")
             cur.execute("DELETE FROM quote_items")
@@ -179,13 +181,13 @@ class CerrarReparacionPermissionsAPITest(TestCase):
                     presupuesto_rechazado_cobro_neto,
                     presupuesto_rechazado_quote_id,
                     permite_reparacion,
-                    asignado_a
+                    asignado_a, device_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                ["reparacion", None, None, None, True, self.tecnico.id],
+                ["reparación", None, None, None, True, self.tecnico.id, device_id],
             )
-            self.ingreso_id = self._last_insert_id(cur)
+            self.ingreso_id = self._last_insert_id(cur, "ingresos")
 
     def _url(self):
         return f"/api/ingresos/{self.ingreso_id}/cerrar/"
@@ -219,7 +221,7 @@ class CerrarReparacionPermissionsAPITest(TestCase):
                 "INSERT INTO quotes (ingreso_id, version_num, estado) VALUES (%s, %s, %s)",
                 [self.ingreso_id, 1, "rechazado"],
             )
-            quote_id = self._last_insert_id(cur)
+            quote_id = self._last_insert_id(cur, "quotes")
             cur.execute(
                 """
                 INSERT INTO quote_items (quote_id, tipo, descripcion, qty, precio_u)

@@ -1,4 +1,5 @@
-﻿import io
+from service.tests.schema_helpers import create_fixture_device
+import io
 import tempfile
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -28,11 +29,11 @@ class IngresoMediaAPITest(TestCase):
         cls.addClassCleanup(cls._media_tmp.cleanup)
 
         vendor = connection.vendor
-        auto_inc = 'INT AUTO_INCREMENT PRIMARY KEY' if vendor != 'sqlite' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
+        auto_inc = 'BIGSERIAL PRIMARY KEY' if vendor == 'postgresql' else ('INT AUTO_INCREMENT PRIMARY KEY' if vendor == 'mysql' else 'INTEGER PRIMARY KEY AUTOINCREMENT')
         bool_type = 'BOOLEAN' if vendor != 'sqlite' else 'INTEGER'
         bigint = 'BIGINT' if vendor != 'sqlite' else 'INTEGER'
-        datetime_type = 'DATETIME'
-        engine_suffix = '' if vendor == 'sqlite' else ' ENGINE=InnoDB'
+        datetime_type = 'TIMESTAMPTZ' if vendor == 'postgresql' else 'DATETIME'
+        engine_suffix = ' ENGINE=InnoDB' if vendor == 'mysql' else ''
 
         users_sql = f"""
             CREATE TABLE IF NOT EXISTS users (
@@ -41,7 +42,7 @@ class IngresoMediaAPITest(TestCase):
                 email VARCHAR(320) UNIQUE,
                 hash_pw TEXT,
                 rol TEXT,
-                activo {bool_type} DEFAULT 1
+                activo {bool_type} DEFAULT {'TRUE' if vendor == 'postgresql' else '1'}
             ){engine_suffix}
         """
 
@@ -90,7 +91,7 @@ class IngresoMediaAPITest(TestCase):
                     height INT NOT NULL,
                     comentario TEXT,
                     created_at {datetime_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at {datetime_type} NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    updated_at {datetime_type} NOT NULL DEFAULT CURRENT_TIMESTAMP {'ON UPDATE CURRENT_TIMESTAMP' if vendor == 'mysql' else ''}
                 ){engine_suffix}
             """
 
@@ -126,16 +127,19 @@ class IngresoMediaAPITest(TestCase):
             nombre='Admin', email='admin@example.com', hash_pw='', rol='admin', activo=True
         )
 
+        device_id = create_fixture_device()
         with connection.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO ingresos (estado, motivo, fecha_ingreso, fecha_creacion, presupuesto_estado, asignado_a)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO ingresos (estado, motivo, fecha_ingreso, fecha_creacion, presupuesto_estado, asignado_a, device_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                ['ingresado', 'reparacion', timezone.now(), timezone.now(), 'pendiente', cls.tech_user.id],
+                ['ingresado', 'reparación', timezone.now(), timezone.now(), 'pendiente', cls.tech_user.id, device_id],
             )
             if connection.vendor == 'sqlite':
                 cur.execute('SELECT last_insert_rowid()')
+            elif connection.vendor == 'postgresql':
+                cur.execute("SELECT currval(pg_get_serial_sequence('ingresos', 'id'))")
             else:
                 cur.execute('SELECT LAST_INSERT_ID()')
             cls.ingreso_id = cur.fetchone()[0]
@@ -189,8 +193,9 @@ class IngresoMediaAPITest(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_large_file_rejected_with_413(self):
-        img = self._make_image(size=(400, 400))
-        override = override_settings(INGRESO_MEDIA_MAX_SIZE_MB=0)
+        img = self._make_image(size=(400, 400)) + b'0' * (1024 * 1024)
+        self.assertGreater(len(img), 1024 * 1024)
+        override = override_settings(INGRESO_MEDIA_MAX_SIZE_MB=1)
         override.enable()
         try:
             response = self._upload(self.tech_token, [("big.jpg", img)])

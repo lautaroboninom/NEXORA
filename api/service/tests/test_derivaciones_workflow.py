@@ -41,6 +41,10 @@ ACTIVE_DERIVATION = {
 
 
 class DerivacionesWorkflowViewTest(SimpleTestCase):
+    # Los métodos se invocan sin su decorador para probar sólo la lógica, pero
+    # ahora crean savepoints/on_commit reales como parte de la regresión.
+    databases = {"default"}
+
     @patch("service.views.derivaciones_views.get_active_derivation")
     @patch("service.views.derivaciones_views.q")
     @patch("service.views.derivaciones_views.exec_void")
@@ -124,6 +128,39 @@ class DerivacionesWorkflowViewTest(SimpleTestCase):
         self.assertIn("update equipos_derivados", all_sql)
         self.assertNotIn("update ingresos", all_sql)
 
+    @patch("service.views.derivaciones_views._avisar_derivacion_devuelta")
+    @patch("service.views.derivaciones_views.transaction.on_commit")
+    @patch("service.views.derivaciones_views.q")
+    @patch("service.views.derivaciones_views.exec_void")
+    @patch("service.views.derivaciones_views.require_permission")
+    @patch("service.views.derivaciones_views._set_audit_user")
+    def test_devolucion_programa_los_avisos_despues_del_commit(
+        self,
+        _audit,
+        _permission,
+        _write,
+        query,
+        on_commit,
+        avisar,
+    ):
+        query.side_effect = [
+            {"estado": "reparado"},
+            {"id": 81, "estado": "en_servicio", "fecha_entrega": None},
+        ]
+
+        response = _without_atomic(DevolverDerivacionView.post)(
+            DevolverDerivacionView(),
+            _request({"fecha_entrega": "2026-09-02"}),
+            44,
+            81,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        on_commit.assert_called_once()
+        avisar.assert_not_called()
+        on_commit.call_args.args[0]()
+        avisar.assert_called_once_with(44, "reparado")
+
     @patch("service.views.derivaciones_views.notify_derivacion_devuelta")
     @patch("service.views.derivaciones_views.q")
     @patch("service.views.derivaciones_views.exec_void")
@@ -138,9 +175,12 @@ class DerivacionesWorkflowViewTest(SimpleTestCase):
         notify,
     ):
         query.side_effect = [
-            {"id": 81, "estado": "devuelto", "fecha_entrega": dt.date(2026, 9, 2)},
             {"estado": "diagnosticado"},
+            {"id": 81, "estado": "devuelto", "fecha_entrega": dt.date(2026, 9, 2)},
         ]
+        active_patch = patch("service.views.derivaciones_views.get_active_derivation", return_value=None)
+        active_patch.start()
+        self.addCleanup(active_patch.stop)
         response = _without_atomic(DevolverDerivacionView.post)(
             DevolverDerivacionView(),
             _request(),
@@ -150,6 +190,29 @@ class DerivacionesWorkflowViewTest(SimpleTestCase):
 
         self.assertTrue(response.data["already_returned"])
         exec_void.assert_not_called()
+        notify.assert_not_called()
+
+    def test_devolucion_antigua_informa_la_nueva_derivacion_activa(self):
+        def query(sql, _params=None, one=False):
+            if "FROM equipos_derivados ed" in sql:
+                return {"id": 80, "estado": "devuelto", "fecha_entrega": dt.date(2026, 9, 1)}
+            return {"estado": "diagnosticado"}
+
+        with (
+            patch("service.views.derivaciones_views.q", side_effect=query),
+            patch("service.views.derivaciones_views.get_active_derivation", return_value=ACTIVE_DERIVATION),
+            patch("service.views.derivaciones_views.require_permission"),
+            patch("service.views.derivaciones_views._set_audit_user"),
+            patch("service.views.derivaciones_views.exec_void") as write,
+            patch("service.views.derivaciones_views.notify_derivacion_devuelta") as notify,
+        ):
+            response = _without_atomic(DevolverDerivacionView.post)(
+                DevolverDerivacionView(), _request(), 44, 80,
+            )
+        self.assertTrue(response.data["already_returned"])
+        self.assertTrue(response.data["derivacion_activa"])
+        self.assertEqual(response.data["derivacion_id"], 81)
+        write.assert_not_called()
         notify.assert_not_called()
 
     @patch("service.views.ingresos_views._owner_list_select_sql", return_value="'' AS propietario_nombre,")

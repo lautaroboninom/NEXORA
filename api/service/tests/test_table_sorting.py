@@ -9,18 +9,33 @@ class PaginatedTableSortingTests(SimpleTestCase):
         ascending = delivery_order_order_sql("cliente")
         descending = delivery_order_order_sql("-cliente")
 
+        self.assertIn("CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC", ascending)
         self.assertIn("customer_name", ascending)
         self.assertIn("ASC NULLS LAST", ascending)
         self.assertIn("o.id ASC", ascending)
         self.assertIn("DESC NULLS LAST", descending)
         self.assertIn("o.id DESC", descending)
 
-    def test_delivery_orders_invalid_sort_uses_original_default(self):
+    def test_delivery_orders_default_prioritizes_urgent_then_latest_grouped_service_release(self):
         order_sql = delivery_order_order_sql("campo_inexistente")
 
-        self.assertIn("o.created_at DESC", order_sql)
+        self.assertIn("CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC", order_sql)
+        self.assertIn("WHEN o.delivery_type = 'service_release'", order_sql)
+        self.assertIn("FROM ingreso_events ie", order_sql)
+        self.assertIn("ie.a_estado = 'liberado'", order_sql)
+        self.assertRegex(order_sql, r"END\s+DESC,")
         self.assertIn("o.id DESC", order_sql)
         self.assertNotIn("campo_inexistente", order_sql)
+
+    def test_delivery_orders_date_sort_uses_latest_grouped_service_release(self):
+        order_sql = delivery_order_order_sql("-fecha")
+
+        self.assertIn("CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC", order_sql)
+        self.assertIn("WHEN o.delivery_type = 'service_release'", order_sql)
+        self.assertIn("FROM delivery_order_items oi", order_sql)
+        self.assertIn("ie.a_estado = 'liberado'", order_sql)
+        self.assertRegex(order_sql, r"END\s+DESC NULLS LAST")
+        self.assertIn("DESC NULLS LAST", order_sql)
 
     def test_historico_merges_deleted_rows_before_sorting_and_keeps_empty_last(self):
         rows = [

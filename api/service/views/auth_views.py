@@ -8,7 +8,7 @@ import secrets
 from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.core.mail import send_mail
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import permissions
 from rest_framework.decorators import api_view, permission_classes
@@ -71,16 +71,17 @@ def _record_successful_login(request, user_id: int) -> None:
         getattr(request, "META", {}).get("HTTP_USER_AGENT", "") or ""
     )[:512]
     try:
-        q(
-            """
-            UPDATE users
-               SET last_login_at = CURRENT_TIMESTAMP,
-                   last_login_ip = %s,
-                   last_login_user_agent = %s
-             WHERE id = %s
-            """,
-            [login_ip, user_agent or None, int(user_id)],
-        )
+        with transaction.atomic():
+            q(
+                """
+                UPDATE users
+                   SET last_login_at = CURRENT_TIMESTAMP,
+                       last_login_ip = %s,
+                       last_login_user_agent = %s
+                 WHERE id = %s
+                """,
+                [login_ip, user_agent or None, int(user_id)],
+            )
     except Exception:
         logger.exception(
             "No se pudo registrar el último acceso del usuario.",

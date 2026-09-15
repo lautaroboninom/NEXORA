@@ -93,6 +93,7 @@ class RutaDeStockTests(SimpleTestCase):
 
 
 class SalidaDeUnEquipoPropioTests(SimpleTestCase):
+    databases = {"default"}
     """Un MG no sale por RSS: sale por RTA/RTN si se alquila, o por RT si se vende.
 
     El RSS es la salida de un equipo de CLIENTE y su perfil pide la partida en STC, donde

@@ -17,6 +17,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
 from .bejerman_sync import BejermanConfigError, BejermanSDKClient, BejermanTransientError, _records_for_partida
+from .mg_codes import normalize_mg_code
 from .models import User
 
 DEFAULT_CUTOFF_DATE = "2026-01-01"
@@ -104,13 +105,15 @@ def _norm_stockcode(value: Any) -> Optional[str]:
     raw = _norm_upper_ascii(value)
     if not raw:
         return None
-    match = re.match(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", raw)
-    if not match:
-        match = re.match(r"^(MG|NM|NV|CE)[^0-9]*(\d{1,4})$", raw)
+    canonico = normalize_mg_code(raw)
+    if canonico:
+        return canonico
+    # Bejerman también lo trae con guion u otro separador ("MG-1234"): se acepta acá, con los
+    # mismos dígitos que el criterio único.
+    match = re.match(r"^(MG|NM|NV|CE)[^0-9]*0*(\d{1,6})$", raw)
     if not match:
         return None
-    prefix, number = match.group(1), match.group(2)
-    return f"{prefix} {number.zfill(4)}"
+    return f"{match.group(1)} {match.group(2).zfill(4)}"
 
 
 def _bejerman_deposit_info(deposit: Any) -> dict[str, str]:

@@ -1,7 +1,15 @@
-﻿-- schema/postgres.sql
+-- schema/postgres.sql
 -- Esquema consolidado para PostgreSQL (12+)
 -- Unifica DDL, índices, vistas y triggers necesarios para la app.
 -- Objetivo: base prolija y mínima sin parches adicionales.
+-- Permisos individuales y último acceso: prepare_production_schema ejecuta
+-- apply_user_permissions_schema y apply_users_admin_schema también al actualizar.
+-- Las definiciones de users y user_permission_overrides de este archivo son
+-- la referencia para instalaciones nuevas y deben conservar paridad con ambos apply.
+-- Configuración externa Bejerman (08/09/2026): copia NS x cliente SEP -> SEPP.
+-- Aplicación: python scripts/apply_ns_cliente_sepp.py --apply.
+-- SQL: sql/ops/copy_ns_cliente_sep_sepp_20260908.sql. Sólo datos de configuración
+-- en manager; no agrega ni cambia objetos del esquema PostgreSQL o SQL Server.
 
 SET TIME ZONE 'America/Argentina/Buenos_Aires';
 CREATE EXTENSION IF NOT EXISTS citext;
@@ -47,6 +55,15 @@ DO $$ BEGIN
     CREATE TYPE preventivo_item_state AS ENUM ('pendiente','ok','retirado','no_controlado');
   END IF;
 END $$;
+
+-- 2026-09-09: corrección externa de datos, sin DDL de PostgreSQL ni del ERP.
+-- SBDASEP.SegDetV: sólo sdvstp_Partida en los renglones 111088, 110836 y 110843.
+-- Aplicación y reversión guardadas: scripts/apply_ns_historicos_20260909.py.
+-- Respaldo: docs/reportes/ns_historico_cinco_casos_antes_20260909.json.
+-- Aclaración posterior del usuario: NATIVA usa MZJ2P, no MZJP.
+-- Segunda etapa: scripts/apply_ns_nativa_prefijo_20260909.py; modifica sólo
+-- partidas comerciales 46171, 110836, 85357, 110843, 47953 y 95207.
+-- Respaldo: docs/reportes/ns_historico_nativa_prefijo_antes_20260909.json.
 
 -- Agregar motivo de revisión técnica en bases ya existentes.
 DO $$
@@ -341,8 +358,59 @@ INSERT INTO locations(nombre) VALUES
   ('Taller'),
   ('Sarmiento'),
   ('Estantería de Alquiler'),
+  ('Sepid'),
   ('-')
 ON CONFLICT DO NOTHING;
+
+-- Consolidación de aliases históricos de ubicaciones (ej. Depósito SEPID -> Sepid)
+DO $$
+DECLARE
+  v_id_sepid INTEGER;
+  r RECORD;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM locations WHERE nombre = 'Sepid') THEN
+    SELECT id INTO v_id_sepid
+      FROM locations
+     WHERE LOWER(TRIM(nombre)) IN (
+       'deposito sepid', 'depósito sepid', 'deposito sepid s.a.', 'depósito sepid s.a.',
+       'deposito sepid sa', 'depósito sepid sa', 'sepid s.a.', 'sepid sa',
+       'deposito sepid (val)', 'depósito sepid (val)', 'deposito sepid val', 'depósito sepid val',
+       'sepid (val)', 'sepid val',
+       'deposito central', 'depósito central', 'deposito central sepid', 'depósito central sepid',
+       'valdenegro', 'deposito valdenegro', 'depósito valdenegro', 'valdenegro 4578'
+     )
+     ORDER BY id
+     LIMIT 1;
+
+    IF v_id_sepid IS NOT NULL THEN
+      UPDATE locations SET nombre = 'Sepid' WHERE id = v_id_sepid;
+    ELSE
+      INSERT INTO locations(nombre) VALUES ('Sepid') ON CONFLICT (nombre) DO NOTHING;
+    END IF;
+  END IF;
+
+  SELECT id INTO v_id_sepid FROM locations WHERE nombre = 'Sepid' LIMIT 1;
+
+  IF v_id_sepid IS NOT NULL THEN
+    FOR r IN
+      SELECT id, nombre
+        FROM locations
+       WHERE id <> v_id_sepid
+         AND LOWER(TRIM(nombre)) IN (
+           'deposito sepid', 'depósito sepid', 'deposito sepid s.a.', 'depósito sepid s.a.',
+           'deposito sepid sa', 'depósito sepid sa', 'sepid s.a.', 'sepid sa',
+           'deposito sepid (val)', 'depósito sepid (val)', 'deposito sepid val', 'depósito sepid val',
+           'sepid (val)', 'sepid val',
+           'deposito central', 'depósito central', 'deposito central sepid', 'depósito central sepid',
+           'valdenegro', 'deposito valdenegro', 'depósito valdenegro', 'valdenegro 4578'
+         )
+    LOOP
+      UPDATE ingresos SET ubicacion_id = v_id_sepid WHERE ubicacion_id = r.id;
+      UPDATE devices SET ubicacion_id = v_id_sepid WHERE ubicacion_id = r.id;
+      DELETE FROM locations WHERE id = r.id;
+    END LOOP;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS customers (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -769,6 +837,55 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+DECLARE
+  v_id_sepid INTEGER;
+  r RECORD;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM locations WHERE nombre = 'Sepid') THEN
+    SELECT id INTO v_id_sepid
+      FROM locations
+     WHERE LOWER(TRIM(nombre)) IN (
+       'deposito sepid', 'depósito sepid', 'deposito sepid s.a.', 'depósito sepid s.a.',
+       'deposito sepid sa', 'depósito sepid sa', 'sepid s.a.', 'sepid sa',
+       'deposito sepid (val)', 'depósito sepid (val)', 'deposito sepid val', 'depósito sepid val',
+       'sepid (val)', 'sepid val',
+       'deposito central', 'depósito central', 'deposito central sepid', 'depósito central sepid',
+       'valdenegro', 'deposito valdenegro', 'depósito valdenegro', 'valdenegro 4578'
+     )
+     ORDER BY id
+     LIMIT 1;
+
+    IF v_id_sepid IS NOT NULL THEN
+      UPDATE locations SET nombre = 'Sepid' WHERE id = v_id_sepid;
+    ELSE
+      INSERT INTO locations(nombre) VALUES ('Sepid') ON CONFLICT (nombre) DO NOTHING;
+    END IF;
+  END IF;
+
+  SELECT id INTO v_id_sepid FROM locations WHERE nombre = 'Sepid' LIMIT 1;
+
+  IF v_id_sepid IS NOT NULL THEN
+    FOR r IN
+      SELECT id, nombre
+        FROM locations
+       WHERE id <> v_id_sepid
+         AND LOWER(TRIM(nombre)) IN (
+           'deposito sepid', 'depósito sepid', 'deposito sepid s.a.', 'depósito sepid s.a.',
+           'deposito sepid sa', 'depósito sepid sa', 'sepid s.a.', 'sepid sa',
+           'deposito sepid (val)', 'depósito sepid (val)', 'deposito sepid val', 'depósito sepid val',
+           'sepid (val)', 'sepid val',
+           'deposito central', 'depósito central', 'deposito central sepid', 'depósito central sepid',
+           'valdenegro', 'deposito valdenegro', 'depósito valdenegro', 'valdenegro 4578'
+         )
+    LOOP
+      UPDATE ingresos SET ubicacion_id = v_id_sepid WHERE ubicacion_id = r.id;
+      UPDATE devices SET ubicacion_id = v_id_sepid WHERE ubicacion_id = r.id;
+      DELETE FROM locations WHERE id = r.id;
+    END LOOP;
+  END IF;
+END $$;
+
 -- Reglas de garantía (excepciones administrables) - Parte 2 editará, Parte 1 solo lectura
 CREATE TABLE IF NOT EXISTS warranty_rules (
   id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -974,10 +1091,39 @@ CREATE TABLE IF NOT EXISTS ingreso_events (
 );
 CREATE INDEX IF NOT EXISTS ix_ingreso_events_usuario_ts ON ingreso_events(usuario_id, ts DESC);
 
+-- Alta masiva de equipos propios: la transferencia VAL->STL de todos los equipos viaja en UNA
+-- SAL y UNA ENT. Guarda la composición congelada y la fase, porque un reenvío tiene que repetir
+-- exactamente el mismo comprobante. Cada equipo conserva su fila en bejerman_sync_jobs.
+CREATE TABLE IF NOT EXISTS bejerman_stock_lotes (
+  id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  sync_type         TEXT NOT NULL,
+  company_key       TEXT NOT NULL DEFAULT 'SEPID',
+  source_deposit    TEXT NOT NULL,
+  target_deposit    TEXT NOT NULL,
+  phase             TEXT NOT NULL DEFAULT 'pending',
+  last_error        TEXT NULL,
+  actor_user_id     INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+  request_payload   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_payload  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_bejerman_stock_lotes_phase CHECK (
+    phase IN ('pending','sal_pending','sal_done','ent_pending','done','review')
+  ),
+  CONSTRAINT chk_bejerman_stock_lotes_deposits CHECK (
+    NULLIF(TRIM(source_deposit), '') IS NOT NULL
+    AND NULLIF(TRIM(target_deposit), '') IS NOT NULL
+    AND source_deposit <> target_deposit
+  )
+);
+
 CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
   id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   sync_type         TEXT NOT NULL,
-  ingreso_id        INTEGER NOT NULL REFERENCES ingresos(id) ON DELETE CASCADE,
+  -- NULL cuando el trabajo no nace de una orden de servicio: el alta de un equipo propio
+  -- para alquiler mueve stock (VAL->STL) sin que exista ningún ingreso. `device_id` es
+  -- entonces la única identidad del job.
+  ingreso_id        INTEGER NULL REFERENCES ingresos(id) ON DELETE CASCADE,
   device_id         INTEGER NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
   ingreso_event_id  INTEGER NULL REFERENCES ingreso_events(id) ON DELETE SET NULL,
   numero_serie      TEXT NOT NULL DEFAULT '',
@@ -1004,10 +1150,12 @@ CREATE TABLE IF NOT EXISTS bejerman_sync_jobs (
   )
 );
 ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS company_key TEXT NOT NULL DEFAULT 'SEPID';
+ALTER TABLE bejerman_sync_jobs ADD COLUMN IF NOT EXISTS lote_id INTEGER NULL REFERENCES bejerman_stock_lotes(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS bejerman_article_mappings (
   id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   model_id             INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+  company_key          TEXT NOT NULL DEFAULT 'SEPID',
   variante             TEXT NOT NULL DEFAULT '',
   variante_norm        TEXT NOT NULL DEFAULT '',
   article_code         TEXT NOT NULL,
@@ -1250,6 +1398,7 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
   delivered_at                    TIMESTAMPTZ NULL,
   invoiced_at                     TIMESTAMPTZ NULL,
   cancelled_at                    TIMESTAMPTZ NULL,
+  remito_general_legend           TEXT NULL,
   CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental','demo')),
   CONSTRAINT chk_delivery_orders_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
   CONSTRAINT chk_delivery_orders_price_currency CHECK (price_currency IN ('ARS','USD')),
@@ -1258,6 +1407,7 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
   CONSTRAINT chk_delivery_orders_remito_location CHECK (remito_location IS NULL OR remito_location IN ('recepcion','oficina'))
 );
 
+ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS remito_general_legend TEXT NULL;
 ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS company_key TEXT NULL;
 ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS price_currency VARCHAR(3) NOT NULL DEFAULT 'ARS';
 ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS billing_postponed_until TIMESTAMPTZ NULL;
@@ -1311,6 +1461,7 @@ CREATE TABLE IF NOT EXISTS delivery_order_items (
   stock_available_quantity  NUMERIC NULL,
   stock_checked_at          TIMESTAMPTZ NULL,
   sort_order                INTEGER NOT NULL DEFAULT 0,
+  remito_article_legend     TEXT NULL,
   created_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT chk_delivery_order_items_quantity CHECK (quantity > 0),
@@ -1318,6 +1469,7 @@ CREATE TABLE IF NOT EXISTS delivery_order_items (
   CONSTRAINT chk_delivery_order_items_discount_percent CHECK (discount_percent >= 0 AND discount_percent <= 100)
 );
 
+ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS remito_article_legend TEXT NULL;
 ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS ingreso_id INTEGER NULL REFERENCES ingresos(id) ON DELETE SET NULL;
 ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS device_id INTEGER NULL REFERENCES devices(id) ON DELETE SET NULL;
 ALTER TABLE delivery_order_items ADD COLUMN IF NOT EXISTS article_requires_partida BOOLEAN NULL;
@@ -3171,7 +3323,12 @@ CREATE INDEX IF NOT EXISTS idx_items_quote ON quote_items(quote_id);
 CREATE INDEX IF NOT EXISTS idx_quote_items_repuesto_codigo ON quote_items(repuesto_codigo);
 CREATE INDEX IF NOT EXISTS ix_events_ingreso_estado_ts ON ingreso_events(ingreso_id, a_estado, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_ingreso
-  ON bejerman_sync_jobs(sync_type, ingreso_id);
+  ON bejerman_sync_jobs(sync_type, ingreso_id)
+  WHERE ingreso_id IS NOT NULL;
+-- Los jobs sin ingreso (alta de equipo propio) se deduplican por equipo.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_sync_jobs_type_device
+  ON bejerman_sync_jobs(sync_type, device_id)
+  WHERE ingreso_id IS NULL;
 CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_due
   ON bejerman_sync_jobs(status, next_attempt_at, id)
   WHERE status IN ('pending','failed');
@@ -3185,10 +3342,19 @@ CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_actor_user
   ON bejerman_sync_jobs(actor_user_id);
 CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_company_key
   ON bejerman_sync_jobs(company_key);
+CREATE INDEX IF NOT EXISTS ix_bejerman_sync_jobs_lote
+  ON bejerman_sync_jobs(lote_id)
+  WHERE lote_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_user_bejerman_credentials_valid
   ON user_bejerman_credentials(is_valid, updated_at);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant
-  ON bejerman_article_mappings(model_id, variante_norm);
+ALTER TABLE bejerman_article_mappings ADD COLUMN IF NOT EXISTS company_key TEXT;
+UPDATE bejerman_article_mappings SET company_key = 'SEPID'
+ WHERE NULLIF(TRIM(COALESCE(company_key, '')), '') IS NULL;
+ALTER TABLE bejerman_article_mappings ALTER COLUMN company_key SET DEFAULT 'SEPID';
+ALTER TABLE bejerman_article_mappings ALTER COLUMN company_key SET NOT NULL;
+DROP INDEX IF EXISTS uq_bejerman_article_mappings_model_variant;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_article_mappings_model_variant_company
+  ON bejerman_article_mappings(model_id, variante_norm, company_key);
 CREATE INDEX IF NOT EXISTS ix_bejerman_article_mappings_article_code
   ON bejerman_article_mappings(article_code);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bejerman_ingreso_remitos_ingreso
@@ -3288,6 +3454,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_sync_jobs_set_updated_at') THEN
     CREATE TRIGGER trg_bejerman_sync_jobs_set_updated_at
     BEFORE UPDATE ON bejerman_sync_jobs
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_stock_lotes_set_updated_at') THEN
+    CREATE TRIGGER trg_bejerman_stock_lotes_set_updated_at
+    BEFORE UPDATE ON bejerman_stock_lotes
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_bejerman_article_mappings_set_updated_at') THEN

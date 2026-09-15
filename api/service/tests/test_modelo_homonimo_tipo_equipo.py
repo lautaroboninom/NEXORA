@@ -139,7 +139,7 @@ class ModeloHomonimoTipoEquipoTest(TestCase):
         with connection.cursor() as cur:
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["Yamind"])
             if connection.vendor == "postgresql":
-                cur.execute("SELECT LASTVAL()")
+                cur.execute("SELECT currval(pg_get_serial_sequence('marcas', 'id'))")
             elif connection.vendor == "mysql":
                 cur.execute("SELECT LAST_INSERT_ID()")
             else:

@@ -29,6 +29,7 @@ from service.bejerman_documents import (
 from service.bejerman_delivery import (
     BillingError,
     _assert_partidas_ready,
+    _assert_remito_payload_print_limits,
     _bejerman_sql_database_for_company,
     _bridge_order,
     _collapse_recovery_candidate_rows,
@@ -50,6 +51,8 @@ from service.bejerman_delivery import (
     _sdk_error,
     _remito_requires_billing,
     _remito_print_item_chunks,
+    _remito_print_line_limit,
+    _split_remito_orders_for_printing,
     _validate_remito_orders,
     check_delivery_remito_stock_sync,
     get_delivery_order_invoice_pdf,
@@ -534,9 +537,12 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         client.ingresar_comprobante_ventas_json.return_value = {"Resultado": "OK"}
         comprobante = self._comprobante_con_partida()
 
-        with patch(
-            "service.bejerman_delivery._delivery_stock_partida_present",
-            side_effect=[False, True, True],
+        with (
+            patch(
+                "service.bejerman_delivery._delivery_stock_partida_present",
+                side_effect=[False, True, True],
+            ),
+            patch("service.bejerman_delivery.observacion_partida_de_serie", return_value="MG 2245") as observacion,
         ):
             enviado, _respuesta = _recover_delivery_partida_rejection(
                 client,
@@ -557,6 +563,10 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         # se la mandan y no la deduce del tipo. Con 1 en vez de -1 la partida queda
         # en 3 en lugar de 1 (visto en el simulacro del 13/08/2026).
         self.assertEqual(movimientos, [("ENT", 1), ("SAL", -1)])
+        # La partida nueva lleva en la observación el MG de esa serie, no "NEXORA <número>".
+        observacion.assert_called_once_with("5167684")
+        alta = client.ingresar_lista_comprobantes_stock_json.call_args_list[0].args[0]
+        self.assertEqual([entry["Partida_Observaciones"] for entry in alta], ["MG 2245"])
         # El comprobante sale tal cual: con su signo y sin ActualizaStock=N.
         self.assertIs(enviado, comprobante)
         self.assertNotIn("Comprobante_ActualizaStock", enviado)
@@ -574,9 +584,13 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         ]
         comprobante = self._comprobante_con_partida()
 
-        with patch(
-            "service.bejerman_delivery._delivery_stock_partida_present",
-            side_effect=[False, True, True],
+        with (
+            patch(
+                "service.bejerman_delivery._delivery_stock_partida_present",
+                side_effect=[False, True, True],
+            ),
+            patch("service.bejerman_delivery._delivery_entries_moved_by_comprobante", return_value=False),
+            patch("service.bejerman_delivery.observacion_partida_de_serie", return_value=""),
         ):
             enviado, _respuesta = _recover_delivery_partida_rejection(
                 client,
@@ -598,15 +612,48 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         self.assertEqual(enviado["Comprobante_ActualizaStock"], "N")
         self.assertEqual(enviado["Comprobante_Items"][0]["Item_CantidadUM1"], 1)
 
+    @override_settings(BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT=True)
+    def test_remito_que_entra_con_error_no_repone_el_ent(self):
+        client = Mock()
+        client.ingresar_lista_comprobantes_stock_json.return_value = {"Resultado": "OK"}
+        client.ingresar_comprobante_ventas_json.side_effect = [RuntimeError("timeout"), {"Resultado": "OK"}]
+
+        with (
+            patch("service.bejerman_delivery._delivery_stock_partida_present", side_effect=[False, True, True]),
+            patch("service.bejerman_delivery._delivery_entries_moved_by_comprobante", return_value=True),
+            patch("service.bejerman_delivery.observacion_partida_de_serie", return_value=""),
+        ):
+            with self.assertRaises(BejermanSdkUnavailable):
+                _recover_delivery_partida_rejection(
+                    client,
+                    self._comprobante_con_partida(),
+                    delivery_type="rental",
+                    numera_flex="N",
+                    emite_reg="E",
+                    circuito="VENTAS",
+                    operacion="RTA",
+                )
+
+        movimientos = [
+            entry["Comprobante_Tipo"]
+            for call in client.ingresar_lista_comprobantes_stock_json.call_args_list
+            for entry in call.args[0]
+        ]
+        self.assertEqual(movimientos, ["ENT", "SAL"])
+        self.assertEqual(client.ingresar_comprobante_ventas_json.call_count, 1)
+
     @override_settings(BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT=False)
     def test_con_la_compensacion_apagada_se_comporta_como_antes(self):
         client = Mock()
         client.ingresar_lista_comprobantes_stock_json.return_value = {"Resultado": "OK"}
         client.ingresar_comprobante_ventas_json.return_value = {"Resultado": "OK"}
 
-        with patch(
-            "service.bejerman_delivery._delivery_stock_partida_present",
-            side_effect=[False, True],
+        with (
+            patch(
+                "service.bejerman_delivery._delivery_stock_partida_present",
+                side_effect=[False, True],
+            ),
+            patch("service.bejerman_delivery.observacion_partida_de_serie", return_value=""),
         ):
             enviado, _respuesta = _recover_delivery_partida_rejection(
                 client,
@@ -631,10 +678,11 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         BEJERMAN_REMITO_MAX_PRINT_LINES=21,
     )
     def test_rta_y_rtn_print_split_conservan_el_limite_general(self):
-        # Alquileres (RTA) y demos imprimen igual que las ventas: 1 línea por
-        # NS/partida más 1 línea de encabezado por orden (la leyenda; el
-        # separador de guiones ya no se emite).
-        for delivery_type in ("rental", "demo"):
+        # Alquileres (RTA) llevan 2 renglones de encabezado por orden (orden y leyenda general
+        # "Se entrega en alquiler"). Cada equipo ocupa un solo renglón (no repite la leyenda por equipo).
+        # En una orden de 25 equipos entran 19 en el primer remito y 6 en el segundo.
+        # Demos (RTN) llevan 1 renglón de encabezado por orden (- Orden -): entran 20 en el primero y 5 en el segundo.
+        for delivery_type, expected_chunk_sizes in (("rental", [19, 6]), ("demo", [20, 5])):
             with self.subTest(delivery_type=delivery_type):
                 order = {
                     "deliveryType": delivery_type,
@@ -650,7 +698,235 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
 
                 chunks = _remito_print_item_chunks(order)
 
-                self.assertEqual([len(chunk) for chunk in chunks], [20, 5])
+                self.assertEqual([len(chunk) for chunk in chunks], expected_chunk_sizes)
+
+    @override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21)
+    def test_rta_y_rtn_reparten_un_renglon_con_varios_ns(self):
+        # La pantalla de alquiler carga todos los NS de un artículo en el mismo renglón.
+        # El chunker lo reparte respetando las capacidades físicas del remito.
+        for delivery_type, expected_ns in (("rental", [19, 6]), ("demo", [20, 5])):
+            with self.subTest(delivery_type=delivery_type):
+                item = {
+                    "id": "item-ns",
+                    "articleCode": "1115003",
+                    "quantity": 25,
+                    "partidas": [
+                        {"id": f"doip-{index}", "partida": f"NS-{index:03d}", "assignedQuantity": 1}
+                        for index in range(25)
+                    ],
+                }
+
+                chunks = _remito_print_item_chunks({"deliveryType": delivery_type, "items": [item]})
+
+                self.assertEqual([len(chunk) for chunk in chunks], [1] * len(expected_ns))
+                self.assertEqual([len(chunk[0]["partidas"]) for chunk in chunks], expected_ns)
+                self.assertEqual([chunk[0]["quantity"] for chunk in chunks], expected_ns)
+                self.assertEqual(
+                    [partida["partida"] for chunk in chunks for partida in chunk[0]["partidas"]],
+                    [f"NS-{index:03d}" for index in range(25)],
+                )
+                # Cada fragmento conserva el id del renglón: con él se asigna cada
+                # partida al remito que la lleva.
+                self.assertTrue(all(chunk[0]["id"] == "item-ns" for chunk in chunks))
+                self.assertEqual(len(item["partidas"]), 25)
+
+    @override_settings(BEJERMAN_REMITO_MAX_PRINT_LINES=21)
+    def test_rta_split_repite_leyenda_de_accesorios_y_no_la_deja_huerfana(self):
+        # Cuando un grupo de artículos con accesorios se divide entre remitos:
+        # Remito 1: Encabezado (2) + Leyenda accesorios (1) + 18 equipos = 21 líneas.
+        # Remito 2: Encabezado (2) + Leyenda accesorios repetida (1) + 2 equipos restantes = 5 líneas.
+        order = {
+            "orderNumber": "OE-00999",
+            "deliveryType": "rental",
+            "remitoGeneralLegend": "Se entrega en alquiler",
+            "items": [
+                {
+                    "id": "humidificadores",
+                    "articleCode": "HUM01",
+                    "description": "Humidificador térmico",
+                    "remitoArticleLegend": "Vaso",
+                    "quantity": 20,
+                    "partidas": [
+                        {"id": f"part-{i}", "partida": f"HUM-NS-{i:02d}", "assignedQuantity": 1}
+                        for i in range(20)
+                    ],
+                }
+            ],
+        }
+        chunks = _remito_print_item_chunks(order)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(len(chunks[0][0]["partidas"]), 18)
+        self.assertEqual(len(chunks[1][0]["partidas"]), 2)
+
+        # Si además se agrega otro grupo de equipos al límite:
+        # no debe quedar la leyenda de accesorios huérfana al final del remito 1 sin su equipo.
+        order_two_groups = {
+            "orderNumber": "OE-00999",
+            "deliveryType": "rental",
+            "remitoGeneralLegend": "Se entrega en alquiler",
+            "items": [
+                {
+                    "id": "humidificadores",
+                    "articleCode": "HUM01",
+                    "description": "Humidificador térmico",
+                    "remitoArticleLegend": "Vaso",
+                    "quantity": 18,
+                    "partidas": [
+                        {"id": f"part-{i}", "partida": f"HUM-NS-{i:02d}", "assignedQuantity": 1}
+                        for i in range(18)
+                    ],
+                },
+                {
+                    "id": "cpap",
+                    "articleCode": "CPAP01",
+                    "description": "Equipo CPAP",
+                    "remitoArticleLegend": "Máscara",
+                    "quantity": 2,
+                    "partidas": [
+                        {"id": f"part-c-{i}", "partida": f"CPAP-NS-{i:02d}", "assignedQuantity": 1}
+                        for i in range(2)
+                    ],
+                },
+            ],
+        }
+        # En remito 1 entran: 2 líneas encabezado + 1 leyenda HUM + 18 HUM = 21 líneas.
+        # CPAP no entra en remito 1 porque su leyenda (1) + equipo (1) = 2 líneas requeridas superan el límite (21).
+        # Por ende, la leyenda de CPAP NO queda huérfana al pie de remito 1: se traslada a remito 2 junto al equipo.
+        chunks2 = _remito_print_item_chunks(order_two_groups)
+        self.assertEqual(len(chunks2), 2)
+        # Remito 1 contiene solo humidificadores
+        self.assertEqual(len(chunks2[0]), 1)
+        self.assertEqual(chunks2[0][0]["articleCode"], "HUM01")
+        self.assertEqual(len(chunks2[0][0]["partidas"]), 18)
+        # Remito 2 contiene los CPAP
+        self.assertEqual(len(chunks2[1]), 1)
+        self.assertEqual(chunks2[1][0]["articleCode"], "CPAP01")
+        self.assertEqual(len(chunks2[1][0]["partidas"]), 2)
+
+    @override_settings(
+        BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        BEJERMAN_REMITO_MAX_PRINT_LINES=21,
+        BEJERMAN_RSS_MAX_PRINT_LINES=22,
+        BEJERMAN_RSS_PRINT_LINES_PER_ITEM=3,
+    )
+    def test_cada_remito_partido_entra_en_su_formulario(self):
+        # La cuenta del split y el comprobante viven en lugares distintos y nada los ata:
+        # el 08/09/2026 una leyenda nueva del RTA duplicó sus renglones sin que fallara
+        # ningún test del chunker. Este arma el comprobante real de cada remito.
+        profiles = {
+            "sale": {"type": "RT", "operation": "MC", "deposit": "VAL"},
+            "rental": {"type": "RTA", "operation": "ALQ", "deposit": "STL"},
+            "demo": {"type": "RTN", "operation": "DEMO", "deposit": "VAL"},
+            "service_release": {"type": "RSS", "operation": "REP", "deposit": "STC"},
+        }
+        partida_shapes = (
+            ("un renglón con 40 NS", [[40]], 0),
+            ("25 renglones de un NS", [[1] * 25], 0),
+            ("renglones mezclados con descuento", [[7, 1, 12], [3]], 10),
+            ("tres órdenes de 8 NS", [[8], [8], [8]], 0),
+        )
+        # RSS lleva un equipo por renglón y no reparte renglones: sólo se prueba así.
+        service_release_shapes = (
+            ("25 equipos", [[1] * 25], 0),
+            ("tres órdenes de 5 equipos", [[1] * 5] * 3, 0),
+        )
+
+        def build_order(delivery_type, order_index, ns_per_item, discount_percent):
+            deposit = profiles[delivery_type]["deposit"]
+            return {
+                "id": f"do-{delivery_type}-{order_index}",
+                "orderNumber": f"OE-{order_index:05d}",
+                "deliveryType": delivery_type,
+                "items": [
+                    {
+                        "id": f"doi-{order_index}-{item_index}",
+                        "articleCode": f"11150{item_index:02d}",
+                        "articleName": "Concentrador de oxígeno",
+                        "articleRequiresPartida": True,
+                        "quantity": ns_count,
+                        "unitPrice": 100 if discount_percent else 0,
+                        "discountPercent": discount_percent,
+                        "stockDepositCode": deposit,
+                        "partidas": [
+                            {
+                                "id": f"doip-{order_index}-{item_index}-{ns_index}",
+                                "partida": f"NS-{order_index}-{item_index}-{ns_index:03d}",
+                                "assignedQuantity": 1,
+                                "stockDepositCode": deposit,
+                            }
+                            for ns_index in range(ns_count)
+                        ],
+                    }
+                    for item_index, ns_count in enumerate(ns_per_item)
+                ],
+            }
+
+        for delivery_type, profile in profiles.items():
+            shapes = service_release_shapes if delivery_type == "service_release" else partida_shapes
+            config = delivery_remito_config(profile)
+            limit = _remito_print_line_limit(delivery_type)
+            for label, orders_shape, discount_percent in shapes:
+                orders = [
+                    build_order(delivery_type, order_index, ns_per_item, discount_percent)
+                    for order_index, ns_per_item in enumerate(orders_shape, start=1)
+                ]
+                batches = _partition_remito_orders_for_printing(_split_remito_orders_for_printing(orders, None))
+                emitted_ns = []
+                for batch_index, batch in enumerate(batches, start=1):
+                    comprobante = build_delivery_remito_comprobante(
+                        {
+                            "groupId": "brg-contrato-renglones",
+                            "issueDate": "2026-09-10",
+                            "customerCode": "ACU",
+                            "customerName": "ACUMAR",
+                            "sellerCode": "ADM",
+                            "paymentTermCode": "30",
+                            "orders": [_bridge_order(order) for order in batch],
+                        },
+                        config,
+                    )["comprobante"]
+                    items = comprobante["Comprobante_Items"]
+                    counted = sum(_order_print_line_count(order) for order in batch)
+                    with self.subTest(delivery_type=delivery_type, shape=label, remito=batch_index):
+                        self.assertLessEqual(len(items), limit)
+                        if delivery_type == "service_release":
+                            # RSS reserva a propósito un renglón de margen por equipo.
+                            self.assertLessEqual(len(items), counted)
+                        else:
+                            self.assertEqual(len(items), counted)
+                        _assert_remito_payload_print_limits(delivery_type, comprobante)
+                    emitted_ns.extend(item["Item_Partida"] for item in items if item["Item_Tipo"] == "A")
+                with self.subTest(delivery_type=delivery_type, shape=label):
+                    self.assertEqual(
+                        emitted_ns,
+                        [partida["partida"] for order in orders for item in order["items"] for partida in item["partidas"]],
+                    )
+
+    @override_settings(
+        BEJERMAN_SALE_MAX_PRINT_LINES=22,
+        BEJERMAN_REMITO_MAX_PRINT_LINES=21,
+        BEJERMAN_RSS_MAX_PRINT_LINES=22,
+    )
+    def test_ningun_remito_sale_con_mas_renglones_que_su_formulario(self):
+        def comprobante(tipo, renglones):
+            return {
+                "Comprobante_Tipo": tipo,
+                "Comprobante_Items": [
+                    {"Item_Tipo": "A" if index % 2 == 0 else "L", "Item_NumeroRenglon": index}
+                    for index in range(1, renglones + 1)
+                ],
+            }
+
+        for delivery_type, tipo, limit in (("rental", "RTA", 21), ("demo", "RTN", 21), ("service_release", "RSS", 22)):
+            with self.subTest(delivery_type=delivery_type):
+                _assert_remito_payload_print_limits(delivery_type, comprobante(tipo, limit))
+                with self.assertRaises(DeliveryOrderError) as ctx:
+                    _assert_remito_payload_print_limits(delivery_type, comprobante(tipo, limit + 1))
+                self.assertEqual(ctx.exception.code, "BEJERMAN_REMITO_PRINT_LIMIT_EXCEEDED")
+        # La venta conserva su código de siempre.
+        with self.assertRaises(DeliveryOrderError) as ctx:
+            _assert_remito_payload_print_limits("sale", comprobante("RT", 23))
+        self.assertEqual(ctx.exception.code, "BEJERMAN_RT_PRINT_LIMIT_EXCEEDED")
 
 
 class FakeSDKClient:
@@ -1147,7 +1423,7 @@ class BejermanPdfHelperTests(SimpleTestCase):
                 )
 
             self.assertEqual(list(Path(sepid_tmp).iterdir()), [])
-            self.assertTrue((Path(mgbio_tmp) / "RTR00007-00000042-OXIHC.pdf").exists())
+            self.assertTrue((Path(mgbio_tmp) / "RTR00007-00000042- OXIHC.pdf").exists())
 
     def test_windows_pdf_output_path_se_traduce_al_mount_configurado(self):
         with tempfile.TemporaryDirectory() as mount_tmp:
@@ -1163,7 +1439,11 @@ class BejermanPdfHelperTests(SimpleTestCase):
         self.assertEqual(resolved, r"samtronic:C:\2. SEPID\PDF\REMITOS")
 
     def test_windows_pdf_output_path_sin_mount_falla(self):
-        with override_settings(BEJERMAN_PDF_WINDOWS_PATH_MOUNTS=""):
+        with (
+            override_settings(BEJERMAN_PDF_WINDOWS_PATH_MOUNTS=""),
+            patch("service.bejerman_pdf_settings.os", name="posix") as operating_system,
+        ):
+            operating_system.name = "posix"
             with self.assertRaises(BejermanPdfOutputSettingsError):
                 validate_pdf_output_dir(r"Z:\MG BIO\Remitos BEJERMAN")
 
@@ -1206,7 +1486,7 @@ class BejermanPdfHelperTests(SimpleTestCase):
 
         write_remote_pdf.assert_called_once()
         self.assertEqual(write_remote_pdf.call_args.args[0], r"samtronic:C:\2. SEPID\PDF\REMITOS")
-        self.assertEqual(write_remote_pdf.call_args.args[1], "RTR00004-00004707-RES.pdf")
+        self.assertEqual(write_remote_pdf.call_args.args[1], "RTR00004-00004707-   RES.pdf")
         self.assertEqual(write_remote_pdf.call_args.args[2], pdf_bytes)
         self.assertEqual(remove_remote_candidates.call_count, 2)
         remove_remote_candidates.assert_any_call(
@@ -1215,16 +1495,14 @@ class BejermanPdfHelperTests(SimpleTestCase):
             [],
             pdf_bytes,
         )
-        remove_remote_candidates.assert_any_call(
-            r"samtronic:C:\2. SEPID\PDF\FACTURAS",
-            [
-                "V-RT -R-00004-00004707-26062026-RES   .pdf",
-                "RTR00004-00004707-RES.pdf",
-                "RTR00004-00004707.pdf",
-            ],
-            ["V-RT -R-00004-00004707-", "RTR00004-00004707"],
-            pdf_bytes,
-        )
+        fallback = remove_remote_candidates.call_args_list[-1]
+        self.assertEqual(fallback.args[0], r"samtronic:C:\2. SEPID\PDF\FACTURAS")
+        self.assertEqual(set(fallback.args[1]), {
+            "V-RT -R-00004-00004707-26062026-RES   .pdf",
+            "RTR00004-00004707-   RES.pdf", "RTR00004-00004707.pdf", "RTR00004-00004707-RES.pdf",
+        })
+        self.assertEqual(fallback.args[2], ["V-RT -R-00004-00004707-", "RTR00004-00004707"])
+        self.assertEqual(fallback.args[3], pdf_bytes)
 
     @patch("service.bejerman_sdk.read_remote_pdf_candidates", return_value=(None, ""))
     def test_fetch_comprobante_pdf_no_devuelve_200_con_bytes_no_pdf(self, _read_remote_candidates):
@@ -1473,7 +1751,7 @@ class BejermanPdfOutputSettingsTests(TestCase):
             )
 
             self.assertEqual(list(Path(sepid_tmp).iterdir()), [])
-            self.assertTrue((Path(mgbio_tmp) / "RTR00007-00000042-OXIHC.pdf").exists())
+            self.assertTrue((Path(mgbio_tmp) / "RTR00007-00000042- OXIHC.pdf").exists())
 
     def test_endpoint_guarda_y_devuelve_configuracion(self):
         with tempfile.TemporaryDirectory() as remitos_tmp:
@@ -3559,7 +3837,14 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
             },
         }
 
-        resuelto = _apply_bejerman_article_descriptions(payload, FakeArticleCatalogClient())
+        client = FakeArticleCatalogClient()
+        # El RDA exige una única descripción literal por código. El catálogo
+        # general de prueba contiene duplicados para probar el buscador.
+        with patch.object(client, "list_articulos", return_value={
+            "Resultado": "OK",
+            "DatosJSON": [{"Articulo_Codigo": "1202018", "Articulo_Descripcion": "Máscara nasal adulto"}],
+        }):
+            resuelto = _apply_bejerman_article_descriptions(payload, client)
 
         self.assertEqual(resuelto["equipment"]["mappedArticleName"], "Máscara nasal adulto")
         self.assertEqual(payload["equipment"]["mappedArticleName"], "Máscara nasal vieja")
@@ -3753,6 +4038,75 @@ class BejermanDeliveryArticleTests(SimpleTestCase):
         self.assertEqual(result["depositCode"], "STL")
         self.assertEqual([item["partida"] for item in result["items"]], ["L-STL-1"])
         self.assertEqual(result["items"][0]["stockDepositCode"], "STL")
+
+    def test_article_stock_no_corta_en_100_y_avisa_si_igual_recorta(self):
+        # OE-00478: SAR tenía más de 100 Auto CPAP (1105001) y el listado cortaba en 100. El
+        # recuadro rechazaba las partidas de más allá del corte como "no figura en el depósito".
+        class FakeSarClient:
+            def obtener_stock_deposito(self, deposit_code):
+                return {
+                    "DatosJSON": [
+                        {
+                            "Articulo_Codigo": "1105001",
+                            "Art_CodDeposito": "SAR",
+                            "Art_Partida": f"E23BE7{index:05d}",
+                            "Art_DispUM1": 1,
+                            "Art_RealUM1": 1,
+                        }
+                        for index in range(126)
+                    ]
+                }
+
+        with patch("service.bejerman_delivery.BejermanSDKClient", return_value=FakeSarClient()):
+            completo = list_bejerman_article_stock("1105001", 1000, deposit_code="SAR")
+            recortado = list_bejerman_article_stock("1105001", 100, deposit_code="SAR")
+
+        self.assertEqual(len(completo["items"]), 126)
+        self.assertEqual(completo["totalLots"], 126)
+        self.assertFalse(completo["truncated"])
+        self.assertIn("E23BE700125", [item["partida"] for item in completo["items"]])
+        self.assertEqual(len(recortado["items"]), 100)
+        self.assertEqual(recortado["totalLots"], 126)
+        self.assertTrue(recortado["truncated"])
+
+    def test_article_stock_marks_rental_lots_that_nexora_cannot_rent(self):
+        # E2321905419: stock en STL y alquilado desde 2024. El recuadro lo ofrecía y el guardado
+        # lo rechazaba; el stock de alquiler ahora viene con el veredicto de NEXORA.
+        client = FakeArticleStockClient()
+        verdict = {
+            "available": False,
+            "code": "RENTAL_EQUIPMENT_NOT_AVAILABLE",
+            "reason": "El NS L-STL-1 está en la OS-25863, que ya figura alquilada.",
+            "equipmentInternalNumber": None,
+        }
+
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient", return_value=client),
+            patch("service.bejerman_delivery.rental_stock_lot_availability", return_value=[verdict]) as availability,
+        ):
+            result = list_bejerman_article_stock(
+                "1202018", 100, company_key="MGBIO", deposit_code="STL", delivery_type="rental", order_id="oe-1"
+            )
+
+        availability.assert_called_once_with(["L-STL-1"], "oe-1")
+        item = result["items"][0]
+        self.assertFalse(item["rentalAvailable"])
+        self.assertEqual(item["rentalBlockCode"], "RENTAL_EQUIPMENT_NOT_AVAILABLE")
+        self.assertIn("ya figura alquilada", item["rentalBlockReason"])
+
+    def test_article_stock_keeps_rental_lots_unmarked_when_nexora_lookup_fails(self):
+        client = FakeArticleStockClient()
+
+        with (
+            patch("service.bejerman_delivery.BejermanSDKClient", return_value=client),
+            patch("service.bejerman_delivery.rental_stock_lot_availability", side_effect=RuntimeError("db")),
+        ):
+            result = list_bejerman_article_stock(
+                "1202018", 100, company_key="MGBIO", deposit_code="STL", delivery_type="rental"
+            )
+
+        self.assertEqual([item["partida"] for item in result["items"]], ["L-STL-1"])
+        self.assertNotIn("rentalAvailable", result["items"][0])
 
     def test_article_stock_falls_back_to_raw_total_when_article_has_no_partida(self):
         # Como OE-00232: article_requires_partida=false, así que las filas de stock no
@@ -4295,7 +4649,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
             if item["Item_Tipo"] == "L"
         ]
         self.assertIn("Ingreso a servicio técnico - OS 00001 -", legend_lines)
-        self.assertIn("Motivo: Ingreso de equipo MG activo desde alquiler.", legend_lines)
+        self.assertIn("Motivo: Ingreso de equipo MG activo desde alquiler. (MG 1234)", legend_lines)
 
         comprobante = _apply_registered_document(
             built["comprobante"],
@@ -4763,6 +5117,28 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertFalse(result["canEmit"])
         self.assertIn("pide 20", result["message"])
 
+    def test_preflight_cuenta_en_el_deposito_de_las_partidas(self):
+        # OE-00130 (10/09/2026): 20 CPAP armados desde SAR. Con partidas el formulario deja
+        # vacío el depósito del renglón y el preflight caía en VAL ("hay 9 en VAL").
+        order = self._preflight_order(20)
+        order["items"][0]["stockDepositCode"] = ""
+        order["items"][0]["partidas"] = [
+            {"partida": f"E238D5010{n:02d}", "assignedQuantity": 1.0, "stockDepositCode": "SAR"}
+            for n in range(20)
+        ]
+        stock = {"SAR": Decimal("20"), "VAL": Decimal("9")}
+
+        with patch.object(bejerman_delivery, "get_delivery_order", return_value=order):
+            with patch.object(
+                delivery_orders,
+                "_delivery_article_available_quantity",
+                side_effect=lambda article, deposit, *args, **kwargs: stock[deposit],
+            ) as available:
+                result = bejerman_delivery._delivery_remito_preflight_result(["do-1"], None, retried=False)
+
+        self.assertTrue(result["canEmit"])
+        self.assertEqual([call.args[1] for call in available.call_args_list], ["SAR"])
+
     def test_sale_remito_profile_is_not_rss(self):
         sale_profile = remito_profile_for_type("sale")
         service_profile = remito_profile_for_type("service_release")
@@ -5031,6 +5407,10 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
                 self.assertFalse(any("----------------" in line for line in legend_lines))
                 if remito_type == "RSS":
                     self.assertEqual(legend_lines, ["Se entrega reparado"])
+                elif remito_type == "RTA":
+                    self.assertEqual(legend_lines, ["- Orden OE-RTA -", "Se entrega en Alquiler"])
+                elif remito_type == "RT":
+                    self.assertEqual(legend_lines, [])
                 else:
                     self.assertEqual(legend_lines, [f"- Orden OE-{remito_type} -"])
 
@@ -5174,7 +5554,7 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
         self.assertEqual(article_lines[0]["Item_Deposito"], "VAL")
         self.assertEqual(article_lines[0]["Item_Partida"], "S225DC14018")
-        self.assertEqual(legend_lines, ["- Orden OE-1 -"])
+        self.assertEqual(legend_lines, [])
 
     def test_delivery_comprobante_usa_iva_de_articulo_en_total_facturable(self):
         built = build_delivery_remito_comprobante(
@@ -5843,21 +6223,21 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         html = _remito_print_wait_page("brg-test", "RT")
 
         self.assertIn("/api/ordenes-entrega/remito-bejerman/brg-test/pdf/", html)
-        self.assertIn("Preparando remito RT", html)
-        self.assertIn('const documentName = "remito RT";', html)
+        self.assertIn("Preparando el remito RT", html)
+        self.assertIn('"documentName": "remito RT"', html)
         self.assertNotIn("Preparando RSS", html)
         self.assertNotIn("Accept: 'application/pdf'", html)
         self.assertIn("Retry-After", html)
         self.assertIn("retry_after_ms", html)
         self.assertIn("REMITO_DOCUMENT_NOT_FOUND", html)
-        self.assertIn("NEXORA volverá a buscar el remito automáticamente", html)
+        self.assertIn("NEXORA volverá a comprobarlo automáticamente", html)
         self.assertIn("Cerrar pestaña", html)
         self.assertNotIn("maxAttempts", html)
         self.assertNotIn("maxWaitMs", html)
         self.assertNotIn("lookupMissRetryLimit", html)
         self.assertNotIn("shouldStopWaiting", html)
-        self.assertIn("PDF original emitido por Bejerman", html)
-        self.assertIn("únicamente por el archivo de Bejerman", html)
+        self.assertIn("El comprobante ya está emitido en Bejerman", html)
+        self.assertIn("Buscando el PDF en Bejerman", html)
         self.assertNotIn("Reintente en unos segundos", html)
         self.assertNotIn("no es necesario volver a emitir el remito", html)
         self.assertNotIn("Intento ", html)

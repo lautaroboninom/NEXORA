@@ -106,7 +106,7 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         admin = get_role_defaults("admin")
         ventas = get_role_defaults("ventas")
         recepcion = get_role_defaults("recepcion")
-        supervisor_explicit_permissions = {"action.route_sheet.postpone"}
+        supervisor_explicit_permissions = {"action.route_sheet.postpone", "action.delivery_order.correct_commercial_terms"}
 
         for code in PERMISSION_CODES:
             self.assertEqual(

@@ -15,6 +15,7 @@ from django.db import connection
 from django.utils import timezone
 
 from .bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY
+from .bejerman_partida_observacion import observacion_partida_de_serie
 from .bejerman_sdk import as_number, as_string, build_stock_rows, first_value
 from .bejerman_sync import BejermanSDKClient, validate_bejerman_config
 
@@ -247,7 +248,7 @@ def _device_contexts(
                    COALESCE(ma.nombre, '') AS marca,
                    COALESCE(m.nombre, '') AS modelo,
                    latest.id AS ingreso_id,
-                   COALESCE(latest.estado, '') AS ingreso_estado,
+                   COALESCE(latest.estado::text, '') AS ingreso_estado,
                    COALESCE(NULLIF(latest.empresa_bejerman, ''), %s) AS empresa_bejerman
               FROM devices d
               LEFT JOIN marcas ma ON ma.id = d.marca_id
@@ -374,7 +375,6 @@ def build_stock_correction_sal_payload(
     cantidad: float,
     run_id: str,
     sequence: int = 1,
-    motivo: str = "",
 ) -> list[dict[str, Any]]:
     qty = _positive_quantity(cantidad)
     comprobante = _clean(getattr(settings, "BEJERMAN_STOCK_CORRECTION_COMPROBANTE", "SAL")) or "SAL"
@@ -399,8 +399,13 @@ def build_stock_correction_sal_payload(
             "Comprobante_CantidadUM2": -payload_qty,
             "Comprobante_PrecioTotalMonLocal": 0,
             "Comprobante_CodigoCausaEmision": causa,
-            "Comprobante_IdOrigen": origin[:80],
-            "Partida_Observaciones": (motivo or f"STOCKFIX {run_id}")[:20],
+            # Bejerman rechaza más de 50 caracteres (OS 29131, 14/09/2026: con 51 no emitió la SAL).
+            # Recortar no alcanza: dos correcciones que difieren sólo al final colapsarían en el
+            # mismo IdOrigen y la segunda se daría por "ya existe". Largo, se reemplaza por su hash.
+            "Comprobante_IdOrigen": (
+                origin if len(origin) <= 50 else f"NEXORA-STOCKFIX-{zlib.crc32(origin.encode('utf-8')):08X}"
+            ),
+            "Partida_Observaciones": observacion_partida_de_serie(numero_serie),
         }
     ]
 
@@ -572,7 +577,6 @@ def apply_single_stock_correction(
         cantidad=qty,
         run_id=run_id,
         sequence=sequence,
-        motivo=motivo,
     )
     response = client.ingresar_lista_comprobantes_json(payload)
     return {

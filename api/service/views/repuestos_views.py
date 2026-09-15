@@ -1,10 +1,11 @@
 import datetime as dt
 import unicodedata
+from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.core.mail import send_mail
-from django.db import transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from rest_framework import permissions
 from rest_framework.exceptions import ValidationError, PermissionDenied
@@ -389,12 +390,15 @@ def _get_or_create_proveedor(nombre: str):
     if row:
         return row.get("id")
     try:
-        pid = exec_returning(
-            "INSERT INTO proveedores_externos (nombre) VALUES (%s) RETURNING id",
-            [name],
-        )
-        return pid
-    except Exception:
+        # La inserción puede perder una carrera contra otra solicitud que creó el
+        # mismo proveedor. El savepoint permite consultar al ganador después del
+        # error de unicidad sin heredar una transacción PostgreSQL abortada.
+        with (transaction.atomic() if connection.in_atomic_block else nullcontext()):
+            return exec_returning(
+                "INSERT INTO proveedores_externos (nombre) VALUES (%s) RETURNING id",
+                [name],
+            )
+    except IntegrityError:
         row2 = q(
             "SELECT id FROM proveedores_externos WHERE LOWER(nombre)=LOWER(%s)",
             [name],

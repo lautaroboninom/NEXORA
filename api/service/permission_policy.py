@@ -238,6 +238,7 @@ VIEW_PERMISSION_MATRIX = {
     "DeliveryOrderBejermanArticlesView": {"GET": "action.delivery_order.assign_articles"},
     "DeliveryOrderBejermanDepositsView": {"GET": "action.delivery_order.assign_articles"},
     "DeliveryOrderBejermanArticleStockView": {"GET": "action.delivery_order.assign_articles"},
+    "DeliveryOrderPartidasMasivasValidarView": {"POST": "action.delivery_order.assign_articles"},
     "DeliveryOrderRentalEquipmentView": {"GET": ["page.delivery_orders", "page.logistics", "action.delivery_order.create"]},
     "DeliveryOrderBejermanRemitoHistoryView": {"GET": "page.delivery_orders"},
     "DeliveryOrderBejermanRemitoPdfView": {"GET": "page.delivery_orders"},
@@ -366,6 +367,15 @@ VIEW_PERMISSION_MATRIX = {
         "PATCH": "action.devices_preventivos.manage",
     },
     "DeviceDirectCreateView": {"POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
+    # El buscador de stock es parte del alta: quien puede dar de alta un equipo tiene que
+    # poder elegir la unidad en Bejerman.
+    "DeviceStockCandidatosView": {"GET": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
+    # Alta masiva de equipos propios: es el alta de a uno para muchas unidades, con el mismo permiso.
+    "DeviceAltaMasivaView": {
+        "GET": ["action.devices_preventivos.manage", "action.devices_preventivos.create"],
+        "POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"],
+    },
+    "DeviceAltaMasivaValidarView": {"POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
     "DevicesMergeView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgVentaView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgReactivarView": {"POST": "action.devices_preventivos.manage"},

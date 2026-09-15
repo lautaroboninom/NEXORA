@@ -156,11 +156,11 @@ class IngresoTestsAPITest(TestCase):
             cur.execute(ingreso_tests_sql)
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return cur.fetchone()[0]
@@ -187,15 +187,15 @@ class IngresoTestsAPITest(TestCase):
 
         with connection.cursor() as cur:
             cur.execute("INSERT INTO customers (razon_social) VALUES (%s)", ["Clinica Demo"])
-            customer_id = cls._last_insert_id(cur)
+            customer_id = cls._last_insert_id(cur, "customers")
 
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["ResMed"])
-            marca_resmed = cls._last_insert_id(cur)
+            marca_resmed = cls._last_insert_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [marca_resmed, "AirSense 10", "CPAP/AutoCPAP"],
             )
-            model_cpap = cls._last_insert_id(cur)
+            model_cpap = cls._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
@@ -203,20 +203,20 @@ class IngresoTestsAPITest(TestCase):
                 """,
                 [customer_id, marca_resmed, model_cpap, "CPAP-001", "MG 0001", "CPAP/AutoCPAP"],
             )
-            device_cpap = cls._last_insert_id(cur)
+            device_cpap = cls._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                "INSERT INTO ingresos (device_id, estado, asignado_a, motivo) VALUES (%s,%s,%s, 'reparación')",
                 [device_cpap, "diagnosticado", cls.tech_user.id],
             )
-            cls.ingreso_cpap_id = cls._last_insert_id(cur)
+            cls.ingreso_cpap_id = cls._last_insert_id(cur, "ingresos")
 
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["EI"])
-            marca_ei = cls._last_insert_id(cur)
+            marca_ei = cls._last_insert_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [marca_ei, "A-550", "Aspirador"],
             )
-            model_asp = cls._last_insert_id(cur)
+            model_asp = cls._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
@@ -224,12 +224,12 @@ class IngresoTestsAPITest(TestCase):
                 """,
                 [customer_id, marca_ei, model_asp, "ASP-001", "MG 0002", "Aspirador"],
             )
-            device_asp = cls._last_insert_id(cur)
+            device_asp = cls._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                "INSERT INTO ingresos (device_id, estado, asignado_a, motivo) VALUES (%s,%s,%s, 'reparación')",
                 [device_asp, "diagnosticado", cls.tech_user.id],
             )
-            cls.ingreso_asp_id = cls._last_insert_id(cur)
+            cls.ingreso_asp_id = cls._last_insert_id(cur, "ingresos")
 
             cur.execute(
                 """
@@ -238,20 +238,20 @@ class IngresoTestsAPITest(TestCase):
                 """,
                 [customer_id, marca_ei, model_asp, "A1-0137", "MG 0005", "Aspirador"],
             )
-            device_asp_electrico = cls._last_insert_id(cur)
+            device_asp_electrico = cls._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                "INSERT INTO ingresos (device_id, estado, asignado_a, motivo) VALUES (%s,%s,%s, 'reparación')",
                 [device_asp_electrico, "diagnosticado", cls.tech_user.id],
             )
-            cls.ingreso_asp_electrico_id = cls._last_insert_id(cur)
+            cls.ingreso_asp_electrico_id = cls._last_insert_id(cur, "ingresos")
 
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Fisher & Paykel"])
-            marca_af = cls._last_insert_id(cur)
+            marca_af = cls._last_insert_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [marca_af, "Airvo 2", "ALTO FLUJO"],
             )
-            model_af = cls._last_insert_id(cur)
+            model_af = cls._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
@@ -259,20 +259,20 @@ class IngresoTestsAPITest(TestCase):
                 """,
                 [customer_id, marca_af, model_af, "AF-001", "MG 0003", "ALTO FLUJO"],
             )
-            device_af = cls._last_insert_id(cur)
+            device_af = cls._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                "INSERT INTO ingresos (device_id, estado, asignado_a, motivo) VALUES (%s,%s,%s, 'reparación')",
                 [device_af, "diagnosticado", cls.tech_user.id],
             )
-            cls.ingreso_af_id = cls._last_insert_id(cur)
+            cls.ingreso_af_id = cls._last_insert_id(cur, "ingresos")
 
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Covidien"])
-            marca_pb = cls._last_insert_id(cur)
+            marca_pb = cls._last_insert_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [marca_pb, "PB 560", "Respirador"],
             )
-            model_pb = cls._last_insert_id(cur)
+            model_pb = cls._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
@@ -280,12 +280,12 @@ class IngresoTestsAPITest(TestCase):
                 """,
                 [customer_id, marca_pb, model_pb, "PB560-001", "MG 0004", "Respirador"],
             )
-            device_pb = cls._last_insert_id(cur)
+            device_pb = cls._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s,%s,%s)",
+                "INSERT INTO ingresos (device_id, estado, asignado_a, motivo) VALUES (%s,%s,%s, 'reparación')",
                 [device_pb, "diagnosticado", cls.tech_user.id],
             )
-            cls.ingreso_pb560_id = cls._last_insert_id(cur)
+            cls.ingreso_pb560_id = cls._last_insert_id(cur, "ingresos")
 
     def setUp(self):
         super().setUp()

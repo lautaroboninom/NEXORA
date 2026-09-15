@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.db import connection
 from django.test import TestCase
 
+from service.tests.schema_helpers import create_fixture_device
 from service.repuestos import corregir_codigos_repuestos, load_maestro_codigos_from_excel
 
 
@@ -89,11 +90,13 @@ class CorregirCodigosRepuestosTests(TestCase):
             )
 
     def _insert_quote_item(self, repuesto_codigo):
+        device_id = create_fixture_device()
         with connection.cursor() as cur:
-            cur.execute(
-                "INSERT INTO quote_items (repuesto_codigo) VALUES (%s)",
-                [repuesto_codigo],
-            )
+            cur.execute("INSERT INTO ingresos(device_id, motivo) VALUES (%s, 'reparación') RETURNING id", [device_id])
+            ingreso_id = cur.fetchone()[0]
+            cur.execute("INSERT INTO quotes(ingreso_id) VALUES (%s) RETURNING id", [ingreso_id])
+            quote_id = cur.fetchone()[0]
+            cur.execute("INSERT INTO quote_items(quote_id, tipo, descripcion, precio_u, repuesto_codigo) VALUES (%s, 'repuesto', 'Repuesto de prueba', 0, %s)", [quote_id, repuesto_codigo])
 
     def test_renombra_codigo_viejo_a_nuevo_y_actualiza_quote_items(self):
         self._insert_repuesto("AE-001", "Caja de embalaje C-500")

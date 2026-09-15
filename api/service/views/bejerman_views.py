@@ -21,6 +21,7 @@ from ..bejerman_ris import (
     BejermanRisPreflightError,
     emit_or_get_ris,
     register_ris_batch,
+    resolve_bejerman_ingreso_remito_review,
 )
 from ..bejerman_sync import (
     BejermanBlockedError,
@@ -32,11 +33,12 @@ from ..bejerman_sync import (
     PORTAL_STOCK_EXIT_MESSAGE,
     SYNC_TYPE_STOCK_ENTRY_STR,
     SYNC_TYPE_STOCK_EXIT_RTS,
+    SYNC_TYPE_STOCK_TO_DESGUACE,
     apply_article_mapping_to_job,
     article_resolution_for_job_row,
     cancel_sync_job,
     is_supported_sync_type,
-    article_context_for_ingreso,
+    article_context_for_job,
     article_context_for_model,
     process_bejerman_jobs,
     search_bejerman_articles_for_job,
@@ -94,14 +96,23 @@ def _build_job_filters(params, *, include_status=True):
               OR (j.status = 'cancelled' AND j.updated_at < NOW() - INTERVAL '7 days')
               OR (
                 j.status IN ('failed', 'blocked')
+                -- Un job sin OS (alta de equipo propio) no tiene ingreso al que mirarle el
+                -- estado. Sin este corte, `t.*` es NULL, la condición entera da NULL en vez
+                -- de falso y el NOT lo descarta: el job desaparecería justo cuando falla.
+                AND j.ingreso_id IS NOT NULL
                 AND (
-                  t.estado IN ('vendido_entregado', 'baja')
+                  t.estado = 'vendido_entregado'
+                  -- La baja es la que encola el pase a DES: que la OS esté en baja no vuelve
+                  -- viejo a ese job, es justamente su contexto. Escondido por su propio
+                  -- estado, un pase a DES trabado no lo veía nadie (OS 29587, 09/2026).
+                  OR (t.estado = 'baja' AND j.sync_type <> %s)
                   OR t.remito_salida IS NOT NULL
                 )
               )
             )
             """
         )
+        sql_params.append(SYNC_TYPE_STOCK_TO_DESGUACE)
 
     if include_status:
         status = (params.get("status") or "").strip()
@@ -353,7 +364,7 @@ def _sort_remito_processes(rows):
     )
 
 
-def _ingreso_remito_processes():
+def _ingreso_remito_processes(action_permissions=None):
     if not _table_exists("bejerman_ingreso_remitos"):
         return []
     rows = q(
@@ -409,6 +420,29 @@ def _ingreso_remito_processes():
         generated = row.get("status") == "generated"
         response_payload = _json_value(row.get("response_payload"), {})
         attempted_at = row.get("updated_at") or row.get("generated_at") or row.get("created_at")
+        # Sin estas acciones el front caía en sus defaults (`?? (canManage && needsReview)`)
+        # y dibujaba sobre una fila de ingreso los botones de las órdenes de entrega:
+        # verificar y reemitir, que acá no existen. Se declaran las que sí existen.
+        status = row.get("status") or ""
+        review_state = _clean_filter(response_payload.get("reviewState"))
+        if status == "failed_review" and not review_state:
+            review_state = "requires_verification"
+        superseded = review_state == "superseded"
+        can_manage = bool((action_permissions or {}).get("manage", True))
+        blocked_reason = _clean_filter(response_payload.get("blockedReason"))
+        needs_review = status == "failed_review" and not superseded
+        actions = {
+            "verify": {"visible": False, "allowed": False, "blockedReason": ""},
+            "edit": {"visible": False, "allowed": False, "blockedReason": ""},
+            "resolve": {
+                "visible": needs_review,
+                "allowed": needs_review and can_manage,
+                "blockedReason": "" if can_manage else "No tiene permiso para resolver revisiones de Bejerman.",
+                "candidates": [],
+                "suggestedNumber": _clean_filter(row.get("remito_number")) or _clean_filter(row.get("manual_remito_number")),
+            },
+            "reissue": {"visible": False, "allowed": False, "blockedReason": ""},
+        }
         out.append(
             {
                 **row,
@@ -420,7 +454,10 @@ def _ingreso_remito_processes():
                 "equipment_label": equipment_label,
                 "title": row.get("remito_number") or row.get("manual_remito_number") or "Remito de ingreso",
                 "operation_label": "Registrar remito" if document_mode == "register" else "Emitir remito",
-                "retryable": row.get("status") == "failed",
+                "retryable": status == "failed" and not superseded,
+                "reviewState": review_state,
+                "actions": actions,
+                "blockedReason": blocked_reason,
                 "last_error": _remito_error_message(response_payload, row.get("last_error")),
                 "attempted_at": attempted_at,
                 "pdf_url": f"/api/ingresos/{row.get('ingreso_id')}/ris/pdf/" if generated and document_mode == "emit" else None,
@@ -800,7 +837,7 @@ def _list_remito_processes(params, *, include_status=True, action_permissions=No
     source = _clean_filter(params.get("source") or params.get("origen")).lower()
     rows = []
     if source in {"", "ingreso"}:
-        rows.extend(_ingreso_remito_processes())
+        rows.extend(_ingreso_remito_processes(action_permissions=action_permissions))
     if source in {"", "orden_entrega"}:
         rows.extend(_delivery_remito_processes(action_permissions=action_permissions))
     if source in {"", "ingreso_conflicto"}:
@@ -858,7 +895,7 @@ class BejermanJobsView(APIView):
                    COALESCE(m.nombre, '') AS modelo,
                    COALESCE(NULLIF(t.equipo_variante, ''), NULLIF(d.variante, ''), NULLIF(m.variante, ''), '') AS variante
               FROM bejerman_sync_jobs j
-              JOIN ingresos t ON t.id = j.ingreso_id
+              LEFT JOIN ingresos t ON t.id = j.ingreso_id
               JOIN devices d ON d.id = j.device_id
               LEFT JOIN customers c ON c.id = d.customer_id
               LEFT JOIN marcas b ON b.id = d.marca_id
@@ -906,7 +943,7 @@ class BejermanJobsView(APIView):
             f"""
             SELECT j.status, COUNT(*) AS count
               FROM bejerman_sync_jobs j
-              JOIN ingresos t ON t.id = j.ingreso_id
+              LEFT JOIN ingresos t ON t.id = j.ingreso_id
               JOIN devices d ON d.id = j.device_id
               LEFT JOIN customers c ON c.id = d.customer_id
               LEFT JOIN marcas b ON b.id = d.marca_id
@@ -1135,6 +1172,34 @@ class BejermanRemitoProcessRetryView(APIView):
                 return Response({"detail": "Proceso de remito no encontrado"}, status=404)
             if row.get("status") not in {"failed", "failed_review"}:
                 return Response({"detail": "Solo se pueden reintentar remitos fallidos o pendientes de revisión"}, status=409)
+            retry_payload = dict(request.data or {})
+            action = _clean_filter(retry_payload.get("action")).lower()
+            # Sin esto la acción no se leía nunca: el panel dibujaba «Verificar»,
+            # «Resolver revisión» y «Emitir corregido» sobre las filas de ingreso y
+            # las tres terminaban acá abajo reintentando la emisión, que el propio
+            # estado `failed_review` rechaza. Tres botones, una sola pared.
+            if action == "resolve":
+                try:
+                    result = resolve_bejerman_ingreso_remito_review(row["id"], actor_id, retry_payload)
+                except BejermanRisError as exc:
+                    return Response({"detail": str(exc)}, status=409)
+                return Response({"ok": True, "source": source, "result": result})
+            if action and action not in {"retry", "reissue_corrected"}:
+                return Response(
+                    {"detail": "Para un remito de ingreso indique action=resolve o action=retry."},
+                    status=400,
+                )
+            if row.get("status") == "failed_review":
+                return Response(
+                    {
+                        "detail": (
+                            "Este comprobante está pendiente de revisión. Use «Resolver revisión» "
+                            "para indicar si existe en Bejerman o si no se emitió."
+                        ),
+                        "code": "BEJERMAN_RIS_REQUIRES_REVIEW",
+                    },
+                    status=409,
+                )
             try:
                 if (row.get("document_mode") or "emit") == "register":
                     manual = row.get("manual_remito_number") or row.get("remito_number")
@@ -1241,14 +1306,17 @@ class BejermanArticleMappingsView(APIView):
         company_key = requested_company_key or DEFAULT_INGRESS_COMPANY_KEY
         if job_id:
             row = q(
-                "SELECT ingreso_id, COALESCE(NULLIF(company_key, ''), %s) AS company_key FROM bejerman_sync_jobs WHERE id=%s",
+                "SELECT ingreso_id, device_id, COALESCE(NULLIF(company_key, ''), %s) AS company_key "
+                "FROM bejerman_sync_jobs WHERE id=%s",
                 [DEFAULT_INGRESS_COMPANY_KEY, job_id],
                 one=True,
             )
             if not row:
                 return Response({"detail": "Operación Bejerman no encontrada"}, status=404)
             company_key = requested_company_key or row.get("company_key") or DEFAULT_INGRESS_COMPANY_KEY
-            context = article_context_for_ingreso(int(row["ingreso_id"]))
+            # Un job de alta de equipo propio no tiene OS: el contexto sale de la ficha del
+            # equipo. Es justamente el job que llega acá cuando le falta el mapeo de artículo.
+            context = article_context_for_job(row)
             model_id = int(context["model_id"])
             variante = context.get("variante") or ""
 

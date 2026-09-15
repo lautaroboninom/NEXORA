@@ -194,7 +194,7 @@ def has_other_open_ingresos(propietario_doc: Any, exclude_ingreso_id: Any = None
             SELECT 1
               FROM ingresos t
              WHERE regexp_replace(COALESCE(t.propietario_doc, ''), '[^0-9]', '', 'g') = %s
-               AND COALESCE(t.estado, '') NOT IN ({placeholders})
+               AND COALESCE(t.estado::text, '') NOT IN ({placeholders})
                {exclude_sql}
              LIMIT 1
             """,

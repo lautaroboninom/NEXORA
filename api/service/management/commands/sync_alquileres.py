@@ -5,6 +5,8 @@ import os
 import csv
 import re
 
+from service.mg_codes import normalize_mg_code, sql_is_mg_code
+
 
 class Command(BaseCommand):
     help = (
@@ -112,6 +114,11 @@ class Command(BaseCommand):
     def _norm_mg(mg: Optional[str]) -> Optional[str]:
         if not mg:
             return None
+        # Primero el criterio único de NEXORA ("MG1678", "MG 001678", "NM 12"). Lo de abajo queda
+        # para lo que la planilla trae suelto, como "1234".
+        canonico = normalize_mg_code(mg)
+        if canonico:
+            return canonico
         s = (mg or "").upper().strip()
         # Extraer dígitos
         m = re.search(r"(\d{1,4})$", s)
@@ -805,7 +812,7 @@ class Command(BaseCommand):
 
                 # MG no alquilados (excluyendo ubicaciones)
                 cur.execute(
-                    r"""
+                    f"""
                     SELECT d.id, d.numero_interno, d.numero_serie,
                            COALESCE(l.nombre,'') AS ubicacion,
                            COALESCE(c.razon_social,'') AS cliente
@@ -820,8 +827,8 @@ class Command(BaseCommand):
                       ) last ON TRUE
                       LEFT JOIN locations l ON l.id = last.ubicacion_id
                      WHERE (
-                            (d.numero_interno IS NOT NULL AND d.numero_interno ~ '^MG\\s\\d{4}$')
-                         OR (d.numero_serie IS NOT NULL AND d.numero_serie ~ '^MG\\s\\d{4}$')
+                            {sql_is_mg_code('d.numero_interno')}
+                         OR {sql_is_mg_code('d.numero_serie')}
                            )
                     """
                 )

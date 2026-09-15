@@ -18,6 +18,7 @@ from django.test import SimpleTestCase
 from service.views.reportes_views import (
     ESTADOS_SALIDA_YA_EMITIDA,
     RemitoSalidaPdfView,
+    ingreso_requiere_presupuesto,
     presupuesto_bloquea_salida,
 )
 
@@ -39,6 +40,16 @@ def _request():
 
 
 class PresupuestoBloqueaSalidaTests(SimpleTestCase):
+    def test_anulado_o_desconocido_no_habilitan_una_reparacion_cobrable(self):
+        for presupuesto in ("anulado", "desconocido", "emitido"):
+            with self.subTest(presupuesto=presupuesto):
+                self.assertTrue(presupuesto_bloquea_salida("reparado", presupuesto))
+
+    def test_emitido_sin_respuesta_bloquea_tambien_las_excepciones(self):
+        self.assertTrue(presupuesto_bloquea_salida(
+            "reparado", "emitido", requiere_presupuesto=False
+        ))
+
     def test_presupuesto_emitido_sin_respuesta_frena_la_salida(self):
         self.assertTrue(presupuesto_bloquea_salida("reparado", "presupuestado"))
 
@@ -54,12 +65,98 @@ class PresupuestoBloqueaSalidaTests(SimpleTestCase):
             with self.subTest(presupuesto=presupuesto):
                 self.assertFalse(presupuesto_bloquea_salida("reparado", presupuesto))
 
-    def test_las_os_sin_presupuesto_no_se_ven_afectadas(self):
-        # Garantías, equipos propios y todo lo que se repara sin presupuestar: el corte
-        # sólo mira el presupuesto ya emitido, nunca el que no existe.
-        for presupuesto in (None, "", "pendiente", "no_aplica"):
+    def test_la_reparacion_que_nadie_presupuesto_tampoco_sale(self):
+        # Caso del 09/09/2026 (OS 29639): el equipo de un cliente, sin garantía, reparado
+        # y liberado el mismo día con el presupuesto en 'pendiente'. El corte del 07/09
+        # sólo miraba 'presupuestado' y esta OS pasó de largo.
+        for presupuesto in (None, "", "pendiente"):
             with self.subTest(presupuesto=presupuesto):
-                self.assertFalse(presupuesto_bloquea_salida("reparado", presupuesto))
+                self.assertTrue(presupuesto_bloquea_salida("reparado", presupuesto))
+
+    def test_el_no_aplica_es_la_salida_del_trabajo_que_no_se_cobra(self):
+        self.assertFalse(presupuesto_bloquea_salida("reparado", "no_aplica"))
+
+
+    def test_lo_que_no_se_le_cobra_a_nadie_sale_sin_presupuesto(self):
+        # Garantías, equipos propios, alquileres y demos se reparan sin presupuestar:
+        # `requiere_presupuesto` en False es lo que los deja pasar.
+        for presupuesto in (None, "", "pendiente"):
+            with self.subTest(presupuesto=presupuesto):
+                self.assertFalse(
+                    presupuesto_bloquea_salida(
+                        "reparado", presupuesto, requiere_presupuesto=False
+                    )
+                )
+
+    def test_sin_reparacion_hecha_el_equipo_vuelve_igual_cuando_no_se_repara(self):
+        # `no_se_repara` devuelve el equipo sin trabajo que cobrar y no frena por presupuesto pendiente.
+        self.assertFalse(presupuesto_bloquea_salida("no_se_repara", "pendiente"))
+
+    def test_controlado_sin_defecto_en_cliente_frena_si_presupuesto_sigue_pendiente(self):
+        # Para el equipo de un cliente, el control sin defecto exige presupuesto cerrado (o no_aplica explícito)
+        for presupuesto in (None, "", "pendiente"):
+            with self.subTest(presupuesto=presupuesto):
+                self.assertTrue(presupuesto_bloquea_salida("controlado_sin_defecto", presupuesto))
+
+    def test_controlado_sin_defecto_propio_o_garantia_no_frena(self):
+        self.assertFalse(
+            presupuesto_bloquea_salida(
+                "controlado_sin_defecto", "pendiente", requiere_presupuesto=False
+            )
+        )
+
+
+class QuienNecesitaPresupuestoTests(SimpleTestCase):
+    """De quién es el equipo y quién paga el trabajo."""
+
+    def test_serie_con_formato_mg_no_acredita_equipo_propio(self):
+        self.assertTrue(ingreso_requiere_presupuesto({"numero_serie": "MG 1234"}))
+
+    def test_garantia_falsa_en_texto_no_exime_del_presupuesto(self):
+        self.assertTrue(ingreso_requiere_presupuesto({"garantia_fabrica": "false"}))
+
+    def test_el_equipo_de_un_cliente_sin_garantia_necesita_presupuesto(self):
+        self.assertTrue(
+            ingreso_requiere_presupuesto(
+                {"motivo": "reparación", "numero_interno": "", "garantia_fabrica": False}
+            )
+        )
+
+    def test_las_garantias_no(self):
+        for campo in ("garantia_fabrica", "garantia_reparacion"):
+            with self.subTest(campo=campo):
+                self.assertFalse(ingreso_requiere_presupuesto({campo: True}))
+
+    def test_los_equipos_propios_no(self):
+        for numero_interno in ("MG 1234", "mg1234", "NM 12", "NV 0007", "CE 500"):
+            with self.subTest(numero_interno=numero_interno):
+                self.assertFalse(
+                    ingreso_requiere_presupuesto({"numero_interno": numero_interno})
+                )
+
+    def test_el_mg_vendido_vuelve_a_necesitarlo(self):
+        # Dejó de ser nuestro: la reparación se le cobra al cliente que lo compró.
+        self.assertTrue(
+            ingreso_requiere_presupuesto(
+                {"numero_interno": "MG 1234", "mg_estado": "inactivo_venta"}
+            )
+        )
+
+    def test_alquileres_y_demos_no(self):
+        for motivo in (
+            "baja alquiler",
+            "reparación alquiler",
+            "reparacion alquiler",
+            "devolución demo",
+            "cotización de equipo",
+        ):
+            with self.subTest(motivo=motivo):
+                self.assertFalse(ingreso_requiere_presupuesto({"motivo": motivo}))
+
+    def test_un_service_preventivo_de_un_cliente_si(self):
+        # Es trabajo cobrable sobre el equipo de otro: sale con presupuesto o con un
+        # "No aplica" puesto a mano.
+        self.assertTrue(ingreso_requiere_presupuesto({"motivo": "service preventivo"}))
 
     def test_una_os_ya_liberada_puede_reimprimir(self):
         # La orden ya salió: bloquear acá sólo impediría reimprimir el papel perdido, y
@@ -102,4 +199,34 @@ class OrdenDeSalidaConPresupuestoSinAprobarTests(SimpleTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], "presupuesto_sin_aprobar")
         self.assertIn("Aprobalo o rechazalo", response.data["detail"])
+        exec_void.assert_not_called()
+
+    @patch("service.views.reportes_views.get_active_derivation", return_value=None)
+    @patch(
+        "service.views.reportes_views.q",
+        return_value={
+            "estado": "reparado",
+            "resolucion": "reparado",
+            "presupuesto_estado": "pendiente",
+            "garantia_fabrica": False,
+            "garantia_reparacion": False,
+            "motivo": "reparación",
+            "numero_interno": "",
+            "mg_estado": "activo",
+        },
+    )
+    @patch("service.views.reportes_views.exec_void")
+    @patch("service.views.reportes_views.require_roles")
+    @patch("service.views.reportes_views._set_audit_user")
+    def test_la_reparacion_sin_presupuesto_tampoco_se_libera(self, _audit, _roles, exec_void, _query, _deriv):
+        # OS 29639: el presupuesto ni siquiera se emitió. Antes esto pasaba derecho.
+        response = _without_atomic(RemitoSalidaPdfView.get)(
+            RemitoSalidaPdfView(),
+            _request(),
+            29639,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "presupuesto_sin_aprobar")
+        self.assertIn("No aplica", response.data["detail"])
         exec_void.assert_not_called()

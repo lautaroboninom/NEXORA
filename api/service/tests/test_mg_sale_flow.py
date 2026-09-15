@@ -1,4 +1,5 @@
 from unittest import skipUnless
+from unittest.mock import patch
 
 from django.core import mail
 from django.core.management import call_command
@@ -157,8 +158,8 @@ class MgSaleFlowAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     @classmethod
@@ -189,24 +190,24 @@ class MgSaleFlowAPITest(TestCase):
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["MGBIO", "MG BIO", ""],
             )
-            cls.customer_mg_id = cls._last_id(cur)
+            cls.customer_mg_id = cls._last_id(cur, "customers")
             cur.execute(
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["CLI001", "Clinica Demo", "123"],
             )
-            cls.customer_cli_id = cls._last_id(cur)
+            cls.customer_cli_id = cls._last_id(cur, "customers")
 
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["ResMed"])
-            cls.marca_id = cls._last_id(cur)
+            cls.marca_id = cls._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [cls.marca_id, "AirSense 10", "CPAP"],
             )
-            cls.model_id = cls._last_id(cur)
+            cls.model_id = cls._last_id(cur, "models")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
-            cls.taller_id = cls._last_id(cur)
+            cls.taller_id = cls._last_id(cur, "locations")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["-"])
-            cls.dash_id = cls._last_id(cur)
+            cls.dash_id = cls._last_id(cur, "locations")
 
             cur.execute(
                 """
@@ -216,7 +217,7 @@ class MgSaleFlowAPITest(TestCase):
                 """,
                 [cls.customer_cli_id, cls.marca_id, cls.model_id, "NS-MG-9001", "MG 9001"],
             )
-            cls.device_id = cls._last_id(cur)
+            cls.device_id = cls._last_id(cur, "devices")
 
             cur.execute(
                 """
@@ -226,7 +227,7 @@ class MgSaleFlowAPITest(TestCase):
                 """,
                 [cls.customer_cli_id, cls.marca_id, cls.model_id, "NS-MG-9002", "MG 9002"],
             )
-            cls.device_id_2 = cls._last_id(cur)
+            cls.device_id_2 = cls._last_id(cur, "devices")
 
     def setUp(self):
         super().setUp()
@@ -255,7 +256,7 @@ class MgSaleFlowAPITest(TestCase):
                     garantia_reparacion, garantia_fabrica, remito_ingreso,
                     alquilado, alquiler_a, alquiler_remito, alquiler_fecha
                 )
-                VALUES (%s,%s,'reparacion',now(),%s,'Test','','',false,false,'',
+                VALUES (%s,%s,'reparación',now(),%s,'Test','','',false,false,'',
                         %s,%s,%s,%s)
                 """,
                 [
@@ -268,7 +269,7 @@ class MgSaleFlowAPITest(TestCase):
                     "2026-03-01" if alquilado else None,
                 ],
             )
-            return self._last_id(cur)
+            return self._last_id(cur, "ingresos")
 
     def _base_nuevo_payload(self, *, numero_serie, numero_interno):
         return {
@@ -500,7 +501,8 @@ class MgSaleFlowAPITest(TestCase):
         self.assertEqual(sold.status_code, 200)
 
         payload = self._base_nuevo_payload(numero_serie="NS-MG-9001", numero_interno="MG 9001")
-        resp = self.client.post(self._url_nuevo_ingreso(), payload, format="json")
+        with patch("service.views.ingresos_views.preflight_ris_for_request_payload", return_value={"can_emit": True}):
+            resp = self.client.post(self._url_nuevo_ingreso(), payload, format="json")
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertEqual(resp.data.get("conflict_type"), "MG_INACTIVO_VENTA", resp.data)
 
@@ -517,7 +519,8 @@ class MgSaleFlowAPITest(TestCase):
         self.assertEqual(sold.status_code, 200)
 
         payload = self._base_nuevo_payload(numero_serie="NS-MG-9001", numero_interno="")
-        resp = self.client.post(self._url_nuevo_ingreso(), payload, format="json")
+        with patch("service.views.ingresos_views.preflight_ris_for_request_payload", return_value={"can_emit": True}):
+            resp = self.client.post(self._url_nuevo_ingreso(), payload, format="json")
         self.assertIn(resp.status_code, (200, 201), resp.data)
         self.assertTrue(bool(resp.data.get("ingreso_id")))
 
@@ -585,11 +588,18 @@ class MgSaleFlowAPITest(TestCase):
 
         self.assertEqual(sold.status_code, 200)
         with connection.cursor() as cur:
-            cur.execute("SELECT estado, fecha_entrega, factura_numero FROM ingresos WHERE id=%s", [ingreso_id])
+            cur.execute(
+                "SELECT estado, fecha_entrega, factura_numero, ubicacion_id FROM ingresos WHERE id=%s",
+                [ingreso_id],
+            )
             pending = cur.fetchone()
         self.assertEqual(pending[0], "vendido_pendiente_entrega")
         self.assertIsNone(pending[1])
         self.assertEqual(pending[2], "FAC-VTA-2")
+        # El equipo todavía está acá esperando el RT: la OS tiene que quedar en el taller.
+        # Mandarla a '-' -como sí corresponde cuando la venta ya se entregó- la sacaba de
+        # todas las colas, que filtran por ubicación 'taller'.
+        self.assertEqual(int(pending[3]), int(self.taller_id))
 
         delivered = self.client.post(
             self._url_entregar(ingreso_id),
@@ -620,3 +630,135 @@ class MgSaleFlowAPITest(TestCase):
         self.assertEqual(ingreso[3], "FAC-VTA-2")
         self.assertIsNotNone(ingreso[4])
         self.assertGreaterEqual(event_count, 1)
+
+    def test_venta_sobre_os_ya_entregada_no_la_reabre(self):
+        """Caso OS 29534: entregada el 04/09/2026, la venta registrada el 07/09 la mandaba
+        de vuelta a 'vendido_pendiente_entrega' con el equipo ya en poder del cliente."""
+        ingreso_id = self._create_ingreso(device_id=self.device_id_2, estado="entregado", alquilado=False)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingresos
+                   SET fecha_entrega = %s, remito_salida = %s
+                 WHERE id = %s
+                """,
+                ["2026-09-04", "RSS R 00004-00009999", ingreso_id],
+            )
+
+        resp = self.client.post(
+            self._url_venta(self.device_id_2),
+            {
+                "factura_numero": "FAC-VTA-3",
+                "remito_numero": "REM-VTA-3",
+                "venta_customer_id": self.customer_cli_id,
+                "source": "service_sheet",
+                "ingreso_id": ingreso_id,
+                "fecha_venta": "2026-09-07",
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT estado, ubicacion_id, remito_salida, fecha_entrega
+                  FROM ingresos
+                 WHERE id=%s
+                """,
+                [ingreso_id],
+            )
+            ingreso = cur.fetchone()
+
+        self.assertEqual(ingreso[0], "vendido_entregado")
+        self.assertEqual(int(ingreso[1]), int(self.dash_id))
+        # La entrega real no se pisa con los datos de la venta.
+        self.assertEqual(ingreso[2], "RSS R 00004-00009999")
+        self.assertEqual(ingreso[3].date().isoformat(), "2026-09-04")
+
+    def _vender_desde_equipos(self, device_id, **extra):
+        payload = {
+            "remito_numero": "RTN R 00004-00004033",
+            "venta_customer_id": self.customer_cli_id,
+            "source": "equipos",
+            "fecha_venta": "2026-04-06",
+            **extra,
+        }
+        return self.client.post(self._url_venta(device_id), payload, format="json")
+
+    def test_venta_desde_equipos_saca_la_os_de_la_estanteria(self):
+        """Caso OS 29131 (14/09/2026): la venta cargada desde Equipos -o por la planilla MADRE-
+        no tocaba la OS, que quedaba "controlado sin defecto" en la estantería de alquiler con el
+        equipo ya vendido, afuera de todas las colas."""
+        ingreso_id = self._create_ingreso(device_id=self.device_id_2, estado="controlado_sin_defecto")
+        with connection.cursor() as cur:
+            cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Estantería de Alquiler"])
+            estanteria_id = self._last_id(cur, "locations")
+            cur.execute("UPDATE ingresos SET ubicacion_id=%s WHERE id=%s", [estanteria_id, ingreso_id])
+
+        resp = self._vender_desde_equipos(self.device_id_2)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado, ubicacion_id FROM ingresos WHERE id=%s", [ingreso_id])
+            estado, ubicacion_id = cur.fetchone()
+            cur.execute(
+                "SELECT ingreso_id FROM device_mg_events WHERE device_id=%s AND accion='venta' ORDER BY id DESC LIMIT 1",
+                [self.device_id_2],
+            )
+            evento_ingreso_id = cur.fetchone()[0]
+        # El equipo sigue acá hasta que salga con su RT o RTN: la OS va al Taller y aparece en
+        # Liberados, no se queda en la estantería ofreciendo un equipo vendido.
+        self.assertEqual(estado, "vendido_pendiente_entrega")
+        self.assertEqual(int(ubicacion_id), int(self.taller_id))
+        self.assertEqual(int(evento_ingreso_id), ingreso_id)
+
+    def test_venta_desde_equipos_no_toca_una_reparacion_en_curso(self):
+        ingreso_id = self._create_ingreso(device_id=self.device_id_2, estado="diagnosticado")
+
+        resp = self._vender_desde_equipos(self.device_id_2)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado, ubicacion_id FROM ingresos WHERE id=%s", [ingreso_id])
+            estado, ubicacion_id = cur.fetchone()
+        self.assertEqual(estado, "diagnosticado")
+        self.assertEqual(int(ubicacion_id), int(self.taller_id))
+
+    def test_salida_con_rtn_de_aporte_cierra_vendida_sin_mover_stock(self):
+        """Los aportes a NOVAMED salen con RTN, que no se factura: marcado como venta cierra la OS
+        y NEXORA no encola ningún pase de stock, porque el RTN ya lo movió en Bejerman."""
+        ingreso_id = self._create_ingreso(device_id=self.device_id_2, estado="controlado_sin_defecto")
+
+        with patch("service.views.ingresos_views.enqueue_stock_transfer_for_ingreso") as alquiler, patch(
+            "service.views.ingresos_views.enqueue_client_ready_transfer_for_ingreso"
+        ) as cliente, patch("service.views.ingresos_views.enqueue_demo_ready_transfer_for_ingreso") as demo:
+            resp = self.client.post(
+                self._url_entregar(ingreso_id),
+                {"remito_salida": "RTN R 00004-00004033", "fecha_entrega": "2026-04-06", "venta": True},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado, remito_salida FROM ingresos WHERE id=%s", [ingreso_id])
+            estado, remito_salida = cur.fetchone()
+        self.assertEqual(estado, "vendido_entregado")
+        self.assertEqual(remito_salida, "RTN R 00004-00004033")
+        alquiler.assert_not_called()
+        cliente.assert_not_called()
+        demo.assert_not_called()
+
+    def test_la_marca_de_venta_rechaza_un_remito_que_no_es_rt_ni_rtn(self):
+        ingreso_id = self._create_ingreso(device_id=self.device_id_2, estado="controlado_sin_defecto")
+
+        resp = self.client.post(
+            self._url_entregar(ingreso_id),
+            {"remito_salida": "RSS R 00004-00004833", "venta": True},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        with connection.cursor() as cur:
+            cur.execute("SELECT estado FROM ingresos WHERE id=%s", [ingreso_id])
+            self.assertEqual(cur.fetchone()[0], "controlado_sin_defecto")

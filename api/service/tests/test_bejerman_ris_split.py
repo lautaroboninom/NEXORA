@@ -4,9 +4,11 @@ from django.test import SimpleTestCase, override_settings
 
 from service.bejerman_ris import (
     BejermanRisError,
+    BejermanRisReviewRequiredError,
     _combined_payload,
     _partition_service_ingress_payload,
     _preflight_from_contexts,
+    _recover_emit_partida_rejection,
     _send_service_ingress_comprobante,
     emit_or_get_ris_batch,
     register_ris_batch,
@@ -73,6 +75,29 @@ def _customer_fields():
 
 @override_settings(BEJERMAN_RIS_MAX_PRINT_LINES=22)
 class BejermanRisSplitTests(SimpleTestCase):
+    @override_settings(BEJERMAN_RECOVERY_KEEPS_STOCK_MOVEMENT=True)
+    def test_reintento_ris_que_entra_con_error_no_repone_el_ent(self):
+        client = Mock()
+        client.ingresar_comprobante_ventas_json.side_effect = [RuntimeError("timeout"), {"Resultado": "OK"}]
+        entries = [{"Comprobante_ArtPartida": "N568930", "Comprobante_ArtDeposito": "STR"}]
+        payload = {"documentProfile": {"deposit": "STR"}, "equipment": {"serial": "N568930"}}
+        built = {"comprobante": {"Comprobante_Items": []}}
+
+        with (
+            patch("service.bejerman_ris._ensure_register_stock_entries", return_value=entries),
+            patch("service.bejerman_ris._neutralize_register_stock_entries"),
+            patch("service.bejerman_ris._register_entries_moved_by_comprobante", return_value=True),
+            patch("service.bejerman_ris._restore_register_stock_entries") as restore,
+            patch("service.bejerman_ris._service_ingress_response", return_value={"remitoNumber": "RDA R 00001-00005287"}),
+        ):
+            with self.assertRaises(BejermanRisReviewRequiredError):
+                _recover_emit_partida_rejection(
+                    client, payload, built, operation="IngresarComprobanteJSON", numera_flex="S", emite_reg="E"
+                )
+
+        self.assertEqual(client.ingresar_comprobante_ventas_json.call_count, 1)
+        restore.assert_not_called()
+
     def test_preflight_de_12_equipos_cuenta_las_os_provisionales(self):
         payloads = [_equipment_payload(f"preflight-{index + 1}") for index in range(12)]
         contexts = [{"id": f"preflight-{index + 1}"} for index in range(12)]
@@ -210,6 +235,25 @@ class BejermanRisSplitTests(SimpleTestCase):
         self.assertEqual(result["id"], 101)
         self.assertEqual([item["ingresoIds"] for item in result["remitos"]], emitted)
         self.assertEqual([item["lineCount"] for item in result["remitos"]], [22, 16])
+
+    def test_lote_incierto_deja_en_revision_solo_el_bloque_enviado(self):
+        ingreso_ids = list(range(1, 13))
+        with (
+            patch("service.bejerman_ris._ensure_ris_row"),
+            patch("service.bejerman_ris._row_for_ingreso", return_value={"status": "pending"}),
+            patch("service.bejerman_ris.preflight_ris_for_ingresos", return_value={"can_emit": True, "issues": []}),
+            patch("service.bejerman_ris._lock_for_emit_many"),
+            patch("service.bejerman_ris._build_batch_payload", return_value=_combined(ingreso_ids)),
+            patch("service.bejerman_ris._emit_payload_to_bejerman", side_effect=BejermanRisReviewRequiredError("Emisión incierta")) as emit,
+            patch("service.bejerman_ris._mark_ris_emission_uncertain") as review,
+            patch("service.bejerman_ris._update_ris_failure_many") as failed,
+        ):
+            with self.assertRaises(BejermanRisReviewRequiredError):
+                emit_or_get_ris_batch(ingreso_ids, user_id=9)
+        emit.assert_called_once()
+        self.assertEqual([call.args[0] for call in review.call_args_list], list(range(1, 8)))
+        self.assertEqual(failed.call_args.args[0], list(range(8, 13)))
+        failed.assert_called_once()
 
     def test_guard_final_bloquea_un_bloque_mayor_a_22_antes_del_sdk(self):
         client = Mock()

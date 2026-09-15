@@ -14,7 +14,6 @@ from service.views import ingresos_views, work_views
 class GlobalSearchRemitosTests(TestCase):
     @classmethod
     def setUpClass(cls):
-        super().setUpClass()
         with connection.cursor() as cur:
             cur.execute(
                 """
@@ -86,6 +85,7 @@ class GlobalSearchRemitosTests(TestCase):
                 """
             )
         call_command("apply_delivery_orders_schema", verbosity=0)
+        super().setUpClass()
         call_command("apply_bejerman_ris_schema", verbosity=0)
         call_command("apply_user_permissions_schema", verbosity=0)
 
@@ -108,7 +108,7 @@ class GlobalSearchRemitosTests(TestCase):
             device_id = int(cur.fetchone()[0])
 
             cur.execute(
-                "INSERT INTO ingresos(device_id) VALUES (%s) RETURNING id",
+                "INSERT INTO ingresos(device_id, motivo) VALUES (%s, 'reparación') RETURNING id",
                 [device_id],
             )
             cls.rda_ingreso_id = int(cur.fetchone()[0])
@@ -123,7 +123,7 @@ class GlobalSearchRemitosTests(TestCase):
             )
 
             cur.execute(
-                "INSERT INTO ingresos(device_id) VALUES (%s) RETURNING id",
+                "INSERT INTO ingresos(device_id, motivo) VALUES (%s, 'reparación') RETURNING id",
                 [device_id],
             )
             cls.rss_ingreso_id = int(cur.fetchone()[0])

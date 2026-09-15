@@ -244,9 +244,9 @@ class AirSepLocalCorrectionTests(TestCase):
         self._device("BUB0115121451", "")
 
         with connection.cursor() as cur:
-            cur.execute("INSERT INTO ingresos(device_id) VALUES (%s) RETURNING id", [source_id])
+            cur.execute("INSERT INTO ingresos(device_id, motivo) VALUES (%s, 'reparación') RETURNING id", [source_id])
             ingreso_id = int(cur.fetchone()[0])
-            cur.execute("INSERT INTO ingresos(device_id) VALUES (%s)", [target_id])
+            cur.execute("INSERT INTO ingresos(device_id, motivo) VALUES (%s, 'reparación')", [target_id])
             cur.execute(
                 """
                 INSERT INTO bejerman_sync_jobs(sync_type, ingreso_id, device_id, numero_serie, source_deposit, target_deposit, status)
@@ -274,12 +274,13 @@ class AirSepLocalCorrectionTests(TestCase):
                 VALUES ('partida-1', 'item-1', '5157952')
                 """
             )
-            cur.execute("INSERT INTO device_mg_events(device_id) VALUES (%s)", [source_id])
-            cur.execute("INSERT INTO preventivo_planes(device_id, activa) VALUES (%s, TRUE)", [source_id])
-            cur.execute(
-                "INSERT INTO preventivo_revision_items(device_id, serie_snapshot) VALUES (%s, '5157952')",
-                [source_id],
-            )
+            cur.execute("INSERT INTO device_mg_events(device_id, accion) VALUES (%s, 'reactivacion')", [source_id])
+            cur.execute("INSERT INTO preventivo_planes(device_id, activa, scope_type, periodicidad_valor, periodicidad_unidad) VALUES (%s, TRUE, 'device', 1, 'meses')", [source_id])
+            cur.execute("SELECT id FROM preventivo_planes WHERE device_id = %s", [source_id])
+            plan_id = cur.fetchone()[0]
+            cur.execute("INSERT INTO preventivo_revisiones(plan_id, fecha_programada) VALUES (%s, CURRENT_DATE) RETURNING id", [plan_id])
+            revision_id = cur.fetchone()[0]
+            cur.execute("INSERT INTO preventivo_revision_items(revision_id, device_id, serie_snapshot) VALUES (%s, %s, '5157952')", [revision_id, source_id])
 
         candidates = load_airsep_candidates()
         self.assertEqual(sum(1 for item in candidates if item.action == "update"), 1)

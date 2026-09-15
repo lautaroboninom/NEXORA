@@ -12,10 +12,10 @@ Con esto el POST sólo anota el pedido y contesta; el trabajo corre aparte y el
 resultado queda guardado esperando a que alguien lo venga a buscar. Que la pestaña se
 congele, se cierre o se recargue deja de importar: el `jobId` alcanza para retomar.
 
-No se toca `generate_bejerman_remito` por dentro — es una función grande y delicada
-(reservas, splits, reconciliación de remitos inciertos). Acá se la envuelve, y se la
-sigue corriendo dentro de un `transaction.atomic()` para que se comporte igual que
-cuando la cubría `ATOMIC_REQUESTS`.
+La emisión utiliza transacciones por etapa: la reserva y la evidencia del envío
+deben quedar confirmadas antes de llamar a Bejerman. Una transacción que abarque
+toda la llamada borraría esa evidencia al fallar o reiniciarse el proceso, aunque
+el comprobante ya exista en el ERP.
 """
 
 from __future__ import annotations
@@ -161,11 +161,9 @@ def _execute(job_id: str) -> None:
         if isinstance(payload, str):
             payload = json.loads(payload)
         try:
-            # El atomic reproduce lo que hacía ATOMIC_REQUESTS cuando esto corría
-            # dentro del POST. Las escrituras de estado del trabajo quedan afuera a
-            # propósito, para que se vean aunque la emisión haga rollback.
-            with transaction.atomic():
-                result = generate_bejerman_remito(order_ids, job.get("actor_user_id"), payload)
+            # El envío externo no puede compartir una transacción que borre la
+            # reserva o el estado incierto al fallar después de enviar el remito.
+            result = generate_bejerman_remito(order_ids, job.get("actor_user_id"), payload)
         except Exception as exc:
             logger.warning(
                 "delivery_remito_job_error",
@@ -268,6 +266,7 @@ def _open_job_for(order_ids: list[str]) -> dict[str, Any] | None:
         return _row(cur)
 
 
+@transaction.atomic
 def enqueue_remito_job(
     order_ids: list[str],
     actor_user_id: int | None,
@@ -278,6 +277,15 @@ def enqueue_remito_job(
     ids = [str(item).strip() for item in (order_ids or []) if str(item).strip()]
     if not ids:
         raise DeliveryOrderError("ORDER_IDS_REQUIRED", "Hay que seleccionar órdenes")
+
+    # Serializar la consulta y el alta aunque todavía no exista un trabajo.
+    # El orden estable evita interbloqueos entre selecciones superpuestas.
+    with connection.cursor() as cur:
+        for order_id in sorted(set(ids)):
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                [f"delivery_remito_job:{order_id}"],
+            )
 
     existente = _open_job_for(ids)
     if existente is not None and float(existente.get("edad") or 0) < STALE_SECONDS:

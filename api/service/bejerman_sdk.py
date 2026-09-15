@@ -21,12 +21,17 @@ from django.conf import settings
 from django.utils import timezone
 
 from .bejerman_companies import company_for_key, require_company
+from .bejerman_partida_grafias import stock_partida_sin_distinguir_mayusculas
 from .bejerman_documents import is_transient_pdf_lookup_message
 from .bejerman_remito_legends import (
     SERVICE_INGRESS_TITLE,
     SERVICE_RELEASE_RESOLUTION_LABELS,
     accessory_legend_lines,
+    delivery_article_legend_lines,
+    delivery_order_general_legend_lines,
     delivery_order_legend,
+    group_rental_order_items_by_article,
+    rental_item_legend,
     service_ingress_equipment_legend_lines,
     service_ingress_main_legend,
     service_ingress_reason_legend,
@@ -986,7 +991,11 @@ class BejermanSDKClient:
             self._drop_cached_stock()
 
     def obtener_stock_partida(self, partida: str) -> dict[str, str]:
-        return self.execute("STOCK", "ObtenerStockPartida", params=[partida])
+        # El SDK compara la partida distinguiendo mayúsculas: ver bejerman_partida_grafias.
+        return stock_partida_sin_distinguir_mayusculas(
+            lambda grafia: self.execute("STOCK", "ObtenerStockPartida", params=[grafia]),
+            partida,
+        )
 
     def obtener_stock_deposito(self, deposit_code: str) -> dict[str, str]:
         return self.execute("STOCK", "ObtenerStockDeposito", params=[deposit_code])
@@ -1064,9 +1073,15 @@ def build_article_code_from_tablas(record: dict[str, Any]) -> str:
     return "-".join([generic, *[item for item in elements if item]])
 
 
+ARTICLE_NAME_FIELDS = (
+    "Articulo_Descripcion", "ArticuloDescripcion", "Descripcion", "Nombre", "Detalle",
+    "Art_Descripcion", "Art_DescripcionGeneral", "ArtDescripcionGeneral",
+)
+
+
 def map_article(record: dict[str, Any]) -> dict[str, Any] | None:
     code = as_string(first_value(record, ("Articulo_Codigo", "ArticuloCodigo", "CodigoArticulo", "Codigo", "Art_Codigo", "CodArticulo"))) or build_article_code_from_tablas(record)
-    name = as_string(first_value(record, ("Articulo_Descripcion", "ArticuloDescripcion", "Descripcion", "Nombre", "Detalle", "Art_Descripcion", "Art_DescripcionGeneral", "ArtDescripcionGeneral")))
+    name = as_string(first_value(record, ARTICLE_NAME_FIELDS))
     description = as_string(first_value(record, ("Articulo_DescripcionAdicional", "DescripcionAdicional", "Observaciones", "Detalle", "Art_DescricpionAdicional", "Art_DescripcionAdicional"))) or name
     if not code and not name:
         return None
@@ -1228,6 +1243,44 @@ def build_article_description_map(
             # eso no es una descripción, así que se deja pasar el texto local.
             if key in wanted and description and key not in result and _article_lookup_key(description) != key:
                 result[key] = description
+    return result
+
+
+def build_exact_article_description_map(response: dict[str, Any], article_codes: list[str]) -> dict[str, str]:
+    """Descripción literal del maestro para RDA, sin respaldos ni normalización.
+
+    Los códigos se comparan como en el catálogo. El texto se conserva carácter
+    por carácter, incluidos espacios y tildes. Si falta o resulta ambiguo,
+    se rechaza antes de emitir; nunca se reemplaza por un nombre local.
+    """
+    wanted = {_article_lookup_key(code) for code in article_codes}
+    if not wanted or "" in wanted:
+        raise BejermanSdkResponseError("No se puede emitir el RDA: falta el código de artículo.")
+    result: dict[str, str] = {}
+    for record in records_from_response(response):
+        article = map_article(record)
+        key = _article_lookup_key(article.get("code")) if article else ""
+        if key not in wanted:
+            continue
+        description = first_value(record, ARTICLE_NAME_FIELDS)
+        if not isinstance(description, str) or not description.strip():
+            raise BejermanSdkResponseError(f"El artículo {key} no tiene descripción en el catálogo de Bejerman.")
+        if key in result and result[key] != description:
+            raise BejermanSdkResponseError(f"Bejerman devolvió descripciones distintas para el artículo {key}.")
+        # El renglón de ventas de esta instalación es varchar(50), página 1252.
+        # No permitir una sustitución o truncamiento silencioso al persistirlo.
+        try:
+            encoded = description.encode("cp1252", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise BejermanSdkResponseError(
+                f"La descripción del artículo {key} contiene caracteres incompatibles con el renglón de Bejerman."
+            ) from exc
+        if len(encoded) > 50:
+            raise BejermanSdkResponseError(f"La descripción del artículo {key} supera los 50 caracteres del renglón de Bejerman.")
+        result[key] = description
+    missing = sorted(wanted - result.keys())
+    if missing:
+        raise BejermanSdkResponseError("Falta la descripción del maestro de Bejerman para: " + ", ".join(missing))
     return result
 
 
@@ -2679,6 +2732,9 @@ def equipment_label(equipment: dict[str, Any]) -> str:
 
 
 def equipment_article_description(equipment: dict[str, Any], fallback: str) -> str:
+    exact = equipment.get("bejermanMasterDescription")
+    if isinstance(exact, str) and exact.strip():
+        return exact
     # El código de artículo es la referencia maestra: si Bejerman ya tiene registrada una
     # descripción para ese código (mappedArticleName), esa es la que se manda, para que la
     # línea del comprobante coincida con lo que Bejerman resuelve por código en sus propias
@@ -2890,7 +2946,7 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
         lines=[
             service_ingress_main_legend(ingreso_id_text),
             service_ingress_reason_legend(equipment, payload=payload, profile=profile_payload),
-            *service_ingress_equipment_legend_lines(equipment, partida=partida),
+            *service_ingress_equipment_legend_lines(equipment, partida=partida, include_internal=tipo.upper() != "RDA"),
         ],
     )
     items.append(
@@ -3006,11 +3062,17 @@ def build_service_ingress_comprobante(payload: dict[str, Any], customer_fields: 
                     customer_code=payload.get("customerCode"),
                     sort_order=sort_order,
                     lines=[
-                        *service_ingress_equipment_legend_lines(equipment_item, os_text=os_text),
-                        service_ingress_reason_legend(equipment_item, profile=profile_payload),
+                        *service_ingress_equipment_legend_lines(equipment_item, os_text=os_text, include_internal=tipo.upper() != "RDA"),
+                        service_ingress_reason_legend(equipment_item, payload=payload, profile=profile_payload),
                         *accessory_legend_lines(equipment_item.get("accessories")),
                         as_string(equipment_item.get("comments")),
                     ],
+                )
+            elif tipo.upper() == "RDA":
+                sort_order = append_remito_legend_lines(
+                    items, tipo=tipo, letter=letter, point=point, issue_date=issue_date,
+                    customer_code=payload.get("customerCode"), sort_order=sort_order,
+                    lines=[service_ingress_reason_legend(equipment_item, payload=payload, profile=profile_payload)],
                 )
             items.append(batch_article_line(item_common(tipo, letter, point, issue_date, payload.get("customerCode"), sort_order), equipment_item))
             sort_order += 1
@@ -3404,19 +3466,45 @@ def build_delivery_remito_comprobante(
     for order in orders:
         is_service_release = order.get("deliveryType") == "service_release"
         is_sale = order.get("deliveryType") == "sale"
-        if not is_service_release and not is_sale:
-            sort_order = append_remito_legend_lines(
-                items,
-                tipo=profile["type"],
-                letter=config["letter"],
-                point=profile["pointOfSale"],
-                issue_date=issue_date,
-                customer_code=request.get("customerCode"),
-                sort_order=sort_order,
-                lines=[delivery_order_legend(order)],
+        if not is_service_release:
+            header_lines = (
+                [*delivery_order_general_legend_lines(order)]
+                if is_sale
+                else [delivery_order_legend(order), *delivery_order_general_legend_lines(order)]
             )
-        for item in order.get("items") or []:
+            header_lines = [line for line in header_lines if line]
+            if header_lines:
+                sort_order = append_remito_legend_lines(
+                    items,
+                    tipo=profile["type"],
+                    letter=config["letter"],
+                    point=profile["pointOfSale"],
+                    issue_date=issue_date,
+                    customer_code=request.get("customerCode"),
+                    sort_order=sort_order,
+                    lines=header_lines,
+                )
+        order_items = order.get("items") or []
+        if (order.get("deliveryType") or "").lower() == "rental":
+            order_items = group_rental_order_items_by_article(order_items)
+        seen_article_groups: set[str] = set()
+        for item in order_items:
             article_code = as_string(item.get("articleCode"))
+            article_key = (article_code or as_string(item.get("description"))).strip().lower()
+            if article_key and article_key not in seen_article_groups:
+                seen_article_groups.add(article_key)
+                article_legend_lines = delivery_article_legend_lines(item, order)
+                if article_legend_lines:
+                    sort_order = append_remito_legend_lines(
+                        items,
+                        tipo=profile["type"],
+                        letter=config["letter"],
+                        point=profile["pointOfSale"],
+                        issue_date=issue_date,
+                        customer_code=request.get("customerCode"),
+                        sort_order=sort_order,
+                        lines=article_legend_lines,
+                    )
             quantity = _positive_quantity(item.get("quantity"))
             unit_price = _amount(item.get("unitPrice"))
             item_currency = _delivery_price_currency(item.get("priceCurrency") or price_currency)

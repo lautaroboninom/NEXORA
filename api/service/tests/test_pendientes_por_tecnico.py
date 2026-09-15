@@ -34,7 +34,7 @@ class PendientesPorTecnicoAPITest(TestCase):
                     email VARCHAR(320) UNIQUE,
                     hash_pw TEXT,
                     rol TEXT,
-                    activo {bool_type} DEFAULT 1
+                    activo {bool_type} DEFAULT {'TRUE' if vendor == 'postgresql' else '1'}
                 ){engine_suffix}
                 """
             )
@@ -132,11 +132,11 @@ class PendientesPorTecnicoAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return int(cur.fetchone()[0])
@@ -176,21 +176,21 @@ class PendientesPorTecnicoAPITest(TestCase):
 
         with connection.cursor() as cur:
             cur.execute("INSERT INTO locations (nombre) VALUES (%s)", ["Taller"])
-            cls.taller_id = cls._last_insert_id(cur)
+            cls.taller_id = cls._last_insert_id(cur, "locations")
             cur.execute("INSERT INTO locations (nombre) VALUES (%s)", ["Deposito"])
-            deposito_id = cls._last_insert_id(cur)
+            deposito_id = cls._last_insert_id(cur, "locations")
 
             cur.execute("INSERT INTO customers (razon_social) VALUES (%s)", ["Clinica Demo"])
-            customer_id = cls._last_insert_id(cur)
+            customer_id = cls._last_insert_id(cur, "customers")
 
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["ResMed"])
-            marca_id = cls._last_insert_id(cur)
+            marca_id = cls._last_insert_id(cur, "marcas")
 
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s)",
                 [marca_id, "AirSense 10", "CPAP", ""],
             )
-            model_id = cls._last_insert_id(cur)
+            model_id = cls._last_insert_id(cur, "models")
 
             cur.execute(
                 """
@@ -199,7 +199,7 @@ class PendientesPorTecnicoAPITest(TestCase):
                 """,
                 [customer_id, marca_id, model_id, "SERIE-ASIGNADO", "MG 1001", ""],
             )
-            device_assigned_id = cls._last_insert_id(cur)
+            device_assigned_id = cls._last_insert_id(cur, "devices")
 
             cur.execute(
                 """
@@ -208,7 +208,7 @@ class PendientesPorTecnicoAPITest(TestCase):
                 """,
                 [customer_id, marca_id, model_id, "SERIE-SIN-TECNICO", "MG 1002", ""],
             )
-            device_unassigned_id = cls._last_insert_id(cur)
+            device_unassigned_id = cls._last_insert_id(cur, "devices")
 
             cur.execute(
                 """
@@ -217,34 +217,34 @@ class PendientesPorTecnicoAPITest(TestCase):
                 """,
                 [customer_id, marca_id, model_id, "SERIE-DEPOSITO", "MG 1003", ""],
             )
-            device_deposito_id = cls._last_insert_id(cur)
+            device_deposito_id = cls._last_insert_id(cur, "devices")
 
             cur.execute(
                 """
                 INSERT INTO ingresos (device_id, estado, presupuesto_estado, motivo, fecha_ingreso, ubicacion_id, asignado_a)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [device_assigned_id, "diagnosticado", None, "reparacion", None, cls.taller_id, cls.tech_user.id],
+                [device_assigned_id, "diagnosticado", "pendiente", "reparación", None, cls.taller_id, cls.tech_user.id],
             )
-            cls.ingreso_assigned_id = cls._last_insert_id(cur)
+            cls.ingreso_assigned_id = cls._last_insert_id(cur, "ingresos")
 
             cur.execute(
                 """
                 INSERT INTO ingresos (device_id, estado, presupuesto_estado, motivo, fecha_ingreso, ubicacion_id, asignado_a)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [device_unassigned_id, "diagnosticado", None, "reparacion", None, cls.taller_id, None],
+                [device_unassigned_id, "diagnosticado", "pendiente", "reparación", None, cls.taller_id, None],
             )
-            cls.ingreso_unassigned_id = cls._last_insert_id(cur)
+            cls.ingreso_unassigned_id = cls._last_insert_id(cur, "ingresos")
 
             cur.execute(
                 """
                 INSERT INTO ingresos (device_id, estado, presupuesto_estado, motivo, fecha_ingreso, ubicacion_id, asignado_a)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
-                [device_deposito_id, "diagnosticado", None, "reparacion", None, deposito_id, None],
+                [device_deposito_id, "diagnosticado", "pendiente", "reparación", None, deposito_id, None],
             )
-            cls.ingreso_deposito_id = cls._last_insert_id(cur)
+            cls.ingreso_deposito_id = cls._last_insert_id(cur, "ingresos")
 
     def setUp(self):
         super().setUp()

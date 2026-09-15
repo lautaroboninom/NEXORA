@@ -113,6 +113,11 @@ class IngresoListItemSerializer(serializers.Serializer):
 
     # Flags opcionales
     derivado_devuelto = serializers.BooleanField(required=False)
+    # Las garantías viajan con la fila porque el front repite el corte de presupuesto
+    # antes de habilitar el botón de liberar (release-flow.js): sin ellas no puede saber
+    # si la reparación se cobra.
+    garantia_fabrica = serializers.BooleanField(required=False)
+    garantia_reparacion = serializers.BooleanField(required=False)
     mg_estado = serializers.CharField(allow_blank=True, required=False)
     mg_inactivo_venta = serializers.BooleanField(required=False)
     es_propietario_mg = serializers.BooleanField(required=False)

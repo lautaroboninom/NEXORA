@@ -1,4 +1,4 @@
-﻿from decimal import Decimal
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.db import connection
@@ -178,6 +178,43 @@ class QuoteAnularAPITest(TestCase):
             cur.execute(catalogo_repuestos_sql)
             cur.execute(repuestos_movimientos_sql)
             cur.execute(audit_log_sql)
+            # `quotes` la crean varios módulos de test: contra una base ya sembrada por
+            # otro, el CREATE ... IF NOT EXISTS de arriba es un no-op silencioso y las
+            # consultas revientan con "column q.moneda does not exist". Los ALTER dejan
+            # la tabla completa venga de donde venga.
+            for columna, tipo in (
+                ("version_num", "INT NOT NULL DEFAULT 1"),
+                ("origen_quote_id", "INT NULL"),
+                ("moneda", "TEXT NOT NULL DEFAULT 'ARS'"),
+                ("subtotal", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+                ("iva_21", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+                ("total", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+                ("autorizado_por", "TEXT NULL"),
+                ("forma_pago", "TEXT NULL"),
+                ("plazo_entrega_txt", "TEXT NULL"),
+                ("garantia_txt", "TEXT NULL"),
+                ("mant_oferta_txt", "TEXT NULL"),
+                ("fecha_emitido", f"{datetime_type} NULL"),
+                ("fecha_aprobado", f"{datetime_type} NULL"),
+                ("fecha_rechazado", f"{datetime_type} NULL"),
+                ("rechazo_comentario", "TEXT NULL"),
+                ("pdf_url", "TEXT NULL"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE quotes ADD COLUMN IF NOT EXISTS {columna} {tipo}")
+                except Exception:
+                    connection.rollback()
+            for columna, tipo in (
+                ("qty", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+                ("precio_u", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+                ("repuesto_id", "INT NULL"),
+                ("repuesto_codigo", "TEXT NULL"),
+                ("costo_u_neto", "NUMERIC(12,2) NULL"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS {columna} {tipo}")
+                except Exception:
+                    connection.rollback()
             try:
                 cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_estado TEXT")
                 cur.execute("ALTER TABLE ingresos ADD COLUMN IF NOT EXISTS presupuesto_rechazado_cobro_neto NUMERIC(12,2) NULL")
@@ -190,11 +227,11 @@ class QuoteAnularAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return int(cur.fetchone()[0])
@@ -256,11 +293,11 @@ class QuoteAnularAPITest(TestCase):
         now = timezone.now()
         with connection.cursor() as cur:
             cur.execute("INSERT INTO customers (razon_social) VALUES (%s)", ["Cliente test"])
-            customer_id = self._last_insert_id(cur)
+            customer_id = self._last_insert_id(cur, "customers")
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Marca test"])
-            marca_id = self._last_insert_id(cur)
-            cur.execute("INSERT INTO models (nombre, tipo_equipo) VALUES (%s,%s)", ["Modelo test", "Equipo"])
-            model_id = self._last_insert_id(cur)
+            marca_id = self._last_insert_id(cur, "marcas")
+            cur.execute("INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)", [marca_id, "Modelo test", "Equipo"])
+            model_id = self._last_insert_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices (customer_id, marca_id, model_id, numero_serie, numero_interno)
@@ -268,29 +305,27 @@ class QuoteAnularAPITest(TestCase):
                 """,
                 [customer_id, marca_id, model_id, "NS-QA-001", "MG-QA-001"],
             )
-            device_id = self._last_insert_id(cur)
+            device_id = self._last_insert_id(cur, "devices")
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, presupuesto_estado, asignado_a) VALUES (%s,%s,%s,%s)",
+                "INSERT INTO ingresos (device_id, estado, presupuesto_estado, asignado_a, motivo) VALUES (%s,%s,%s,%s,'reparación')",
                 [device_id, ingreso_estado, presupuesto_estado, self.jefe_user.id],
             )
-            ingreso_id = self._last_insert_id(cur)
+            ingreso_id = self._last_insert_id(cur, "ingresos")
 
             cur.execute(
                 """
                 INSERT INTO quotes (
-                    ingreso_id, estado, moneda, subtotal, iva_21, total,
+                    ingreso_id, estado, moneda, subtotal,
                     autorizado_por, forma_pago, plazo_entrega_txt, garantia_txt, mant_oferta_txt,
                     fecha_emitido, fecha_aprobado, pdf_url
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 [
                     ingreso_id,
                     quote_estado,
                     "ARS",
                     Decimal("100.00"),
-                    Decimal("21.00"),
-                    Decimal("121.00"),
                     "Cliente",
                     "Contado",
                     "5 dias",
@@ -301,13 +336,13 @@ class QuoteAnularAPITest(TestCase):
                     "/api/quotes/x/pdf/",
                 ],
             )
-            quote_id = self._last_insert_id(cur)
+            quote_id = self._last_insert_id(cur, "quotes")
 
             cur.execute(
                 "INSERT INTO catalogo_repuestos (codigo, nombre, stock_on_hand, stock_min, activo, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
                 ["R-001", "Repuesto test", Decimal(str(stock)), Decimal("0"), True, now],
             )
-            repuesto_id = self._last_insert_id(cur)
+            repuesto_id = self._last_insert_id(cur, "catalogo_repuestos")
 
             cur.execute(
                 """
@@ -440,6 +475,9 @@ class QuoteAnularAPITest(TestCase):
                     cur.execute("DELETE FROM ingresos")
                     cur.execute("DELETE FROM repuestos_movimientos")
                     cur.execute("DELETE FROM catalogo_repuestos")
+                    cur.execute("DELETE FROM devices")
+                    cur.execute("DELETE FROM models")
+                    cur.execute("DELETE FROM marcas")
 
                 ingreso_id, quote_id, repuesto_id = self._seed_case(
                     ingreso_estado=estado_final,
@@ -719,6 +757,75 @@ class QuoteAnularAPITest(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         mock_notify.assert_not_called()
+
+    def _resolucion(self, ingreso_id: int):
+        with connection.cursor() as cur:
+            cur.execute("SELECT resolucion FROM ingresos WHERE id=%s", [ingreso_id])
+            return cur.fetchone()[0]
+
+    def test_rechazar_deja_la_os_resuelta_como_presupuesto_rechazado(self):
+        """El rechazo también resuelve la OS: se cobra la revisión, no el presupuesto.
+
+        Antes el rechazo no tocaba `resolucion`, así que una OS ya marcada 'reparado' se
+        liberaba con esa etiqueta —el modal de salida no vuelve a preguntar cuando ya hay
+        resolución cargada— y la orden salía con "Resolución: Reparado".
+        """
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET resolucion='reparado' WHERE id=%s", [ingreso_id])
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"presupuesto_rechazado_cobro_neto": "12800"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._resolucion(ingreso_id), "presupuesto_rechazado")
+
+    def test_rechazar_no_pisa_la_resolucion_de_un_cambio_de_equipo(self):
+        # 'cambio' es un hecho patrimonial: corta el stock al cliente y la emisión del RSS.
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="reparado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET resolucion='cambio' WHERE id=%s", [ingreso_id])
+
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"presupuesto_rechazado_cobro_neto": "12800"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._resolucion(ingreso_id), "cambio")
+
+    def test_nueva_version_libera_la_resolucion_que_dejo_el_rechazo(self):
+        # La versión nueva deja sin efecto el rechazo: si la resolución quedara pegada, la
+        # OS seguiría saliendo como "Presupuesto rechazado" después de aprobar y reparar.
+        ingreso_id, _quote_id, _repuesto_id = self._seed_case(
+            ingreso_estado="diagnosticado",
+            presupuesto_estado="presupuestado",
+            quote_estado="presupuestado",
+        )
+        resp = self.client.post(
+            self._url_rechazar(ingreso_id),
+            {"presupuesto_rechazado_cobro_neto": "12800"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._resolucion(ingreso_id), "presupuesto_rechazado")
+
+        resp = self.client.post(self._url_versiones(ingreso_id), {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(self._resolucion(ingreso_id))
 
     def test_rechazar_presupuesto_exige_cobro_neto(self):
         ingreso_id, quote_id, _repuesto_id = self._seed_case(

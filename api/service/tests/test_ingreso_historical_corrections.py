@@ -149,8 +149,8 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     @classmethod
@@ -190,18 +190,18 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["CLI-HIST", "Clinica Historica", "123"],
             )
-            cls.customer_id = cls._last_id(cur)
+            cls.customer_id = cls._last_id(cur, "customers")
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["ResMed"])
-            cls.marca_id = cls._last_id(cur)
+            cls.marca_id = cls._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [cls.marca_id, "AirSense 10", "CPAP"],
             )
-            cls.model_id = cls._last_id(cur)
+            cls.model_id = cls._last_id(cur, "models")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["-"])
-            cls.loc_dash_id = cls._last_id(cur)
+            cls.loc_dash_id = cls._last_id(cur, "locations")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
-            cls.loc_taller_id = cls._last_id(cur)
+            cls.loc_taller_id = cls._last_id(cur, "locations")
 
             cur.execute(
                 """
@@ -210,16 +210,16 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
                 """,
                 [cls.customer_id, cls.marca_id, cls.model_id, "NS-HIST-001", "MG 1001"],
             )
-            cls.device_id = cls._last_id(cur)
+            cls.device_id = cls._last_id(cur, "devices")
 
             cur.execute(
                 """
                 INSERT INTO ingresos(device_id, estado, motivo, fecha_ingreso, ubicacion_id, alquilado)
                 VALUES (%s,%s,%s,%s,%s,FALSE)
                 """,
-                [cls.device_id, "diagnosticado", "reparacion", timezone.now(), cls.loc_taller_id],
+                [cls.device_id, "diagnosticado", "reparación", timezone.now(), cls.loc_taller_id],
             )
-            cls.ingreso_id = cls._last_id(cur)
+            cls.ingreso_id = cls._last_id(cur, "ingresos")
 
     def setUp(self):
         super().setUp()
@@ -485,7 +485,7 @@ class IngresoHistoricalCorrectionsAPITest(TestCase):
         fecha_alta = timezone.localtime(timezone.now() - timedelta(days=1)).replace(second=0, microsecond=0)
 
         with (
-            patch("service.views.ingresos_views._notify_estado_patrimonial") as notify_mock,
+            patch("service.views.ingresos_views._notify_estado_patrimonial", return_value={"sent": True}) as notify_mock,
             patch("service.views.ingresos_views.ingreso_is_internal_equipment", return_value=True),
             patch(
                 "service.views.ingresos_views.enqueue_stock_baja_for_ingreso",

@@ -23,11 +23,11 @@ def _schema_bits():
     return auto_inc, datetime_type, bool_type, engine_suffix
 
 
-def _last_insert_id(cur):
+def _last_insert_id(cur, table):
     if connection.vendor == "sqlite":
         cur.execute("SELECT last_insert_rowid()")
     elif connection.vendor == "postgresql":
-        cur.execute("SELECT LASTVAL()")
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
     else:
         cur.execute("SELECT LAST_INSERT_ID()")
     return int(cur.fetchone()[0])
@@ -189,7 +189,7 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
     def _seed_marca(self, nombre: str) -> int:
         with connection.cursor() as cur:
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", [nombre])
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "marcas")
 
     def _seed_modelo(self, marca_id: int | None, nombre: str, variante: str | None = None) -> int:
         with connection.cursor() as cur:
@@ -197,37 +197,39 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
                 "INSERT INTO models (marca_id, nombre, variante) VALUES (%s,%s,%s)",
                 [marca_id, nombre, variante],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "models")
 
     def _seed_device(self, marca_id: int | None, modelo_id: int | None, variante: str | None = None) -> int:
         with connection.cursor() as cur:
+            cur.execute("INSERT INTO customers(razon_social) VALUES ('Cliente de prueba') RETURNING id")
+            customer_id = cur.fetchone()[0]
             cur.execute(
-                "INSERT INTO devices (marca_id, model_id, variante) VALUES (%s,%s,%s)",
-                [marca_id, modelo_id, variante],
+                "INSERT INTO devices (customer_id, marca_id, model_id, variante) VALUES (%s,%s,%s,%s)",
+                [customer_id, marca_id, modelo_id, variante],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "devices")
 
     def _seed_ingreso(self, device_id: int, equipo_variante: str | None = None) -> int:
         with connection.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO ingresos (device_id, estado, presupuesto_estado, equipo_variante)
-                VALUES (%s,%s,%s,%s)
+                INSERT INTO ingresos (device_id, estado, presupuesto_estado, equipo_variante, motivo)
+                VALUES (%s,%s,%s,%s, 'reparación')
                 """,
                 [device_id, "diagnosticado", "pendiente", equipo_variante],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "ingresos")
 
     def _seed_quote(self, ingreso_id: int) -> int:
         with connection.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO quotes (ingreso_id, estado, moneda, subtotal, iva_21, total)
-                VALUES (%s,%s,%s,%s,%s,%s)
+                INSERT INTO quotes (ingreso_id, estado, moneda, subtotal)
+                VALUES (%s,%s,%s,%s)
                 """,
-                [ingreso_id, "pendiente", "ARS", 0, 0, 0],
+                [ingreso_id, "pendiente", "ARS", 0],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "quotes")
 
     def _seed_repuesto(self, codigo: str, estado: str | None = None, activo: bool = True) -> int:
         with connection.cursor() as cur:
@@ -238,7 +240,7 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
                 """,
                 [codigo, f"Repuesto {codigo}", estado, activo],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "catalogo_repuestos")
 
     def _seed_quote_item(
         self,
@@ -255,7 +257,7 @@ class QuoteEmitirAutoasignacionAPITest(TestCase):
                 """,
                 [quote_id, repuesto_id, repuesto_codigo],
             )
-            return _last_insert_id(cur)
+            return _last_insert_id(cur, "quote_items")
 
     def _get_repuesto_estado(self, repuesto_id: int) -> str:
         with connection.cursor() as cur:

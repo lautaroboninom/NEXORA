@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
+
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest import skipUnless
 from unittest.mock import patch
 
 from django.core.management import call_command
-from django.db import connection
+from django.db import connection, connections
 from django.test import TransactionTestCase
 
 from service.bejerman_delivery import BillingError, DeliveryOrderError
+from service.delivery_orders import ensure_service_release_order_for_ingreso
 from service.delivery_remito_jobs import (
     RemitoJobNotFound,
     STALE_SECONDS,
@@ -17,6 +22,34 @@ from service.delivery_remito_jobs import (
     sweep_stale_remito_jobs,
     _execute,
 )
+
+
+@skipUnless(connection.vendor == "postgresql", "Los trabajos de emisión requieren PostgreSQL")
+class ServiceReleaseOrderTransactionTests(TransactionTestCase):
+    def test_ensure_service_release_abre_transaccion_desde_autocommit(self):
+        atomic_states = []
+
+        def existing_order(_ingreso_id):
+            atomic_states.append(connection.in_atomic_block)
+            return "do-existing"
+
+        self.assertFalse(connection.in_atomic_block)
+        with (
+            patch("service.delivery_orders._service_release_context", return_value={"estado": "liberado"}),
+            patch("service.delivery_orders._ingreso_belongs_to_rental_fleet", return_value=False),
+            patch("service.delivery_orders._article_mapping_for_service_release", return_value={}),
+            patch("service.delivery_orders._existing_service_release_order_id", side_effect=existing_order),
+            patch("service.delivery_orders._refresh_service_release_order", return_value={"id": "do-existing"}),
+            patch("service.delivery_orders.connection.cursor") as cursor,
+        ):
+            result = ensure_service_release_order_for_ingreso(21, 1)
+
+        self.assertEqual(result, {"id": "do-existing"})
+        self.assertEqual(atomic_states, [True])
+        cursor.return_value.__enter__.return_value.execute.assert_called_once_with(
+            "LOCK TABLE delivery_orders IN SHARE ROW EXCLUSIVE MODE"
+        )
+        self.assertFalse(connection.in_atomic_block)
 
 
 @skipUnless(connection.vendor == "postgresql", "Los trabajos de emisión requieren PostgreSQL")
@@ -90,6 +123,53 @@ class DeliveryRemitoJobsTests(_TrabajosDeRemitoBase):
         primero = enqueue_remito_job(["do-1"], self.actor_id, {})
         segundo = enqueue_remito_job(["do-9"], self.actor_id, {})
         self.assertNotEqual(primero["jobId"], segundo["jobId"])
+
+    def test_pedidos_concurrentes_reutilizan_una_sola_emision(self):
+        inicio = Barrier(2)
+
+        def encolar():
+            try:
+                inicio.wait(timeout=10)
+                return enqueue_remito_job(["do-concurrente"], self.actor_id, {})
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futuros = [pool.submit(encolar) for _ in range(2)]
+            resultados = [f.result(timeout=20) for f in futuros]
+        self.assertEqual(resultados[0]["jobId"], resultados[1]["jobId"])
+        self.assertEqual(self.spawn.call_count, 1)
+
+    def test_error_post_envio_conserva_la_evidencia_confirmada(self):
+        job = enqueue_remito_job(["do-evidencia"], self.actor_id, {})
+        visible_durante_envio = []
+
+        def envio_incierto(*args):
+            with connection.cursor() as cur:
+                cur.execute(
+                    "UPDATE delivery_remito_jobs SET request_payload = %s::jsonb WHERE id = %s",
+                    ['{"evidencia": "enviado"}', job["jobId"]],
+                )
+            observador = connection.copy(alias="observador_emision")
+            try:
+                with observador.cursor() as cur:
+                    cur.execute("SELECT request_payload FROM delivery_remito_jobs WHERE id = %s", [job["jobId"]])
+                    raw = cur.fetchone()[0]
+                    visible_durante_envio.append(json.loads(raw) if isinstance(raw, str) else raw)
+            finally:
+                observador.close()
+            raise DeliveryOrderError("BEJERMAN_REMITO_REVIEW_REQUIRED", "Envío sin respuesta", status_code=409)
+
+        with patch("service.delivery_remito_jobs.generate_bejerman_remito", side_effect=envio_incierto):
+            _execute(job["jobId"])
+        with connection.cursor() as cur:
+            cur.execute("SELECT request_payload FROM delivery_remito_jobs WHERE id = %s", [job["jobId"]])
+            evidencia = cur.fetchone()[0]
+            if isinstance(evidencia, str):
+                evidencia = json.loads(evidencia)
+        self.assertEqual(evidencia, {"evidencia": "enviado"})
+        self.assertEqual(visible_durante_envio, [{"evidencia": "enviado"}])
+        self.assertEqual(get_remito_job(job["jobId"])["status"], "error")
 
     # -- ejecutar --------------------------------------------------------------
 

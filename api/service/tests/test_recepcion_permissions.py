@@ -340,69 +340,69 @@ class RecepcionPermissionsAPITest(TestCase):
         )
 
         with connection.cursor() as cur:
-            cur.execute("INSERT INTO customers(id, razon_social) VALUES (1, 'Cliente Test')")
-            cur.execute("INSERT INTO customers(id, razon_social, cod_empresa, telefono) VALUES (2, 'SIED', 'C-SIED', '111')")
-            cur.execute("INSERT INTO customers(id, razon_social, cod_empresa, telefono) VALUES (3, 'ALCLA', 'C-ALCLA', '222')")
-            cur.execute("INSERT INTO marcas(id, nombre) VALUES (1, 'Marca Test')")
+            cur.execute("INSERT INTO customers(id, razon_social) OVERRIDING SYSTEM VALUE VALUES (1, 'Cliente Test')")
+            cur.execute("INSERT INTO customers(id, razon_social, cod_empresa, telefono) OVERRIDING SYSTEM VALUE VALUES (2, 'SIED', 'C-SIED', '111')")
+            cur.execute("INSERT INTO customers(id, razon_social, cod_empresa, telefono) OVERRIDING SYSTEM VALUE VALUES (3, 'ALCLA', 'C-ALCLA', '222')")
+            cur.execute("INSERT INTO marcas(id, nombre) OVERRIDING SYSTEM VALUE VALUES (1, 'Marca Test')")
             cur.execute(
-                "INSERT INTO models(id, marca_id, nombre, tipo_equipo, tecnico_id) VALUES (1, 1, 'Modelo Test', 'CPAP', %s)",
+                "INSERT INTO models(id, marca_id, nombre, tipo_equipo, tecnico_id) OVERRIDING SYSTEM VALUE VALUES (1, 1, 'Modelo Test', 'CPAP', %s)",
                 [cls.tecnico_user.id],
             )
-            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (1, 1, 1, 1, 'NS-1', 'MG 0001')")
-            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (2, 1, 1, 1, 'NS-HIST', 'MG 0002')")
+            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) OVERRIDING SYSTEM VALUE VALUES (1, 1, 1, 1, 'NS-1', 'MG 0001')")
+            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) OVERRIDING SYSTEM VALUE VALUES (2, 1, 1, 1, 'NS-HIST', 'MG 0002')")
             # El calentador humidificador del equipo 1: no trae serie propia, entra con la del
             # CPAP con el que vino. Mismo número, otro equipo.
             cur.execute(
                 """
                 INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno, tipo_equipo)
-                VALUES (5, 1, 1, 1, 'NS-1', 'MG 0005', 'Calentador humidificador')
+                OVERRIDING SYSTEM VALUE VALUES (5, 1, 1, 1, 'NS-1', 'MG 0005', 'Calentador humidificador')
                 """
             )
-            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (3, 1, 1, 1, 'NS-ACT-OLDER', 'MG 0003')")
+            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) OVERRIDING SYSTEM VALUE VALUES (3, 1, 1, 1, 'NS-ACT-OLDER', 'MG 0003')")
             # Equipo que salió con la orden de salida impresa y nada más: quedó 'liberado' y
             # sin fecha_entrega, que es como se cierra la mayoría de las entregas.
             cur.execute(
-                "INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (6, 1, 1, 1, 'NS-LIB-SIN-ENTREGA', 'MG 0006')"
+                "INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) OVERRIDING SYSTEM VALUE VALUES (6, 1, 1, 1, 'NS-LIB-SIN-ENTREGA', 'MG 0006')"
             )
             cur.execute(
                 """
                 INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno, alquilado, alquiler_a)
-                VALUES (4, 2, 1, 1, 'NS-ALQ-RETURN', 'MG 0004', TRUE, 'ALCLA')
+                OVERRIDING SYSTEM VALUE VALUES (4, 2, 1, 1, 'NS-ALQ-RETURN', 'MG 0004', TRUE, 'ALCLA')
                 """
             )
-            cur.execute("INSERT INTO locations(id, nombre) VALUES (1, 'taller')")
+            cur.execute("INSERT INTO locations(id, nombre) OVERRIDING SYSTEM VALUE VALUES (1, 'taller')")
             cur.execute(
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
-                VALUES (1, 1, 'reparacion', 'liberado', 'no_aplica', 'reparado', '2026-05-01 09:00:00', 1, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (1, 1, 'reparación', 'liberado', 'no_aplica', 'reparado', '2026-05-01 09:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
             cur.execute(
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
-                VALUES (2, 1, 'reparacion', 'ingresado', 'pendiente', NULL, '2026-06-02 10:30:00', 1, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (2, 1, 'reparación', 'ingresado', 'pendiente', NULL, '2026-06-02 10:30:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
             cur.execute(
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
-                VALUES (3, 2, 'reparacion', 'entregado', 'no_aplica', 'reparado', '2026-04-01 08:00:00', 1, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (3, 2, 'reparación', 'entregado', 'no_aplica', 'reparado', '2026-04-01 08:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
             cur.execute(
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
-                VALUES (4, 3, 'reparacion', 'ingresado', 'pendiente', NULL, '2026-03-01 11:00:00', 1, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (4, 3, 'reparación', 'ingresado', 'pendiente', NULL, '2026-03-01 11:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
             cur.execute(
                 """
                 INSERT INTO ingresos(id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso, ubicacion_id, asignado_a, recibido_por)
-                VALUES (5, 3, 'reparacion', 'entregado', 'no_aplica', 'reparado', '2026-05-15 12:00:00', 1, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (5, 3, 'reparación', 'entregado', 'no_aplica', 'reparado', '2026-05-15 12:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
@@ -414,7 +414,7 @@ class RecepcionPermissionsAPITest(TestCase):
                     id, device_id, motivo, estado, presupuesto_estado, resolucion,
                     fecha_ingreso, fecha_entrega, ubicacion_id, asignado_a, recibido_por
                 )
-                VALUES (7, 1, 'reparacion', 'entregado', 'no_aplica', 'reparado',
+                OVERRIDING SYSTEM VALUE VALUES (7, 1, 'reparación', 'entregado', 'no_aplica', 'reparado',
                         '2026-02-01 09:00:00', '2026-02-20 15:00:00', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
@@ -425,8 +425,8 @@ class RecepcionPermissionsAPITest(TestCase):
                     id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso,
                     ubicacion_id, asignado_a, recibido_por, alquilado, alquiler_a, alquiler_remito
                 )
-                VALUES (
-                    6, 4, 'reparacion alquiler', 'alquilado', 'no_aplica', 'reparado', '2026-06-10 12:00:00',
+                OVERRIDING SYSTEM VALUE VALUES (
+                    6, 4, 'reparación alquiler', 'alquilado', 'no_aplica', 'reparado', '2026-06-10 12:00:00',
                     1, %s, %s, TRUE, 'ALCLA', 'RTA-ALCLA'
                 )
                 """,
@@ -438,7 +438,7 @@ class RecepcionPermissionsAPITest(TestCase):
                     id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso,
                     trabajos_realizados, ubicacion_id, asignado_a, recibido_por
                 )
-                VALUES (8, 6, 'reparacion', 'liberado', 'no_aplica', 'reparado', '2026-05-20 09:00:00',
+                OVERRIDING SYSTEM VALUE VALUES (8, 6, 'reparación', 'liberado', 'no_aplica', 'reparado', '2026-05-20 09:00:00',
                         'cambio de filtros', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
@@ -451,7 +451,7 @@ class RecepcionPermissionsAPITest(TestCase):
                     id, device_id, motivo, estado, presupuesto_estado, resolucion, fecha_ingreso,
                     fecha_entrega, trabajos_realizados, ubicacion_id, asignado_a, recibido_por
                 )
-                VALUES (9, 6, 'alquiler', 'entregado', 'no_aplica', NULL, '2026-06-01 09:00:00',
+                OVERRIDING SYSTEM VALUE VALUES (9, 6, 'reparación alquiler', 'entregado', 'no_aplica', NULL, '2026-06-01 09:00:00',
                         '2026-06-05 15:00:00', 'preparacion para alquiler', 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
@@ -462,15 +462,15 @@ class RecepcionPermissionsAPITest(TestCase):
                     id, device_id, motivo, estado, presupuesto_estado, fecha_ingreso,
                     garantia_reparacion, ubicacion_id, asignado_a, recibido_por
                 )
-                VALUES (10, 6, 'reparacion', 'ingresado', 'pendiente', '2026-07-01 09:00:00',
+                OVERRIDING SYSTEM VALUE VALUES (10, 6, 'reparación', 'ingresado', 'pendiente', '2026-07-01 09:00:00',
                         TRUE, 1, %s, %s)
                 """,
                 [cls.tecnico_user.id, cls.recepcion_user.id],
             )
-            cur.execute("INSERT INTO ingreso_events(ingreso_id, a_estado) VALUES (1, 'liberado')")
-            cur.execute("INSERT INTO ingreso_events(ingreso_id, a_estado) VALUES (8, 'liberado')")
-            cur.execute("INSERT INTO catalogo_accesorios(id, nombre, activo) VALUES (1, 'Bolso', TRUE)")
-            cur.execute("INSERT INTO catalogo_tipos_equipo(id, nombre, activo) VALUES (1, 'CPAP', TRUE)")
+            cur.execute("INSERT INTO ingreso_events(ticket_id, a_estado) VALUES (1, 'liberado')")
+            cur.execute("INSERT INTO ingreso_events(ticket_id, a_estado) VALUES (8, 'liberado')")
+            cur.execute("INSERT INTO catalogo_accesorios(id, nombre, activo) OVERRIDING SYSTEM VALUE VALUES (1, 'Bolso', TRUE)")
+            cur.execute("INSERT INTO catalogo_tipos_equipo(id, nombre, activo) OVERRIDING SYSTEM VALUE VALUES (1, 'CPAP', TRUE)")
 
         cls.recepcion_token = issue_token(cls.recepcion_user)
 

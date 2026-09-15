@@ -129,6 +129,74 @@ class RentalDeliveryItemValidationTests(SimpleTestCase):
         self.assertEqual(contexts, [])
 
 
+class RentalStockLotVerdictTests(SimpleTestCase):
+    """El recuadro "NS disponibles" ofrecía NS que el guardado después rechazaba: E2321905419
+    tenía stock en STL y figuraba alquilado desde 2024. Lo que el recuadro marca como no
+    alquilable tiene que ser exactamente lo que rechazaría el guardado, con el mismo mensaje."""
+
+    SERIAL = "E2321905419"
+
+    def _context(self, **overrides):
+        row = {
+            "ingreso_id": 25863,
+            "device_id": 25863,
+            "estado": "reparado",
+            "alquilado": False,
+            "ubicacion_nombre": "Estantería de Alquiler",
+            "equipment_serial": self.SERIAL,
+            "equipment_internal_number": "MG 7212",
+        }
+        row.update(overrides)
+        return row
+
+    def _save_error(self, rows, device_rows, device_exists):
+        with (
+            patch.object(delivery_orders, "_rental_equipment_contexts_by_serial", return_value=list(rows)),
+            patch.object(delivery_orders, "_rental_device_contexts_by_serial", return_value=list(device_rows)),
+            patch.object(delivery_orders, "_device_exists_by_serial", return_value=device_exists),
+        ):
+            with self.assertRaises(delivery_orders.DeliveryOrderError) as caught:
+                delivery_orders._resolve_rental_context_for_partida(self.SERIAL, None, None)
+        return caught.exception
+
+    def _verdict(self, rows, device_rows=(), device_exists=False, reserved=None):
+        with patch.object(delivery_orders, "_rental_duplicate_reservation", return_value=reserved):
+            return delivery_orders._rental_serial_verdict(
+                self.SERIAL,
+                list(rows) or list(device_rows),
+                device_exists=device_exists,
+                order_id=None,
+            )
+
+    def test_el_motivo_es_el_mismo_que_da_el_guardado(self):
+        device_row = self._context(ingreso_id=None, estado="", mg_estado="activo", alquilado=True)
+        cases = {
+            "sin alta en NEXORA": ([], [], False),
+            "sin cliente cargado": ([], [], True),
+            "OS alquilada": ([self._context(estado="alquilado", alquilado=True)], [], False),
+            "fuera de la estantería": ([self._context(ubicacion_nombre="-")], [], False),
+            "equipo sin OS alquilado": ([], [device_row], False),
+        }
+        for name, (rows, device_rows, device_exists) in cases.items():
+            with self.subTest(name):
+                expected = self._save_error(rows, device_rows, device_exists)
+                _, error = self._verdict(rows, device_rows, device_exists)
+                self.assertIsNotNone(error)
+                self.assertEqual((error.code, str(error)), (expected.code, str(expected)))
+
+    def test_el_equipo_en_la_estanteria_se_ofrece(self):
+        context, error = self._verdict([self._context()])
+
+        self.assertIsNone(error)
+        self.assertEqual(context["equipment_internal_number"], "MG 7212")
+
+    def test_el_reservado_en_otra_orden_no_se_ofrece(self):
+        _, error = self._verdict([self._context()], reserved="OE-00417")
+
+        self.assertEqual(error.code, "RENTAL_EQUIPMENT_RESERVED")
+        self.assertIn("OE-00417", str(error))
+
+
 class RentalSerialErrorMessageTests(SimpleTestCase):
     """Cada motivo por el que un NS no se puede alquilar contestaba lo mismo
     ("NS no vinculado a una OS disponible"), que no decía cuál era ni qué hacer.
@@ -453,7 +521,7 @@ class RentalRemitoStateTests(TestCase):
                 VALUES (%s,%s,%s,CURRENT_TIMESTAMP,%s,%s,%s,%s)
                 RETURNING id
                 """,
-                [self.device_id, "reparado", "reparacion", "reparado", "OXICASTHOMECARE S.R.L.", "SEPID", "SEPID"],
+                [self.device_id, "reparado", "reparación", "reparado", "OXICASTHOMECARE S.R.L.", "SEPID", "SEPID"],
             )
             self.ingreso_id = int(cur.fetchone()[0])
             cur.execute(
@@ -481,8 +549,10 @@ class RentalRemitoStateTests(TestCase):
 
         self.assertEqual(state["status"], "verified")
         with connection.cursor() as cur:
-            cur.execute("SELECT alquiler_remito FROM ingresos WHERE id=%s", [self.ingreso_id])
-            self.assertEqual(cur.fetchone()[0], "RTA R 00004-00004587")
+            cur.execute("SELECT alquiler_remito, remito_salida FROM ingresos WHERE id=%s", [self.ingreso_id])
+            alquiler_remito, remito_salida = cur.fetchone()
+            self.assertEqual(alquiler_remito, "RTA R 00004-00004587")
+            self.assertEqual(remito_salida, "RTA R 00004-00004587")
 
     def test_existing_point_offers_stock_correction_when_stl_positive(self):
         state = get_rental_remito_state(
@@ -546,6 +616,8 @@ class RentalRemitoStateTests(TestCase):
             self.assertEqual(cur.fetchone()[0], 1)
             cur.execute("SELECT COUNT(*) FROM ingreso_events WHERE ticket_id=%s AND comentario ILIKE %s", [self.ingreso_id, "%RTA R 00001-00004587%"])
             self.assertEqual(cur.fetchone()[0], 1)
+            cur.execute("SELECT remito_salida FROM ingresos WHERE id=%s", [self.ingreso_id])
+            self.assertEqual(cur.fetchone()[0], "RTA R 00001-00004587")
 
     def _make_particular_ingreso(self, *, propietario_nombre="Juan Perez", propietario_doc="30710698"):
         with connection.cursor() as cur:
@@ -577,7 +649,7 @@ class RentalRemitoStateTests(TestCase):
                 RETURNING id
                 """,
                 [
-                    device_id, "reparado", "reparacion", "reparado", "Particular",
+                    device_id, "reparado", "reparación", "reparado", "Particular",
                     "SEPID", "SEPID", propietario_nombre, propietario_doc,
                 ],
             )

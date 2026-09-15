@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import unicodedata
+import zlib
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
@@ -15,6 +16,9 @@ from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, require_company
+from .mg_codes import MG_CODE_RE
+from .bejerman_partida_grafias import stock_partida_sin_distinguir_mayusculas
+from .bejerman_partida_observacion import observacion_partida_de_equipo, observacion_partida_de_ingreso
 from .bejerman_sync_alerts import queue_stale_blocked_bejerman_job_alerts
 from .bejerman_sdk import (
     is_bejerman_already_imported_message,
@@ -35,22 +39,33 @@ SYNC_TYPE_STOCK_STR_TO_STL = "stock_str_to_stl"
 SYNC_TYPE_STOCK_STR_TO_STC = "stock_str_to_stc"
 SYNC_TYPE_STOCK_STR_TO_VAL = "stock_str_to_val"
 SYNC_TYPE_STOCK_STR_TO_STCL = "stock_str_to_stcl"  # Alias legacy previo a STC.
+# Cambio manual entre ubicaciones físicas de NEXORA. A diferencia de los tipos
+# anteriores, el origen y el destino salen del selector y no de una transición de
+# estado de la OS.
+SYNC_TYPE_STOCK_LOCATION_TRANSFER = "stock_location_transfer"
 SYNC_TYPE_STOCK_EXIT_RTS = "stock_exit_rts"  # Nombre legacy; la salida física la gestiona Portal.
 SYNC_TYPE_STOCK_TO_DESGUACE = "stock_to_desguace"
 SYNC_TYPE_STOCK_FROM_DESGUACE = "stock_from_desguace"
+# Alta de un equipo propio nuevo: la unidad llega al depósito central y hay que dejarla en la
+# estantería de alquiler. Es el único tipo que no nace de una orden de servicio.
+SYNC_TYPE_STOCK_VAL_TO_STL = "stock_val_to_stl"
 ARTICLE_RECONCILE_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STL,
     SYNC_TYPE_STOCK_STR_TO_STC,
     SYNC_TYPE_STOCK_STR_TO_VAL,
     SYNC_TYPE_STOCK_STR_TO_STCL,
+    SYNC_TYPE_STOCK_LOCATION_TRANSFER,
     SYNC_TYPE_STOCK_TO_DESGUACE,
     SYNC_TYPE_STOCK_FROM_DESGUACE,
+    SYNC_TYPE_STOCK_VAL_TO_STL,
 )
 TARGET_STOCK_RESTORE_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STL,
     SYNC_TYPE_STOCK_STR_TO_STC,
     SYNC_TYPE_STOCK_STR_TO_VAL,
     SYNC_TYPE_STOCK_STR_TO_STCL,
+    SYNC_TYPE_STOCK_LOCATION_TRANSFER,
+    SYNC_TYPE_STOCK_VAL_TO_STL,
 )
 
 JOB_STATUS_PENDING = "pending"
@@ -60,15 +75,31 @@ JOB_STATUS_FAILED = "failed"
 JOB_STATUS_BLOCKED = "blocked"
 JOB_STATUS_CANCELLED = "cancelled"
 
-# Hasta 6 digitos: el numero interno tambien se carga con ceros a la izquierda
-# ("MG 001678", "MG 002562"). Con el limite en 4 esos equipos no se reconocian
-# como propios y su stock terminaba en STC en vez de STL. Son 13 en produccion.
-INTERNAL_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,6}$", re.IGNORECASE)
+# Criterio único de número interno (`mg_codes`): hasta 6 dígitos y con ceros a la izquierda
+# ("MG 001678", "MG 002562"). Con el límite en 4 esos equipos no se reconocían como propios y
+# su stock terminaba en STC en vez de STL. Son 13 en producción.
+INTERNAL_CODE_RE = MG_CODE_RE
 RENTAL_FLEET_MOTIVOS = ("baja alquiler", "reparacion alquiler")
 TRANSFER_PHASE_SAL_DONE = "sal_done"
 TRANSFER_PHASE_ENT_PENDING = "ent_pending"
 TRANSFER_PHASE_DONE = "done"
 TRANSFER_PHASE_TARGET_ENTRY_DONE = "target_entry_done"
+# Alta masiva de equipos propios: la transferencia VAL->STL de todos los equipos viaja en UNA
+# SAL y UNA ENT (tabla bejerman_stock_lotes). Cada equipo conserva su job, que es lo que muestra
+# el panel; el lote guarda la composición congelada y la fase, porque un reenvío tiene que
+# repetir exactamente el mismo comprobante. `review` quiere decir que el lote quedó a medias en
+# Bejerman y alguien tiene que mirarlo antes de seguir.
+LOTE_PHASE_PENDING = "pending"
+LOTE_PHASE_SAL_PENDING = "sal_pending"
+LOTE_PHASE_SAL_DONE = "sal_done"
+LOTE_PHASE_ENT_PENDING = "ent_pending"
+LOTE_PHASE_DONE = "done"
+LOTE_PHASE_REVIEW = "review"
+# Fases en las que el lote ya pudo emitir: ahí no se descarta ni se restaura un equipo suelto,
+# porque su renglón viaja en un comprobante compartido.
+LOTE_EMITTING_PHASES = (LOTE_PHASE_SAL_PENDING, LOTE_PHASE_SAL_DONE, LOTE_PHASE_ENT_PENDING)
+LOTE_ADVISORY_LOCK_NAMESPACE = "bejerman_stock_lote"
+STOCK_LOTE_MAX_ITEMS = 100
 NEXORA_STOCK_ENTRY_MESSAGE = (
     "El RIS/RDA de ingreso se emite en Bejerman antes de NEXORA; "
     "NEXORA no emite ENT/RIS de ingreso. Verificar remito emitido o stock en STR."
@@ -89,6 +120,8 @@ SUPPORTED_SYNC_TYPES = (
     SYNC_TYPE_STOCK_STR_TO_STC,
     SYNC_TYPE_STOCK_STR_TO_VAL,
     SYNC_TYPE_STOCK_STR_TO_STCL,
+    SYNC_TYPE_STOCK_LOCATION_TRANSFER,
+    SYNC_TYPE_STOCK_VAL_TO_STL,
 )
 
 
@@ -912,7 +945,11 @@ class BejermanSDKClient:
     def stock_by_deposit_partida(self, deposit: str, serial: str) -> dict[str, str]:
         # En Bejerman SEP, ObtenerStockDepositoPartida responde OK pero vacío para partidas reales.
         # ObtenerStockPartida devuelve todos los depósitos; filtramos por depósito localmente.
-        return self.execute("STOCK", "ObtenerStockPartida", params=[serial])
+        # Y compara la partida distinguiendo mayúsculas: ver bejerman_partida_grafias.
+        return stock_partida_sin_distinguir_mayusculas(
+            lambda grafia: self.execute("STOCK", "ObtenerStockPartida", params=[grafia]),
+            serial,
+        )
 
     def obtener_articulos(self, article_code: str = "") -> dict[str, str]:
         params = [article_code] if (article_code or "").strip() else []
@@ -1014,8 +1051,98 @@ def _ingreso_context(ingreso_id: int) -> dict[str, Any]:
     return row
 
 
+def _device_context(device_id: int, company_key: str | None = None) -> dict[str, Any]:
+    """Mismo contexto que `_ingreso_context`, pero para un equipo sin orden de servicio.
+
+    Un equipo propio nuevo se da de alta en Equipos con su MG y nunca pasa por un ingreso
+    (ver `_rental_device_context_sql` en delivery_orders.py), asi que el movimiento de stock
+    que lo deja en la estanteria de alquiler no tiene de donde sacar el contexto del equipo.
+    Lo que la cadena de resolucion de articulo necesita -- model_id, variante, marca, modelo --
+    esta todo en `devices`; la empresa, que en el otro camino sale de `ingresos`, se pasa.
+    """
+    n_de_control_sql = "COALESCE(d.n_de_control, '')" if _column_exists("devices", "n_de_control") else "''"
+    device_variante_sql = "COALESCE(d.variante, '')" if _column_exists("devices", "variante") else "''"
+    model_variante_sql = "COALESCE(m.variante, '')" if _column_exists("models", "variante") else "''"
+    model_tipo_sql = "COALESCE(m.tipo_equipo, '')" if _column_exists("models", "tipo_equipo") else "''"
+    mg_estado_sql = "COALESCE(d.mg_estado, 'activo')" if _column_exists("devices", "mg_estado") else "'activo'"
+    mg_venta_fecha_sql = "d.mg_venta_fecha" if _column_exists("devices", "mg_venta_fecha") else "NULL"
+    mg_venta_factura_sql = (
+        "COALESCE(d.mg_venta_factura_numero, '')"
+        if _column_exists("devices", "mg_venta_factura_numero")
+        else "''"
+    )
+    mg_venta_remito_sql = (
+        "COALESCE(d.mg_venta_remito_numero, '')"
+        if _column_exists("devices", "mg_venta_remito_numero")
+        else "''"
+    )
+    mg_venta_customer_sql = (
+        "d.mg_venta_customer_id" if _column_exists("devices", "mg_venta_customer_id") else "NULL"
+    )
+    resolved_company = str(company_key or "").strip() or DEFAULT_INGRESS_COMPANY_KEY
+    row = q(
+        f"""
+        SELECT NULL::INTEGER AS ingreso_id,
+               '' AS motivo,
+               d.id AS device_id,
+               d.customer_id,
+               d.model_id,
+               d.marca_id,
+               COALESCE(c.cod_empresa, '') AS customer_code,
+               COALESCE(c.razon_social, '') AS customer_name,
+               COALESCE(d.numero_serie, '') AS numero_serie,
+               COALESCE(d.numero_interno, '') AS numero_interno,
+               {n_de_control_sql} AS n_de_control,
+               {mg_estado_sql} AS mg_estado,
+               {mg_venta_fecha_sql} AS mg_venta_fecha,
+               {mg_venta_factura_sql} AS mg_venta_factura_numero,
+               {mg_venta_remito_sql} AS mg_venta_remito_numero,
+               {mg_venta_customer_sql} AS mg_venta_customer_id,
+               COALESCE(m.nombre, '') AS modelo,
+               {model_tipo_sql} AS tipo_equipo,
+               '' AS ingreso_variante,
+               {device_variante_sql} AS device_variante,
+               {model_variante_sql} AS model_variante,
+               COALESCE(b.nombre, '') AS marca
+          FROM devices d
+          LEFT JOIN customers c ON c.id = d.customer_id
+          LEFT JOIN models m ON m.id = d.model_id
+          LEFT JOIN marcas b ON b.id = d.marca_id
+         WHERE d.id = %s
+        """,
+        [device_id],
+        one=True,
+    )
+    if not row:
+        raise BejermanBlockedError(f"Equipo {device_id} no encontrado")
+    row["empresa_bejerman"] = resolved_company
+    row["empresa_facturar"] = resolved_company
+    row["variante"] = (
+        (row.get("device_variante") or "").strip()
+        or (row.get("model_variante") or "").strip()
+    )
+    row["variante_norm"] = normalize_article_variant(row.get("variante"))
+    return row
+
+
+def _job_context(job: dict[str, Any]) -> dict[str, Any]:
+    """Contexto del equipo del job, venga de una orden de servicio o de la ficha del equipo."""
+    ingreso_id = job.get("ingreso_id")
+    if ingreso_id:
+        return _ingreso_context(int(ingreso_id))
+    device_id = job.get("device_id")
+    if not device_id:
+        raise BejermanBlockedError("El job no tiene ni ingreso ni equipo asociado")
+    return _device_context(int(device_id), job.get("company_key"))
+
+
 def article_context_for_ingreso(ingreso_id: int) -> dict[str, Any]:
     return _ingreso_context(ingreso_id)
+
+
+def article_context_for_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Contexto para mapear el artículo de un job, tenga o no orden de servicio."""
+    return _job_context(job)
 
 
 def _ingreso_has_mg_sale(row: dict[str, Any]) -> bool:
@@ -1060,6 +1187,24 @@ def ingreso_targets_rental_stock(ingreso_id: int) -> bool:
     return _text_key(row.get("motivo")) in RENTAL_FLEET_MOTIVOS
 
 
+def device_targets_rental_stock(device_id: int) -> bool:
+    """El equipo es nuestro y sigue siendo nuestro: su stock puede ir a STL.
+
+    Es la mitad device-level de `ingreso_targets_rental_stock`, para el alta de un equipo
+    propio que no tiene ingreso. Sin motivo de ingreso que consultar, lo que queda es el
+    numero interno y la venta: un MG ya vendido paso a ser del cliente y no vuelve al parque
+    de alquiler. La misma funcion se usa al encolar y al ejecutar el job: si las dos mitades
+    divergen vuelve el bug de los equipos propios parados en STC.
+    """
+    row = _device_context(device_id)
+    if _ingreso_has_mg_sale(row):
+        return False
+    return bool(
+        _is_mg_owner_customer(row.get("customer_id"))
+        or _is_internal_equipment(row.get("numero_interno"), row.get("numero_serie"), row.get("n_de_control"))
+    )
+
+
 def ingreso_is_demo_return(ingreso_id: int) -> bool:
     row = _ingreso_context(ingreso_id)
     return _text_key(row.get("motivo")) == "devolucion demo"
@@ -1089,53 +1234,106 @@ def _company_key_for_ingreso_row(row: dict[str, Any]) -> str:
         raise BejermanBlockedError(str(exc)) from exc
 
 
+def _reference_for_job(ingreso_id: Any, device_id: Any) -> str:
+    """Identidad del trabajo en Bejerman: la OS si existe, si no el equipo.
+
+    Da el prefijo de `Comprobante_IdOrigen`, que es la clave con la que Bejerman deduplica.
+    Un job sin ingreso NO puede seguir usando `NEXORA-OS-`: saldría `NEXORA-OS-None-ENT-STL`
+    para todos, `_is_own_id_origen` lo daría por propio y `_send_stock_comprobantes`
+    absorbería como "ya importado" el choque entre dos equipos distintos.
+    """
+    if ingreso_id:
+        return f"NEXORA-OS-{int(ingreso_id)}"
+    if device_id:
+        return f"NEXORA-DEV-{int(device_id)}"
+    raise BejermanBlockedError("El job no tiene ni ingreso ni equipo asociado")
+
+
+def _reference_for_lote(lote_id: Any) -> str:
+    """Identidad en Bejerman de un lote de transferencias: la SAL y la ENT de todos sus equipos.
+
+    Espacio de nombres propio, como `NEXORA-DEV-`: con el de un equipo, el choque "ya existe"
+    entre un lote y un alta suelta se absorbería como si fuera el mismo movimiento.
+    """
+    if not lote_id:
+        raise BejermanBlockedError("El lote de transferencias no tiene identificador")
+    return f"NEXORA-LOTE-{int(lote_id)}"
+
+
 def _enqueue_stock_job(
     *,
-    ingreso_id: int,
+    ingreso_id: int | None = None,
+    device_id: int | None = None,
+    company_key: str | None = None,
     sync_type: str,
     source_deposit: str,
     target_deposit: str,
     trigger: str,
     ingreso_event_id: int | None = None,
     actor_user_id: int | None = None,
+    article_code: str | None = None,
+    requeue_succeeded: bool = False,
+    request_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    row = _ingreso_context(ingreso_id)
+    if ingreso_id:
+        row = _ingreso_context(ingreso_id)
+        company_key = _company_key_for_ingreso_row(row)
+    elif device_id:
+        row = _device_context(device_id, company_key)
+        company_key = _company_key_for_ingreso_row(row)
+    else:
+        raise BejermanBlockedError("Falta el ingreso o el equipo para encolar el movimiento de stock")
     serial = (row.get("numero_serie") or "").strip()
-    company_key = _company_key_for_ingreso_row(row)
     status = JOB_STATUS_PENDING if serial else JOB_STATUS_BLOCKED
     last_error = None if serial else "Número de serie requerido para sincronizar Bejerman"
     request_payload = {
         "source": "nexora",
         "trigger": trigger,
-        "reference": f"NEXORA-OS-{ingreso_id}",
+        "reference": _reference_for_job(ingreso_id, row.get("device_id")),
         "companyKey": company_key,
         "marca": row.get("marca") or "",
         "modelo": row.get("modelo") or "",
         "variante": row.get("variante") or "",
+        **(request_details or {}),
     }
+    # Los dos índices únicos son parciales, así que hay que nombrarles el predicado: sin el
+    # WHERE, Postgres no infiere el índice y el ON CONFLICT falla.
+    conflict_target = (
+        "(sync_type, ingreso_id) WHERE ingreso_id IS NOT NULL"
+        if ingreso_id
+        else "(sync_type, device_id) WHERE ingreso_id IS NULL"
+    )
     return q(
-        """
+        f"""
         INSERT INTO bejerman_sync_jobs(
           sync_type, ingreso_id, device_id, ingreso_event_id, numero_serie,
-          source_deposit, target_deposit, company_key, status, last_error, actor_user_id, request_payload
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
-        ON CONFLICT (sync_type, ingreso_id) DO UPDATE
+          source_deposit, target_deposit, company_key, status, last_error, actor_user_id,
+          article_code, request_payload
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,''),%s::jsonb)
+        ON CONFLICT {conflict_target} DO UPDATE
            SET ingreso_event_id = COALESCE(bejerman_sync_jobs.ingreso_event_id, EXCLUDED.ingreso_event_id),
                device_id = EXCLUDED.device_id,
                numero_serie = EXCLUDED.numero_serie,
                source_deposit = EXCLUDED.source_deposit,
                target_deposit = EXCLUDED.target_deposit,
                company_key = EXCLUDED.company_key,
+               -- El artículo ya resuelto no se pisa con un NULL: lo que aprendió el job
+               -- vale más que lo que trae un reencolado.
+               article_code = COALESCE(bejerman_sync_jobs.article_code, EXCLUDED.article_code),
                actor_user_id = COALESCE(EXCLUDED.actor_user_id, bejerman_sync_jobs.actor_user_id),
                request_payload = bejerman_sync_jobs.request_payload || EXCLUDED.request_payload,
                status = CASE
+                 WHEN %s THEN EXCLUDED.status
                  WHEN bejerman_sync_jobs.status = 'succeeded' THEN bejerman_sync_jobs.status
                  ELSE EXCLUDED.status
                END,
                last_error = CASE
+                 WHEN %s THEN EXCLUDED.last_error
                  WHEN bejerman_sync_jobs.status = 'succeeded' THEN bejerman_sync_jobs.last_error
                  ELSE EXCLUDED.last_error
                END,
+               attempts = CASE WHEN %s THEN 0 ELSE bejerman_sync_jobs.attempts END,
+               next_attempt_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE bejerman_sync_jobs.next_attempt_at END,
                updated_at = CURRENT_TIMESTAMP
         RETURNING id, status, attempts
         """,
@@ -1151,7 +1349,12 @@ def _enqueue_stock_job(
             status,
             last_error,
             actor_user_id,
+            (article_code or "").strip(),
             _json_param(request_payload),
+            bool(requeue_succeeded),
+            bool(requeue_succeeded),
+            bool(requeue_succeeded),
+            bool(requeue_succeeded),
         ],
         one=True,
     )
@@ -1192,10 +1395,15 @@ def enqueue_stock_transfer_for_ingreso(
     ingreso_id: int,
     ingreso_event_id: int | None = None,
     actor_user_id: int | None = None,
+    *,
+    source_deposit: str | None = None,
+    requeue_succeeded: bool = False,
 ) -> dict[str, Any]:
     if not ingreso_targets_rental_stock(ingreso_id):
         raise BejermanBlockedError("Solo los equipos del parque de alquiler pueden transferirse de STR a STL")
-    source_deposit = str(_setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR").strip() or "STR"
+    source_deposit = str(
+        source_deposit or _setting("BEJERMAN_SOURCE_DEPOSIT", "STR") or "STR"
+    ).strip() or "STR"
     target_deposit = str(_setting("BEJERMAN_TARGET_DEPOSIT", "STL") or "STL").strip() or "STL"
     if ingreso_event_id is None:
         ingreso_event_id = _last_liberado_event_id(ingreso_id)
@@ -1207,7 +1415,198 @@ def enqueue_stock_transfer_for_ingreso(
         trigger="equipo_propio_listo_alquiler",
         ingreso_event_id=ingreso_event_id,
         actor_user_id=actor_user_id,
+        requeue_succeeded=requeue_succeeded,
     )
+
+
+def enqueue_location_transfer_for_ingreso(
+    ingreso_id: int,
+    *,
+    source_deposit: str,
+    target_deposit: str,
+    source_location: str,
+    target_location: str,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Encola el traslado explícitamente confirmado entre dos ubicaciones físicas.
+
+    Nunca adivina el origen. Si Bejerman no confirma stock positivo en el depósito de
+    origen, el worker bloquea el trabajo sin emitir una ENT: así un cambio de selector no
+    puede inventar stock en el destino.
+    """
+    source = str(source_deposit or "").strip().upper()
+    target = str(target_deposit or "").strip().upper()
+    if not source or not target:
+        raise BejermanBlockedError("La ubicación elegida no tiene un depósito Bejerman asociado")
+    if source == target:
+        raise BejermanBlockedError("El depósito de origen y el destino son el mismo")
+
+    active = q(
+        """
+        SELECT id, status
+          FROM bejerman_sync_jobs
+         WHERE ingreso_id=%s
+           AND sync_type=%s
+           AND status IN ('pending', 'running')
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        [ingreso_id, SYNC_TYPE_STOCK_LOCATION_TRANSFER],
+        one=True,
+    )
+    if active:
+        raise BejermanBlockedError(
+            "Ya hay un traslado de ubicación en curso en Bejerman. Esperá su resolución antes de moverlo otra vez."
+        )
+
+    return _enqueue_stock_job(
+        ingreso_id=ingreso_id,
+        sync_type=SYNC_TYPE_STOCK_LOCATION_TRANSFER,
+        source_deposit=source,
+        target_deposit=target,
+        trigger="cambio_ubicacion_confirmado",
+        actor_user_id=actor_user_id,
+        requeue_succeeded=True,
+        request_details={
+            "strict_source_stock": True,
+            "location_transfer": {
+                "source_location": str(source_location or "").strip(),
+                "target_location": str(target_location or "").strip(),
+                "source_deposit": source,
+                "target_deposit": target,
+            },
+        },
+    )
+
+
+def enqueue_stock_val_to_stl_for_device(
+    device_id: int,
+    *,
+    company_key: str | None = None,
+    source_deposit: str | None = None,
+    article_code: str | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Deja en la estantería de alquiler un equipo propio recién dado de alta.
+
+    La unidad nueva llega al depósito central (VAL) y "disponible para alquiler" es la
+    intersección de la ubicación con stock positivo en STL, que además es de donde descuenta
+    el RTA. Sin este movimiento el equipo queda invisible y, si igual se alquila, deja STL en
+    negativo sin que nadie se entere.
+
+    El origen es configurable porque la unidad puede haber quedado en otro depósito; el
+    proceso además se autocorrige si la partida no está donde se declaró.
+
+    El `article_code` viene del renglón de stock que eligió el operador. Sin él, un modelo
+    todavía sin mapear bloquearía el job pidiendo que alguien confirme el artículo a mano,
+    cuando el dato ya estaba a la vista en la pantalla del alta.
+    """
+    if not device_targets_rental_stock(device_id):
+        raise BejermanBlockedError(
+            "Solo un equipo propio activo puede transferirse a la estantería de alquiler"
+        )
+    source_deposit = str(source_deposit or _setting("BEJERMAN_DEMO_TARGET_DEPOSIT", "VAL") or "VAL").strip() or "VAL"
+    target_deposit = str(_setting("BEJERMAN_TARGET_DEPOSIT", "STL") or "STL").strip() or "STL"
+    if source_deposit.upper() == target_deposit.upper():
+        raise BejermanBlockedError("El depósito de origen no puede ser el mismo que el destino")
+    return _enqueue_stock_job(
+        device_id=device_id,
+        company_key=company_key,
+        sync_type=SYNC_TYPE_STOCK_VAL_TO_STL,
+        source_deposit=source_deposit,
+        target_deposit=target_deposit,
+        trigger="alta_equipo_propio_alquiler",
+        article_code=article_code,
+        actor_user_id=actor_user_id,
+    )
+
+
+def enqueue_stock_val_to_stl_lote(
+    device_ids: Sequence[int],
+    *,
+    company_key: str | None = None,
+    source_deposit: str | None = None,
+    article_codes: dict[int, str] | None = None,
+    actor_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Encola en UN lote la transferencia a la estantería de alquiler de varios equipos propios.
+
+    Cada equipo tiene su job, como en el alta individual —es lo que muestra el panel y lo que
+    deduplica el índice por equipo—, pero todos cuelgan del mismo `bejerman_stock_lotes` y el
+    worker los mueve juntos: una SAL y una ENT con un renglón por equipo, en vez de dos
+    comprobantes por equipo. Tiene que correr dentro de la transacción del alta: si un equipo
+    no califica, no se encola ninguno.
+    """
+    ids = [int(device_id) for device_id in dict.fromkeys(device_ids or [])]
+    if not ids:
+        raise BejermanBlockedError("El lote de transferencias no tiene equipos")
+    if len(ids) > STOCK_LOTE_MAX_ITEMS:
+        raise BejermanBlockedError(
+            f"Un lote admite como máximo {STOCK_LOTE_MAX_ITEMS} equipos; dividí la carga."
+        )
+    source = str(source_deposit or _setting("BEJERMAN_DEMO_TARGET_DEPOSIT", "VAL") or "VAL").strip().upper() or "VAL"
+    target = str(_setting("BEJERMAN_TARGET_DEPOSIT", "STL") or "STL").strip().upper() or "STL"
+    if source == target:
+        raise BejermanBlockedError("El depósito de origen no puede ser el mismo que el destino")
+    # La misma guarda que el alta individual y que el worker al ejecutar: un equipo que no es
+    # nuestro no puede terminar en STL.
+    for device_id in ids:
+        if not device_targets_rental_stock(device_id):
+            raise BejermanBlockedError(
+                f"El equipo {device_id} no es un equipo propio activo: no puede ir a la estantería de alquiler"
+            )
+    resolved_company = _company_key_for_ingreso_row({"empresa_bejerman": company_key})
+    lote = q(
+        """
+        INSERT INTO bejerman_stock_lotes(
+          sync_type, company_key, source_deposit, target_deposit, actor_user_id, request_payload
+        ) VALUES (%s,%s,%s,%s,%s,%s::jsonb)
+        RETURNING id
+        """,
+        [
+            SYNC_TYPE_STOCK_VAL_TO_STL,
+            resolved_company,
+            source,
+            target,
+            actor_user_id,
+            _json_param({"source": "nexora", "trigger": "alta_masiva_equipos_propios", "device_ids": ids}),
+        ],
+        one=True,
+    )
+    lote_id = int(lote["id"])
+    reference = _reference_for_lote(lote_id)
+    codes = {int(key): str(value or "").strip() for key, value in (article_codes or {}).items()}
+    jobs = []
+    for device_id in ids:
+        job = _enqueue_stock_job(
+            device_id=device_id,
+            company_key=resolved_company,
+            sync_type=SYNC_TYPE_STOCK_VAL_TO_STL,
+            source_deposit=source,
+            target_deposit=target,
+            trigger="alta_masiva_equipos_propios",
+            article_code=codes.get(device_id) or "",
+            actor_user_id=actor_user_id,
+        )
+        q(
+            """
+            UPDATE bejerman_sync_jobs
+               SET lote_id = %s,
+                   request_payload = request_payload || %s::jsonb,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+            """,
+            [lote_id, _json_param({"lote_id": lote_id, "lote_reference": reference}), job["id"]],
+        )
+        jobs.append({**job, "device_id": device_id})
+    return {
+        "lote_id": lote_id,
+        "reference": reference,
+        "company_key": resolved_company,
+        "source_deposit": source,
+        "target_deposit": target,
+        "jobs": jobs,
+    }
 
 
 def enqueue_client_ready_transfer_for_ingreso(
@@ -1336,12 +1735,15 @@ def enqueue_stock_alta_for_ingreso(
     ingreso_event_id: int | None = None,
     actor_user_id: int | None = None,
 ) -> dict[str, Any]:
-    source_deposit = _stock_alta_source_deposit()
+    # AUTO igual que la baja: el origen lo decide el stock real, no la teoría. Fijarlo en DES
+    # daba por hecho que la baja anterior había pasado por la integración, y en una corrección
+    # histórica justamente no pasó: el equipo sigue en STR/STL/VAL y el alta se bloqueaba
+    # con "se esperaba DES" sin corregir ningún depósito.
     target_deposit = _stock_alta_target_deposit()
     return _enqueue_stock_job(
         ingreso_id=ingreso_id,
         sync_type=SYNC_TYPE_STOCK_FROM_DESGUACE,
-        source_deposit=source_deposit,
+        source_deposit="AUTO",
         target_deposit=target_deposit,
         trigger="alta_desguace",
         ingreso_event_id=ingreso_event_id,
@@ -1426,7 +1828,7 @@ def cancel_sync_job(job_id: int, actor_user_id: int | None, reason: str) -> dict
     if not reason:
         raise BejermanBlockedError("Escriba el motivo por el que se descarta la operación.")
     row = q(
-        "SELECT id, status, sync_type, response_payload FROM bejerman_sync_jobs WHERE id=%s",
+        "SELECT id, status, sync_type, response_payload, lote_id FROM bejerman_sync_jobs WHERE id=%s",
         [job_id],
         one=True,
     )
@@ -1437,6 +1839,14 @@ def cancel_sync_job(job_id: int, actor_user_id: int | None, reason: str) -> dict
         raise BejermanBlockedError("La operación ya está cerrada.")
     if status == JOB_STATUS_RUNNING:
         raise BejermanBlockedError("La operación se está ejecutando; espere a que termine.")
+    lote = _stock_lote_for_job(row)
+    if lote and lote.get("phase") in LOTE_EMITTING_PHASES:
+        # El renglón de este equipo viaja en una SAL/ENT compartida que ya pudo haber entrado:
+        # descartarlo suelto dejaría al equipo fuera del origen sin llegar al destino.
+        raise BejermanBlockedError(
+            f"El equipo es parte del lote {_reference_for_lote(lote['id'])}, que ya emitió "
+            "movimientos en Bejerman: reintentá la operación en vez de descartarla."
+        )
     payload = {
         **_dict_payload(row.get("response_payload")),
         "cancellation": {
@@ -1459,15 +1869,18 @@ def cancel_sync_job(job_id: int, actor_user_id: int | None, reason: str) -> dict
     ) or {}
 
 
-def _retry_job(job: dict[str, Any], error: str, max_attempts: int) -> str:
-    attempts = int(job.get("attempts") or 0)
+def _retry_next_attempt(attempts: int, error: str, max_attempts: int):
+    """Cuándo reintentar un job que falló, o `None` si ya agotó los intentos.
+
+    Separado de `_retry_job` para que el lote de transferencias aplique exactamente la misma
+    política a todos sus equipos.
+    """
     retryable_sync_error = _is_retryable_sync_message(error)
     effective_max_attempts = (
         _sync_transient_max_attempts(max_attempts) if retryable_sync_error else int(max_attempts)
     )
     if attempts >= effective_max_attempts:
-        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=f"Máximos reintentos agotados: {error}")
-        return JOB_STATUS_BLOCKED
+        return None
     base_delay_seconds = (
         _positive_int_setting("BEJERMAN_SYNC_TRANSIENT_RETRY_BASE_SECONDS", 300)
         if retryable_sync_error
@@ -1477,7 +1890,14 @@ def _retry_job(job: dict[str, Any], error: str, max_attempts: int) -> str:
         3600,
         max(base_delay_seconds, 2 ** max(0, attempts - 1) * base_delay_seconds),
     )
-    next_attempt = timezone.now() + timedelta(seconds=delay_seconds)
+    return timezone.now() + timedelta(seconds=delay_seconds)
+
+
+def _retry_job(job: dict[str, Any], error: str, max_attempts: int) -> str:
+    next_attempt = _retry_next_attempt(int(job.get("attempts") or 0), error, max_attempts)
+    if next_attempt is None:
+        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=f"Máximos reintentos agotados: {error}")
+        return JOB_STATUS_BLOCKED
     q(
         """
         UPDATE bejerman_sync_jobs
@@ -1838,7 +2258,7 @@ def remember_article_mapping_from_stock_record(
     if not code:
         return ""
     try:
-        context = _ingreso_context(int(job["ingreso_id"]))
+        context = _job_context(job)
         company_key = job.get("company_key") or _company_key_for_mapping_lookup(context)
         mapping = _mapping_for_context(context, company_key)
         existing_code = (mapping or {}).get("article_code") or ""
@@ -1886,8 +2306,7 @@ def _blocked_article_job_ids_for_context(model_id: int, variante: str, company_k
         f"""
         SELECT j.id, j.ingreso_id
           FROM bejerman_sync_jobs j
-          JOIN ingresos t ON t.id = j.ingreso_id
-          JOIN devices d ON d.id = t.device_id
+          JOIN devices d ON d.id = j.device_id
          WHERE d.model_id = %s
            {company_clause}
            AND j.status = 'blocked'
@@ -2171,7 +2590,7 @@ def _resolve_article_for_job(job: dict[str, Any], client: BejermanSDKClient) -> 
     existing = (job.get("article_code") or "").strip()
     if existing:
         return existing
-    context = _ingreso_context(int(job["ingreso_id"]))
+    context = _job_context(job)
     mapping = _mapping_for_context(context, job.get("company_key"))
     if mapping and (mapping.get("article_code") or "").strip():
         code = (mapping.get("article_code") or "").strip()
@@ -2208,7 +2627,7 @@ def _mapping_article_codes_for_job(job: dict[str, Any]) -> tuple[str, str]:
     porque ahí sólo se elige entre códigos que Bejerman ya informó.
     """
     try:
-        context = _ingreso_context(int(job["ingreso_id"]))
+        context = _job_context(job)
         mapping = _mapping_for_context(context, job.get("company_key")) or {}
     except Exception:
         logger.exception("No se pudo consultar el mapeo confirmado para job Bejerman %s", job.get("id"))
@@ -2257,24 +2676,43 @@ def _stock_transfer_comprobante_number(job: dict[str, Any]) -> str:
     silencio, ver force_stock_entry_for_ingreso), todo reintento posterior con el
     mismo número choca para siempre con 'el mismo ya existe... importación
     anterior'. A partir del segundo intento se corre el número para poder
-    reintentar de verdad."""
-    base = int(job["ingreso_id"]) % 100000000
+    reintentar de verdad.
+
+    Sin ingreso el número sale del equipo, en el rango 9xxxxxxx que ya usan los otros
+    movimientos que no nacen de una OS (correcciones de stock, force_stock_entry): así no
+    puede pisar el número de un comprobante numerado con un `ingreso_id`."""
     attempts = int(job.get("attempts") or 0)
+    if not job.get("ingreso_id"):
+        # El corrimiento por reintento se hace DENTRO del rango: sumar y tomar módulo 1e8
+        # podía dar la vuelta y aterrizar en el espacio de los comprobantes numerados por OS.
+        seed = zlib.crc32(_reference_for_job(None, job.get("device_id")).encode("utf-8"))
+        return f"{90000000 + ((seed + attempts * 100000) % 10000000):08d}"
+    base = int(job["ingreso_id"]) % 100000000
     if attempts > 0:
         base = (base + attempts * 100000) % 100000000
     return f"{base:08d}"
 
 
-def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobante: str, deposit: str) -> dict[str, Any]:
-    document_date = _stock_document_date()
-    reference = f"NEXORA-OS-{job['ingreso_id']}"
-    serial = (job.get("numero_serie") or "").strip()
+def _stock_transfer_item(
+    *,
+    serial: str,
+    article_code: str,
+    comprobante: str,
+    deposit: str,
+    number: str,
+    observacion: str,
+) -> dict[str, Any]:
+    """Un renglón de un comprobante de stock. El lote arma varios con el mismo número.
+
+    `observacion` es el MG del equipo, no una referencia de NEXORA: ver
+    `bejerman_partida_observacion`.
+    """
     return {
-        "Comprobante_FechaEmision": document_date,
+        "Comprobante_FechaEmision": _stock_document_date(),
         "Comprobante_Tipo": comprobante,
         "Comprobante_Letra": "",
         "Comprobante_PtoVenta": "",
-        "Comprobante_Numero": _stock_transfer_comprobante_number(job),
+        "Comprobante_Numero": number,
         "Comprobante_Art_CodGen": article_code,
         "Comprobante_ArtPartida": serial,
         "Comprobante_DescArticulo": f"NEXORA {serial}"[:50],
@@ -2283,8 +2721,25 @@ def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobant
         "Comprobante_CantidadUM1": 1,
         "Comprobante_CantidadUM2": 1,
         "Comprobante_PrecioTotalMonLocal": 0,
-        "Partida_Observaciones": reference[:20],
+        "Partida_Observaciones": observacion,
     }
+
+
+def _observacion_partida_for_job(job: dict[str, Any]) -> str:
+    if job.get("device_id"):
+        return observacion_partida_de_equipo(job["device_id"])
+    return observacion_partida_de_ingreso(job.get("ingreso_id"))
+
+
+def _base_stock_transfer_item(job: dict[str, Any], article_code: str, comprobante: str, deposit: str) -> dict[str, Any]:
+    return _stock_transfer_item(
+        serial=(job.get("numero_serie") or "").strip(),
+        article_code=article_code,
+        comprobante=comprobante,
+        deposit=deposit,
+        number=_stock_transfer_comprobante_number(job),
+        observacion=_observacion_partida_for_job(job),
+    )
 
 
 def build_stock_transfer_out_payload(
@@ -2299,7 +2754,8 @@ def build_stock_transfer_out_payload(
     item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
     item["Comprobante_CantidadUM1"] = -1
     item["Comprobante_CantidadUM2"] = -1
-    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-SAL-{source_deposit}"
+    reference = _reference_for_job(job.get("ingreso_id"), job.get("device_id"))
+    item["Comprobante_IdOrigen"] = f"{reference}-SAL-{source_deposit}"
     return [item]
 
 
@@ -2307,7 +2763,8 @@ def build_stock_transfer_in_payload(job: dict[str, Any], article_code: str) -> l
     target_deposit = job.get("target_deposit") or "STL"
     comprobante = str(_setting("BEJERMAN_STOCK_TRANSFER_IN_COMPROBANTE", "ENT") or "").strip()
     item = _base_stock_transfer_item(job, article_code, comprobante, target_deposit)
-    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-ENT-{target_deposit}"
+    reference = _reference_for_job(job.get("ingreso_id"), job.get("device_id"))
+    item["Comprobante_IdOrigen"] = f"{reference}-ENT-{target_deposit}"
     return [item]
 
 
@@ -2329,7 +2786,8 @@ def build_stock_baja_out_payload(
     item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
     item["Comprobante_CantidadUM1"] = -1
     item["Comprobante_CantidadUM2"] = -1
-    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-SAL-{source_deposit}-{target_deposit}"
+    reference = _reference_for_job(job.get("ingreso_id"), job.get("device_id"))
+    item["Comprobante_IdOrigen"] = f"{reference}-SAL-{source_deposit}-{target_deposit}"
     item["Comprobante_CodigoCausaEmision"] = causa
     return [item]
 
@@ -2338,19 +2796,31 @@ def build_stock_baja_in_payload(job: dict[str, Any], article_code: str) -> list[
     target_deposit = job.get("target_deposit") or _stock_baja_target_deposit()
     comprobante = str(_setting("BEJERMAN_STOCK_BAJA_IN_COMPROBANTE", "ENT") or "ENT").strip()
     item = _base_stock_transfer_item(job, article_code, comprobante, target_deposit)
-    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-ENT-{target_deposit}"
+    reference = _reference_for_job(job.get("ingreso_id"), job.get("device_id"))
+    item["Comprobante_IdOrigen"] = f"{reference}-ENT-{target_deposit}"
     return [item]
 
 
-def build_stock_alta_out_payload(job: dict[str, Any], article_code: str) -> list[dict[str, Any]]:
-    source_deposit = job.get("source_deposit") or _stock_alta_source_deposit()
+def build_stock_alta_out_payload(
+    job: dict[str, Any],
+    article_code: str,
+    source_deposit: str = "",
+) -> list[dict[str, Any]]:
+    # El origen llega resuelto contra el stock real (el job guarda 'AUTO'); sólo se cae al
+    # default cuando alguien arma el payload a mano con un job viejo.
+    source_deposit = str(source_deposit or "").strip()
+    if not source_deposit or _norm(source_deposit) == "AUTO":
+        source_deposit = str(job.get("source_deposit") or "").strip()
+    if not source_deposit or _norm(source_deposit) == "AUTO":
+        source_deposit = _stock_alta_source_deposit()
     target_deposit = job.get("target_deposit") or _stock_alta_target_deposit()
     comprobante = str(_setting("BEJERMAN_STOCK_ALTA_OUT_COMPROBANTE", "SAL") or "SAL").strip()
     causa = _stock_alta_causa_emision()
     item = _base_stock_transfer_item(job, article_code, comprobante, source_deposit)
     item["Comprobante_CantidadUM1"] = -1
     item["Comprobante_CantidadUM2"] = -1
-    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-SAL-{source_deposit}-{target_deposit}"
+    reference = _reference_for_job(job.get("ingreso_id"), job.get("device_id"))
+    item["Comprobante_IdOrigen"] = f"{reference}-SAL-{source_deposit}-{target_deposit}"
     item["Comprobante_CodigoCausaEmision"] = causa
     return [item]
 
@@ -2359,7 +2829,8 @@ def build_stock_alta_in_payload(job: dict[str, Any], article_code: str) -> list[
     target_deposit = job.get("target_deposit") or _stock_alta_target_deposit()
     comprobante = str(_setting("BEJERMAN_STOCK_ALTA_IN_COMPROBANTE", "ENT") or "ENT").strip()
     item = _base_stock_transfer_item(job, article_code, comprobante, target_deposit)
-    item["Comprobante_IdOrigen"] = f"NEXORA-OS-{job['ingreso_id']}-ENT-{target_deposit}"
+    reference = _reference_for_job(job.get("ingreso_id"), job.get("device_id"))
+    item["Comprobante_IdOrigen"] = f"{reference}-ENT-{target_deposit}"
     return [item]
 
 
@@ -2628,7 +3099,8 @@ def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient)
                 article_code=stock_article_code,
             )
             raise BejermanBlockedError(
-                f"No se encontró stock positivo para la partida {serial}; no se puede mover a {target}"
+                f"La partida {serial} no tiene stock positivo en ningún depósito de Bejerman; "
+                f"no hay nada que dar de alta en {target}: hay que ingresarla desde Bejerman"
             )
         if len(positive_deposits) != 1:
             _finish_job(
@@ -2641,21 +3113,17 @@ def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient)
             raise BejermanBlockedError(
                 f"Partida {serial} encontrada con stock positivo en múltiples depósitos ({deposits_label}); requiere conciliación"
             )
-        if not source_records:
-            _finish_job(
-                job["id"],
-                JOB_STATUS_BLOCKED,
-                response_payload={**response_payload, "stock": stock_response},
-                article_code=stock_article_code,
-            )
-            deposit = positive_deposits[0] if positive_deposits else "-"
-            raise BejermanBlockedError(
-                f"Partida {serial} encontrada en depósito {deposit}; se esperaba {source} para alta a {target}"
-            )
-        source_deposit = source
+        # El único depósito con stock es el origen, venga de DES o de donde haya quedado el
+        # equipo cuando la baja nunca se sincronizó. Exigir DES dejaba el depósito sin corregir.
+        source_deposit = positive_deposits[0]
+        source_records = [
+            record
+            for record in positive_records
+            if _norm(_deposit_from_record(record) or "") == _norm(source_deposit)
+        ]
     else:
         source_deposit = str(request_payload.get("source_stock_deposit") or job.get("source_deposit") or "").strip()
-        if not source_deposit:
+        if not source_deposit or _norm(source_deposit) == "AUTO":
             _finish_job(
                 job["id"],
                 JOB_STATUS_BLOCKED,
@@ -2684,7 +3152,7 @@ def _process_stock_from_desguace(job: dict[str, Any], client: BejermanSDKClient)
     }
     next_response_payload = {**response_payload, "stock": stock_response}
     if not sal_done:
-        sal_payload = build_stock_alta_out_payload(job, article_code)
+        sal_payload = build_stock_alta_out_payload(job, article_code, source_deposit)
         sal_request_payload = {
             **next_request_payload,
             "alta_phase": "sal_pending",
@@ -2790,12 +3258,21 @@ def _stock_present_in_deposit(
 
 
 def _is_own_id_origen(comprobantes: list[dict[str, Any]]) -> bool:
-    """Todos los renglones llevan un `Comprobante_IdOrigen` armado por NEXORA."""
+    """Todos los renglones llevan un `Comprobante_IdOrigen` armado por NEXORA.
+
+    `NEXORA-OS-` numera por orden de servicio, `NEXORA-DEV-` por equipo (los movimientos
+    que no nacen de una OS, como el alta de un equipo propio) y `NEXORA-LOTE-` por lote de
+    equipos (el alta masiva). Los tres identifican unívocamente el trabajo, que es lo que
+    habilita tratar el "ya fue importado" como éxito.
+    """
 
     items = [item for item in (comprobantes or []) if isinstance(item, dict)]
     if not items:
         return False
-    return all(str(item.get("Comprobante_IdOrigen") or "").startswith("NEXORA-OS-") for item in items)
+    return all(
+        str(item.get("Comprobante_IdOrigen") or "").startswith(("NEXORA-OS-", "NEXORA-DEV-", "NEXORA-LOTE-"))
+        for item in items
+    )
 
 
 def _send_stock_comprobantes(
@@ -2860,7 +3337,16 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
     sync_type = (job.get("sync_type") or "").strip()
     request_payload = _dict_payload(job.get("request_payload"))
     response_payload = _dict_payload(job.get("response_payload"))
-    if sync_type == SYNC_TYPE_STOCK_STR_TO_STL and not ingreso_targets_rental_stock(int(job["ingreso_id"])):
+    # La misma pregunta que se hizo al encolar, revalidada acá: entre las dos cosas el equipo
+    # pudo venderse, y un MG vendido ya no vuelve al parque de alquiler. Las dos mitades tienen
+    # que decidir igual; si divergen, el stock termina en el depósito equivocado.
+    if sync_type == SYNC_TYPE_STOCK_STR_TO_STL:
+        targets_rental = ingreso_targets_rental_stock(int(job["ingreso_id"]))
+    elif sync_type == SYNC_TYPE_STOCK_VAL_TO_STL:
+        targets_rental = device_targets_rental_stock(int(job["device_id"]))
+    else:
+        targets_rental = True
+    if not targets_rental:
         _finish_job(
             job["id"],
             JOB_STATUS_SUCCEEDED,
@@ -2914,17 +3400,58 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
             deposit=target,
             expected_article_codes=expected_article_codes,
         )
+        idempotent_request_payload = {
+            **request_payload,
+            "idempotent": True,
+            "numero_serie": serial,
+            "target_deposit": target,
+            "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+        }
+        idempotent_response_payload = {**response_payload, "target": target_response}
+        # Una unidad no puede estar en los dos depósitos. Si el origen todavía la tiene, al
+        # destino la llevó otra cosa (el restore del 08/06 que emitía ENT sin SAL, un ENT a
+        # mano) y la SAL de este traslado nunca se hizo. Darlo por hecho dejaba el stock
+        # duplicado con el job en verde; cuando alguien borró el ENT sobrante, la unidad volvió
+        # a quedar en el origen sin que nadie se enterara (OS 28054). El equipo va al destino:
+        # lo que falta es la SAL del origen, con su propio IdOrigen.
+        leftover_response = client.stock_by_deposit_partida(source, serial)
+        leftover_records = _records_for_equipment_article(
+            _records_for_partida(leftover_response, serial, source), article_code
+        )
+        if leftover_records and _norm(source) != _norm(target):
+            validate_bejerman_config(comprobante="BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE")
+            sal_payload = build_stock_transfer_out_payload(job, article_code, source_deposit=source)
+            for item in sal_payload:
+                item["Comprobante_IdOrigen"] = f"{item.get('Comprobante_IdOrigen', '')}-DUP"[:50]
+            _finish_job(
+                job["id"],
+                JOB_STATUS_RUNNING,
+                request_payload={**request_payload, "sal_duplicado_comprobantes": sal_payload},
+                article_code=article_code,
+            )
+            idempotent_response_payload["source"] = leftover_response
+            idempotent_response_payload["sal_duplicado"] = _send_stock_comprobantes(
+                client,
+                sal_payload,
+                phase="transfer_sal_duplicado",
+                job_id=job["id"],
+                verify=lambda: not _stock_present_in_deposit(client, source, serial, article_code),
+            )
+            idempotent_request_payload.update(
+                {
+                    "sal_done": True,
+                    "sal_duplicado_comprobantes": sal_payload,
+                    "stock_duplicado_corregido": {
+                        "source_deposit": source,
+                        "records": _stock_records_summary(leftover_records),
+                    },
+                }
+            )
         _finish_job(
             job["id"],
             JOB_STATUS_SUCCEEDED,
-            request_payload={
-                **request_payload,
-                "idempotent": True,
-                "numero_serie": serial,
-                "target_deposit": target,
-                "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
-            },
-            response_payload={**response_payload, "target": target_response},
+            request_payload=idempotent_request_payload,
+            response_payload=idempotent_response_payload,
             article_code=article_code,
         )
         return JOB_STATUS_SUCCEEDED
@@ -2932,6 +3459,31 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
     source_response = client.stock_by_deposit_partida(source, serial)
     source_known_records = _records_for_partida_any_quantity(source_response, serial, source)
     source_records = _records_for_partida(source_response, serial, source)
+
+    # Este flujo nace de un cambio manual de ubicación: a diferencia de las
+    # transiciones automáticas, no hay otro documento que pueda justificar una ENT
+    # sin su SAL. Si Bejerman no tiene la partida en el origen declarado, se bloquea
+    # para conciliar; nunca se crea stock por una selección de pantalla.
+    if (
+        sync_type == SYNC_TYPE_STOCK_LOCATION_TRANSFER
+        and bool(request_payload.get("strict_source_stock"))
+        and not sal_done
+        and not source_records
+    ):
+        _finish_job(
+            job["id"],
+            JOB_STATUS_BLOCKED,
+            request_payload={
+                **request_payload,
+                "strict_source_stock_failed": True,
+                "source_stock_deposit": source,
+            },
+            response_payload={**response_payload, "source": source_response, "target": target_response},
+            article_code=(job.get("article_code") or "").strip(),
+        )
+        raise BejermanBlockedError(
+            f"La partida {serial} no tiene stock positivo en {source}; no se emitió ningún movimiento."
+        )
 
     other_records = [
         record
@@ -3085,7 +3637,15 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
             "sal_comprobantes": sal_payload,
         }
         _finish_job(job["id"], JOB_STATUS_RUNNING, request_payload=sal_request_payload, article_code=article_code)
-        sal_response = _send_stock_comprobantes(client, sal_payload, phase="transfer_sal", job_id=job["id"])
+        sal_response = _send_stock_comprobantes(
+            client,
+            sal_payload,
+            phase="transfer_sal",
+            job_id=job["id"],
+            # La verificación de después del ENT mira sólo el destino: sin esto, un "ya existe"
+            # con el origen todavía cargado pasaba por SAL hecha y el ENT duplicaba el stock.
+            verify=lambda: not _stock_present_in_deposit(client, transfer_source, serial, article_code),
+        )
         next_request_payload = {
             **sal_request_payload,
             "sal_done": True,
@@ -3146,7 +3706,695 @@ def _process_stock_transfer(job: dict[str, Any], client: BejermanSDKClient) -> s
     return JOB_STATUS_SUCCEEDED
 
 
+def _config_error_message(exc: Exception) -> str:
+    error = str(exc)
+    if BEJERMAN_CREDENTIALS_REQUIRED in error:
+        # Se reabre solo cuando la persona las carga (ver
+        # reopen_jobs_waiting_for_credentials); decirlo acá evita que alguien
+        # reintente a mano diez veces esperando que cambie algo.
+        error = (
+            f"{BEJERMAN_CREDENTIALS_REQUIRED} La operación se reanuda sola en cuanto el usuario "
+            "que la originó cargue sus credenciales en su perfil."
+        )
+    return error
+
+
+def _stock_lote_for_job(job: dict[str, Any]) -> dict[str, Any] | None:
+    """El lote al que pertenece un job, o `None` si el equipo se mueve solo."""
+    lote_id = (job or {}).get("lote_id")
+    if not lote_id:
+        return None
+    return q(
+        "SELECT id, phase, last_error FROM bejerman_stock_lotes WHERE id = %s",
+        [int(lote_id)],
+        one=True,
+    )
+
+
+def build_stock_lote_transfer_payloads(
+    reference: str,
+    number: str,
+    items: Sequence[dict[str, Any]],
+    *,
+    source: str,
+    target: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """La SAL y la ENT de un lote: un renglón por equipo, todos con el mismo número e IdOrigen.
+
+    El IdOrigen es del lote y no del equipo: Bejerman deduplica por `Comprobante_IdOrigen`, así
+    que reenviar el lote choca contra sí mismo, y ese choque es la confirmación de que ya entró.
+    """
+    sal_tipo = str(_setting("BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE", "SAL") or "").strip()
+    ent_tipo = str(_setting("BEJERMAN_STOCK_TRANSFER_IN_COMPROBANTE", "ENT") or "").strip()
+    sal: list[dict[str, Any]] = []
+    ent: list[dict[str, Any]] = []
+    for item in items:
+        salida = _stock_transfer_item(
+            serial=str(item["serial"]),
+            article_code=str(item["article_code"]),
+            comprobante=sal_tipo,
+            deposit=source,
+            number=number,
+            observacion=str(item.get("observacion") or ""),
+        )
+        salida["Comprobante_CantidadUM1"] = -1
+        salida["Comprobante_CantidadUM2"] = -1
+        salida["Comprobante_IdOrigen"] = f"{reference}-SAL-{source}"
+        sal.append(salida)
+        entrada = _stock_transfer_item(
+            serial=str(item["serial"]),
+            article_code=str(item["article_code"]),
+            comprobante=ent_tipo,
+            deposit=target,
+            number=number,
+            observacion=str(item.get("observacion") or ""),
+        )
+        entrada["Comprobante_IdOrigen"] = f"{reference}-ENT-{target}"
+        ent.append(entrada)
+    return sal, ent
+
+
+def _stock_lote_comprobante_number(reference: str, plan: int = 0) -> str:
+    """Número de la SAL/ENT del lote, en el rango 9xxxxxxx de los movimientos sin OS.
+
+    Se corre sólo cuando el lote se vuelve a planificar porque la SAL no entró —como el job
+    individual lo corre por intento—; el reenvío de un lote congelado conserva el número.
+    """
+    seed = zlib.crc32(str(reference).encode("utf-8"))
+    return f"{90000000 + ((seed + int(plan or 0) * 100000) % 10000000):08d}"
+
+
+def _stock_lote_lock_key(lote_id: int) -> str:
+    return f"{LOTE_ADVISORY_LOCK_NAMESPACE}:{int(lote_id)}"
+
+
+def _try_lock_stock_lote(lote_id: int) -> bool:
+    """Lock de sesión por lote: el worker y un "Reintentar" del panel no lo mueven a la vez."""
+    if connection.vendor != "postgresql":
+        return True
+    with connection.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", [_stock_lote_lock_key(lote_id)])
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def _unlock_stock_lote(lote_id: int) -> None:
+    if connection.vendor != "postgresql":
+        return
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", [_stock_lote_lock_key(lote_id)])
+    except Exception:
+        # Si la conexión se cayó, el lock de sesión se fue con ella.
+        logger.exception("No se pudo liberar el lock del lote Bejerman %s", lote_id)
+
+
+def _requeue_claimed_lote_job(job: dict[str, Any], delay_seconds: int = 60) -> None:
+    """Devuelve a la cola un job cuyo lote está moviendo otro proceso, sin gastarle un intento."""
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = 'pending',
+               attempts = GREATEST(attempts - 1, 0),
+               next_attempt_at = %s,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+           AND status = 'running'
+        """,
+        [timezone.now() + timedelta(seconds=delay_seconds), job["id"]],
+    )
+
+
+def _claim_stock_lote_members(lote_id: int, claimed_job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Toma todos los jobs vivos del lote, con el lock del lote ya tomado.
+
+    El worker reclamó uno solo; los demás se marcan `running` acá para que nadie los agarre
+    sueltos mientras viajan en el comprobante compartido. Quedan todos con los intentos del
+    reclamado: la política de reintentos se aplica al lote entero.
+    """
+    rows = q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = 'running',
+               attempts = CASE WHEN id = %s THEN attempts ELSE %s END,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE lote_id = %s
+           AND status IN ('pending','failed','blocked','running')
+        RETURNING *
+        """,
+        [int(claimed_job["id"]), int(claimed_job.get("attempts") or 0), int(lote_id)],
+    ) or []
+    return sorted(rows, key=lambda row: int(row["id"]))
+
+
+def _load_stock_lote(lote_id: int) -> dict[str, Any] | None:
+    return q("SELECT * FROM bejerman_stock_lotes WHERE id = %s", [int(lote_id)], one=True)
+
+
+def _update_stock_lote(
+    lote_id: int,
+    *,
+    phase: str | None = None,
+    request_payload: Any = None,
+    response_payload: Any = None,
+    error: str | None = None,
+) -> None:
+    """`error=None` conserva el último error; `error=""` lo limpia."""
+    q(
+        """
+        UPDATE bejerman_stock_lotes
+           SET phase = COALESCE(%s::text, phase),
+               request_payload = COALESCE(%s::jsonb, request_payload),
+               response_payload = COALESCE(%s::jsonb, response_payload),
+               last_error = CASE WHEN %s::boolean THEN NULLIF(%s::text, '') ELSE last_error END,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+        """,
+        [
+            phase,
+            _json_param(request_payload) if request_payload is not None else None,
+            _json_param(response_payload) if response_payload is not None else None,
+            error is not None,
+            error or "",
+            int(lote_id),
+        ],
+    )
+
+
+def _set_running_lote_members(
+    lote_id: int, status: str, *, error: str | None = None, next_attempt_at: Any = None
+) -> None:
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET status = %s,
+               last_error = %s,
+               next_attempt_at = COALESCE(%s::timestamptz, next_attempt_at),
+               updated_at = CURRENT_TIMESTAMP
+         WHERE lote_id = %s
+           AND status = 'running'
+        """,
+        [status, error, next_attempt_at, int(lote_id)],
+    )
+
+
+def _retry_stock_lote_members(lote_id: int, job: dict[str, Any], error: str, max_attempts: int) -> str:
+    next_attempt = _retry_next_attempt(int(job.get("attempts") or 0), error, max_attempts)
+    if next_attempt is None:
+        _set_running_lote_members(lote_id, JOB_STATUS_BLOCKED, error=f"Máximos reintentos agotados: {error}")
+        return JOB_STATUS_BLOCKED
+    _set_running_lote_members(lote_id, JOB_STATUS_FAILED, error=error, next_attempt_at=next_attempt)
+    return JOB_STATUS_FAILED
+
+
+def _detach_stock_lote_member(job: dict[str, Any], reason: str) -> None:
+    """Saca un equipo del lote ANTES de que el lote emita nada.
+
+    Sigue por el camino individual (`_process_stock_transfer`), que ya sabe resolver una unidad
+    que no está donde se esperaba: descuenta del depósito real o se bloquea con su propio
+    mensaje. Una vez congelado el lote esto ya no se puede hacer.
+    """
+    payload = {
+        key: value
+        for key, value in _dict_payload(job.get("request_payload")).items()
+        if key not in ("lote_id", "lote_reference")
+    }
+    payload["lote_detached"] = {
+        "lote_id": job.get("lote_id"),
+        "reason": reason,
+        "at": timezone.now().isoformat(),
+    }
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET lote_id = NULL,
+               status = 'pending',
+               last_error = NULL,
+               next_attempt_at = CURRENT_TIMESTAMP,
+               request_payload = %s::jsonb,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+        """,
+        [_json_param(payload), job["id"]],
+    )
+
+
+def _release_stock_lote_leftovers(lote_id: int, items: Sequence[dict[str, Any]]) -> None:
+    """Un job del lote que quedó `running` sin renglón congelado sigue por el camino individual.
+
+    No debería pasar —cada equipo se resuelve o se desprende al planificar—, pero un job
+    reabierto a mano después de terminado el lote quedaría `running` para siempre.
+    """
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET lote_id = NULL,
+               status = 'pending',
+               next_attempt_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE lote_id = %s
+           AND status = 'running'
+           AND NOT (id = ANY(%s::int[]))
+        """,
+        [int(lote_id), [int(item["job_id"]) for item in items]],
+    )
+
+
+def _stock_lote_item_in(client: BejermanSDKClient, deposit: str, item: dict[str, Any]) -> bool:
+    """¿Bejerman tiene el artículo de este renglón con stock en el depósito?
+
+    A diferencia de `_stock_present_in_deposit`, un error de Bejerman se propaga: acá la
+    respuesta decide si se reenvía un comprobante, y "no pude mirar" no puede leerse como
+    "no está".
+    """
+    serial = str(item.get("serial") or "").strip()
+    response = client.stock_by_deposit_partida(deposit, serial)
+    return bool(
+        _records_for_equipment_article(
+            _records_for_partida(response, serial, deposit),
+            str(item.get("article_code") or ""),
+        )
+    )
+
+
+def _stock_lote_series(items: Sequence[dict[str, Any]], flags: Sequence[bool]) -> str:
+    series = [str(item.get("serial") or "") for item, flag in zip(items, flags) if flag]
+    if len(series) > 10:
+        return f"{', '.join(series[:10])} y {len(series) - 10} más"
+    return ", ".join(series)
+
+
+def _stock_lote_review(lote_id: int, message: str) -> None:
+    """Deja el lote en revisión y corta: no se emite nada más hasta que alguien mire Bejerman."""
+    _update_stock_lote(lote_id, phase=LOTE_PHASE_REVIEW, error=message)
+    raise BejermanBlockedError(message)
+
+
+def _stock_lote_partial_message(
+    reference: str,
+    comprobante: str,
+    items: Sequence[dict[str, Any]],
+    flags: Sequence[bool],
+    *,
+    presentes: str,
+    ausentes: str,
+) -> str:
+    return (
+        f"El lote {reference} quedó a medias con la {comprobante}: {_stock_lote_series(items, flags)} "
+        f"{presentes} y {_stock_lote_series(items, [not flag for flag in flags])} {ausentes}. "
+        "Un solo comprobante no deja el stock así: revisá Bejerman antes de reintentar. "
+        "No se emitió nada más."
+    )
+
+
+def _plan_stock_lote_member(
+    job: dict[str, Any], client: BejermanSDKClient, *, source: str, target: str
+) -> dict[str, Any] | None:
+    """Decide qué pasa con un equipo del lote antes de emitir nada.
+
+    Devuelve el renglón a mover, o `None` si el equipo ya quedó resuelto: no corresponde
+    moverlo, ya estaba en destino, o salió del lote para seguir por el camino individual. Son
+    las mismas preguntas que `_process_stock_transfer` le hace a un equipo suelto, en el mismo
+    orden, para que un equipo no se decida distinto por venir en un lote.
+    """
+    request_payload = _dict_payload(job.get("request_payload"))
+    response_payload = _dict_payload(job.get("response_payload"))
+    serial = (job.get("numero_serie") or "").strip()
+    try:
+        if not device_targets_rental_stock(int(job["device_id"])):
+            _finish_job(
+                job["id"],
+                JOB_STATUS_SUCCEEDED,
+                request_payload={
+                    **request_payload,
+                    "skipped_not_applicable": True,
+                    "reason": "Equipo vendido o de cliente; no corresponde transferir a STL.",
+                },
+                response_payload=response_payload,
+            )
+            return None
+        if not serial:
+            _detach_stock_lote_member(job, "Número de serie requerido para sincronizar Bejerman")
+            return None
+        confirmed_article_code, mapped_article_code = _mapping_article_codes_for_job(job)
+        expected_article_codes = [
+            confirmed_article_code,
+            (job.get("article_code") or "").strip(),
+            str(request_payload.get("article_code") or "").strip(),
+            mapped_article_code,
+        ]
+        equipment_article_code = next((code for code in expected_article_codes if code), "")
+        target_response = client.stock_by_deposit_partida(target, serial)
+        target_records = _records_for_equipment_article(
+            _records_for_partida(target_response, serial, target),
+            equipment_article_code,
+        )
+        if target_records:
+            article_code = _article_code_for_partida_deposit(
+                target_records,
+                serial=serial,
+                deposit=target,
+                expected_article_codes=expected_article_codes,
+            )
+            _finish_job(
+                job["id"],
+                JOB_STATUS_SUCCEEDED,
+                request_payload={
+                    **request_payload,
+                    "idempotent": True,
+                    "numero_serie": serial,
+                    "target_deposit": target,
+                    "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+                },
+                response_payload={**response_payload, "target": target_response},
+                article_code=article_code,
+            )
+            return None
+        source_response = client.stock_by_deposit_partida(source, serial)
+        source_records = _records_for_partida(source_response, serial, source)
+        if not source_records:
+            _detach_stock_lote_member(job, f"La partida {serial} no tiene stock en {source}")
+            return None
+        article_code = _article_code_for_partida_deposit(
+            source_records,
+            serial=serial,
+            deposit=source,
+            expected_article_codes=expected_article_codes,
+        )
+        _assert_source_article_matches_confirmed_mapping(
+            job,
+            serial=serial,
+            deposit=source,
+            source_article_code=article_code,
+            confirmed_article_code=confirmed_article_code,
+        )
+    except BejermanBlockedError as exc:
+        # Un bloqueo transitorio del SDK no es un problema del equipo: reintenta el lote entero.
+        if _is_retryable_sync_message(str(exc)):
+            raise
+        _detach_stock_lote_member(job, str(exc))
+        return None
+    return {
+        "job_id": int(job["id"]),
+        "device_id": int(job["device_id"]),
+        "serial": serial,
+        "article_code": article_code,
+        "observacion": observacion_partida_de_equipo(job["device_id"]),
+    }
+
+
+def _verify_stock_lote_target(
+    client: BejermanSDKClient, items: Sequence[dict[str, Any]], target: str
+) -> None:
+    attempts = _positive_int_setting("BEJERMAN_SYNC_STOCK_VERIFY_ATTEMPTS", 3)
+    try:
+        delay_ms = int(_setting("BEJERMAN_SYNC_STOCK_VERIFY_DELAY_MS", 1500) or 0)
+    except (TypeError, ValueError):
+        delay_ms = 1500
+    delay_ms = max(0, delay_ms)
+    pendientes = list(items)
+    for attempt in range(attempts):
+        pendientes = [item for item in pendientes if not _stock_lote_item_in(client, target, item)]
+        if not pendientes:
+            return
+        if attempt < attempts - 1 and delay_ms:
+            time.sleep(delay_ms / 1000)
+    raise BejermanTransientError(
+        f"Bejerman aceptó la ENT del lote pero todavía no confirma stock en {target} para "
+        f"{_stock_lote_series(pendientes, [True] * len(pendientes))}."
+    )
+
+
+def _send_stock_lote_ent(
+    client: BejermanSDKClient,
+    request_payload: dict[str, Any],
+    items: Sequence[dict[str, Any]],
+    target: str,
+) -> dict[str, Any]:
+    return _send_stock_comprobantes(
+        client,
+        list(request_payload.get("ent_comprobantes") or []),
+        phase="lote_ent",
+        job_id=items[0]["job_id"],
+        verify=lambda: all(_stock_lote_item_in(client, target, item) for item in items),
+    )
+
+
+def _finish_stock_lote_items(
+    lote_id: int,
+    items: Sequence[dict[str, Any]],
+    members_by_id: dict[int, dict[str, Any]],
+    request_payload: dict[str, Any],
+    response_payload: dict[str, Any],
+    *,
+    source: str,
+    target: str,
+) -> None:
+    reference = _reference_for_lote(lote_id)
+    lote_info = {
+        "id": lote_id,
+        "reference": reference,
+        "comprobante_numero": request_payload.get("comprobante_numero"),
+        "sal": response_payload.get("sal"),
+        "ent": response_payload.get("ent"),
+    }
+    for item in items:
+        member = members_by_id.get(int(item["job_id"]))
+        if member is None:
+            continue
+        _finish_job(
+            int(item["job_id"]),
+            JOB_STATUS_SUCCEEDED,
+            request_payload={
+                **_dict_payload(member.get("request_payload")),
+                "lote_id": lote_id,
+                "lote_reference": reference,
+                "numero_serie": item["serial"],
+                "article_code": item["article_code"],
+                "source_stock_deposit": source,
+                "target_deposit": target,
+                "sal_done": True,
+                "target_stock_entry_done": True,
+                "transfer_phase": TRANSFER_PHASE_TARGET_ENTRY_DONE,
+            },
+            response_payload={**_dict_payload(member.get("response_payload")), "lote": lote_info},
+            article_code=item["article_code"],
+        )
+    _release_stock_lote_leftovers(lote_id, items)
+
+
+def _run_stock_lote(lote: dict[str, Any], members: list[dict[str, Any]], client: BejermanSDKClient) -> None:
+    """Mueve un lote de equipos de origen a destino con UNA SAL y UNA ENT.
+
+    Máquina de estados persistida en `bejerman_stock_lotes.phase`, porque cada paso puede
+    cortarse a mitad de camino y el reintento tiene que saber qué ya entró:
+
+    * `pending`: nada emitido. Se decide equipo por equipo (`_plan_stock_lote_member`), se
+      congela la composición y recién después se manda la SAL.
+    * `sal_pending`: la SAL se mandó pero no se sabe si entró. Lo dice el stock: si todas las
+      unidades siguen en origen no entró y se vuelve a planificar; si no queda ninguna, entró.
+    * `sal_done` / `ent_pending`: lo mismo con la ENT, mirando el destino.
+    * `review`: el stock quedó como un solo comprobante no lo deja (unas unidades sí y otras
+      no). No se emite nada más hasta que alguien mire Bejerman.
+
+    Reenviar un comprobante congelado es seguro porque Bejerman deduplica por IdOrigen, y el
+    choque sólo se absorbe si el stock confirma el movimiento (`_send_stock_comprobantes`).
+    """
+    validate_bejerman_config()
+    validate_bejerman_config(comprobante="BEJERMAN_STOCK_TRANSFER_OUT_COMPROBANTE")
+    validate_bejerman_config(comprobante="BEJERMAN_STOCK_TRANSFER_IN_COMPROBANTE")
+    lote_id = int(lote["id"])
+    reference = _reference_for_lote(lote_id)
+    source = _norm(lote.get("source_deposit")) or "VAL"
+    target = _norm(lote.get("target_deposit")) or "STL"
+    request_payload = _dict_payload(lote.get("request_payload"))
+    response_payload = _dict_payload(lote.get("response_payload"))
+    loaded_phase = str(lote.get("phase") or "").strip() or LOTE_PHASE_PENDING
+    phase = loaded_phase
+    members_by_id = {int(member["id"]): member for member in members}
+    items = [dict(item) for item in (request_payload.get("items") or []) if isinstance(item, dict)]
+
+    if phase == LOTE_PHASE_DONE:
+        _finish_stock_lote_items(
+            lote_id, items, members_by_id, request_payload, response_payload, source=source, target=target
+        )
+        return
+    if phase == LOTE_PHASE_REVIEW:
+        raise BejermanBlockedError(
+            str(lote.get("last_error") or "").strip()
+            or f"El lote {reference} quedó a medias en Bejerman: revisalo antes de reintentar."
+        )
+    if phase in LOTE_EMITTING_PHASES and not items:
+        _stock_lote_review(
+            lote_id,
+            f"El lote {reference} figura en curso ({phase}) pero no tiene renglones congelados: "
+            "no se puede saber qué emitió.",
+        )
+
+    if phase == LOTE_PHASE_SAL_PENDING:
+        en_origen = [_stock_lote_item_in(client, source, item) for item in items]
+        if all(en_origen):
+            phase = LOTE_PHASE_PENDING
+        elif not any(en_origen):
+            phase = LOTE_PHASE_SAL_DONE
+            _update_stock_lote(lote_id, phase=phase)
+        else:
+            _stock_lote_review(
+                lote_id,
+                _stock_lote_partial_message(
+                    reference,
+                    "SAL",
+                    items,
+                    en_origen,
+                    presentes=f"siguen en {source}",
+                    ausentes=f"ya salieron de {source}",
+                ),
+            )
+
+    ent_enviada = False
+    if phase == LOTE_PHASE_PENDING:
+        plan = int(request_payload.get("plan") or 0) + (1 if items else 0)
+        items = [
+            item
+            for item in (
+                _plan_stock_lote_member(member, client, source=source, target=target) for member in members
+            )
+            if item
+        ]
+        if not items:
+            _update_stock_lote(
+                lote_id,
+                phase=LOTE_PHASE_DONE,
+                request_payload={**request_payload, "plan": plan, "items": []},
+                error="",
+            )
+            _release_stock_lote_leftovers(lote_id, items)
+            return
+        number = _stock_lote_comprobante_number(reference, plan)
+        sal_payload, ent_payload = build_stock_lote_transfer_payloads(
+            reference, number, items, source=source, target=target
+        )
+        request_payload = {
+            **request_payload,
+            "reference": reference,
+            "plan": plan,
+            "comprobante_numero": number,
+            "items": items,
+            "sal_comprobantes": sal_payload,
+            "ent_comprobantes": ent_payload,
+            "congelado_at": timezone.now().isoformat(),
+        }
+        # Se congela ANTES de mandar: si el envío se corta, el reintento tiene que repetir
+        # exactamente este comprobante y no uno armado de nuevo.
+        _update_stock_lote(lote_id, phase=LOTE_PHASE_SAL_PENDING, request_payload=request_payload, error="")
+        for item in items:
+            member = members_by_id.get(int(item["job_id"])) or {}
+            _finish_job(
+                int(item["job_id"]),
+                JOB_STATUS_RUNNING,
+                request_payload={
+                    **_dict_payload(member.get("request_payload")),
+                    "lote_id": lote_id,
+                    "lote_reference": reference,
+                    "article_code": item["article_code"],
+                    "source_stock_deposit": source,
+                    "transfer_phase": "sal_pending",
+                },
+                article_code=item["article_code"],
+            )
+        sal_response = _send_stock_comprobantes(
+            client,
+            sal_payload,
+            phase="lote_sal",
+            job_id=items[0]["job_id"],
+            verify=lambda: not any(_stock_lote_item_in(client, source, item) for item in items),
+        )
+        response_payload = {**response_payload, "sal": sal_response}
+        phase = LOTE_PHASE_SAL_DONE
+        _update_stock_lote(lote_id, phase=phase, response_payload=response_payload)
+    elif phase == LOTE_PHASE_SAL_DONE and loaded_phase == LOTE_PHASE_SAL_DONE:
+        # Retomado después de una SAL confirmada. Si alguna unidad volvió al origen (un
+        # movimiento a mano, una restauración), mandar la ENT duplicaría stock.
+        vueltas = [_stock_lote_item_in(client, source, item) for item in items]
+        if any(vueltas):
+            _stock_lote_review(
+                lote_id,
+                f"El lote {reference} ya descontó de {source}, pero {_stock_lote_series(items, vueltas)} "
+                f"volvieron a figurar ahí: mandar la ENT duplicaría stock. Revisá Bejerman antes de reintentar.",
+            )
+
+    if phase == LOTE_PHASE_SAL_DONE:
+        _update_stock_lote(lote_id, phase=LOTE_PHASE_ENT_PENDING)
+        ent_response = _send_stock_lote_ent(client, request_payload, items, target)
+        response_payload = {**response_payload, "ent": ent_response}
+        _update_stock_lote(lote_id, response_payload=response_payload)
+        phase = LOTE_PHASE_ENT_PENDING
+        ent_enviada = True
+
+    if phase == LOTE_PHASE_ENT_PENDING and not ent_enviada:
+        en_destino = [_stock_lote_item_in(client, target, item) for item in items]
+        if not any(en_destino):
+            ent_response = _send_stock_lote_ent(client, request_payload, items, target)
+            response_payload = {**response_payload, "ent": ent_response}
+            _update_stock_lote(lote_id, response_payload=response_payload)
+        elif not all(en_destino):
+            _stock_lote_review(
+                lote_id,
+                _stock_lote_partial_message(
+                    reference,
+                    "ENT",
+                    items,
+                    en_destino,
+                    presentes=f"ya están en {target}",
+                    ausentes=f"todavía no llegaron a {target}",
+                ),
+            )
+
+    _verify_stock_lote_target(client, items, target)
+    response_payload = {**response_payload, "destino_verificado_at": timezone.now().isoformat()}
+    _update_stock_lote(lote_id, phase=LOTE_PHASE_DONE, response_payload=response_payload, error="")
+    _finish_stock_lote_items(
+        lote_id, items, members_by_id, request_payload, response_payload, source=source, target=target
+    )
+
+
+def _process_stock_lote_job(job: dict[str, Any], client: BejermanSDKClient, max_attempts: int) -> str:
+    """Procesa el lote entero al que pertenece un job reclamado por el worker."""
+    lote_id = int(job["lote_id"])
+    if not _try_lock_stock_lote(lote_id):
+        # Otro proceso (el worker o un "Reintentar" del panel) está moviendo este lote.
+        _requeue_claimed_lote_job(job)
+        return JOB_STATUS_PENDING
+    try:
+        try:
+            members = _claim_stock_lote_members(lote_id, job)
+            lote = _load_stock_lote(lote_id)
+            if not lote:
+                raise BejermanBlockedError(f"El lote de transferencias {lote_id} no existe.")
+            _run_stock_lote(lote, members, client)
+            return JOB_STATUS_SUCCEEDED
+        except BejermanConfigError as exc:
+            _set_running_lote_members(lote_id, JOB_STATUS_BLOCKED, error=_config_error_message(exc))
+            return JOB_STATUS_BLOCKED
+        except BejermanBlockedError as exc:
+            if _is_retryable_sync_message(str(exc)):
+                return _retry_stock_lote_members(lote_id, job, str(exc), max_attempts)
+            _set_running_lote_members(lote_id, JOB_STATUS_BLOCKED, error=str(exc))
+            return JOB_STATUS_BLOCKED
+        except BejermanTransientError as exc:
+            return _retry_stock_lote_members(lote_id, job, str(exc), max_attempts)
+        except Exception as exc:
+            logger.exception("Error sincronizando el lote Bejerman %s (job %s)", lote_id, job.get("id"))
+            return _retry_stock_lote_members(lote_id, job, str(exc), max_attempts)
+    finally:
+        _unlock_stock_lote(lote_id)
+
+
 def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_attempts: int) -> str:
+    if job.get("lote_id") and (job.get("sync_type") or "").strip() == SYNC_TYPE_STOCK_VAL_TO_STL:
+        # Un equipo de un alta masiva se mueve junto con el resto de su lote. El lote maneja sus
+        # propios errores: tiene que dejar a todos sus jobs en el mismo estado, no sólo a este.
+        return _process_stock_lote_job(job, client, max_attempts)
     try:
         sync_type = (job.get("sync_type") or "").strip()
         if sync_type == SYNC_TYPE_STOCK_ENTRY_STR:
@@ -3162,6 +4410,8 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
             SYNC_TYPE_STOCK_STR_TO_STC,
             SYNC_TYPE_STOCK_STR_TO_VAL,
             SYNC_TYPE_STOCK_STR_TO_STCL,
+            SYNC_TYPE_STOCK_LOCATION_TRANSFER,
+            SYNC_TYPE_STOCK_VAL_TO_STL,
         ):
             return _process_stock_transfer(job, client)
         raise BejermanBlockedError(
@@ -3170,16 +4420,7 @@ def _process_claimed_job(job: dict[str, Any], client: BejermanSDKClient, max_att
             "no puede funcionar: descártela desde el panel."
         )
     except BejermanConfigError as exc:
-        error = str(exc)
-        if BEJERMAN_CREDENTIALS_REQUIRED in error:
-            # Se reabre solo cuando la persona las carga (ver
-            # reopen_jobs_waiting_for_credentials); decirlo acá evita que alguien
-            # reintente a mano diez veces esperando que cambie algo.
-            error = (
-                f"{BEJERMAN_CREDENTIALS_REQUIRED} La operación se reanuda sola en cuanto el usuario "
-                "que la originó cargue sus credenciales en su perfil."
-            )
-        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=error)
+        _finish_job(job["id"], JOB_STATUS_BLOCKED, error=_config_error_message(exc))
         return JOB_STATUS_BLOCKED
     except BejermanBlockedError as exc:
         if _is_retryable_sync_message(str(exc)):
@@ -3306,7 +4547,7 @@ def reconcile_article_mapping_for_job(job: dict[str, Any], client: BejermanSDKCl
         }
 
     try:
-        context = _ingreso_context(int(job["ingreso_id"]))
+        context = _job_context(job)
         mapping = _mapping_for_context(context, job.get("company_key"))
     except Exception:
         mapping = None
@@ -3380,6 +4621,11 @@ def reconcile_article_mappings_from_stock(
 
 
 def restore_target_stock_for_job(job: dict[str, Any], client: BejermanSDKClient) -> dict[str, Any]:
+    lote = _stock_lote_for_job(job)
+    if lote and lote.get("phase") in (*LOTE_EMITTING_PHASES, LOTE_PHASE_REVIEW):
+        # Restaurar un equipo suelto con su lote a mitad de camino emitiría un ENT por fuera del
+        # comprobante compartido, y el lote después lo volvería a sumar: stock doble.
+        return {"status": "skipped", "reason": "lote_en_curso", "job_id": job.get("id"), "lote_id": lote.get("id")}
     serial = (job.get("numero_serie") or "").strip()
     if not serial:
         return {"status": "skipped", "reason": "sin_serie", "job_id": job.get("id")}

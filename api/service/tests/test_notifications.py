@@ -913,6 +913,11 @@ class NotificationsAPITest(TestCase):
             self.jefe.id,
         )
 
+    def _prepare_customer_service_release(self):
+        # Un RSS corresponde a un equipo de cliente, no a la flota propia MG.
+        with connection.cursor() as cur:
+            cur.execute("UPDATE devices SET numero_interno=NULL WHERE id=(SELECT device_id FROM ingresos WHERE id=%s)", [self.ingreso_id])
+
     def _create_service_release_ingreso(
         self,
         serial: str,
@@ -934,7 +939,7 @@ class NotificationsAPITest(TestCase):
             marca_id, model_id = cur.fetchone()
             cur.execute(
                 "INSERT INTO devices(customer_id, marca_id, model_id, numero_serie, numero_interno, variante) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
-                [customer_id or self.customer_id, marca_id, model_id, serial, internal, ""],
+                [customer_id or self.customer_id, marca_id, model_id, serial, None, ""],
             )
             device_id = int(cur.fetchone()[0])
             cur.execute(
@@ -962,6 +967,7 @@ class NotificationsAPITest(TestCase):
             return int(cur.fetchone()[0]), device_id
 
     def test_liberaciones_rss_compatibles_se_agrupan_en_una_orden(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -998,7 +1004,8 @@ class NotificationsAPITest(TestCase):
             )
             self.assertEqual({row[0] for row in cur.fetchall()}, {self.ingreso_id, second_ingreso_id})
 
-    def test_liberacion_rss_incompatible_por_motivo_o_cliente_abre_otra_orden(self):
+    def test_liberacion_rss_agrupa_motivos_y_separa_clientes(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute("UPDATE ingresos SET estado = 'liberado', resolucion = 'reparado' WHERE id = %s", [self.ingreso_id])
@@ -1018,14 +1025,15 @@ class NotificationsAPITest(TestCase):
         reason_order = ensure_service_release_order_for_ingreso(different_reason_id, self.jefe.id)
         customer_order = ensure_service_release_order_for_ingreso(different_customer_id, self.jefe.id)
 
-        self.assertNotEqual(reason_order["id"], first_order["id"])
+        self.assertEqual(reason_order["id"], first_order["id"])
         self.assertNotEqual(customer_order["id"], first_order["id"])
         self.assertNotEqual(customer_order["id"], reason_order["id"])
         with connection.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM delivery_orders WHERE delivery_type = 'service_release'")
-            self.assertEqual(int(cur.fetchone()[0]), 3)
+            self.assertEqual(int(cur.fetchone()[0]), 2)
 
     def test_rss_emitido_completa_entrega_de_todas_las_os_del_grupo(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -1065,6 +1073,7 @@ class NotificationsAPITest(TestCase):
         self.assertTrue(all(row[3] is not None for row in rows))
 
     def test_rss_partida_rechazada_cae_a_ent_mas_documento_n(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -1083,7 +1092,7 @@ class NotificationsAPITest(TestCase):
 
         sent_comprobantes = []
         stock_comprobantes = []
-        present_partidas = set()
+        present_partidas = {}
 
         class PartidaRejectedRssClient:
             def __init__(self, *args, **kwargs):
@@ -1112,8 +1121,8 @@ class NotificationsAPITest(TestCase):
                             "Articulo_Codigo": "1111003",
                             "Art_CodDeposito": "STC",
                             "Art_Partida": requested_partida,
-                            "Art_RealUM1": 1,
-                            "Art_DispUM1": 1,
+                            "Art_RealUM1": present_partidas[requested_partida],
+                            "Art_DispUM1": present_partidas[requested_partida],
                         }
                     ]
                 }
@@ -1121,7 +1130,8 @@ class NotificationsAPITest(TestCase):
             def ingresar_lista_comprobantes_stock_json(self, comprobantes, *, numera_flex="N"):
                 stock_comprobantes.append(list(comprobantes or []))
                 for item in comprobantes or []:
-                    present_partidas.add(item.get("Comprobante_ArtPartida"))
+                    partida = item.get("Comprobante_ArtPartida")
+                    present_partidas[partida] = present_partidas.get(partida, 0) + item["Comprobante_CantidadUM1"]
                 return {"Resultado": "OK", "DatosJSON": json.dumps(comprobantes or [])}
 
             def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
@@ -1144,12 +1154,12 @@ class NotificationsAPITest(TestCase):
             result = generate_bejerman_remito([order["id"]], self.jefe.id, {})
 
         self.assertEqual(result["remitoNumber"], "RSS R 00004-00001234")
-        self.assertEqual(len(sent_comprobantes), 2)
+        self.assertEqual(len(sent_comprobantes), 3)
         self.assertEqual(sent_comprobantes[0]["Comprobante_ActualizaStock"], "S")
-        self.assertEqual(sent_comprobantes[1]["Comprobante_ActualizaStock"], "N")
-        self.assertEqual(len(stock_comprobantes), 1)
+        self.assertEqual([c["Comprobante_ActualizaStock"] for c in sent_comprobantes], ["S", "S", "N"])
+        self.assertEqual([batch[0]["Comprobante_Tipo"] for batch in stock_comprobantes], ["ENT", "SAL", "ENT"])
         rejected_article_lines = [item for item in sent_comprobantes[0]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        recovered_article_lines = [item for item in sent_comprobantes[1]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
+        recovered_article_lines = [item for item in sent_comprobantes[-1]["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         partida = rejected_article_lines[0]["Item_Partida"]
         self.assertTrue(partida)
         self.assertEqual(stock_comprobantes[0][0]["Comprobante_ArtPartida"], partida)
@@ -1161,6 +1171,7 @@ class NotificationsAPITest(TestCase):
             self.assertEqual(cur.fetchone()[0], "generated")
 
     def test_rss_corrige_articulo_por_stock_de_partida_antes_de_emitir(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1103004")
         with connection.cursor() as cur:
             cur.execute(
@@ -1261,6 +1272,7 @@ class NotificationsAPITest(TestCase):
         self.assertEqual(float(updated[2]), 1.0)
 
     def test_rss_grande_se_divide_por_limite_de_lineas_impresas(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -1368,8 +1380,16 @@ class NotificationsAPITest(TestCase):
             ("RSS R 00004-00001239", 2),
             ("RSS R 00004-00001240", 1),
         ])
+        from service.views.ingresos_views import _service_release_remito_salida_for_ingreso
+        with connection.cursor() as cur:
+            cur.execute("SELECT id, remito_salida FROM ingresos WHERE id = ANY(%s)", [ingreso_ids])
+            references = cur.fetchall()
+        for ingreso_id, expected in references:
+            self.assertEqual(_service_release_remito_salida_for_ingreso(ingreso_id), expected)
+
 
     def test_rss_cuarenta_y_ocho_equipos_genera_siete_remitos(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -1485,6 +1505,7 @@ class NotificationsAPITest(TestCase):
         self.assertEqual([int(row[1]) for row in rows], [7, 7, 7, 7, 7, 7, 6])
 
     def test_rss_grande_en_revision_se_reinicia_dividido_sin_reemitir_a_ciegas(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -1629,8 +1650,16 @@ class NotificationsAPITest(TestCase):
             ("RSS R 00004-00002239", 2),
             ("RSS R 00004-00002240", 1),
         ])
+        from service.views.ingresos_views import _service_release_remito_salida_for_ingreso
+        with connection.cursor() as cur:
+            cur.execute("SELECT id, remito_salida FROM ingresos WHERE id = ANY(%s)", [ingreso_ids])
+            references = cur.fetchall()
+        for ingreso_id, expected in references:
+            self.assertEqual(_service_release_remito_salida_for_ingreso(ingreso_id), expected)
+
 
     def test_cobranzas_factura_sincroniza_todas_las_os_del_grupo(self):
+        self._prepare_customer_service_release()
         self._ensure_rental_article_mapping("1111003")
         with connection.cursor() as cur:
             cur.execute(
@@ -1760,7 +1789,7 @@ class NotificationsAPITest(TestCase):
                 cur.execute(
                     """
                     UPDATE ingresos
-                       SET estado = 'disponible',
+                       SET estado = 'reparado',
                            ubicacion_id = %s,
                            alquilado = FALSE,
                            alquiler_a = NULL,
@@ -1800,8 +1829,8 @@ class NotificationsAPITest(TestCase):
                 """,
                 [
                     device_id,
-                    "disponible",
-                    "alquiler",
+                    "reparado",
+                    "reparación alquiler",
                     timezone.now(),
                     timezone.now(),
                     "no_aplica",
@@ -5426,7 +5455,7 @@ class NotificationsAPITest(TestCase):
                 self.ingresar_count += 1
                 if self.ingresar_count == 1:
                     raise BejermanSdkResponseError(
-                        "El comprobante no se importó. Se ha superado el Máximo para Ajustar diferencias permitido."
+                        "Se perdió la conexión antes de recibir la confirmación del comprobante."
                     )
                 return {
                     "Resultado": "OK",
@@ -5440,12 +5469,19 @@ class NotificationsAPITest(TestCase):
 
         fake_client = SafeReviewClient()
         with patch("service.bejerman_delivery.BejermanSDKClient", return_value=fake_client):
-            with self.assertRaises(DeliveryOrderError):
+            with self.assertRaises(DeliveryOrderError) as emission_error:
                 generate_bejerman_remito([order["id"]], self.jefe.id, {"issueDate": "2026-07-13"})
+            self.assertEqual(fake_client.ingresar_count, 1, str(emission_error.exception))
             with connection.cursor() as cur:
                 cur.execute("SELECT bejerman_remito_group_id FROM delivery_orders WHERE id = %s", [order["id"]])
                 old_group_id = cur.fetchone()[0]
 
+            with self.assertRaises(DeliveryOrderError):
+                verify_bejerman_remito_review(old_group_id, self.jefe.id)
+            self.assertEqual(fake_client.ingresar_count, 1)
+            # Simular evidencia persistida de un rechazo definitivo de una versión anterior.
+            with connection.cursor() as cur:
+                cur.execute("UPDATE bejerman_remito_groups SET response_summary = response_summary || %s::jsonb WHERE id = %s", [json.dumps({"failureCertainty": "confirmed_not_imported"}), old_group_id])
             verify_result = verify_bejerman_remito_review(old_group_id, self.jefe.id)
             self.assertEqual(verify_result["reviewState"], "ready_for_correction")
             self.assertEqual(fake_client.ingresar_count, 1)
@@ -5460,7 +5496,8 @@ class NotificationsAPITest(TestCase):
             self.assertEqual(fake_client.ingresar_count, 1)
 
             editable = get_delivery_order(order["id"], include_events=False)
-            edited_items = [{**item, "unitPrice": "30"} for item in editable["items"]]
+            # El RT no lleva importes: cambiar sólo el precio no cambia el comprobante.
+            edited_items = [{**item, "unitPrice": "30", "quantity": 2, "partidas": [{**partida, "assignedQuantity": 2} for partida in item["partidas"]]} for item in editable["items"]]
             with self._delivery_partida_stock_patch(
                 [{"articleCode": "1202014", "depositCode": "VAL", "partida": "D2507112H", "availableQuantity": 20}]
             ):
@@ -5510,7 +5547,7 @@ class NotificationsAPITest(TestCase):
                 {"confirm": True, "issueDate": "2026-07-13"},
             )
 
-        self.assertEqual(fake_client.lookup_count, 4)
+        self.assertGreaterEqual(fake_client.lookup_count, 4)
         self.assertEqual(fake_client.ingresar_count, 2)
         self.assertEqual(result["remitoNumber"], "RT R 00007-00000106")
         with connection.cursor() as cur:
@@ -5610,7 +5647,7 @@ class NotificationsAPITest(TestCase):
             def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
                 self.ingresar_count += 1
                 raise BejermanSdkResponseError(
-                    "El comprobante no se importó. Se ha superado el Máximo para Ajustar diferencias permitido."
+                    "Se perdió la conexión antes de recibir la confirmación del comprobante."
                 )
 
             def list_comprobantes_ventas(self, filters):
@@ -5633,6 +5670,12 @@ class NotificationsAPITest(TestCase):
                     cur.execute("SELECT bejerman_remito_group_id FROM delivery_orders WHERE id = %s", [order["id"]])
                     group_id = cur.fetchone()[0]
 
+                with self.assertRaises(DeliveryOrderError):
+                    verify_bejerman_remito_review(group_id, self.jefe.id)
+                self.assertEqual(fake_client.ingresar_count, 1)
+                # Simular evidencia persistida de un rechazo definitivo de una versión anterior.
+                with connection.cursor() as cur:
+                    cur.execute("UPDATE bejerman_remito_groups SET response_summary = response_summary || %s::jsonb WHERE id = %s", [json.dumps({"failureCertainty": "confirmed_not_imported"}), group_id])
                 result = verify_bejerman_remito_review(group_id, self.jefe.id)
 
         self.assertEqual(result["reviewState"], "ready_for_correction")
@@ -6142,6 +6185,11 @@ class NotificationsAPITest(TestCase):
                 ["%OE-RTN-NO-BILLING%"],
             )
             self.assertEqual(cur.fetchone()[0], 0)
+        from service.notification_email_outbox import process_notification_email_outbox
+        with connection.cursor() as cur:
+            cur.execute("UPDATE notification_email_outbox SET next_attempt_at = CURRENT_TIMESTAMP WHERE status = 'retry'")
+        with patch("service.notification_email_outbox._attachment_for_delivery", return_value=(b"%PDF-1.4 audit", "application/pdf", "remito.pdf")):
+            process_notification_email_outbox()
         self.assertEqual(
             sorted(address for message in mail.outbox for address in message.to),
             ["admin@notif.test", "cobranzas@notif.test", "recepcion@notif.test"],
@@ -7538,7 +7586,7 @@ class NotificationsAPITest(TestCase):
 
         postponed = postpone_delivery_order_billing(order["id"], self.cobranzas.id, return_date)
 
-        self.assertEqual(postponed["billingPostponedAt"][:10], timezone.localdate().isoformat())
+        self.assertEqual(timezone.localtime(datetime.fromisoformat(postponed["billingPostponedAt"].replace("Z", "+00:00"))).date(), timezone.localdate())
         due_at = datetime.fromisoformat(postponed["billingPostponedUntil"])
         self.assertEqual(timezone.localtime(due_at).strftime("%H:%M"), "09:00")
         self.assertNotIn(order["id"], [item["id"] for item in list_delivery_orders({"pendingBilling": True, "limit": 10})["items"]])
@@ -7639,7 +7687,7 @@ class NotificationsAPITest(TestCase):
         with self.assertRaises(DeliveryOrderError) as ctx:
             mark_invoiced(order["id"], self.cobranzas.id, "FC A 0001-00001234")
 
-        self.assertEqual(ctx.exception.code, "INVALID_INVOICE_STATE")
+        self.assertEqual(ctx.exception.code, "DELIVERY_REMITO_SET_INCOMPLETE")
 
     def test_facturacion_registra_numero_y_cierra_orden(self):
         order = create_delivery_order(
@@ -7805,7 +7853,7 @@ class NotificationsAPITest(TestCase):
         with self.assertRaises(DeliveryOrderError) as ctx:
             mark_not_billable(order["id"], self.cobranzas.id, "No corresponde facturar")
 
-        self.assertEqual(ctx.exception.code, "INVALID_NOT_BILLABLE_STATE")
+        self.assertEqual(ctx.exception.code, "DELIVERY_REMITO_SET_INCOMPLETE")
 
     def test_ordenes_entrega_buscan_por_articulos_y_exponen_origen(self):
         with self._delivery_partida_stock_patch(

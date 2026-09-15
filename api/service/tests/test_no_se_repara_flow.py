@@ -149,11 +149,11 @@ class NoSeReparaFlowAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_insert_id(cls, cur):
+    def _last_insert_id(cls, cur, table):
         if connection.vendor == "sqlite":
             cur.execute("SELECT last_insert_rowid()")
         elif connection.vendor == "postgresql":
-            cur.execute("SELECT LASTVAL()")
+            cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         else:
             cur.execute("SELECT LAST_INSERT_ID()")
         return int(cur.fetchone()[0])
@@ -190,12 +190,12 @@ class NoSeReparaFlowAPITest(TestCase):
             cur.execute("DELETE FROM quotes")
             cur.execute("DELETE FROM ingresos")
             cur.execute("INSERT INTO customers (razon_social) VALUES (%s)", ["Cliente No se repara"])
-            customer_id = self._last_insert_id(cur)
+            customer_id = self._last_insert_id(cur, "customers")
             cur.execute(
                 "INSERT INTO devices (customer_id, numero_serie, numero_interno) VALUES (%s, %s, %s)",
                 [customer_id, "SER-NO-SE-REPARA", "INT-NO-SE-REPARA"],
             )
-            device_id = self._last_insert_id(cur)
+            device_id = self._last_insert_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO ingresos (
@@ -209,9 +209,9 @@ class NoSeReparaFlowAPITest(TestCase):
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                [device_id, "reparar", "reparacion", None, "aprobado", True, self.tecnico.id],
+                [device_id, "reparar", "reparación", None, "aprobado", True, self.tecnico.id],
             )
-            self.ingreso_id = self._last_insert_id(cur)
+            self.ingreso_id = self._last_insert_id(cur, "ingresos")
             if connection.vendor == "postgresql":
                 cur.execute(
                     "DELETE FROM audit.change_log WHERE table_name='ingresos' AND (record_id=%s OR ingreso_id=%s)",
@@ -238,7 +238,7 @@ class NoSeReparaFlowAPITest(TestCase):
             return
         with connection.cursor() as cur:
             cur.execute(
-                "DELETE FROM audit.change_log WHERE table_name='ingresos' AND record_id=%s AND column_name='estado'",
+                "DELETE FROM audit.change_log WHERE table_name='ingresos' AND record_id=%s AND column_name IN ('estado','presupuesto_estado')",
                 [self.ingreso_id],
             )
 
@@ -394,6 +394,87 @@ class NoSeReparaFlowAPITest(TestCase):
         self.assertIsNone(resolucion)
         self.assertEqual(presupuesto_estado, "aprobado")
 
+    def test_quitar_estado_final_conserva_la_resolucion_del_presupuesto_rechazado(self):
+        # Deshacer el "reparado" deshace el resultado del trabajo, no la respuesta del
+        # cliente. Antes la resolución volvía a quedar sin definir y la orden de salida
+        # salía en blanco (o con lo que se eligiera a mano) sobre un presupuesto que el
+        # cliente ya había rechazado.
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparado', resolucion='presupuesto_rechazado', presupuesto_estado='rechazado' WHERE id=%s",
+                [self.ingreso_id],
+            )
+        self._clear_estado_audit()
+        self._insert_estado_audit("diagnosticado", "reparado")
+        self.client.force_authenticate(user=self.tecnico)
+
+        resp = self.client.post(
+            f"/api/ingresos/{self.ingreso_id}/quitar-estado-final-reparacion/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data.get("resolucion"), "presupuesto_rechazado")
+        estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "diagnosticado")
+        self.assertEqual(resolucion, "presupuesto_rechazado")
+        self.assertEqual(presupuesto_estado, "rechazado")
+
+    def test_quitar_reparar_conserva_la_resolucion_del_presupuesto_rechazado(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparar', resolucion='presupuesto_rechazado', presupuesto_estado='rechazado' WHERE id=%s",
+                [self.ingreso_id],
+            )
+        self._clear_estado_audit()
+        self._insert_estado_audit("diagnosticado", "reparar")
+        self.client.force_authenticate(user=self.jefe)
+
+        resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/quitar-reparar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data.get("resolucion"), "presupuesto_rechazado")
+        _estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(resolucion, "presupuesto_rechazado")
+        self.assertEqual(presupuesto_estado, "rechazado")
+
+    def test_marcar_reparado_no_pisa_el_presupuesto_rechazado(self):
+        # El equipo puede quedar armado y andando igual, pero la OS no se resolvió
+        # reparando: si acá se pisara la resolución con 'reparado', la orden de salida
+        # imprimiría "Resolución: Reparado" sobre un presupuesto que el cliente rechazó.
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparar', resolucion=NULL, presupuesto_estado='rechazado' WHERE id=%s",
+                [self.ingreso_id],
+            )
+        self.client.force_authenticate(user=self.tecnico)
+
+        with patch("service.views.ingresos_views.enqueue_stock_transfer_for_ingreso"):
+            resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/reparado/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "reparado")
+        self.assertEqual(resolucion, "presupuesto_rechazado")
+        self.assertEqual(presupuesto_estado, "rechazado")
+
+    def test_marcar_reparado_sin_rechazo_sigue_resolviendo_reparado(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE ingresos SET estado='reparar', resolucion=NULL, presupuesto_estado='aprobado' WHERE id=%s",
+                [self.ingreso_id],
+            )
+        self.client.force_authenticate(user=self.tecnico)
+
+        with patch("service.views.ingresos_views.enqueue_stock_transfer_for_ingreso"):
+            resp = self.client.post(f"/api/ingresos/{self.ingreso_id}/reparado/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        estado, resolucion, _presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "reparado")
+        self.assertEqual(resolucion, "reparado")
+
     def test_quitar_reparar_solo_jefe(self):
         with connection.cursor() as cur:
             cur.execute(
@@ -467,7 +548,9 @@ class NoSeReparaFlowAPITest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(self._quote_vigente(), "no_aplica")
 
-    def test_controlado_sin_defecto_deja_la_quote_vigente_en_no_aplica(self):
+    def test_controlado_sin_defecto_en_equipo_cliente_no_toca_presupuesto(self):
+        # En equipos de clientes, el presupuesto no pasa automáticamente a no_aplica
+        # para permitir cotizar la revisión técnica o definirlo manualmente.
         with connection.cursor() as cur:
             cur.execute(
                 "UPDATE ingresos SET estado='diagnosticado', resolucion=NULL, presupuesto_estado='pendiente' WHERE id=%s",
@@ -486,8 +569,40 @@ class NoSeReparaFlowAPITest(TestCase):
             )
 
         self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._quote_vigente(), "pendiente")
+        estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "controlado_sin_defecto")
+        self.assertEqual(resolucion, "no_se_encontro_falla")
+        self.assertEqual(presupuesto_estado, "pendiente")
+
+    def test_controlado_sin_defecto_en_equipo_propio_deja_la_quote_en_no_aplica(self):
+        # En equipos propios de MG BIO, el presupuesto sí pasa a no_aplica automáticamente.
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE devices SET numero_interno='MG 0001' WHERE id=(SELECT device_id FROM ingresos WHERE id=%s)",
+                [self.ingreso_id],
+            )
+            cur.execute(
+                "UPDATE ingresos SET estado='diagnosticado', resolucion=NULL, presupuesto_estado='pendiente' WHERE id=%s",
+                [self.ingreso_id],
+            )
+            cur.execute(
+                "INSERT INTO quotes (ingreso_id, version_num, estado) VALUES (%s, %s, %s)",
+                [self.ingreso_id, 1, "pendiente"],
+            )
+        self.client.force_authenticate(user=self.tecnico)
+
+        with patch("service.views.ingresos_views.ingreso_targets_rental_stock", return_value=False), \
+             patch("service.views.ingresos_views.ingreso_is_demo_return", return_value=False):
+            resp = self.client.post(
+                f"/api/ingresos/{self.ingreso_id}/controlado-sin-defecto/", {}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(self._quote_vigente(), "no_aplica")
-        _estado, _resolucion, presupuesto_estado = self._estado_resolucion()
+        estado, resolucion, presupuesto_estado = self._estado_resolucion()
+        self.assertEqual(estado, "controlado_sin_defecto")
+        self.assertEqual(resolucion, "no_se_encontro_falla")
         self.assertEqual(presupuesto_estado, "no_aplica")
 
     def test_no_se_repara_no_tapa_un_presupuesto_rechazado(self):

@@ -115,8 +115,8 @@ class DevicesListViewAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     @classmethod
@@ -145,30 +145,30 @@ class DevicesListViewAPITest(TestCase):
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["PART", "Particular", "111"],
             )
-            cls.customer_particular_id = cls._last_id(cur)
+            cls.customer_particular_id = cls._last_id(cur, "customers")
             cur.execute(
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["CLI001", "Clinica Demo", "222"],
             )
-            cls.customer_cli_id = cls._last_id(cur)
+            cls.customer_cli_id = cls._last_id(cur, "customers")
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["BMC"])
-            cls.marca_id = cls._last_id(cur)
+            cls.marca_id = cls._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s)",
                 [cls.marca_id, "CPAP G3", "CPAP", "Elite"],
             )
-            cls.model_id = cls._last_id(cur)
+            cls.model_id = cls._last_id(cur, "models")
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["Longfian"])
-            cls.marca_oxi_id = cls._last_id(cur)
+            cls.marca_oxi_id = cls._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo, variante) VALUES (%s,%s,%s,%s)",
                 [cls.marca_oxi_id, "JAY-5", "Concentrador", "5L"],
             )
-            cls.model_oxi_id = cls._last_id(cur)
+            cls.model_oxi_id = cls._last_id(cur, "models")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Taller"])
-            cls.location_id = cls._last_id(cur)
+            cls.location_id = cls._last_id(cur, "locations")
             cur.execute("INSERT INTO locations(nombre) VALUES (%s)", ["Depósito"])
-            cls.location_deposito_id = cls._last_id(cur)
+            cls.location_deposito_id = cls._last_id(cur, "locations")
             cur.execute(
                 """
                 INSERT INTO devices(
@@ -190,7 +190,7 @@ class DevicesListViewAPITest(TestCase):
                     "20-12345678-9",
                 ],
             )
-            cls.device_id = cls._last_id(cur)
+            cls.device_id = cls._last_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO devices(
@@ -209,7 +209,7 @@ class DevicesListViewAPITest(TestCase):
                     cls.location_id,
                 ],
             )
-            cls.device_mg_id = cls._last_id(cur)
+            cls.device_mg_id = cls._last_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO devices(
@@ -229,13 +229,13 @@ class DevicesListViewAPITest(TestCase):
                     "Clinica Demo",
                 ],
             )
-            cls.device_oxi_id = cls._last_id(cur)
+            cls.device_oxi_id = cls._last_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO ingresos(device_id, estado, motivo, fecha_ingreso, ubicacion_id)
                 VALUES (%s,%s,%s, CURRENT_TIMESTAMP, %s)
                 """,
-                [cls.device_id, "ingresado", "reparacion", cls.location_id],
+                [cls.device_id, "ingresado", "reparación", cls.location_id],
             )
 
     def setUp(self):
@@ -283,7 +283,7 @@ class DevicesListViewAPITest(TestCase):
                 INSERT INTO ingresos(device_id, estado, motivo, fecha_ingreso, ubicacion_id)
                 VALUES (%s,%s,%s, CURRENT_TIMESTAMP + INTERVAL '1 day', %s)
                 """,
-                [self.device_id, "baja", "obsoleto", self.location_id],
+                [self.device_id, "baja", "otros", self.location_id],
             )
         resp = self.client.get("/api/equipos/?page_size=20")
         self.assertEqual(resp.status_code, 200)

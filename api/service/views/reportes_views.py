@@ -7,7 +7,13 @@ from django.db import transaction
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .helpers import _set_audit_user, exec_void, q, require_roles
+from .helpers import _set_audit_user, exec_void, mg_estado_select_sql, q, require_roles
+from ..release_gate import (
+    ESTADOS_SALIDA_YA_EMITIDA,
+    ingreso_requiere_presupuesto,
+    motivo_del_bloqueo,
+    presupuesto_bloquea_salida,
+)
 from ..rejected_budget import get_rejected_quote_summary, get_stored_rejected_budget_fields, has_rejected_budget_charge_schema
 from ..bejerman_sync import (
     enqueue_client_ready_transfer_for_ingreso,
@@ -29,31 +35,9 @@ logger = logging.getLogger(__name__)
 _HEADER_EMITIDOS = "X-Nexora-Remitos-Emitidos"
 _HEADER_FALLIDOS = "X-Nexora-Remitos-Fallidos"
 
-# Estados en los que la orden de salida ya se emitió: volver a pedirla es
-# reimprimir, no liberar, así que los controles previos a liberar no aplican.
-ESTADOS_SALIDA_YA_EMITIDA = frozenset(
-    {
-        "liberado",
-        "entregado",
-        "alquilado",
-        "baja",
-        "vendido_pendiente_entrega",
-        "vendido_entregado",
-    }
-)
-
-
-def presupuesto_bloquea_salida(estado: str | None, presupuesto_estado: str | None) -> bool:
-    """¿Este presupuesto frena la orden de salida?
-
-    Un presupuesto emitido y todavía sin respuesta del cliente ('presupuestado') no
-    habilita liberar: se entregaría -y facturaría- un trabajo que nadie aprobó.
-    Aprobarlo o rechazarlo lo deja en 'aprobado'/'rechazado' y destraba la salida.
-    Sobre una OS cuya orden ya se emitió el corte no aplica: ahí se está reimprimiendo.
-    """
-    if (estado or "").strip().lower() in ESTADOS_SALIDA_YA_EMITIDA:
-        return False
-    return (presupuesto_estado or "").strip().lower() == "presupuestado"
+# `ESTADOS_SALIDA_YA_EMITIDA`, `presupuesto_bloquea_salida` e `ingreso_requiere_presupuesto`
+# se importan de `service/release_gate.py`: es el mismo módulo que leen las colas, para que
+# lo que la lista muestra y lo que esta view acepta no puedan separarse.
 
 
 def _response_detail(response) -> str:
@@ -120,14 +104,24 @@ class RemitoSalidaPdfView(APIView):
         require_roles(request, ["jefe", "admin", "recepcion","jefe_veedor"])
         _set_audit_user(request)
 
+        # El equipo entra en la consulta -y no sólo el ingreso- porque para saber si esta
+        # OS necesita presupuesto hay que saber de quién es el equipo: un MG del parque
+        # propio se repara sin presupuestarle nada a nadie.
         cur_row = q(
-            """
-            SELECT resolucion,
-                   estado,
-                   COALESCE(presupuesto_estado::text, '') AS presupuesto_estado
-              FROM ingresos
-             WHERE id=%s
-               FOR UPDATE
+            f"""
+            SELECT i.resolucion,
+                   i.estado,
+                   COALESCE(i.presupuesto_estado::text, '') AS presupuesto_estado,
+                   COALESCE(i.garantia_fabrica, FALSE) AS garantia_fabrica,
+                   COALESCE(i.garantia_reparacion, FALSE) AS garantia_reparacion,
+                   COALESCE(i.motivo::text, '') AS motivo,
+                   COALESCE(d.numero_interno, '') AS numero_interno,
+                   {mg_estado_select_sql('d')}
+                   i.id AS ingreso_id
+              FROM ingresos i
+              JOIN devices d ON d.id = i.device_id
+             WHERE i.id=%s
+               FOR UPDATE OF i
             """,
             [ingreso_id],
             one=True,
@@ -156,13 +150,14 @@ class RemitoSalidaPdfView(APIView):
         # Este es el único punto por el que pasan todas las liberaciones -el lote delega
         # en esta misma vista-, así que el corte del presupuesto sin aprobar va acá y no
         # en cada cola.
-        if presupuesto_bloquea_salida(estado_actual, cur_row.get("presupuesto_estado")):
+        if presupuesto_bloquea_salida(
+            estado_actual,
+            cur_row.get("presupuesto_estado"),
+            requiere_presupuesto=ingreso_requiere_presupuesto(cur_row),
+        ):
             return Response(
                 {
-                    "detail": (
-                        "El presupuesto está emitido y todavía sin aprobar. "
-                        "Aprobalo o rechazalo antes de imprimir la orden de salida."
-                    ),
+                    "detail": motivo_del_bloqueo(cur_row.get("presupuesto_estado")),
                     "code": "presupuesto_sin_aprobar",
                 },
                 status=409,

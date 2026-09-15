@@ -216,22 +216,23 @@ class IngresoAlquilerUncheckAPITest(TestCase):
         cls.jefe_token = issue_token(cls.jefe_user)
 
         with connection.cursor() as cur:
-            cur.execute("INSERT INTO customers(id, razon_social) VALUES (1, 'Cliente Test')")
-            cur.execute("INSERT INTO marcas(id, nombre) VALUES (1, 'Marca Test')")
+            cur.execute("INSERT INTO customers(id, razon_social) OVERRIDING SYSTEM VALUE VALUES (1, 'Cliente Test')")
+            cur.execute("INSERT INTO marcas(id, nombre) OVERRIDING SYSTEM VALUE VALUES (1, 'Marca Test')")
             cur.execute(
-                "INSERT INTO models(id, marca_id, nombre, tipo_equipo) VALUES (1, 1, 'Modelo Test', 'CPAP')"
+                "INSERT INTO models(id, marca_id, nombre, tipo_equipo) OVERRIDING SYSTEM VALUE VALUES (1, 1, 'Modelo Test', 'CPAP')"
             )
             cur.execute(
-                "INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) VALUES (1, 1, 1, 1, 'NS-ALQ-1', 'MG 0001')"
+                "INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) OVERRIDING SYSTEM VALUE VALUES (1, 1, 1, 1, 'NS-ALQ-1', 'MG 0001')"
             )
-            cur.execute("INSERT INTO locations(id, nombre) VALUES (1, 'taller')")
+            cur.execute("INSERT INTO devices(id, customer_id, marca_id, model_id, numero_serie, numero_interno) OVERRIDING SYSTEM VALUE VALUES (2, 1, 1, 1, 'NS-ALQ-2', 'MG 0002')")
+            cur.execute("INSERT INTO locations(id, nombre) OVERRIDING SYSTEM VALUE VALUES (1, 'taller')")
             cur.execute(
                 """
                 INSERT INTO ingresos(
                     id, device_id, motivo, estado, presupuesto_estado, resolucion, ubicacion_id,
                     asignado_a, recibido_por, alquilado, alquiler_a, alquiler_remito, fecha_entrega
                 )
-                VALUES (1, 1, 'reparacion', 'alquilado', 'no_aplica', 'reparado', 1, NULL, NULL, TRUE, 'Cliente Test', 'REM-ALQ-10', NULL)
+                OVERRIDING SYSTEM VALUE VALUES (1, 1, 'reparación', 'alquilado', 'no_aplica', 'reparado', 1, NULL, NULL, TRUE, 'Cliente Test', 'REM-ALQ-10', NULL)
                 """
             )
             cur.execute(
@@ -240,7 +241,7 @@ class IngresoAlquilerUncheckAPITest(TestCase):
                     id, device_id, motivo, estado, presupuesto_estado, resolucion, ubicacion_id,
                     asignado_a, recibido_por, alquilado, alquiler_a, alquiler_remito, fecha_entrega
                 )
-                VALUES (2, 1, 'reparacion', 'entregado', 'no_aplica', 'reparado', 1, NULL, NULL, TRUE, 'Cliente Test', 'REM-ALQ-20', CURRENT_TIMESTAMP)
+                OVERRIDING SYSTEM VALUE VALUES (2, 2, 'reparación', 'entregado', 'no_aplica', 'reparado', 1, NULL, NULL, TRUE, 'Cliente Test', 'REM-ALQ-20', CURRENT_TIMESTAMP)
                 """
             )
 
@@ -249,23 +250,32 @@ class IngresoAlquilerUncheckAPITest(TestCase):
         self.client = APIClient()
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.jefe_token}")
 
-    def test_jefe_puede_destildar_alquiler_si_no_fue_entregado(self):
+    def test_alquiler_con_remito_no_se_destilda_aunque_falte_fecha_de_entrega(self):
         resp = self.client.patch("/api/ingresos/1/", {"alquilado": False}, format="json")
 
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 409, resp.data)
 
         with connection.cursor() as cur:
             cur.execute("SELECT COALESCE(alquilado,false) FROM ingresos WHERE id=1")
             row = cur.fetchone()
 
         self.assertIsNotNone(row)
-        self.assertFalse(bool(row[0]))
+        self.assertTrue(bool(row[0]))
+
+    def test_jefe_puede_destildar_alquiler_sin_remito(self):
+        with connection.cursor() as cur:
+            cur.execute("UPDATE ingresos SET alquiler_remito=NULL WHERE id=1")
+        resp = self.client.patch("/api/ingresos/1/", {"alquilado": False}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        with connection.cursor() as cur:
+            cur.execute("SELECT alquilado FROM ingresos WHERE id=1")
+            self.assertFalse(cur.fetchone()[0])
 
     def test_jefe_no_puede_destildar_alquiler_entregado_con_remito(self):
         resp = self.client.patch("/api/ingresos/2/", {"alquilado": False}, format="json")
 
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("remito de alquiler", str(resp.data.get("detail") or "").lower())
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertIn("rta", str(resp.data.get("detail") or "").lower())
 
         with connection.cursor() as cur:
             cur.execute(

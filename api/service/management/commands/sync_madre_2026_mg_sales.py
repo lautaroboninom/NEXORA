@@ -7,6 +7,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
 from django.utils import timezone
 
+from service.views.devices_views import aplicar_venta_mg_a_ingreso, ingreso_para_venta_mg
+
 
 DEFAULT_WORKBOOK = r"Z:\MG BIO\MADRES\MADRE 2026.xlsx"
 INVENTORY_SHEETS = ("SEPID 2026", "POR MG")
@@ -331,7 +333,8 @@ class Command(BaseCommand):
                 self.stdout.write(
                     f"- {code} device #{row['id']} serie {row['numero_serie']} "
                     f"fila {sale['row']} comprador '{sale['observaciones'] or '-'}' "
-                    f"customer_id {buyer_id or '-'}"
+                    f"customer_id {buyer_id or '-'} "
+                    f"OS a cerrar {ingreso_para_venta_mg(row['id']) or '-'}"
                 )
 
             self.stdout.write(f"Para reactivar por falso vendido: {len(reactivate)}")
@@ -350,6 +353,7 @@ class Command(BaseCommand):
                 return
 
             now_ts = timezone.now()
+            os_actualizadas = 0
             dash_id = _dash_location_id(cur)
             with transaction.atomic():
                 for row, inventory_record in inventory_updates:
@@ -360,6 +364,7 @@ class Command(BaseCommand):
 
                 for code, sale, row, buyer_id in mark_sold:
                     sale_date = sale["fecha"] or now_ts
+                    ingreso_venta_id = ingreso_para_venta_mg(row["id"])
                     obs = f"MADRE 2026 ALTAS Y BAJAS fila {sale['row']}: VENTA"
                     if sale["observaciones"]:
                         obs = f"{obs} - {sale['observaciones']}"
@@ -389,10 +394,15 @@ class Command(BaseCommand):
                           factura_numero, remito_numero, observaciones, usuario_id, ingreso_id,
                           venta_customer_id, venta_numero_alternativo, source
                         )
-                        VALUES (%s, 'venta', %s, %s, NULL, NULL, %s, NULL, NULL, %s, NULL, 'equipos')
+                        VALUES (%s, 'venta', %s, %s, NULL, NULL, %s, NULL, %s, %s, NULL, 'equipos')
                         """,
-                        [row["id"], code, sale_date, obs, buyer_id],
+                        [row["id"], code, sale_date, obs, ingreso_venta_id, buyer_id],
                     )
+                    # La OS del equipo acompaña la venta: si no, queda varada en la estantería
+                    # de alquiler con el equipo ya vendido (OS 29131, 14/09/2026).
+                    if ingreso_venta_id is not None:
+                        aplicar_venta_mg_a_ingreso(ingreso_venta_id, fecha_venta=sale_date)
+                        os_actualizadas += 1
 
                 for code, row, inv in reactivate:
                     obs = (
@@ -432,6 +442,7 @@ class Command(BaseCommand):
             "APLICADO OK: "
             f"números internos corregidos {len(inventory_updates)}, "
             f"vendidos marcados {len(mark_sold)}, "
+            f"OS de vendidos actualizadas {os_actualizadas}, "
             f"reactivados {len(reactivate)}, "
             f"ventas faltantes {len(missing)}."
         )

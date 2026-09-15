@@ -344,14 +344,14 @@ class PortalIntegrationAPITest(TestCase):
             ):
                 cur.execute(f"DELETE FROM {table}")
 
-            cur.execute("INSERT INTO customers (id, razon_social) VALUES (%s, %s), (%s, %s)", [1, "Cliente A", 2, "Cliente B"])
+            cur.execute("INSERT INTO customers (id, razon_social) OVERRIDING SYSTEM VALUE VALUES (%s, %s), (%s, %s)", [1, "Cliente A", 2, "Cliente B"])
             if connection.vendor == "postgresql":
                 cur.execute(
                     "SELECT setval(pg_get_serial_sequence('customers', 'id'), COALESCE((SELECT MAX(id) FROM customers), 1))"
                 )
-            cur.execute("INSERT INTO marcas (id, nombre) VALUES (%s, %s)", [1, "Marca"])
+            cur.execute("INSERT INTO marcas (id, nombre) OVERRIDING SYSTEM VALUE VALUES (%s, %s)", [1, "Marca"])
             cur.execute(
-                "INSERT INTO models (id, marca_id, nombre, tipo_equipo, variante) VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO models (id, marca_id, nombre, tipo_equipo, variante) OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s)",
                 [1, 1, "Modelo X", "Monitor", ""],
             )
             cur.execute(
@@ -359,15 +359,15 @@ class PortalIntegrationAPITest(TestCase):
                 INSERT INTO bejerman_article_mappings (
                     id, model_id, variante, variante_norm, article_code, article_description, match_source
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 [1, 1, "", "", "11", "Liberacion servicio tecnico", "manual"],
             )
-            cur.execute("INSERT INTO locations (id, nombre) VALUES (%s, %s), (%s, %s)", [1, "Taller", 2, "Deposito"])
+            cur.execute("INSERT INTO locations (id, nombre) OVERRIDING SYSTEM VALUE VALUES (%s, %s), (%s, %s)", [1, "Taller", 2, "Deposito"])
             cur.execute(
                 """
                 INSERT INTO users (id, nombre, email, hash_pw, rol, activo)
-                VALUES
+                OVERRIDING SYSTEM VALUE VALUES
                   (%s, %s, %s, %s, %s, %s),
                   (%s, %s, %s, %s, %s, %s),
                   (%s, %s, %s, %s, %s, %s)
@@ -381,7 +381,7 @@ class PortalIntegrationAPITest(TestCase):
             cur.execute(
                 """
                 INSERT INTO devices (id, customer_id, marca_id, model_id, numero_serie, numero_interno, variante)
-                VALUES
+                OVERRIDING SYSTEM VALUE VALUES
                   (%s, %s, %s, %s, %s, %s, %s),
                   (%s, %s, %s, %s, %s, %s, %s),
                   (%s, %s, %s, %s, %s, %s, %s),
@@ -395,16 +395,16 @@ class PortalIntegrationAPITest(TestCase):
                 ],
             )
             rows = [
-                (100, 10, "diagnostico", "pendiente", "reparacion", now - timedelta(days=2), now - timedelta(days=2), None, 1, None, "", "", "", ""),
-                (101, 11, "entregado", "emitido", "reparacion", now - timedelta(days=4), now - timedelta(days=4), None, 1, None, "", "", "", ""),
-                (102, 12, "diagnostico", "pendiente", "reparacion", now - timedelta(days=18), now - timedelta(days=18), None, 1, None, "", "", "", ""),
-                (103, 13, "diagnostico", "pendiente", "reparacion", now - timedelta(days=1), now - timedelta(days=1), None, 2, None, "", "", "", ""),
+                (100, 10, "diagnosticado", "pendiente", "reparación", now - timedelta(days=2), now - timedelta(days=2), None, 1, None, "", "", "", ""),
+                (101, 11, "entregado", "emitido", "reparación", now - timedelta(days=4), now - timedelta(days=4), None, 1, None, "", "", "", ""),
+                (102, 12, "diagnosticado", "pendiente", "reparación", now - timedelta(days=18), now - timedelta(days=18), None, 1, None, "", "", "", ""),
+                (103, 13, "diagnosticado", "pendiente", "reparación", now - timedelta(days=1), now - timedelta(days=1), None, 2, None, "", "", "", ""),
                 (
                     104,
                     10,
-                    "reparacion",
-                    "emitido",
-                    "urgente control",
+                    "reparar",
+                    "presupuestado",
+                    "reparación",
                     now - timedelta(days=8),
                     now - timedelta(days=8),
                     None,
@@ -424,7 +424,7 @@ class PortalIntegrationAPITest(TestCase):
                         fecha_servicio, ubicacion_id, asignado_a, equipo_variante, informe_preliminar,
                         descripcion_problema, trabajos_realizados
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     row,
                 )
@@ -432,25 +432,25 @@ class PortalIntegrationAPITest(TestCase):
             cur.execute(
                 """
                 INSERT INTO quotes (
-                    id, ingreso_id, estado, subtotal, iva_21, total, moneda, fecha_emitido,
+                    id, ingreso_id, estado, subtotal, moneda, fecha_emitido,
                     fecha_aprobado, autorizado_por, forma_pago, plazo_entrega_txt, garantia_txt,
                     mant_oferta_txt, pdf_url
                 )
-                VALUES
-                  (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s),
-                  (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES
+                  (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s),
+                  (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s)
                 """,
                 [
-                    1, 104, "presupuestado", 100, 21, 121, "ARS", now - timedelta(days=1),
+                    1, 104, "presupuestado", 100, "ARS", now - timedelta(days=1),
                     "Cliente", "30 F.F.", "5 dias", "90 dias", "7 dias", "/api/quotes/104/pdf/",
-                    2, 102, "presupuestado", 200, 42, 242, "ARS", now - timedelta(days=1),
+                    2, 102, "presupuestado", 200, "ARS", now - timedelta(days=1),
                     "Cliente", "30 F.F.", "5 dias", "90 dias", "7 dias", "/api/quotes/102/pdf/",
                 ],
             )
             cur.execute(
                 """
                 INSERT INTO quote_items (id, quote_id, tipo, descripcion, qty, precio_u, costo_u_neto)
-                VALUES
+                OVERRIDING SYSTEM VALUE VALUES
                   (%s, %s, %s, %s, %s, %s, %s),
                   (%s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -503,7 +503,7 @@ class PortalIntegrationAPITest(TestCase):
                     id, ingreso_id, usuario_id, comentario, mime_type, size_bytes,
                     width, height, original_name, storage_path, thumbnail_path, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [1, 100, 7, "Frente del equipo", "image/jpeg", 1234, 640, 480, "frente.jpg", "missing/frente.jpg", "missing/frente-thumb.jpg", now, now],
             )
@@ -536,7 +536,7 @@ class PortalIntegrationAPITest(TestCase):
         self._auth()
         with connection.cursor() as cur:
             cur.execute(
-                "INSERT INTO customers (id, razon_social) VALUES (%s, %s)",
+                "INSERT INTO customers (id, razon_social) OVERRIDING SYSTEM VALUE VALUES (%s, %s)",
                 [30, "CENTRO MEDICO AMENABAR"],
             )
 
@@ -753,7 +753,7 @@ class PortalIntegrationAPITest(TestCase):
         now = timezone.now()
         with connection.cursor() as cur:
             cur.execute(
-                "INSERT INTO devices (id, customer_id, marca_id, model_id, numero_serie, numero_interno, variante) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                "INSERT INTO devices (id, customer_id, marca_id, model_id, numero_serie, numero_interno, variante) OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 [14, 1, 1, 1, "SER-LIB", "A2-0187", ""],
             )
             cur.execute(
@@ -763,12 +763,12 @@ class PortalIntegrationAPITest(TestCase):
                     fecha_servicio, ubicacion_id, asignado_a, equipo_variante, informe_preliminar,
                     descripcion_problema, trabajos_realizados
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                OVERRIDING SYSTEM VALUE VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                [105, 14, "liberado", "no_aplica", "reparacion", now, now, now, 1, None, "", "", "", ""],
+                [105, 14, "liberado", "no_aplica", "reparación", now, now, now, 1, None, "", "", "", ""],
             )
             cur.execute(
-                "INSERT INTO ingreso_events (ingreso_id, a_estado, ts) VALUES (%s, %s, %s)",
+                "INSERT INTO ingreso_events (ticket_id, a_estado, ts) VALUES (%s, %s, %s)",
                 [105, "liberado", now],
             )
 

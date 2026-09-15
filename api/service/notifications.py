@@ -251,7 +251,7 @@ NOTIFICATION_CATALOG = [
         "label": "Resumen operativo",
         "description": "Resumen de alertas y objetivos del servicio técnico.",
         "group": "Operación",
-        "default_roles": ["jefe", "jefe_veedor", "admin"],
+        "default_roles": ["jefe", "admin"],
         "allowed_roles": MANAGEMENT_NOTIFICATION_ROLES,
     },
     {

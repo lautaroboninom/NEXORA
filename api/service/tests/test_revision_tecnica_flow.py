@@ -220,8 +220,8 @@ class IngresoConvertirPropioMgAPITest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     @classmethod
@@ -275,19 +275,19 @@ class IngresoConvertirPropioMgAPITest(TestCase):
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["CLI001", "Clinica Demo", "123"],
             )
-            cls.customer_cli_id = cls._last_id(cur)
+            cls.customer_cli_id = cls._last_id(cur, "customers")
             cur.execute(
                 "INSERT INTO customers(cod_empresa, razon_social, telefono) VALUES (%s,%s,%s)",
                 ["MGBIO", "MG BIO", ""],
             )
-            cls.customer_mg_id = cls._last_id(cur)
+            cls.customer_mg_id = cls._last_id(cur, "customers")
             cur.execute("INSERT INTO marcas(nombre) VALUES (%s)", ["ResMed"])
-            cls.marca_id = cls._last_id(cur)
+            cls.marca_id = cls._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models(marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [cls.marca_id, "AirSense 10", "CPAP"],
             )
-            cls.model_id = cls._last_id(cur)
+            cls.model_id = cls._last_id(cur, "models")
 
     def setUp(self):
         super().setUp()
@@ -306,7 +306,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
                 """,
                 [customer_id or self.customer_cli_id, self.marca_id, self.model_id, numero_serie, numero_interno],
             )
-            device_id = self._last_id(cur)
+            device_id = self._last_id(cur, "devices")
             if mg_estado is not None:
                 cur.execute(
                     """
@@ -328,7 +328,7 @@ class IngresoConvertirPropioMgAPITest(TestCase):
                 """,
                 [device_id, motivo],
             )
-            return self._last_id(cur)
+            return self._last_id(cur, "ingresos")
 
     def _url(self, ingreso_id):
         return f"/api/ingresos/{ingreso_id}/convertir-propio-mg/"

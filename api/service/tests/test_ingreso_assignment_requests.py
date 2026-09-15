@@ -138,7 +138,7 @@ class IngresoAssignmentRequestAPITest(TestCase):
             )
             device_id = cur.fetchone()[0]
             cur.execute(
-                "INSERT INTO ingresos (device_id, estado, asignado_a) VALUES (%s, %s, NULL) RETURNING id",
+                "INSERT INTO ingresos (device_id, estado, asignado_a, motivo) VALUES (%s, %s, NULL, 'reparación') RETURNING id",
                 [device_id, "diagnosticado"],
             )
             cls.ingreso_id = cur.fetchone()[0]

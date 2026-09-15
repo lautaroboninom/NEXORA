@@ -30,6 +30,7 @@ REQUIRED_COLUMNS = {
         "billing_postponement_notified_at",
         "source_system",
         "source_external_id",
+        "remito_general_legend",
     },
     "delivery_order_items": {
         "id",
@@ -42,6 +43,7 @@ REQUIRED_COLUMNS = {
         "unit_price",
         "discount_percent",
         "partida",
+        "remito_article_legend",
     },
     "delivery_order_item_partidas": {
         "id",
@@ -208,6 +210,7 @@ class Command(BaseCommand):
                       delivered_at                    TIMESTAMPTZ NULL,
                       invoiced_at                     TIMESTAMPTZ NULL,
                       cancelled_at                    TIMESTAMPTZ NULL,
+                      remito_general_legend           TEXT NULL,
                       CONSTRAINT chk_delivery_orders_type CHECK (delivery_type IN ('sale','service_release','rental','demo')),
                       CONSTRAINT chk_delivery_orders_company_key CHECK (company_key IS NULL OR company_key IN ('SEPID','MGBIO')),
                       CONSTRAINT chk_delivery_orders_price_currency CHECK (price_currency IN ('ARS','USD')),
@@ -218,6 +221,12 @@ class Command(BaseCommand):
                     """
                 )
 
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_orders
+                    ADD COLUMN IF NOT EXISTS remito_general_legend TEXT NULL
+                    """
+                )
                 cur.execute(
                     """
                     ALTER TABLE delivery_orders
@@ -340,12 +349,19 @@ class Command(BaseCommand):
                       stock_available_quantity  NUMERIC NULL,
                       stock_checked_at          TIMESTAMPTZ NULL,
                       sort_order                INTEGER NOT NULL DEFAULT 0,
+                      remito_article_legend     TEXT NULL,
                       created_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       updated_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       CONSTRAINT chk_delivery_order_items_quantity CHECK (quantity > 0),
                       CONSTRAINT chk_delivery_order_items_price_currency CHECK (price_currency IN ('ARS','USD')),
                       CONSTRAINT chk_delivery_order_items_discount_percent CHECK (discount_percent >= 0 AND discount_percent <= 100)
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE delivery_order_items
+                    ADD COLUMN IF NOT EXISTS remito_article_legend TEXT NULL
                     """
                 )
                 cur.execute(

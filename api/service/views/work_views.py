@@ -19,6 +19,7 @@ from .helpers import (
     os_label,
 )
 from ..delivery_orders import BILLABLE_REMITO_TYPES, delivery_source_reference, load_items_by_order
+from ..derivations import attach_active_derivations, sql_derivacion_activa
 
 
 VIEW_ROLES = ["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente", "tecnico", "recepcion", "cobranzas"]
@@ -686,7 +687,9 @@ def _alert_rows_presupuesto(request, rule):
            ORDER BY COALESCE(q2.version_num, 1) DESC, q2.id DESC
            LIMIT 1
         )
-         WHERE LOWER(COALESCE(loc.nombre,'')) = LOWER(%s)
+         -- Taller o derivado: derivar no cambia la ubicación, pero si al equipo derivado lo
+         -- movieron a otra, el presupuesto demorado igual tiene que avisar.
+         WHERE (LOWER(COALESCE(loc.nombre,'')) = LOWER(%s) OR {sql_derivacion_activa('t')})
            AND t.estado NOT IN ('liberado','entregado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')
            AND (
                 q.estado::text IN ('emitido','enviado','presupuestado')
@@ -1244,6 +1247,20 @@ def _dedupe_priorities(items):
     return unique
 
 
+def _attach_derivations_safe(items):
+    """La marca de derivado no puede tumbar el tablero si falta el esquema."""
+    try:
+        attach_active_derivations(items, ingreso_key="ingreso_id")
+    except Exception:
+        # Mismo cuidado que _safe_rows: un error acá no puede dejar la
+        # transacción marcada para rollback y tumbar las consultas que siguen.
+        try:
+            transaction.set_rollback(False)
+        except Exception:
+            pass
+    return items
+
+
 def build_work_summary(request, periodo="hoy"):
     alerts, raw = _build_alerts(request)
     variant = _dashboard_variant(request)
@@ -1252,6 +1269,9 @@ def build_work_summary(request, periodo="hoy"):
     priorities = []
     for alert in alerts:
         priorities.extend(alert.get("items") or [])
+    # Prioridades y alertas comparten los mismos dicts: con una sola consulta
+    # las dos vistas quedan con la marca de derivado.
+    _attach_derivations_safe(priorities)
     severity_by_key = {alert.get("key"): alert.get("severity") or "info" for alert in alerts}
     priorities.sort(
         key=lambda item: (
@@ -1540,6 +1560,7 @@ class GlobalSearchView(APIView):
             }
             for row in ingreso_rows
         ]
+        _attach_derivations_safe(ingresos)
 
         devices = _safe_rows(
             f"""

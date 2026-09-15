@@ -20,6 +20,19 @@ ACTIVE_DERIVATION_BLOCK_DETAIL = (
 )
 
 
+def sql_derivacion_activa(ingreso_alias="t"):
+    """¿La OS tiene una derivación abierta?, como condición de un WHERE.
+
+    Es la misma condición que usan `get_active_derivation` y `attach_active_derivations`.
+    """
+    return (
+        "EXISTS (SELECT 1 FROM equipos_derivados ed_activa"
+        f" WHERE ed_activa.ingreso_id = {ingreso_alias}.id"
+        " AND ed_activa.fecha_entrega IS NULL"
+        " AND ed_activa.estado IN ('derivado','en_servicio'))"
+    )
+
+
 def _fetchall_dicts(cursor):
     columns = [column[0] for column in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]

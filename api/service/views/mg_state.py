@@ -1,19 +1,11 @@
-import re
+from ..mg_codes import MG_CODE_RE, is_mg_code, normalize_mg_code
 
-
-MG_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*\d{1,4}$", re.IGNORECASE)
-
-
-def is_mg_code(value: str) -> bool:
-    return bool(MG_CODE_RE.match((value or "").strip()))
+# Qué es un número interno lo decide `service/mg_codes.py`, el criterio único de NEXORA.
+# `MG_CODE_RE` e `is_mg_code` se reexportan porque los importa medio backend.
 
 
 def normalize_mg(value: str):
-    raw = (value or "").strip().upper()
-    m = re.match(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", raw, re.IGNORECASE)
-    if not m:
-        return None
-    return f"{m.group(1).upper()} {m.group(2).zfill(4)}"
+    return normalize_mg_code(value)
 
 
 def is_mg_owner_device(numero_interno: str, numero_serie: str = "", n_de_control: str = "") -> bool:

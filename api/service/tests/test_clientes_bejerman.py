@@ -267,7 +267,7 @@ class ClientesBejermanAPITest(TestCase):
             cur.execute("INSERT INTO devices (customer_id) VALUES (%s), (%s), (%s)", [sim_id, sim_id, cma_id])
             cur.execute("SELECT id FROM devices WHERE customer_id=%s ORDER BY id LIMIT 1", [sim_id])
             device_id = cur.fetchone()[0]
-            cur.execute("INSERT INTO ingresos (device_id) VALUES (%s)", [device_id])
+            cur.execute("INSERT INTO ingresos (device_id, motivo) VALUES (%s, 'reparación')", [device_id])
         return sim_id, cma_id
 
     def _insert_cached_customer(

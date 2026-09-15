@@ -441,6 +441,7 @@ class DeliveryOrderBejermanArticleStockView(DeliveryOrderPermissionMixin, APIVie
                     company_key=request.query_params.get("companyKey") or request.query_params.get("company_key"),
                     deposit_code=deposit_code,
                     delivery_type=request.query_params.get("deliveryType") or request.query_params.get("delivery_type"),
+                    order_id=request.query_params.get("orderId") or request.query_params.get("order_id"),
                 )
             )
         except Exception:

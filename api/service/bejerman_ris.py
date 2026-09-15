@@ -15,7 +15,9 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from . import bejerman_catalog_cache
+from .bejerman_article_rename import article_renamed_away_from_model
 from .bejerman_companies import require_company
+from .ingreso_duplicados import INGRESO_ESTADOS_NO_BLOQUEAN_ALTA
 from .bejerman_particular_customers import ensure_particular_customer_enabled
 from .bejerman_documents import (
     REMITO_COMPROBANTE_TYPES,
@@ -32,11 +34,13 @@ from .bejerman_sdk import (
     BejermanSdkResponseError,
     BejermanSdkUnavailable,
     article_description_for,
+    _article_lookup_key,
     as_bool,
     as_string,
     bejerman_customer_code_for,
     bejerman_filter,
     build_customer_document_fields,
+    build_exact_article_description_map,
     build_occasional_customer_fields,
     build_service_ingress_comprobante,
     comprobante_id_of,
@@ -51,6 +55,7 @@ from .bejerman_sdk import (
     is_ok_response,
     normalize_serial_for_lookup,
     parse_remito_response,
+    probe_comprobante_pdf_copy,
     records_from_response,
     resolve_customer_document_fields,
     resolve_equipment_partida,
@@ -66,6 +71,8 @@ from .bejerman_pdf_requests import (
     pdf_error_metadata,
     store_rendered_remito_pdf,
 )
+from .bejerman_partida_observacion import observacion_partida
+from .mg_codes import MG_CODE_RE
 from .bejerman_remito_pdf_data import comprobante_from_emission
 from .bejerman_sync import (
     BejermanBlockedError,
@@ -76,6 +83,7 @@ from .bejerman_sync import (
     _article_description_from_record,
     _deposit_from_record,
     _partida_from_record,
+    _quantity_from_record,
     _records_for_partida,
     _records_for_partida_any_quantity,
     normalize_article_variant,
@@ -93,7 +101,6 @@ RIS_REGISTER_POINT_OF_SALE = "00001"
 RIS_REGISTER_NUMERA_FLEX = "N"
 RIS_REGISTER_EMITE_REG = "R"
 RIS_DEFAULT_MAX_PRINT_LINES = 22
-MG_CODE_RE = re.compile(r"^(MG|NM|NV|CE)\s*(\d{1,4})$", re.IGNORECASE)
 
 
 class BejermanRisError(RuntimeError):
@@ -169,11 +176,24 @@ class BejermanRisRegisteredNoPdfError(BejermanRisError):
 
 
 class BejermanRisReviewRequiredError(BejermanRisError):
+    """El comprobante quedó pendiente de que alguien lo mire en Bejerman.
+
+    Nació como copia de `BejermanRisRegisteredNoPdfError` —la clase de arriba— y se
+    quedó con su `__init__`: los cuatro callers le pasan un **mensaje** y terminaba
+    metido en el hueco `{número}` de la plantilla de "remito registrado sin PDF". En
+    pantalla salía "El remito «Este RIS requiere revisión manual…» fue registrado
+    manualmente en NEXORA, no emitido. Los remitos registrados no generan PDF…":
+    un texto que habla de otra cosa y que mandaba al operador a buscar un problema
+    que no tenía. El detalle se pasa tal cual.
+    """
+
     code = "BEJERMAN_RIS_REQUIRES_REVIEW"
 
-    def __init__(self, remito_number: Any = ""):
-        super().__init__(registered_remito_no_pdf_detail(remito_number))
-        self.remito_number = _clean(remito_number)
+    def __init__(self, detail: Any = ""):
+        super().__init__(
+            _clean(detail)
+            or "El comprobante quedó pendiente de revisión manual en Bejerman antes de poder reintentarse."
+        )
 
 
 def _json_param(value: Any) -> str:
@@ -1256,19 +1276,48 @@ def _number_from_remito(remito_number: str) -> str:
     return match.group(1) if match else ""
 
 
-def _parse_complete_existing_remito(raw_remito: str) -> dict[str, str]:
-    if not re.match(r"^\s*[A-Za-z]{2,4}\s+[A-Za-z]\s+\d{1,5}\s*[-/ ]\s*\d{1,8}\s*$", raw_remito):
+def _parse_complete_existing_remito(
+    raw_remito: str,
+    profile: dict[str, Any] | None = None,
+    *,
+    allow_short_number: bool = False,
+) -> dict[str, str]:
+    """Lee el comprobante que la OS ya tiene anotado.
+
+    Los ingresos viejos —los que se hicieron antes de que NEXORA emitiera— guardan el
+    número **corto**: sólo los últimos dígitos distintos de cero, sin tipo, sin letra y
+    sin punto de venta. Por defecto eso **no** se adopta, y está bien que no se adopte:
+    completar el punto de venta por nuestra cuenta puede asociar la OS a un comprobante
+    que no es el suyo (lo fija `test_ris_status_no_adopta_remito_ingreso_corto_sin_punto_venta`).
+
+    `allow_short_number` habilita completarlo desde el perfil del ingreso —que ya sabe
+    si es RIS, RDA o RDN y con qué punto de venta emite la empresa— y se reserva para
+    cuando la decisión la tomó una persona que miró Bejerman y dejó escrito qué vio
+    (`resolve_bejerman_ingreso_remito_review`). Lo que nunca es correcto es el plan B
+    que había: negarse a adoptar y caer a la rama de **emisión**, que le mandaba a
+    Bejerman un comprobante que existía desde hacía meses.
+    """
+
+    profile = profile if isinstance(profile, dict) else {}
+    default_type = _clean_upper(profile.get("type")) or "RIS"
+    default_letter = _clean_upper(profile.get("letter")) or "R"
+    default_point = (_digits_only(profile.get("pointOfSale")) or "").zfill(5)
+    if default_point == "00000":
+        default_point = ""
+    complete = bool(re.match(r"^\s*[A-Za-z]{2,4}\s+[A-Za-z]\s+\d{1,5}\s*[-/ ]\s*\d{1,8}\s*$", raw_remito))
+    if not complete and not (allow_short_number and default_point):
         raise BejermanRisError(
             "El remito guardado debe tener tipo, letra y punto de venta para asociarlo automáticamente"
         )
     try:
         return parse_bejerman_remito_number(
             raw_remito,
-            default_type="RIS",
-            default_letter="R",
+            default_type=default_type if not complete else "RIS",
+            default_letter=default_letter if not complete else "R",
             allowed_types=REMITO_COMPROBANTE_TYPES,
-            allow_number_only=False,
-            require_complete=True,
+            allow_number_only=not complete,
+            default_point=default_point,
+            require_complete=complete,
         )
     except ValueError as exc:
         raise BejermanRisError(str(exc)) from exc
@@ -1277,6 +1326,8 @@ def _parse_complete_existing_remito(raw_remito: str) -> dict[str, str]:
 def _existing_ingress_remito_reference(
     ingreso_id: int,
     current: dict[str, Any] | None = None,
+    *,
+    allow_short_number: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     context = _ingreso_context(ingreso_id)
     if not context:
@@ -1289,7 +1340,7 @@ def _existing_ingress_remito_reference(
     except ValueError as exc:
         raise BejermanRisError(str(exc)) from exc
     profile = _ingress_document_profile(context, company.key)
-    document = _parse_complete_existing_remito(raw_remito)
+    document = _parse_complete_existing_remito(raw_remito, profile, allow_short_number=allow_short_number)
     document_mode = RIS_DOCUMENT_MODE_REGISTER if _is_manual_registered_document(document) else RIS_DOCUMENT_MODE_EMIT
     issue_date = _date_iso(context.get("fecha_ingreso")) or timezone.localdate().isoformat()
     summary = {
@@ -1340,6 +1391,8 @@ def _adopt_existing_ingress_remito_reference(
     ingreso_id: int,
     user_id: int | None = None,
     current: dict[str, Any] | None = None,
+    *,
+    allow_short_number: bool = False,
 ) -> dict[str, Any] | None:
     if not _has_ris_schema():
         return current
@@ -1351,7 +1404,7 @@ def _adopt_existing_ingress_remito_reference(
     if row.get("status") == "running":
         return row
     try:
-        reference = _existing_ingress_remito_reference(ingreso_id, row)
+        reference = _existing_ingress_remito_reference(ingreso_id, row, allow_short_number=allow_short_number)
     except BejermanRisError as exc:
         logger.info(
             "bejerman_ris_existing_remito_not_adopted",
@@ -1363,6 +1416,20 @@ def _adopt_existing_ingress_remito_reference(
     payload, response = reference
     _ensure_ris_row(ingreso_id, user_id)
     return _update_ris_generated(ingreso_id, payload, response, sync_ingreso_remito=False)
+
+
+def _pending_legacy_remito_reference(ingreso_id: int, current: dict[str, Any] | None) -> str:
+    """Referencia ya anotada que `_adopt_existing_ingress_remito_reference` no pudo asociar sola.
+
+    Mismo dato que usa esa función (`remito_number` de la fila o `ingresos.remito_ingreso`),
+    expuesto aparte para que el caller pueda frenar en vez de tratar un "no se pudo
+    completar el punto de venta" como "no hay nada anotado, emitir de cero".
+    """
+    raw = _clean((current or {}).get("remito_number"))
+    if raw:
+        return raw
+    context = _ingreso_context(ingreso_id)
+    return _clean((context or {}).get("remito_ingreso"))
 
 
 def _accessories_text_for_ingreso(ingreso_id: int) -> str:
@@ -1584,6 +1651,7 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
             "mappedArticleName": mapped_article_name,
             "serial": serial,
             "internalNumber": _clean(context.get("numero_interno")),
+            "mgEstado": _clean(context.get("mg_estado")),
             "equipmentType": _clean(context.get("tipo_equipo")),
             "brand": _clean(context.get("marca")),
             "model": _clean(context.get("modelo")),
@@ -1592,6 +1660,12 @@ def _build_payload(context: dict[str, Any]) -> dict[str, Any]:
             "accessories": _clean(context.get("accesorios")),
             "comments": _clean(context.get("comentarios")),
             "equipmentLabel": equipment_label,
+            # En una devolución de alquiler el modelo físico registrado en NEXORA es
+            # la referencia histórica. El artículo Bejerman puede haber sido
+            # renombrado y reutilizado para otra variante (por ejemplo, 1115005
+            # fue JAY-5Q, en 2024 pasó a decir JAY-5AW y se corrigió el 11/09/2026).
+            # Sólo se activa para RDA.
+            "rentalReturnDescription": equipment_label if _is_rental_return_profile(document_profile, context) else "",
         },
     }
 
@@ -1951,6 +2025,64 @@ def _ingress_duplicate_document_types(profile: dict[str, Any] | None) -> list[st
     return types
 
 
+def _duplicate_document_parts(duplicate: dict[str, Any] | None) -> tuple[str, int, int] | None:
+    """Tipo, punto de venta y número del comprobante que Bejerman devolvió como duplicado."""
+
+    raw = (duplicate or {}).get("raw")
+    if not isinstance(raw, dict):
+        return None
+    tipo = _clean_upper(first_value(raw, ("Comprobante_Tipo", "TipoComprobante", "Tipo")))
+    point = _digits_only(first_value(raw, ("Comprobante_PtoVenta", "PuntoVenta", "PtoVenta")))
+    number = _digits_only(first_value(raw, ("Comprobante_Numero", "Numero", "NroComprobante")))
+    if not tipo or not point or not number:
+        return None
+    return tipo, int(point), int(number)
+
+
+def _remote_duplicate_already_registered(duplicate: dict[str, Any] | None, ingreso_ids: list[int] | None) -> bool:
+    """¿El remito que Bejerman devolvió ya está anotado en otra OS de NEXORA?
+
+    Es lo que separa "el remito se emitió dos veces" de "el equipo fue y volvió". La
+    consulta remota sólo sabe que hay un comprobante de ingreso del mismo día para esa
+    serie; no sabe de qué OS es. Si NEXORA ya lo tiene anotado en otra —la del ciclo
+    anterior, típicamente la baja de alquiler del equipo que se acaba de entregar— ese
+    comprobante está rendido y lo que se está por emitir es el del ciclo nuevo.
+
+    Lo que **no** se puede hacer es dar por buena cualquier emisión sólo porque el equipo
+    no tenga otra OS abierta: el caso más común de duplicado es justamente el de una sola
+    OS que reintenta una emisión que en Bejerman ya había entrado (ver
+    [[nexora-connectionerror-no-es-no-ejecutado]]). Un comprobante que nadie reclama es
+    exactamente el que hay que frenar.
+    """
+
+    if not _has_ris_schema():
+        return False
+    parts = _duplicate_document_parts(duplicate)
+    if not parts:
+        return False
+    tipo, point, number = parts
+    excluded = [int(item) for item in (ingreso_ids or []) if str(item).isdigit()]
+    exclude_sql = "AND r.ingreso_id <> ALL(%s)" if excluded else ""
+    params: list[Any] = [tipo, point, number]
+    if excluded:
+        params.append(excluded)
+    row = q(
+        f"""
+        SELECT 1
+          FROM bejerman_ingreso_remitos r
+         WHERE COALESCE(r.comprobante_tipo, '') = %s
+           AND NULLIF(regexp_replace(COALESCE(r.comprobante_pto_venta, ''), '[^0-9]', '', 'g'), '')::bigint = %s
+           AND NULLIF(regexp_replace(COALESCE(r.comprobante_numero, ''), '[^0-9]', '', 'g'), '')::bigint = %s
+           AND r.status IN ('running', 'generated')
+           {exclude_sql}
+         LIMIT 1
+        """,
+        params,
+        one=True,
+    )
+    return bool(row)
+
+
 def _local_ingress_equipment_remito_duplicate(payload: dict[str, Any], ingreso_ids: list[int]) -> dict[str, Any] | None:
     if not _has_ris_schema():
         return None
@@ -1962,7 +2094,13 @@ def _local_ingress_equipment_remito_duplicate(payload: dict[str, Any], ingreso_i
     issue_date = _date_iso(payload.get("issueDate")) or timezone.localdate().isoformat()
     excluded = [int(item) for item in ingreso_ids or [] if isinstance(item, int) or str(item).isdigit()]
     exclude_sql = "AND r.ingreso_id <> ALL(%s)" if excluded else ""
-    params: list[Any] = [document_types, issue_date, identifiers, identifiers]
+    params: list[Any] = [
+        document_types,
+        issue_date,
+        identifiers,
+        identifiers,
+        sorted(INGRESO_ESTADOS_NO_BLOQUEAN_ALTA),
+    ]
     if excluded:
         params.append(excluded)
     row = q(
@@ -1986,6 +2124,10 @@ def _local_ingress_equipment_remito_duplicate(payload: dict[str, Any], ingreso_i
              OR COALESCE(d.numero_interno, '') = ANY(%s)
            )
            AND r.status IN ('running', 'generated')
+           -- La OS dueña del remito tiene que seguir abierta. Si ya se cerró —el equipo
+           -- se entregó, se alquiló, se vendió— su remito es de un ciclo terminado, y el
+           -- que se está emitiendo ahora es el del ciclo nuevo: el equipo fue y volvió.
+           AND LOWER(TRIM(COALESCE(t.estado::text, ''))) <> ALL(%s)
            {exclude_sql}
          ORDER BY r.generated_at DESC NULLS LAST, r.updated_at DESC NULLS LAST
          LIMIT 1
@@ -2206,7 +2348,8 @@ def _validate_equipment_remito_not_duplicated(
     ingreso_ids: list[int] | None = None,
     actor_user_id: int | None = None,
 ) -> None:
-    if not _payload_equipment_identifiers(payload):
+    identifiers = _payload_equipment_identifiers(payload)
+    if not identifiers:
         return
     local_duplicate = _local_ingress_equipment_remito_duplicate(payload, ingreso_ids or [])
     if local_duplicate:
@@ -2229,6 +2372,8 @@ def _validate_equipment_remito_not_duplicated(
         logger.warning("bejerman_ris_duplicate_check_unavailable", extra={"error": str(exc)[:500]})
         issues.append(_remote_duplicate_check_unavailable_issue(exc))
         return
+    if remote_duplicate and _remote_duplicate_already_registered(remote_duplicate, ingreso_ids or []):
+        return
     if remote_duplicate:
         issues.append(
             _issue(
@@ -2247,6 +2392,10 @@ def _ensure_equipment_remito_not_duplicated(
 ) -> None:
     local_duplicate = _local_ingress_equipment_remito_duplicate(payload, ingreso_ids)
     duplicate = local_duplicate or _remote_ingress_equipment_remito_duplicate(payload, client)
+    # Mismo criterio que en la validación previa: un comprobante que otra OS ya tiene
+    # anotado es de un ciclo cerrado, no la segunda emisión del que se está por hacer.
+    if duplicate and not local_duplicate and _remote_duplicate_already_registered(duplicate, ingreso_ids):
+        return
     if duplicate:
         raise BejermanSdkResponseError(_equipment_remito_duplicate_message(duplicate))
 
@@ -2714,12 +2863,33 @@ def _apply_bejerman_article_descriptions(payload: dict[str, Any], client: Bejerm
     MGBIO el 1111001 se venía imprimiendo como "Calentador humidificador BMC G2 B-20V"
     cuando en Bejerman hace rato que es "Calentador humidificador BMC H60-GII".
 
-    Nunca levanta: si el catálogo no responde, cada equipo se queda con el texto que
-    ya tenía y el remito sale igual.
+    Para RDA la consulta es fresca y obligatoria, y conserva el texto literal.
+    Los demás perfiles conservan el comportamiento de respaldo previo.
     """
 
     items = _payload_equipment_items(payload)
     codes = [_clean(item.get("articleCode")) for item in items]
+    profile = payload.get("documentProfile") or {}
+    if _clean_upper(profile.get("type")) == "RDA":
+        try:
+            # No usar el catálogo cacheado ni el mapa local como respaldo.
+            response = client.list_articulos([], 5000)
+            descriptions = build_exact_article_description_map(response, codes)
+        except Exception as exc:
+            raise BejermanRisError(
+                "No se emitió el RDA: no se pudo confirmar la descripción exacta "
+                f"del maestro de Bejerman. {exc}"
+            ) from exc
+        resolved = []
+        for item in items:
+            # La búsqueda normaliza sólo el código; nunca el texto del maestro.
+            description = _clean(item.get("rentalReturnDescription")) or descriptions[_article_lookup_key(item.get("articleCode"))]
+            resolved.append({**item, "mappedArticleName": description, "bejermanMasterDescription": description})
+        out = dict(payload)
+        out["equipment"] = resolved[0]
+        if isinstance(payload.get("equipments"), list):
+            out["equipments"] = resolved
+        return out
     descriptions = bejerman_catalog_cache.article_descriptions(
         client, codes, company_key=_clean(payload.get("companyKey")) or None
     )
@@ -2864,7 +3034,7 @@ def _validate_article(
         )
         return None
     try:
-        return validate_bejerman_article_choice(
+        candidate = validate_bejerman_article_choice(
             article_code,
             client=SyncBejermanSDKClient(company_key=company_key, actor_user_id=actor_user_id),
             context=article_context,
@@ -2889,6 +3059,56 @@ def _validate_article(
             )
         )
         return None
+    _validate_article_not_renamed(
+        equipment,
+        context,
+        candidate,
+        issues,
+        item_index=item_index,
+        variante=variante,
+        company_key=company_key,
+    )
+    return candidate
+
+
+def _validate_article_not_renamed(
+    equipment: dict[str, Any],
+    context: dict[str, Any],
+    candidate: dict[str, Any],
+    issues: list[dict[str, Any]],
+    *,
+    item_index: int | None,
+    variante: str,
+    company_key: str | None,
+) -> None:
+    """Frena la emisión si el artículo que eligió el mapeo ya no se llama como el modelo.
+
+    Sólo cuando decide el mapeo: si la partida ya tiene historia en Bejerman el artículo sale de ahí
+    (`_apply_bejerman_partida_articles`), y ése es justamente el que mantiene la trazabilidad.
+    """
+    if _clean(equipment.get("articleSource")) != "mapping":
+        return
+    article_code = _clean(equipment.get("articleCode"))
+    mapping = _article_mapping_for_context(context.get("model_id"), variante, company_key or "SEPID") or {}
+    if _clean(mapping.get("article_code")).upper() != article_code.upper():
+        return
+    mapped_description = _clean(mapping.get("article_description"))
+    live_description = _clean(candidate.get("article_description"))
+    if not article_renamed_away_from_model(context.get("modelo"), mapped_description, live_description):
+        return
+    issues.append(
+        _issue(
+            "BEJERMAN_ARTICLE_RENAMED",
+            f"El artículo {article_code} de Bejerman hoy se llama «{live_description}», pero cuando se mapeó "
+            f"el modelo {_clean(context.get('modelo'))} se llamaba «{mapped_description}». Si le cambiaron el "
+            "nombre para otro equipo, éste entraría con el artículo de otro modelo y se mezclaría la historia "
+            "de las dos series: revisá el mapeo del modelo antes de emitir.",
+            scope="articulo",
+            field="equipo.modelo_id",
+            item_index=item_index,
+            fix=_article_mapping_fix_from_candidates([], context, variante, company_key or ""),
+        )
+    )
 
 
 def _validate_customer(
@@ -3778,7 +3998,10 @@ def _register_stock_entry_item(
         "Comprobante_CantidadUM2": 1,
         "Comprobante_PrecioTotalMonLocal": 0,
         "Comprobante_IdOrigen": f"NEXORA-ING-{number}"[:50],
-        "Partida_Observaciones": f"NEXORA {number}"[:20],
+        # El equipo del payload es el de esa serie: sin MG propio no se busca otro.
+        "Partida_Observaciones": observacion_partida(
+            equipment.get("internalNumber"), mg_estado=equipment.get("mgEstado")
+        ),
     }
 
 
@@ -3930,6 +4153,32 @@ def _verify_partidas_present(client: BejermanSDKClient, partidas: list[str], dep
         )
 
 
+def _register_entries_moved_by_comprobante(
+    client: BejermanSDKClient, entries: list[dict[str, Any]], deposit: str
+) -> bool:
+    """Indica si el reintento de VENTAS llegó a mover las partidas compensadas.
+
+    Antes del reintento las partidas quedan deliberadamente en cero. Por eso la
+    mera presencia de una fila en StockPar no sirve para distinguir una llamada
+    que falló de una que Bejerman procesó pero cuya respuesta se perdió.
+    """
+
+    if not entries:
+        return False
+    for entry in entries:
+        partida = _clean(entry.get("Comprobante_ArtPartida"))
+        if not partida:
+            return False
+        try:
+            response = client.obtener_stock_partida(partida)
+        except Exception:
+            return False
+        records = _records_for_partida_any_quantity(response, partida, deposit)
+        if not any((quantity := _quantity_from_record(record)) is not None and quantity != 0 for record in records):
+            return False
+    return True
+
+
 def _restore_register_stock_entries(client: BejermanSDKClient, entries: list[dict[str, Any]]) -> None:
     """Vuelve a sumar la unidad que sacó la SAL, para retomar el camino de siempre.
 
@@ -4079,8 +4328,11 @@ def _recover_emit_partida_rejection(
     if created_entries and _recovery_keeps_stock_movement():
         try:
             _neutralize_register_stock_entries(client, created_entries, deposit)
-        except Exception:
+        except Exception as exc:
             logger.warning("bejerman_ris_partida_neutralize_failed", exc_info=True)
+            raise BejermanRisReviewRequiredError(
+                "No se pudo confirmar la compensación de stock; requiere reconciliación."
+            ) from exc
         else:
             try:
                 raw_response = client.ingresar_comprobante_ventas_json(
@@ -4090,9 +4342,24 @@ def _recover_emit_partida_rejection(
                     numera_flex=numera_flex,
                     emite_reg=emite_reg,
                 )
-            except Exception:
+            except Exception as retry_exc:
                 logger.warning("bejerman_ris_partida_stock_retry_failed", exc_info=True)
-                _restore_register_stock_entries(client, created_entries)
+                if not (isinstance(retry_exc, BejermanSdkResponseError)
+                        and _is_partida_rejection_message(str(retry_exc))):
+                    raise BejermanRisReviewRequiredError(
+                        "El reintento del remito de ingreso quedó sin confirmación; requiere reconciliación."
+                    ) from retry_exc
+                if _register_entries_moved_by_comprobante(client, created_entries, deposit):
+                    # El cambio de stock contradice el rechazo: detenerse y reconciliar.
+                    logger.warning(
+                        "bejerman_ris_partida_stock_retry_entered_anyway",
+                        extra={"partidas": [_clean(e.get("Comprobante_ArtPartida")) for e in created_entries]},
+                    )
+                    raise BejermanRisReviewRequiredError(
+                        "El stock cambió durante el reintento del remito de ingreso; requiere reconciliación."
+                    ) from retry_exc
+                else:
+                    _restore_register_stock_entries(client, created_entries)
             else:
                 request_payload = {
                     **payload,
@@ -4309,6 +4576,12 @@ def _build_service_ingress_request(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     _assert_issue_date_plausible(payload)
     built = build_service_ingress_comprobante(payload, customer_fields)
+    if _clean_upper((payload.get("documentProfile") or {}).get("type")) == "RDA":
+        expected = [item.get("bejermanMasterDescription") for item in _payload_equipment_items(payload)]
+        actual = [item.get("Item_DescripArticulo") for item in built["comprobante"].get("Comprobante_Items", [])
+                  if item.get("Item_Tipo") == "A"]
+        if not expected or any(not isinstance(text, str) or not text.strip() for text in expected) or actual != expected:
+            raise BejermanRisError("No se emitió el RDA: la descripción del renglón no coincide exactamente con el maestro de Bejerman.")
     line_count = _built_service_ingress_print_lines(built)
     max_lines = _ris_max_print_lines()
     if line_count > max_lines:
@@ -4432,10 +4705,12 @@ def _emission_needs_review_instead_of_failure(exc: Exception) -> bool:
     `failed_review` es el estado que pide justamente que alguien lo mire.
     """
 
-    return is_bejerman_success_message(str(exc))
+    return isinstance(exc, BejermanRisReviewRequiredError) or is_bejerman_success_message(str(exc))
 
 
 def _uncertain_emission_message(exc: Exception) -> str:
+    if isinstance(exc, BejermanRisReviewRequiredError):
+        return str(exc)
     return (
         "Bejerman devolvió un error pero avisa que el comprobante se importó: "
         f"«{_clean(str(exc))}». El remito puede haberse emitido igual, así que NEXORA no lo "
@@ -4464,9 +4739,25 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
     current = _row_for_ingreso(ingreso_id) or {}
 
     if current.get("status") == "failed_review" and not force_reviewed_reissue:
+        # Antes de mandar a nadie a "revisar a mano", preguntar si hay algo que revisar:
+        # cuando la OS ya tiene anotado su comprobante, el remito existe y lo único que
+        # falta es que NEXORA lo sepa. Es el caso de los ingresos viejos, cuyo remito se
+        # hizo en el ERP mucho antes de que NEXORA emitiera: alguien quiso *verlo* y el
+        # único camino disponible era volver a emitirlo, que es como nacieron los
+        # procesos trabados en `failed_review` (ver `_parse_complete_existing_remito`).
+        adopted = _adopt_existing_ingress_remito_reference(ingreso_id, user_id=user_id, current=current)
+        if adopted and _clean(adopted.get("remito_number")) and adopted.get("status") == "generated":
+            logger.info(
+                "bejerman_ris_review_resolved_by_existing_remito",
+                extra={"ingreso_id": ingreso_id, "remito_number": _clean(adopted.get("remito_number"))},
+            )
+            return adopted
+        # El texto guardado describe lo que pasó de verdad; "reintente con
+        # force_reviewed_reissue=True" era una bandera interna que ningún operador
+        # puede accionar desde ninguna pantalla.
         raise BejermanRisReviewRequiredError(
-            "Este RIS requiere revisión manual antes de reintentar. "
-            "Por favor revise el error y reintente con force_reviewed_reissue=True."
+            _clean(current.get("last_error"))
+            or "Este comprobante quedó pendiente de revisión: búsquelo en Bejerman antes de reintentar."
         )
 
     manual_remito_number = _clean(current.get("manual_remito_number")) or _clean(current.get("remito_number"))
@@ -4492,6 +4783,32 @@ def emit_or_get_ris(ingreso_id: int, user_id: int | None = None, force_reviewed_
             extra={"ingreso_id": ingreso_id, "duration_ms": int((time.monotonic() - started_at) * 1000)},
         )
         return existing
+    # Un humano ya revisó esta fila y confirmó en Bejerman que no está emitida
+    # (`resolve_bejerman_ingreso_remito_review`, decisión "not_emitted"): a partir de
+    # ahí sí corresponde emitir de cero, aunque quede una referencia vieja sin poder
+    # asociarse sola.
+    reviewed_ready_to_reissue = (
+        _clean(_json_dict(current.get("response_payload")).get("reviewState")) == "ready_to_reissue"
+    )
+    if not reviewed_ready_to_reissue:
+        legacy_reference = _pending_legacy_remito_reference(ingreso_id, current)
+        if legacy_reference:
+            # La OS ya tiene un remito anotado que no se pudo asociar solo (típico:
+            # número corto sin punto de venta, de ingresos de antes de que NEXORA
+            # emitiera). Caer acá a la emisión real le mandaba a Bejerman un
+            # comprobante nuevo para algo que ya existía hace meses (OS 29236,
+            # duplicado el 14/09/2026). Frenar y pedir revisión humana en su lugar.
+            detail = (
+                f"Este ingreso ya tiene anotado el remito «{legacy_reference}» pero no se pudo "
+                "asociar automáticamente (falta tipo, letra o punto de venta). Verifíquelo en "
+                "Bejerman y resuelva la revisión antes de emitir uno nuevo."
+            )
+            _update_ris_review_required(ingreso_id, detail)
+            logger.warning(
+                "bejerman_ris_emit_blocked_legacy_reference",
+                extra={"ingreso_id": ingreso_id, "legacy_reference": legacy_reference},
+            )
+            raise BejermanRisReviewRequiredError(detail)
     batch_ids = _ingreso_ids_from_payload(current.get("request_payload"))
     if len(batch_ids) > 1:
         return emit_or_get_ris_batch(batch_ids, user_id=user_id)
@@ -4619,10 +4936,14 @@ def emit_or_get_ris_batch(ingreso_ids: list[int], user_id: int | None = None) ->
         try:
             request_payload, response = _emit_payload_to_bejerman(block_payload, user_id=user_id)
         except BejermanRisError as exc:
-            # Los bloques anteriores ya fueron confirmados y quedan generados. El
-            # bloque fallido y los todavía no intentados quedan reintentables sin
-            # poner en riesgo una doble emisión de los primeros.
-            for remaining in blocks[block_index:]:
+            # Los bloques confirmados conservan su resultado. El bloque incierto
+            # requiere revisión; solo los todavía no enviados quedan reintentables.
+            remaining_index = block_index
+            if _emission_needs_review_instead_of_failure(exc):
+                for ingreso_id in block_ids:
+                    _mark_ris_emission_uncertain(ingreso_id, exc, block_payload)
+                remaining_index += 1
+            for remaining in blocks[remaining_index:]:
                 remaining_payload = (
                     remaining.get("payload") if isinstance(remaining.get("payload"), dict) else payload
                 )
@@ -4647,6 +4968,175 @@ def emit_or_get_ris_batch(ingreso_ids: list[int], user_id: int | None = None) ->
             )
         )
     return _aggregate_ris_batch_result(clean_ids, [*generated_entries, *emitted_entries])
+
+
+INGRESO_REMITO_REVIEW_RESOLUTIONS = ("adopt", "not_emitted", "duplicate")
+INGRESO_REMITO_REVIEW_STATE_SUPERSEDED = "superseded"
+
+
+def _row_for_ingreso_remito(process_id: Any) -> dict[str, Any] | None:
+    if not _has_ris_schema():
+        return None
+    return q(
+        """
+        SELECT r.*, COALESCE(i.remito_ingreso, '') AS remito_ingreso
+          FROM bejerman_ingreso_remitos r
+          JOIN ingresos i ON i.id = r.ingreso_id
+         WHERE r.id = %s
+        """,
+        [process_id],
+        one=True,
+    )
+
+
+def _patch_ingreso_remito_review(ingreso_id: int, patch: dict[str, Any], *, status: str = "") -> None:
+    """Deja asentada la decisión del operador dentro de `response_payload`.
+
+    El CHECK de `status` sólo admite pending/running/generated/failed/failed_review, así
+    que "cerrado a mano" vive como `reviewState` en el payload —igual que del lado de las
+    órdenes de entrega— y no necesita tocar el esquema.
+    """
+
+    row = _row_for_ingreso(ingreso_id) or {}
+    response = {**_json_dict(row.get("response_payload")), **patch}
+    with connection.cursor() as cur:
+        if status:
+            cur.execute(
+                """
+                UPDATE bejerman_ingreso_remitos
+                   SET status = %s, response_payload = %s::jsonb, updated_at = CURRENT_TIMESTAMP
+                 WHERE ingreso_id = %s
+                """,
+                [status, _json_param(response), ingreso_id],
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE bejerman_ingreso_remitos
+                   SET response_payload = %s::jsonb, updated_at = CURRENT_TIMESTAMP
+                 WHERE ingreso_id = %s
+                """,
+                [_json_param(response), ingreso_id],
+            )
+
+
+def resolve_bejerman_ingreso_remito_review(
+    process_id: Any,
+    actor_user_id: int | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """El desempate humano para un remito de ingreso trabado en revisión.
+
+    Existía para las órdenes de entrega (`resolve_bejerman_remito_review`) y no para
+    los ingresos, aunque el panel dibujaba los mismos botones sobre las dos clases de
+    fila: en un RIS/RDA la acción no se leía nunca y el backend contestaba reintentando
+    la emisión, que el propio estado `failed_review` rechaza. Los tres botones eran el
+    mismo botón y ese botón era una pared, así que estos procesos sólo se destrababan
+    por SQL.
+
+    Las tres respuestas posibles después de mirar Bejerman, con quién decidió y por qué:
+
+    - `adopt`: "el comprobante existe, es éste" -> se anota el número en la OS y se
+      asocia, sin emitir nada.
+    - `not_emitted`: "lo miré y no está" -> vuelve a `failed`, que habilita el
+      reintento normal.
+    - `duplicate`: "esta fila ya no representa nada" -> se cierra sin tocar la OS ni
+      el stock.
+    """
+
+    payload = payload or {}
+    decision = _clean(payload.get("decision")).lower()
+    reason = _clean(payload.get("reason"))
+    if decision not in INGRESO_REMITO_REVIEW_RESOLUTIONS:
+        raise BejermanRisError(
+            "Indique si el comprobante existe en Bejerman ('adopt'), si no se emitió "
+            "('not_emitted') o si este proceso es un duplicado ('duplicate')."
+        )
+    if payload.get("confirm") is not True:
+        raise BejermanRisError("Debe confirmar la resolución manual de la revisión.")
+    if not reason:
+        raise BejermanRisError("Escriba qué verificó en Bejerman antes de resolver la revisión.")
+
+    row = _row_for_ingreso_remito(process_id)
+    if not row or row.get("status") != "failed_review":
+        raise BejermanRisError("No se encontró un proceso pendiente de revisión.")
+    stored = _json_dict(row.get("response_payload"))
+    if _clean(stored.get("reviewState")) == INGRESO_REMITO_REVIEW_STATE_SUPERSEDED:
+        raise BejermanRisError("Este proceso ya fue cerrado por un operador.")
+
+    ingreso_id = int(row["ingreso_id"])
+    resolution = {
+        "decision": decision,
+        "reason": reason,
+        "actorUserId": actor_user_id,
+        "at": timezone.now().isoformat(),
+    }
+
+    if decision == "duplicate":
+        _patch_ingreso_remito_review(
+            ingreso_id,
+            {
+                "reviewState": INGRESO_REMITO_REVIEW_STATE_SUPERSEDED,
+                "operatorResolution": resolution,
+                "blockedReason": (
+                    "Cerrado como duplicado por un operador. Si Bejerman quedó con un comprobante "
+                    "de más para este ingreso, hay que anularlo en Bejerman."
+                ),
+            },
+        )
+        logger.info(
+            "bejerman_ris_review_closed_duplicate",
+            extra={"ingreso_id": ingreso_id, "actor_user_id": actor_user_id},
+        )
+        return {"success": True, "ingresoId": ingreso_id, "reviewState": INGRESO_REMITO_REVIEW_STATE_SUPERSEDED}
+
+    if decision == "not_emitted":
+        _patch_ingreso_remito_review(
+            ingreso_id,
+            {"reviewState": "ready_to_reissue", "operatorResolution": resolution, "blockedReason": ""},
+            status="failed",
+        )
+        logger.info(
+            "bejerman_ris_review_confirmed_not_emitted",
+            extra={"ingreso_id": ingreso_id, "actor_user_id": actor_user_id},
+        )
+        return {"success": True, "ingresoId": ingreso_id, "reviewState": "ready_to_reissue"}
+
+    numero = _clean(payload.get("comprobanteNumero") or payload.get("remitoNumber"))
+    if not numero:
+        numero = _clean(row.get("remito_ingreso"))
+    if not numero:
+        raise BejermanRisError(
+            "Indique el número de comprobante que Bejerman tiene emitido: la OS no lo tiene anotado."
+        )
+    # El número se anota en la OS y la adopción sale del mismo camino que usa la
+    # apertura normal: así el comprobante viejo y el adoptado a mano quedan idénticos.
+    with connection.cursor() as cur:
+        cur.execute("UPDATE ingresos SET remito_ingreso = %s WHERE id = %s", [numero, ingreso_id])
+    # Acá sí se acepta el número corto: lo escribió una persona que miró Bejerman y
+    # dejó asentado qué vio. La adopción automática sigue exigiéndolo completo.
+    adopted = _adopt_existing_ingress_remito_reference(
+        ingreso_id, user_id=actor_user_id, allow_short_number=True,
+    ) or {}
+    if not (_clean(adopted.get("remito_number")) and adopted.get("status") == "generated"):
+        raise BejermanRisError(
+            f"No se pudo asociar el comprobante {numero}: revise que el número corresponda "
+            "al tipo y punto de venta de este ingreso."
+        )
+    _patch_ingreso_remito_review(
+        ingreso_id,
+        {"operatorResolution": resolution, "blockedReason": "", "reviewState": ""},
+    )
+    logger.info(
+        "bejerman_ris_review_adopted",
+        extra={"ingreso_id": ingreso_id, "actor_user_id": actor_user_id, "remito_number": _clean(adopted.get("remito_number"))},
+    )
+    return {
+        "success": True,
+        "ingresoId": ingreso_id,
+        "remitoNumber": _clean(adopted.get("remito_number")),
+        "operatorResolution": resolution,
+    }
 
 
 def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_id: int | None = None) -> dict[str, Any]:
@@ -4717,6 +5207,60 @@ def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_i
     return row
 
 
+def _is_associated_existing_remito(row: dict[str, Any]) -> bool:
+    """El comprobante existía en Bejerman antes que NEXORA; acá sólo se anotó su número."""
+
+    response = _json_dict(row.get("response_payload"))
+    request = _json_dict(row.get("request_payload"))
+    return bool(
+        response.get("associatedExistingBejermanRemito")
+        or request.get("existingBejermanRemito")
+    )
+
+
+def _existing_remito_pdf_from_folder(row: dict[str, Any], user_id: int | None = None) -> tuple[bytes, str]:
+    """Busca en las carpetas de PDF de Bejerman el comprobante que NEXORA no emitió.
+
+    Para estos comprobantes viejos pedirle una generación al ERP no lleva a ningún
+    lado: `RegenPDFSDK='N'` hace que Bejerman se niegue a rehacer un PDF que no esté
+    ya escrito en la carpeta, así que encolar el pedido sólo consigue que el operador
+    espere hasta el deadline para no recibir nada. Se mira la carpeta —con el barrido
+    por prefijo habilitado, que es la red para las variantes de nombre que no
+    adivinamos— y si el archivo no está se dice eso mismo, que es la respuesta útil.
+    """
+
+    params = _pdf_params(row)
+    if not params["number"] or not params["pointOfSale"]:
+        raise BejermanRisPdfError("No hay referencia de comprobante suficiente para buscar el PDF")
+    try:
+        client = BejermanSDKClient(company_key=params["companyKey"], actor_user_id=user_id)
+    except ValueError as exc:
+        raise BejermanRisPdfError(str(exc)) from exc
+    reference = BejermanPdfReference(
+        type=params["type"],
+        number=params["number"],
+        letter=params["letter"],
+        point_of_sale=params["pointOfSale"],
+        issue_date=params["issueDate"],
+        customer_code=params["customerCode"],
+    )
+    pdf, status = probe_comprobante_pdf_copy(
+        client, reference, interactive=True, allow_directory_scan=True,
+    )
+    if pdf:
+        return pdf, "application/pdf"
+    remito = _clean(row.get("remito_number")) or _clean(params["number"])
+    if status == "error":
+        raise BejermanRisPdfError(
+            f"No se pudo leer la carpeta de PDFs de Bejerman para buscar el remito {remito}."
+        )
+    raise BejermanRisPdfError(
+        f"No se encontró el PDF del remito {remito} en las carpetas de Bejerman. "
+        "Es un comprobante que no emitió NEXORA, así que el único archivo posible es el "
+        "que haya dejado el ERP: si no está ahí, hay que imprimirlo desde Bejerman."
+    )
+
+
 def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, str, dict[str, Any]]:
     started_at = time.monotonic()
     row = _row_for_ingreso(ingreso_id) or {}
@@ -4724,6 +5268,8 @@ def fetch_ris_pdf(ingreso_id: int, user_id: int | None = None) -> tuple[bytes, s
         row = _adopt_existing_ingress_remito_reference(ingreso_id, user_id=user_id, current=row) or {}
     if not row:
         raise BejermanRisError("RIS no inicializado")
+    if _is_associated_existing_remito(row) and _clean(row.get("remito_number")):
+        return (*_existing_remito_pdf_from_folder(row, user_id=user_id), row)
     if (row.get("document_mode") or RIS_DOCUMENT_MODE_EMIT) == RIS_DOCUMENT_MODE_REGISTER:
         raise BejermanRisRegisteredNoPdfError(row.get("remito_number") or row.get("manual_remito_number"))
     if row.get("status") != "generated" or not _clean(row.get("remito_number")):

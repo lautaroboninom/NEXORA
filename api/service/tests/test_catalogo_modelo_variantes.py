@@ -151,6 +151,9 @@ class ModeloVariantesAPITest(TestCase):
 
     def _insert(self, sql, params):
         with connection.cursor() as cur:
+            if connection.vendor == "postgresql":
+                cur.execute(sql.rstrip().rstrip(";") + " RETURNING id", params)
+                return int(cur.fetchone()[0])
             cur.execute(sql, params)
             return self._last_id(cur)
 

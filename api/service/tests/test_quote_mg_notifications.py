@@ -164,8 +164,8 @@ class QuoteMgApprovedNotificationTest(TestCase):
         super().setUpClass()
 
     @classmethod
-    def _last_id(cls, cur):
-        cur.execute("SELECT LASTVAL()")
+    def _last_id(cls, cur, table):
+        cur.execute("SELECT currval(pg_get_serial_sequence(%s, 'id'))", [table])
         return int(cur.fetchone()[0])
 
     def setUp(self):
@@ -221,14 +221,14 @@ class QuoteMgApprovedNotificationTest(TestCase):
                 "INSERT INTO customers (cod_empresa, razon_social) VALUES (%s,%s)",
                 ["CLI", razon_social],
             )
-            customer_id = self._last_id(cur)
+            customer_id = self._last_id(cur, "customers")
             cur.execute("INSERT INTO marcas (nombre) VALUES (%s)", ["Philips"])
-            marca_id = self._last_id(cur)
+            marca_id = self._last_id(cur, "marcas")
             cur.execute(
                 "INSERT INTO models (marca_id, nombre, tipo_equipo) VALUES (%s,%s,%s)",
                 [marca_id, "DreamStation", "CPAP"],
             )
-            model_id = self._last_id(cur)
+            model_id = self._last_id(cur, "models")
             cur.execute(
                 """
                 INSERT INTO devices
@@ -246,24 +246,24 @@ class QuoteMgApprovedNotificationTest(TestCase):
                     mg_venta_factura,
                 ],
             )
-            device_id = self._last_id(cur)
+            device_id = self._last_id(cur, "devices")
             cur.execute(
                 """
                 INSERT INTO ingresos (device_id, estado, motivo, presupuesto_estado)
-                VALUES (%s,'presupuestado','Reparación','presupuestado')
+                VALUES (%s,'presupuestado','reparación','presupuestado')
                 """,
                 [device_id],
             )
-            ingreso_id = self._last_id(cur)
+            ingreso_id = self._last_id(cur, "ingresos")
             cur.execute(
                 """
                 INSERT INTO quotes
-                  (ingreso_id, version_num, estado, moneda, subtotal, iva_21, total, fecha_emitido)
-                VALUES (%s,1,'presupuestado','ARS',%s,%s,%s,%s)
+                  (ingreso_id, version_num, estado, moneda, subtotal, fecha_emitido)
+                VALUES (%s,1,'presupuestado','ARS',%s,%s)
                 """,
-                [ingreso_id, Decimal("100.00"), Decimal("21.00"), Decimal("121.00"), now],
+                [ingreso_id, Decimal("100.00"), now],
             )
-            quote_id = self._last_id(cur)
+            quote_id = self._last_id(cur, "quotes")
             cur.execute(
                 """
                 INSERT INTO quote_items (quote_id, tipo, descripcion, qty, precio_u)
