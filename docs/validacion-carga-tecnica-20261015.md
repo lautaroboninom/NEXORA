@@ -39,3 +39,11 @@ El único acceso a producción fue la [consulta histórica de solo lectura](repo
 ## Configuración pendiente
 
 Los valores reales de primera hora, hora adicional y diagnóstico y limpieza deben cargarse desde la tabla del negocio. La emisión continúa requiriendo revisión manual. Las propuestas del histórico quedan disponibles para decidir qué otros trabajos incorporar al catálogo.
+
+## Ampliación de los datos de demostración
+
+Después de la primera revisión se amplió `seed_technical_dev_preview`: la base conserva la OS 1 y ahora contiene 16 órdenes, 11 repuestos y dos solicitudes de alta pendientes. Se agregaron tres clientes, seis tipos de equipo y tarifas ficticias para recorrer los cálculos; los valores existentes no se reemplazan. La [guía de casos](carga-tecnica-presupuestos.md#casos-disponibles-para-probar) identifica las órdenes preparadas para cada etapa.
+
+Se ejecutó el seed en desarrollo y se verificaron importes de mano de obra de $ 12.000 para 30 minutos, $ 22.000 para 80 minutos, $ 44.500 para 150 minutos, $ 6.000 para el caso sin falla y cero para su bonificación. Se comprobó el bloqueo del tipo sin tarifa, la existencia del PDF emitido, el registro de tiempos reales y el adicional sobre una versión aprobada.
+
+Una segunda ejecución conservó los identificadores, las cantidades de stock, las versiones y las solicitudes, sin duplicarlos. La revisión en Chromium confirmó los casos en Pendientes de presupuesto, la OS 6 lista para emitir y la OS 2 disponible para la carga del técnico; la búsqueda técnica ofreció los 11 repuestos sin datos comerciales. No se registraron errores de JavaScript.

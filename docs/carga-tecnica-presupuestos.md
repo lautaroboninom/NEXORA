@@ -10,9 +10,33 @@ docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py 
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py seed_technical_dev_preview --password 'CargaTecnica-demo-2026!'
 ```
 
-La interfaz está en http://localhost:5177 y la API en http://localhost:18110. Los usuarios de demostración son `presupuestos@tecnica.invalid` y `tecnico@tecnica.invalid`, con la contraseña elegida al ejecutar el comando. Los registros son ficticios y las tarifas quedan vacías hasta cargarlas. La base `nexora_technical_dev`, su volumen y sus contenedores son exclusivos de este trabajo. No se usan `.env.prod`, trabajadores de correo ni sincronizadores externos. El comando de demostración rechaza otras bases de datos.
+La interfaz está en http://localhost:5177 y la API en http://localhost:18110. Los usuarios de demostración son `presupuestos@tecnica.invalid` y `tecnico@tecnica.invalid`, con la contraseña elegida al ejecutar el comando. El seed incluye clientes, equipos, repuestos con stock y **tarifas ficticias exclusivas de prueba**. No representan la tabla de precios del negocio. La base `nexora_technical_dev`, su volumen y sus contenedores son exclusivos de este trabajo. No se usan `.env.prod`, trabajadores de correo ni sincronizadores externos. El comando de demostración rechaza otras bases de datos y no reemplaza órdenes ni valores ya cargados.
 
 Las imágenes incorporan el código y el esquema: después de modificar archivos, reconstruir el servicio correspondiente. Esta configuración evita montajes de archivos desde rutas UNC, que Docker Desktop puede interpretar como directorios.
+
+## Casos disponibles para probar
+
+La carga ampliada agrega quince órdenes, tres clientes, diez repuestos con códigos `DEMO-…` y seis tipos de equipo. Conserva la OS 1 y los cambios que ya se hayan realizado. Los números de OS de la tabla corresponden a la base de demostración actual; en una instalación nueva el comando informa sus identificadores.
+
+| OS | Caso |
+| --- | --- |
+| 2 | Ingreso nuevo para diagnosticar y cargar las listas |
+| 3 | Ingreso sin técnico asignado |
+| 4 | Carga técnica en preparación, aún sin enviar |
+| 5 | Revisión de 30 minutos: mínimo de una hora |
+| 6 | Revisión de 1 h 20 min, con dos repuestos |
+| 7 | Revisión de 2 h 30 min, con turbina y manguera |
+| 8 | Solicitud de alta de repuesto pendiente |
+| 9 | Solicitud de alta de trabajo pendiente |
+| 10 | Sin falla: tarifa general de diagnóstico y limpieza |
+| 11 | Sin falla con diagnóstico y limpieza bonificados |
+| 12 | Tipo de equipo sin tarifa: emisión bloqueada |
+| 13 | Presupuesto emitido, listo para aprobar |
+| 14 | Aprobado, con 35 minutos reales: completar ejecución |
+| 15 | Reparación terminada, con 100 minutos reales |
+| 16 | Adicional enviado sobre una versión aprobada |
+
+El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. Las tarifas de ejemplo usan un mínimo por primera hora y adicionales proporcionales; el cargo general sin falla de ejemplo es de $ 6.000 netos. Repetir el seed no reinicia los casos, no repone stock consumido y no duplica presupuestos.
 
 ## Operación
 
