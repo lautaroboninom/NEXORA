@@ -49,6 +49,9 @@ from service.notifications import (
     notify_ingreso_asignado,
     notify_ingreso_liberado,
     notify_presupuesto_rechazado_reparado,
+    notify_solicitud_asignacion,
+    resolve_solicitud_asignacion,
+    solicitud_asignacion_email_recipients,
 )
 from service.permissions import apply_overrides
 from service.remito_pdf_notifications import notify_bejerman_remito_pdf_issued
@@ -2629,6 +2632,83 @@ class NotificationsAPITest(TestCase):
             )
             rows = cur.fetchall()
         self.assertEqual(rows, [(self.tecnico.id,)])
+
+    def _solicitud_asignacion_user_ids(self):
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id
+                  FROM notifications
+                 WHERE notification_key = 'solicitud_asignacion'
+                 ORDER BY user_id
+                """
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def test_solicitud_asignacion_llega_por_campana_aunque_el_jefe_apague_el_mail(self):
+        """Apagar el Mail del aviso dejaba al jefe también sin campana ni push.
+
+        La lista de correo ya filtrada por el toggle era la audiencia de la
+        campana: con el Mail apagado quedaba vacía y el pedido no le llegaba a
+        nadie (prod, desde el 11/08/2026).
+        """
+        self._set_channel_preference(self.jefe, "solicitud_asignacion", bell=True, email=False, push=True)
+
+        inserted = notify_solicitud_asignacion(self.ingreso_id, self.otro.id, tecnico_nombre=self.otro.nombre)
+
+        self.assertEqual(inserted, 1)
+        self.assertEqual(self._solicitud_asignacion_user_ids(), [self.jefe.id])
+        self.assertNotIn(self.jefe.email, solicitud_asignacion_email_recipients(actor_user_id=self.otro.id))
+
+    def test_solicitud_asignacion_llega_al_suplente_con_el_aviso_prendido(self):
+        """El suplente de jefatura nunca entraba: la audiencia era una casilla fija."""
+        suplente = User.objects.create(
+            nombre="Suplente Notificaciones",
+            email="suplente@notif.test",
+            hash_pw="",
+            rol="jefe_suplente",
+            activo=True,
+        )
+        self._set_channel_preference(suplente, "solicitud_asignacion", bell=True, email=True, push=True)
+
+        notify_solicitud_asignacion(self.ingreso_id, self.otro.id, tecnico_nombre=self.otro.nombre)
+
+        self.assertEqual(self._solicitud_asignacion_user_ids(), sorted([self.jefe.id, suplente.id]))
+        self.assertIn(suplente.email, solicitud_asignacion_email_recipients(actor_user_id=self.otro.id))
+
+    def test_solicitud_asignacion_no_le_llega_al_que_la_pide(self):
+        """Un jefe_suplente también pide asignación: no se avisa a sí mismo."""
+        inserted = notify_solicitud_asignacion(self.ingreso_id, self.jefe.id, tecnico_nombre=self.jefe.nombre)
+
+        self.assertEqual(inserted, 0)
+        self.assertEqual(self._solicitud_asignacion_user_ids(), [])
+        self.assertNotIn(self.jefe.email, solicitud_asignacion_email_recipients(actor_user_id=self.jefe.id))
+
+    @override_settings(ASSIGNMENT_REQUEST_RECIPIENTS=["jefe@notif.test", "externo@otra.test"])
+    def test_mail_de_solicitud_asignacion_respeta_el_toggle(self):
+        self._set_channel_preference(self.jefe, "solicitud_asignacion", bell=True, email=False, push=True)
+
+        recipients = solicitud_asignacion_email_recipients(actor_user_id=self.otro.id)
+
+        self.assertNotIn(self.jefe.email, recipients)
+        self.assertIn("externo@otra.test", recipients)
+
+    def test_asignar_el_ingreso_cierra_la_campana_de_la_solicitud(self):
+        notify_solicitud_asignacion(self.ingreso_id, self.otro.id, tecnico_nombre=self.otro.nombre)
+        self.assertEqual(self._solicitud_asignacion_user_ids(), [self.jefe.id])
+
+        resolve_solicitud_asignacion(self.ingreso_id)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                  FROM notifications
+                 WHERE notification_key = 'solicitud_asignacion'
+                   AND read_at IS NULL
+                """
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
 
     def test_roles_no_crean_audiencia_interna(self):
         self._enable_notification(self.tecnico, "ingreso_asignado", True)

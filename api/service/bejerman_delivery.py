@@ -8416,7 +8416,18 @@ def reissue_corrected_bejerman_remito_review(
 def _is_delivery_partida_rejection_message(message: Any) -> bool:
     """Detecta el mismo rechazo de partida que ya se resolvió para RIS
     (bejerman_ris._is_partida_rejection_message): Bejerman procesa la 'emisión' del
-    remito como importador y no da de alta partidas nuevas."""
+    remito como importador y no da de alta partidas nuevas.
+
+    La falta de stock NO es un rechazo de partida aunque nombre la partida: "El
+    comprobante no se importó. No hay stock suficiente en la partida X..." trae
+    "PARTIDA" y "NO SE IMPORT", y se tomaba como tal. Entonces la recuperación,
+    con la partida existente, emitía el remito entero con ActualizaStock=N y se
+    salteaba el control de stock de Bejerman: así salieron 6 de los 13 remitos de
+    salida sin movimiento de 2026 (4 por la UM2 en cajas de las máscaras, que
+    redondea a milésimas: RT 00004-00005321 pedía 0,292 cajas de un lote con 0,290).
+    Es un rechazo definitivo y se informa tal cual."""
+    if is_bejerman_stock_insuficiente_message(message):
+        return False
     text = _optional_text(message).upper()
     if "PARTIDA" not in text:
         return False
@@ -8454,6 +8465,36 @@ def _delivery_partida_stock_lines(comprobante: dict[str, Any]) -> list[tuple[str
     return lines
 
 
+DELIVERY_INCOMING_REMITO_TYPES = frozenset({"RD", "RDN", "RDA"})
+
+
+def _delivery_outgoing_partidas_missing(
+    client: BejermanSDKClient, comprobante: dict[str, Any]
+) -> list[tuple[str, str, str]]:
+    """Renglones cuya partida no existe en el depósito del renglón.
+
+    Bejerman rechaza el remito por "partida inexistente" cuando un renglón saca un
+    equipo de un depósito donde ese equipo no está. En una devolución (RD, RDN, RDA)
+    eso es normal y la recuperación con ENT es la entrada correcta; en una salida
+    (RT, RTN, RTA, RSS), no. Si es salida o devolución lo decide
+    `_delivery_is_outgoing_remito` por el tipo de comprobante y no por el signo de la
+    cantidad: el signo lo fija `BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES` y ya estuvo
+    invertido (junio-julio de 2026).
+    """
+
+    missing: list[tuple[str, str, str]] = []
+    for article, partida, deposit in _delivery_partida_stock_lines(comprobante):
+        if not _delivery_stock_partida_present(client, partida, deposit):
+            missing.append((article, partida, deposit))
+    return missing
+
+
+def _delivery_is_outgoing_remito(comprobante: dict[str, Any]) -> bool:
+    tipo = (_optional_text(comprobante.get("Comprobante_Tipo")) or "").upper()
+    return tipo not in DELIVERY_INCOMING_REMITO_TYPES
+
+
+
 def _delivery_stock_partida_present(client: BejermanSDKClient, partida: str, deposit: str) -> bool:
     if not _optional_text(partida):
         return False
@@ -8469,23 +8510,35 @@ def _delivery_entries_moved_by_comprobante(client: BejermanSDKClient, entries: l
 
     La compensación previa deja una fila de stock en cero, así que comprobar sólo
     que la partida exista confundiría ese estado intermedio con un remito emitido.
+
+    Alcanza con que se haya movido UNA partida (el comprobante entra entero o no
+    entra) y la lectura se reintenta con la espera de la verificación del ENT: mirar
+    una sola vez y exigir todas es lo que duplicó el stock con la RIS 00004-00005325
+    (ver `bejerman_ris._register_entries_moved_by_comprobante`).
     """
 
     if not entries:
         return False
-    for entry in entries:
-        partida = _optional_text(entry.get("Comprobante_ArtPartida"))
-        deposit = _optional_text(entry.get("Comprobante_ArtDeposito"))
-        if not partida or not deposit:
-            return False
-        try:
-            response = client.obtener_stock_partida(partida)
-        except Exception:
-            return False
-        records = _records_for_partida_any_quantity(response, partida, deposit)
-        if not any((quantity := _quantity_from_record(record)) is not None and quantity != 0 for record in records):
-            return False
-    return True
+    targets = [
+        (_optional_text(entry.get("Comprobante_ArtPartida")), _optional_text(entry.get("Comprobante_ArtDeposito")))
+        for entry in entries
+    ]
+    if not all(partida and deposit for partida, deposit in targets):
+        return False
+    attempts = max(1, _env_positive_int("BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS", 3))
+    delay_ms = max(0, _env_positive_int("BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS", 1500))
+    for attempt in range(attempts):
+        for partida, deposit in targets:
+            try:
+                response = client.obtener_stock_partida(partida)
+            except Exception:
+                continue
+            records = _records_for_partida_any_quantity(response, partida, deposit)
+            if any((quantity := _quantity_from_record(record)) is not None and quantity != 0 for record in records):
+                return True
+        if attempt < attempts - 1 and delay_ms:
+            time.sleep(delay_ms / 1000)
+    return False
 
 
 def _delivery_stock_entry_number(partida: str, index: int, used: set[str]) -> str:
@@ -8663,6 +8716,7 @@ def _recover_delivery_partida_rejection(
     emite_reg: str,
     circuito: str,
     operacion: str,
+    rejection_message: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fallback cuando Bejerman procesa la 'emisión' del remito de entrega como
     importador y rechaza la partida (mismo comportamiento ya resuelto para RIS en
@@ -8678,6 +8732,32 @@ def _recover_delivery_partida_rejection(
     # Antes que nada y antes de tocar el SDK: si el remito no entra en el formulario,
     # este reintento no puede salir y no hay que dejar altas de stock a medio camino.
     _assert_sale_remito_payload_limits(delivery_type, comprobante)
+
+    # Un remito de SALIDA no se "recupera": el último recurso de abajo lo emite ENTERO
+    # con ActualizaStock=N, y entonces ningún renglón sale de su depósito (y el ENT deja
+    # una unidad de más). En 2026 fueron 13 remitos de salida así (de ~1.800): 3 por una
+    # partida que no estaba en el depósito del renglón (RSS 00004-00005366 del 29/09:
+    # un MG cargado contra VAL dejó cinco equipos entregados figurando en STC), 3 de MG
+    # BIO por renglones sin lote de artículos que lo exigen, y 6 por falta de stock que
+    # se tomaba como rechazo de partida (ver _is_delivery_partida_rejection_message).
+    # Se frena antes de crear el ENT con la respuesta de Bejerman, que nombra el renglón.
+    # "No se importó" lo vuelve un rechazo definitivo: la orden queda lista para
+    # reintentar. Las devoluciones (RD, RDN, RDA) siguen con la recuperación.
+    if _delivery_is_outgoing_remito(comprobante):
+        outgoing_missing = _delivery_outgoing_partidas_missing(client, comprobante)
+        detalle = (
+            "Estos renglones sacan un equipo de un depósito donde Bejerman no lo tiene: "
+            + "; ".join(f"{partida} en {deposit} (art. {article})" for article, partida, deposit in outgoing_missing)
+            + "."
+            if outgoing_missing
+            else "Revisá las partidas, los lotes y los depósitos de los renglones."
+        )
+        original = _optional_text(rejection_message)
+        raise BejermanSdkResponseError(
+            "El comprobante no se importó: Bejerman rechazó una partida del remito y un remito de "
+            f"salida no se emite sin mover stock. {detalle}"
+            + (f" Respuesta de Bejerman: {original}" if original else "")
+        )
 
     created_entries = _ensure_delivery_stock_entries_for_partidas(client, comprobante)
 
@@ -9043,6 +9123,7 @@ def generate_bejerman_remito(
                     emite_reg=_env_text("BEJERMAN_REMITO_EMITE_REG", "E"),
                     circuito=_env_text("BEJERMAN_REMITO_CIRCUIT", "VENTAS"),
                     operacion=_env_text("BEJERMAN_REMITO_OPERATION", "IngresarComprobanteJSON"),
+                    rejection_message=str(exc),
                 )
             except Exception as recovery_exc:
                 if (

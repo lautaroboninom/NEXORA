@@ -110,6 +110,20 @@ export const SALE_TICKET_STATES = new Set(["vendido_pendiente_entrega", "vendido
 // Número interno de MG BIO: pegado o separado, con o sin ceros a la izquierda y hasta 6 dígitos
 // ("MG1678", "MG 001678"). Espejo de `service/mg_codes.py`: si cambia uno, cambia el otro.
 export const MG_CODE_RE = /^(MG|NM|NV|CE)\s*0*\d{1,6}$/i;
+const MG_PREFIX_RE = /^(MG|NM|NV|CE)/i;
+const MG_CODE_PARTS_RE = /^(MG|NM|NV|CE)\s*0*(\d{1,6})$/i;
+// Cómo guarda NEXORA un número interno. Regla del 14/10/2026: no distingue mayúsculas.
+// "mg 7359" -> "MG 7359", "MG 12" -> "MG 0012", "7359" -> "MG 7359"; lo que no es un código
+// numérico sólo sube el prefijo ("mg sm-004" -> "MG sm-004"). Espejo de `normalize_mg_input`
+// de `service/mg_codes.py`, que es lo que de verdad se guarda (la base tiene un trigger igual).
+export const normalizeMgInput = (value) => {
+  let text = String(value ?? "").replace(/[   ]/g, " ").trim();
+  if (!text) return "";
+  if (!MG_PREFIX_RE.test(text)) text = `MG ${text}`;
+  const match = MG_CODE_PARTS_RE.exec(text);
+  if (match) return `${match[1].toUpperCase()} ${match[2].padStart(4, "0")}`;
+  return text.slice(0, 2).toUpperCase() + text.slice(2);
+};
 const cleanText = (v) => (v == null ? "" : String(v).trim());
 
 export const locationNameKey = (value) =>

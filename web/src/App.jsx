@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "./components/Sidebar.jsx";
 import Footer from "./components/Footer.jsx";
 import NotificationBell from "./components/NotificationBell.jsx";
+import NewVersionBanner from "./components/NewVersionBanner.jsx";
 import BejermanCredentialsModal from "./components/BejermanCredentialsModal.jsx";
 import BejermanSellerCodeModal from "./components/BejermanSellerCodeModal.jsx";
 import useRouteUiState from "./hooks/useRouteUiState";
@@ -191,6 +192,8 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      <NewVersionBanner />
 
       <main className="flex min-w-0 flex-1">
         <Sidebar

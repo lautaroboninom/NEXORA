@@ -9,7 +9,7 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..permissions import MappedPermissionGuard
+from ..permissions import MappedPermissionGuard, require_permission
 from ..patrimonial_notifications import notify_patrimonial_email
 from ..bejerman_companies import (
     DEFAULT_INGRESS_COMPANY_KEY,
@@ -36,7 +36,7 @@ from .helpers import (
     _set_audit_user,
 )
 from .mg_state import normalize_mg, resolve_mg_flags
-from ..mg_codes import MG_CODE_PATTERN, MG_CODE_RE, MG_KEY_SQL, sql_is_mg_code, sql_mg_key
+from ..mg_codes import MG_CODE_PATTERN, MG_CODE_RE, MG_KEY_SQL, normalize_mg_input, sql_is_mg_code, sql_mg_key
 from .tipo_equipo_utils import sentence_case_tipo_equipo
 
 
@@ -167,18 +167,13 @@ def _normalize_mg(numero_interno: str) -> str:
     `XX ####`) las veían como distintas. Normalizar al escribir hace que el valor guardado y
     el que compara la base sean literalmente el mismo.
 
-    Lo que no encaja en el patrón numérico (`MG SM-004`) se deja como está: no es un código
-    canónico y forzarlo sería inventar un número que nadie escribió.
+    Lo que no encaja en el patrón numérico (`MG SM-004`) se deja como está, salvo el prefijo,
+    que va en mayúsculas: no es un código canónico y forzarlo sería inventar un número que
+    nadie escribió.
+
+    Es la regla única de `mg_codes.normalize_mg_input`, la misma que aplica el trigger de la base.
     """
-    value = (numero_interno or "").strip()
-    if not value:
-        return ""
-    if not value.upper().startswith(MG_PREFIXES):
-        value = "MG " + value
-    match = _MG_CANONICAL_RE.match(value)
-    if not match:
-        return value
-    return f"{match.group(1).upper()} {match.group(2).zfill(4)}"
+    return normalize_mg_input(numero_interno)
 
 
 def _fetch_device_editable(device_id: int):
@@ -1008,6 +1003,10 @@ class DeviceDirectCreateView(APIView):
         data = request.data or {}
 
         propio = bool(_parse_bool_or_default(data.get("propio"), False))
+        if propio:
+            # El alta propia mueve stock real a STL: pide su propio permiso, aparte del alta
+            # de equipos de clientes que la matriz habilita para esta vista.
+            require_permission(request, "action.devices_preventivos.create_own")
 
         customer_id = _parse_int_or_none(data.get("customer_id"))
         if propio:

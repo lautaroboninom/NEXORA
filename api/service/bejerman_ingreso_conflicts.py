@@ -226,6 +226,7 @@ def list_pending_conflicts() -> list[dict[str, Any]]:
                k.updated_at,
                COALESCE(prev.estado::text, '') AS conflicting_estado,
                COALESCE(prev.fecha_ingreso, prev.fecha_creacion) AS conflicting_fecha_ingreso,
+               COALESCE(i.fecha_ingreso, i.fecha_creacion) AS ingreso_fecha_ingreso,
                COALESCE(c.razon_social, '') AS cliente,
                COALESCE(b.nombre, '') AS marca,
                COALESCE(m.nombre, '') AS modelo,

@@ -5,6 +5,7 @@ import {
   getDeliveryOrder,
   getDeliveryOrders,
   patchDeliveryOrderItemPartidas,
+  patchDeliveryOrderPriority,
   patchDeliveryOrderRemitoLocation,
   postDeliveryOrderCancel,
   postDeliveryOrderDelivered,
@@ -197,12 +198,18 @@ function isEditableOrder(order) {
   );
 }
 
+// La urgencia se puede cambiar mientras la orden siga pendiente de entrega, aunque ya tenga
+// remito: es de la entrega física. Las de servicio técnico nacen normales y se marcan acá.
+function isPriorityEditableOrder(order) {
+  return EDITABLE_STATUSES.has(order?.status);
+}
+
 function canSyncDrive(user) {
-  return ["admin", "supervisor", "ventas", "jefe", "jefe_suplente"].includes(String(user?.rol || "").trim().toLowerCase());
+  return can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_SYNC_DRIVE);
 }
 
 function canEditItemDiscounts(user) {
-  return ["jefe", "jefe_suplente", "admin", "supervisor", "ventas"].includes(String(user?.rol || "").trim().toLowerCase());
+  return can(user, PERMISSION_CODES.ACTION_DELIVERY_ORDER_EDIT_DISCOUNTS);
 }
 
 function canEditCommercialFields(user) {
@@ -769,6 +776,15 @@ export default function DeliveryOrders() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleTogglePriority = (order) => {
+    if (!order?.id) return;
+    const nextPriority = isUrgentOrder(order) ? "normal" : "urgente";
+    runAction(async () => {
+      const updated = await patchDeliveryOrderPriority(order.id, nextPriority);
+      if (updated?.id) setDetailOrder((current) => (current?.id === updated.id ? updated : current));
+    });
   };
 
   const handleCancelOrder = (order) => {
@@ -1484,6 +1500,9 @@ export default function DeliveryOrders() {
         order={detailOrder}
         canEdit={canEditCommercialFields(user) && isEditableOrder(detailOrder)}
         canEditPartidas={canAssignArticles && isEditableOrder(detailOrder)}
+        canEditPriority={canEditCommercialFields(user) && isPriorityEditableOrder(detailOrder)}
+        priorityBusy={saving}
+        onTogglePriority={() => handleTogglePriority(detailOrder)}
         canCorrectCommercialTerms={canCorrectCommercialTerms(user, detailOrder)}
         canPrintInvoice={canPrintInvoiceForOrder(user, detailOrder)}
         canGenerateRemito={canGenerateRemito && canSelectForRemito(detailOrder)}
@@ -1571,6 +1590,9 @@ function DeliveryOrderDetailModal({
   order,
   canEdit,
   canEditPartidas,
+  canEditPriority,
+  priorityBusy,
+  onTogglePriority,
   canCorrectCommercialTerms,
   canPrintInvoice,
   canGenerateRemito,
@@ -1679,7 +1701,21 @@ function DeliveryOrderDetailModal({
             <DetailField label="Condición" value={order.commercialCondition || "-"} />
             <DetailField label="Moneda" value={currency === "USD" ? "U$S" : "$"} />
             <DetailField label="TC" value={order.commercialExchangeRate || "-"} />
-            <DetailField label="Prioridad" value={order.priority === "urgente" ? "Urgente" : "Normal"} />
+            <DetailField label="Prioridad">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>{isUrgentOrder(order) ? "Urgente" : "Normal"}</span>
+                {canEditPriority && (
+                  <button
+                    type="button"
+                    onClick={onTogglePriority}
+                    disabled={priorityBusy}
+                    className="rounded border px-2 py-0.5 text-xs hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isUrgentOrder(order) ? "Quitar urgencia" : "Marcar urgente"}
+                  </button>
+                )}
+              </div>
+            </DetailField>
             <DetailField label="Remitos">
               <RemitoDocuments order={order} />
             </DetailField>

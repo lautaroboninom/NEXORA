@@ -13,6 +13,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         deduped = 0
+        accepted = 0
+        canceled_stale = 0
         with transaction.atomic():
             with connection.cursor() as cur:
                 if connection.vendor == "postgresql":
@@ -57,6 +59,37 @@ class Command(BaseCommand):
                         """
                     )
                     deduped = max(int(cur.rowcount or 0), 0)
+                    # Pedidos abiertos de ingresos que ya tienen técnico. Hasta el
+                    # 15/09/2026 asignar sólo cerraba el pedido del técnico elegido:
+                    # los de los demás seguían "pendientes" para siempre, la hoja lo
+                    # mostraba y al resto de los técnicos les escondía el botón.
+                    cur.execute(
+                        """
+                        UPDATE ingreso_assignment_requests r
+                           SET accepted_at = CURRENT_TIMESTAMP,
+                               status = 'aceptado'
+                          FROM ingresos t
+                         WHERE t.id = r.ingreso_id
+                           AND r.accepted_at IS NULL
+                           AND r.canceled_at IS NULL
+                           AND t.asignado_a = r.usuario_id
+                        """
+                    )
+                    accepted = max(int(cur.rowcount or 0), 0)
+                    cur.execute(
+                        """
+                        UPDATE ingreso_assignment_requests r
+                           SET canceled_at = CURRENT_TIMESTAMP,
+                               status = 'cancelado'
+                          FROM ingresos t
+                         WHERE t.id = r.ingreso_id
+                           AND r.accepted_at IS NULL
+                           AND r.canceled_at IS NULL
+                           AND t.asignado_a IS NOT NULL
+                           AND t.asignado_a <> r.usuario_id
+                        """
+                    )
+                    canceled_stale = max(int(cur.rowcount or 0), 0)
                 else:
                     cur.execute(
                         """
@@ -104,4 +137,7 @@ class Command(BaseCommand):
                     if not cur.fetchone():
                         raise RuntimeError("No se aplicó ingreso_assignment_requests")
 
-        self.stdout.write(f"APLICADO OK: esquema de solicitudes de asignación (deduplicadas={deduped})")
+        self.stdout.write(
+            f"APLICADO OK: esquema de solicitudes de asignación (deduplicadas={deduped}, "
+            f"aceptadas_ya_asignadas={accepted}, canceladas_asignadas_a_otro={canceled_stale})"
+        )

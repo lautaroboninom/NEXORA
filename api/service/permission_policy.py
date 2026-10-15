@@ -9,9 +9,11 @@
 VIEW_PERMISSION_MATRIX = {
     # Ingresos / operacion
     "MisPendientesView": {"GET": "page.work_queues"},
-    "MarcarParaRepararView": {"POST": "action.ingreso.repair_transitions"},
-    "QuitarRepararView": {"POST": "action.ingreso.repair_transitions"},
-    "HabilitarReparacionCotizacionView": {"POST": "action.ingreso.repair_transitions"},
+    # Autorizar la reparación es decisión de jefatura. Con `repair_transitions` el técnico
+    # podía autorizarse su propio equipo por API aunque la pantalla no le mostrara el botón.
+    "MarcarParaRepararView": {"POST": "action.ingreso.authorize_repair"},
+    "QuitarRepararView": {"POST": "action.ingreso.authorize_repair"},
+    "HabilitarReparacionCotizacionView": {"POST": "action.ingreso.authorize_repair"},
     "MarcarReparadoView": {"POST": "action.ingreso.repair_transitions"},
     "MarcarControladoSinDefectoView": {"POST": "action.ingreso.repair_transitions"},
     "MarcarNoSeReparaView": {"POST": "action.ingreso.repair_transitions"},
@@ -230,6 +232,8 @@ VIEW_PERMISSION_MATRIX = {
     "DeliveryOrderBillingReactivationView": {"POST": "action.delivery_order.invoice"},
     "DeliveryOrderCancelView": {"POST": "action.delivery_order.cancel"},
     "DeliveryOrderRemitoLocationView": {"PATCH": "action.delivery_order.update_remito_location"},
+    # Cambiar la urgencia es editar la orden: el mismo permiso que "Editar orden".
+    "DeliveryOrderPriorityView": {"PATCH": "action.delivery_order.assign_articles"},
     "DeliveryOrderCommercialCorrectionView": {"PATCH": "action.delivery_order.correct_commercial_terms"},
     "DeliveryOrderItemArticleView": {"PATCH": "action.delivery_order.assign_articles"},
     "DeliveryOrderItemPartidasView": {"PATCH": "action.delivery_order.assign_articles"},
@@ -367,15 +371,16 @@ VIEW_PERMISSION_MATRIX = {
         "PATCH": "action.devices_preventivos.manage",
     },
     "DeviceDirectCreateView": {"POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
-    # El buscador de stock es parte del alta: quien puede dar de alta un equipo tiene que
-    # poder elegir la unidad en Bejerman.
-    "DeviceStockCandidatosView": {"GET": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
-    # Alta masiva de equipos propios: es el alta de a uno para muchas unidades, con el mismo permiso.
+    # Alta de equipos propios (de a uno o masiva): mueve stock real VAL→STL en Bejerman, así
+    # que tiene permiso propio, aparte del alta de equipos de clientes. El buscador de stock
+    # es la primera parte de ese alta. `DeviceDirectCreateView` con `propio=true` pide el
+    # mismo permiso adentro de la vista.
+    "DeviceStockCandidatosView": {"GET": "action.devices_preventivos.create_own"},
     "DeviceAltaMasivaView": {
-        "GET": ["action.devices_preventivos.manage", "action.devices_preventivos.create"],
-        "POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"],
+        "GET": "action.devices_preventivos.create_own",
+        "POST": "action.devices_preventivos.create_own",
     },
-    "DeviceAltaMasivaValidarView": {"POST": ["action.devices_preventivos.manage", "action.devices_preventivos.create"]},
+    "DeviceAltaMasivaValidarView": {"POST": "action.devices_preventivos.create_own"},
     "DevicesMergeView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgVentaView": {"POST": "action.devices_preventivos.manage"},
     "DeviceMgReactivarView": {"POST": "action.devices_preventivos.manage"},
@@ -455,6 +460,93 @@ VIEW_PERMISSION_MATRIX = {
     # General por cliente
     "GeneralPorClienteView": {"GET": ["page.general_cliente", "page.ingresos_history"]},
     "GeneralPorClienteExportView": {"GET": ["page.general_cliente", "page.ingresos_history"]},
+    # --- Vistas que estaban afuera de la matriz ---------------------------------------
+    # Sin entrada acá, una vista con `MappedPermissionGuard` deja pasar a cualquier usuario
+    # logueado, y una con `require_roles` sólo mira el rol: en los dos casos lo que se
+    # configura en Usuarios no tiene efecto. `test_permission_coverage` obliga a que toda
+    # vista ruteada esté en la matriz o en PERMISSION_EXEMPT_VIEWS.
+    "BejermanPurchaseEntryPopulateFromOrderView": {"POST": "action.bejerman_purchase_entries.manage"},
+    # La usan la carga manual del remito (órdenes de entrega) y la hoja de servicio.
+    "BejermanRemitoSerialSearchView": {"GET": ["page.delivery_orders", "page.service_sheet_principal", "page.liberados"]},
+    "DeliveryOrderBejermanRemitoJobView": {"GET": ["action.delivery_order.generate_bejerman_remito", "page.delivery_orders"]},
+    "DeliveryOrderDriveSyncView": {"POST": "action.delivery_order.sync_drive"},
+    "IngresoBejermanEstadoAccionView": {"POST": "action.bejerman_sync.force_stock_entry"},
+    "IngresoAlquilerRemitoPdfView": {
+        "GET": [
+            "page.ingresos_history",
+            "page.work_queues",
+            "page.budget_queues",
+            "page.logistics",
+            "page.liberados",
+            "page.service_sheet_principal",
+            "action.ingreso.edit_basics",
+            "action.ingreso.edit_diagnosis",
+            "action.ingreso.edit_location",
+            "action.ingreso.edit_delivery",
+            "action.ingreso.manage_derivations",
+            "action.ingreso.repair_transitions",
+            "action.ingreso.baja_alta",
+            "action.presupuesto.manage",
+        ]
+    },
+    "NuevoIngresoLoteView": {"POST": ["action.ingreso.create", "page.new_ingreso"]},
+    "IngresoRisPdfView": {"GET": ["action.ingreso.emit_ingress_order", "action.ingreso.create", "page.new_ingreso"]},
+    "IngresoRisPrintView": {"GET": ["action.ingreso.emit_ingress_order", "action.ingreso.create", "page.new_ingreso"]},
+    "IngresoRisLotePdfView": {"GET": ["action.ingreso.emit_ingress_order", "action.ingreso.create", "page.new_ingreso"]},
+    "IngresoRisLotePrintView": {"GET": ["action.ingreso.emit_ingress_order", "action.ingreso.create", "page.new_ingreso"]},
+    "BejermanIngressCompaniesView": {"GET": ["action.ingreso.create", "page.new_ingreso"]},
+    "BejermanPdfQueueStatusView": {"GET": "page.bejerman_sync"},
+    "BejermanPdfQueueRetryView": {"POST": "action.bejerman_sync.manage"},
+    "BejermanJobCancelView": {"POST": "action.bejerman_sync.manage"},
+    "BejermanJobDiagnoseView": {"POST": "action.bejerman_sync.manage"},
+    "BejermanPartidaStockView": {"GET": "action.bejerman_sync.manage"},
+    "DevicePreventivoRepuestosView": {"GET": "page.devices_preventivos", "POST": "action.devices_preventivos.manage"},
+    "DevicePreventivoRepuestoDetailView": {
+        "PATCH": "action.devices_preventivos.manage",
+        "DELETE": "action.devices_preventivos.manage",
+    },
+    # Tablero de trabajo
+    "WorkResumenView": {"GET": "page.work_dashboard"},
+    "WorkObjectivesView": {"GET": "page.work_dashboard", "PUT": "action.work_dashboard.configure"},
+    "WorkAlertRulesView": {"GET": "action.work_dashboard.configure", "PATCH": "action.work_dashboard.configure"},
+    "GlobalSearchView": {"GET": ["page.home_search", "page.work_dashboard"]},
+}
+
+
+# Vistas ruteadas que a propósito no pasan por la matriz. La clave es el nombre de la
+# clase (vale para toda la clase y para sus subclases) o "Clase.METODO" para un método
+# puntual. El motivo queda escrito para que nadie "arregle" la exención sin entenderla.
+PERMISSION_EXEMPT_VIEWS = {
+    # Autenticación y datos del propio usuario
+    "ping": "público: chequeo de vida (vista función con @api_view)",
+    "LoginView": "público: inicio de sesión",
+    "LogoutView": "sesión propia",
+    "SessionView": "sesión propia",
+    "ForgotPasswordView": "público: pedido de recuperación de contraseña",
+    "ResetPasswordView": "público: restablecimiento con token",
+    "BejermanCredentialsView": "credenciales Bejerman del propio usuario",
+    "BejermanWorkstationsView": "puestos Bejerman del propio usuario",
+    "BejermanSellerCodeView": "código de vendedor del propio usuario",
+    # Notificaciones del propio usuario
+    "NotificacionesView": "notificaciones propias",
+    "NotificacionesEmailEstadoView": "estado de envíos consultado por id",
+    "NotificacionClickView": "notificaciones propias",
+    "NotificacionesReadAllView": "notificaciones propias",
+    "NotificacionesPushConfigView": "notificaciones propias",
+    "NotificacionesPushSubscriptionView": "notificaciones propias",
+    "NotificacionesConfiguracionView": "preferencias propias",
+    "NotificacionesConfiguracionEmailsView": "mails extra propios (chequeo por rol adentro)",
+    "NotificacionesConfiguracionEmailDetailView": "mails extra propios (chequeo por rol adentro)",
+    # Integración con el Portal: autentica con su propio token, no con usuario de NEXORA
+    "PortalIntegrationBaseView": "integración Portal: auth por token propio",
+    # Edición de permisos: exige rol Jefe a propósito. Mapearla haría que un override de
+    # `action.users.manage_permissions` le diera a cualquiera la llave de todos los permisos.
+    "CatalogoPermisosView": "exige rol Jefe + action.users.manage_permissions adentro",
+    "UsuarioPermisosView": "exige rol Jefe + action.users.manage_permissions adentro",
+    "UsuarioPermisosResetView": "exige rol Jefe + action.users.manage_permissions adentro",
+    # Chequeos que dependen del contenido del pedido
+    "ColasNovedadesView": "cuenta cada cola sólo si el usuario tiene su permiso",
+    "IngresoDetalleView.PATCH": "exige un permiso distinto según el campo que se edita",
 }
 
 

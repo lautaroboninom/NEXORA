@@ -1298,27 +1298,106 @@ def notify_ingreso_asignado(ingreso_id, tecnico_id):
     )
 
 
-def notify_solicitud_asignacion(ingreso_id, tecnico_id, tecnico_nombre="", user_ids=None, emails=None):
+def _int_or_none(value):
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def solicitud_asignacion_user_ids(actor_user_id=None):
+    """Jefatura que tiene prendido el aviso, sin quien hizo el pedido.
+
+    La audiencia salía de ``ASSIGNMENT_REQUEST_RECIPIENTS`` **ya filtrada** por
+    el toggle "Mail": el jefe que apagaba el correo se quedaba también sin
+    campana ni push, y el suplente de jefatura nunca entraba aunque tuviera el
+    aviso prendido. Desde el 11/08/2026 no le llegaba a nadie. El actor queda
+    afuera porque un ``jefe_suplente`` también puede pedir asignación.
+    """
+    actor_id = _int_or_none(actor_user_id)
+    return [
+        uid
+        for uid in user_ids_subscribed_to("solicitud_asignacion", MANAGEMENT_NOTIFICATION_ROLES)
+        if uid != actor_id
+    ]
+
+
+def solicitud_asignacion_email_recipients(actor_user_id=None):
+    """Casillas del correo del pedido, separadas de la audiencia de la campana.
+
+    Van los usuarios de jefatura con el canal Mail prendido y, además, la lista
+    de entorno filtrada por el mismo toggle (las casillas externas pasan
+    siempre). El fallback a los correos de la empresa sólo se usa si la lista
+    de entorno no está configurada, como antes.
+    """
+    key = "solicitud_asignacion"
+    try:
+        subscribed = notification_email_recipients_for_users(
+            active_users_for_notification(
+                key,
+                roles=MANAGEMENT_NOTIFICATION_ROLES,
+                channel="email",
+                require_email=True,
+            )
+        )
+    except Exception:
+        logger.exception("No se pudieron resolver los correos de solicitud de asignación")
+        _safe_set_rollback_false()
+        subscribed = []
+    configured = getattr(settings, "ASSIGNMENT_REQUEST_RECIPIENTS", []) or []
+    if not isinstance(configured, (list, tuple)):
+        configured = [str(configured)] if configured else []
+    candidates = [*subscribed, *configured]
+    if not candidates:
+        candidates = [
+            value
+            for value in (
+                getattr(settings, "COMPANY_FOOTER_EMAIL_2", None),
+                getattr(settings, "COMPANY_FOOTER_EMAIL", None),
+            )
+            if value
+        ]
+    allowed = filter_email_recipients_by_preference(key, candidates)
+
+    actor_email = ""
+    actor_id = _int_or_none(actor_user_id)
+    if actor_id is not None:
+        try:
+            row = q("SELECT COALESCE(email,'') AS email FROM users WHERE id = %s", [actor_id], one=True) or {}
+            actor_email = str(row.get("email") or "").strip().lower()
+        except Exception:
+            _safe_set_rollback_false()
+    return [value for value in allowed if value.lower() != actor_email]
+
+
+def notify_solicitud_asignacion(ingreso_id, tecnico_id, tecnico_nombre="", user_ids=None, solicitud_id=None):
     row = _ingreso_context(ingreso_id)
     os_txt = os_label(ingreso_id)
-    actor = tecnico_nombre or row.get("tecnico_nombre") or "Un técnico"
+    # `row["tecnico_nombre"]` es el técnico ASIGNADO, no el que pide: no sirve de respaldo.
+    actor = tecnico_nombre or "Un técnico"
+    if user_ids is None:
+        user_ids = solicitud_asignacion_user_ids(actor_user_id=tecnico_id)
+    # Con el id de la solicitud, un segundo pedido del mismo día (después de
+    # una cancelación) no choca con el `ON CONFLICT` del primero.
+    marca = solicitud_id if solicitud_id is not None else timezone.localdate().isoformat()
     return emit_notification(
         "solicitud_asignacion",
         user_ids=user_ids,
-        emails=emails,
         title=f"Solicitud de asignación - OS {os_txt}",
         body=f"{actor} solicita asignación.\n{_ingreso_body(row)}",
         href=f"/ingresos/{ingreso_id}?tab=principal&tecnico_id={tecnico_id}",
         severity="warning",
         entity_type="ingreso",
         entity_id=ingreso_id,
-        dedupe_key=(
-            f"ingreso:{ingreso_id}:solicitud_asignacion:{tecnico_id}"
-            f":{timezone.localdate().isoformat()}"
-        ),
-        payload={"ingreso_id": ingreso_id, "tecnico_id": tecnico_id},
+        dedupe_key=f"ingreso:{ingreso_id}:solicitud_asignacion:{tecnico_id}:{marca}",
+        payload={"ingreso_id": ingreso_id, "tecnico_id": tecnico_id, "solicitud_id": solicitud_id},
         push=True,
     )
+
+
+def resolve_solicitud_asignacion(ingreso_id):
+    """El ingreso ya se asignó: el pedido deja de estar pendiente en la campana."""
+    return resolve_notifications("solicitud_asignacion", entity_type="ingreso", entity_id=ingreso_id)
 
 
 def notify_presupuesto_aprobado(ingreso_id, tecnico_id):

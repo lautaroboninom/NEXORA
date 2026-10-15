@@ -237,8 +237,10 @@ export default function Repuestos() {
     user,
     PERMISSION_CODES.ACTION_SPARE_PARTS_MANAGE_24H_PERMISSIONS,
   );
-  const canSeeCosts = canManage || can(user, PERMISSION_CODES.ACTION_PRESUPUESTO_VIEW_COSTS);
-  const canEditCost = canManage;
+  // El mismo permiso con el que el backend manda y acepta costos. Antes el front decidía
+  // con otro criterio: el técnico veía la columna vacía y admin no la veía aunque le llegara.
+  const canSeeCosts = can(user, PERMISSION_CODES.ACTION_SPARE_PARTS_VIEW_COSTS);
+  const canEditCost = canManage && canSeeCosts;
   const canManageSubrubros = canManage;
   const canViewCambios = canManage;
 

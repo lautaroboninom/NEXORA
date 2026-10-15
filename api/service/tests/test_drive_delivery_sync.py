@@ -275,6 +275,15 @@ class DeliveryOrderDriveSyncViewTests(SimpleTestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
         self.view = DeliveryOrderDriveSyncView.as_view()
+        # El permiso sale de la matriz (`action.delivery_order.sync_drive`). Sin overrides
+        # cargados, cada rol tiene lo que trae por defecto.
+        self.overrides = {}
+        patcher = patch(
+            "service.permissions._fetch_overrides",
+            side_effect=lambda _uid: dict(self.overrides),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _request(self, role):
         request = self.factory.post("/api/ordenes-entrega/sincronizar-drive/", {}, format="json")
@@ -332,6 +341,25 @@ class DeliveryOrderDriveSyncViewTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 403)
         sync_mock.assert_not_called()
+
+    def test_un_bloqueo_por_usuario_le_saca_la_sincronizacion_a_ventas(self):
+        self.overrides = {"action.delivery_order.sync_drive": "deny"}
+        with patch("service.views.delivery_orders_views.sync_delivery_orders_to_drive") as sync_mock:
+            response = self.view(self._request("ventas"))
+
+        self.assertEqual(response.status_code, 403)
+        sync_mock.assert_not_called()
+
+    def test_un_permiso_por_usuario_habilita_a_recepcion(self):
+        self.overrides = {"action.delivery_order.sync_drive": "allow"}
+        with patch(
+            "service.views.delivery_orders_views.sync_delivery_orders_to_drive",
+            return_value={"ok": True, "createdRows": 0, "alreadyInDrive": 3},
+        ) as sync_mock:
+            response = self.view(self._request("recepcion"))
+
+        self.assertEqual(response.status_code, 200)
+        sync_mock.assert_called_once_with()
 
     def test_missing_credentials_returns_clear_error(self):
         with patch(

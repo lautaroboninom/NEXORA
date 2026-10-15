@@ -23,6 +23,7 @@ from service.bejerman_sdk import (
 
 
 TEST_CUSTOMER_CODE = "NXT001"
+TEST_CUSTOMER_SITIVA5_CODE = "NXT005"
 TEST_CUSTOMER_SITIVA6_CODE = "NXT006"
 TEST_ARTICLES = (
     {"code": "NXTPART", "description": "NEXORA TEST con partida", "stockByPartida": True},
@@ -330,6 +331,15 @@ class Command(BaseCommand):
             customers = client.list_clientes()
             customer_specs = (
                 (TEST_CUSTOMER_CODE, _customer_payload()),
+                (
+                    TEST_CUSTOMER_SITIVA5_CODE,
+                    _customer_payload(
+                        TEST_CUSTOMER_SITIVA5_CODE,
+                        name="NEXORA TEST CLIENTE EXENTO",
+                        iva_code="5",
+                        cuit="20000000028",
+                    ),
+                ),
                 (
                     TEST_CUSTOMER_SITIVA6_CODE,
                     _customer_payload(

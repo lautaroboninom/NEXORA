@@ -1,5 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 
+import QueueHighlightRow from "./QueueHighlightRow.jsx";
+import { useScrollToFirstNewRow } from "../hooks/useQueueBadges";
 import SelectionCheckbox from "./SelectionCheckbox.jsx";
 import { MobileSortControl, SortButton, SortableTh } from "./TableSortControls.jsx";
 import {
@@ -81,6 +83,7 @@ function FilterControl({ column, value, onChange, options }) {
 
 export default function IngresoTable({
   rows,
+  queueHighlight,
   columns,
   sort = "",
   onSortChange,
@@ -102,6 +105,8 @@ export default function IngresoTable({
   rowKey = ingresoIdOf,
   titleField = "os",
 }) {
+  const rootRef = useRef(null);
+  useScrollToFirstNewRow(rootRef, queueHighlight);
   const data = Array.isArray(rows) ? rows : [];
   const cols = useMemo(() => (columns || []).filter(Boolean), [columns]);
   const displayRows = useMemo(
@@ -163,7 +168,7 @@ export default function IngresoTable({
   }
 
   return (
-    <div>
+    <div ref={rootRef}>
       {typeof onSortChange === "function" && sortOptions.length > 0 && (
         <MobileSortControl
           sort={sort}
@@ -200,7 +205,10 @@ export default function IngresoTable({
         {displayRows.map((row, index) => {
           const id = rowKey(row) || `row-${index}`;
           return (
-            <MobileDataCard
+            <QueueHighlightRow
+              as={MobileDataCard}
+              highlight={queueHighlight}
+              ingresoId={ingresoIdOf(row)}
               key={id}
               onClick={onOpen ? () => openRow(row) : undefined}
               onKeyDown={onOpen ? (event) => onRowKeyDown(event, row) : undefined}
@@ -243,7 +251,7 @@ export default function IngresoTable({
                   {rowActions(row, { mobile: true })}
                 </div>
               )}
-            </MobileDataCard>
+            </QueueHighlightRow>
           );
         })}
       </MobileDataList>
@@ -335,7 +343,9 @@ export default function IngresoTable({
             {displayRows.map((row, index) => {
               const id = rowKey(row) || `row-${index}`;
               return (
-                <tr
+                <QueueHighlightRow
+                  highlight={queueHighlight}
+                  ingresoId={ingresoIdOf(row)}
                   key={id}
                   onClick={onOpen ? () => openRow(row) : undefined}
                   onKeyDown={onOpen ? (event) => onRowKeyDown(event, row) : undefined}
@@ -367,7 +377,7 @@ export default function IngresoTable({
                       <div className="flex justify-end gap-2">{rowActions(row, { mobile: false })}</div>
                     </td>
                   )}
-                </tr>
+                </QueueHighlightRow>
               );
             })}
           </tbody>

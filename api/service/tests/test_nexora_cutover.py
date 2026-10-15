@@ -106,7 +106,11 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
         admin = get_role_defaults("admin")
         ventas = get_role_defaults("ventas")
         recepcion = get_role_defaults("recepcion")
-        supervisor_explicit_permissions = {"action.route_sheet.postpone", "action.delivery_order.correct_commercial_terms"}
+        supervisor_explicit_permissions = {
+            "action.route_sheet.postpone",
+            "action.delivery_order.correct_commercial_terms",
+            "action.bejerman_sync.force_stock_entry",
+        }
 
         for code in PERMISSION_CODES:
             self.assertEqual(
@@ -194,6 +198,50 @@ class NexoraRoleDefaultsTests(SimpleTestCase):
 
         self.assertIn("page.general_cliente", required)
         self.assertIn("page.ingresos_history", required)
+
+    def test_los_permisos_nuevos_replican_quien_podia_antes(self):
+        # Cada acción que antes se decidía con una lista de roles escrita a mano pasó a ser
+        # un permiso editable. Por defecto lo tienen exactamente los mismos roles: al
+        # deployar nadie gana ni pierde acceso, sólo se vuelve configurable por usuario.
+        esperado = {
+            "action.ingreso.authorize_repair": {"jefe", "jefe_veedor", "jefe_suplente"},
+            "action.ingreso.uncheck_rental": {"jefe", "jefe_suplente"},
+            "action.delivery_order.edit_discounts": {"jefe", "jefe_suplente", "admin", "supervisor", "ventas"},
+            "action.delivery_order.sync_drive": {"jefe", "jefe_suplente", "admin", "supervisor", "ventas"},
+            "action.bejerman_sync.force_stock_entry": {"jefe", "jefe_veedor", "jefe_suplente", "supervisor"},
+            "action.spare_parts.view_costs": {"jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor"},
+            "page.work_dashboard": {
+                "jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor",
+                "ventas", "tecnico", "recepcion", "cobranzas",
+            },
+            "action.work_dashboard.configure": {"jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor"},
+            "page.customer_catalog": {"jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor", "ventas"},
+            # Decisión del 15/09/2026: el alta propia sigue abierta a recepción, ventas y
+            # técnico, pero con permiso propio para poder quitársela a alguien.
+            "action.devices_preventivos.create_own": {
+                "jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor",
+                "recepcion", "ventas", "tecnico",
+            },
+        }
+        roles = (
+            "tecnico", "admin", "supervisor", "ventas", "jefe", "jefe_veedor",
+            "jefe_suplente", "recepcion", "cobranzas", "logistica",
+        )
+        for code, roles_esperados in esperado.items():
+            reales = {role for role in roles if get_role_defaults(role).get(code)}
+            self.assertEqual(reales, roles_esperados, code)
+
+    def test_autorizar_reparacion_no_se_hereda_de_mover_estados(self):
+        # Con `repair_transitions` el técnico podía autorizarse la reparación por API.
+        for view_name in ("MarcarParaRepararView", "QuitarRepararView", "HabilitarReparacionCotizacionView"):
+            self.assertEqual(
+                VIEW_PERMISSION_MATRIX[view_name]["POST"],
+                "action.ingreso.authorize_repair",
+                view_name,
+            )
+        tecnico = get_role_defaults("tecnico")
+        self.assertTrue(tecnico["action.ingreso.repair_transitions"])
+        self.assertFalse(tecnico["action.ingreso.authorize_repair"])
 
 
 class NexoraDeliveryOrderHelpersTests(SimpleTestCase):
@@ -343,3 +391,7 @@ class PortalImportDryRunHelpersTests(SimpleTestCase):
         self.assertEqual(_status("legacy"), "pendiente_armado")
         self.assertEqual(_delivery_type("legacy"), "sale")
         self.assertEqual(_priority("legacy"), "normal")
+
+    def test_import_service_release_never_keeps_portal_urgency(self):
+        self.assertEqual(_priority("urgente", "service_release"), "normal")
+        self.assertEqual(_priority("urgente", "sale"), "urgente")

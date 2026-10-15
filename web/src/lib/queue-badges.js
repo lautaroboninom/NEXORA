@@ -79,12 +79,17 @@ export function writeSeenIds(userId, queueKey, ids, store = storage()) {
  * avisa nada. La cola se siembra en silencio y a partir de ahí sí avisa.
  */
 export function countNew(seen, currentIds) {
-  if (!(seen instanceof Set)) return 0;
+  return newQueueIds(seen, currentIds).size;
+}
+
+/** Misma diferencia para el contador y para resaltar las filas al abrir. */
+export function newQueueIds(seen, currentIds) {
+  const nuevas = new Set();
+  if (!(seen instanceof Set)) return nuevas;
   const actuales = Array.isArray(currentIds) ? currentIds : [];
-  let nuevas = 0;
   for (const raw of actuales) {
     const id = Number(raw);
-    if (Number.isFinite(id) && !seen.has(id)) nuevas += 1;
+    if (Number.isFinite(id) && !seen.has(id)) nuevas.add(id);
   }
   return nuevas;
 }
@@ -142,4 +147,25 @@ export function markQueueSeen(colas, queueKey, userId, store = storage()) {
   if (!Array.isArray(ids)) return false;
   writeSeenIds(userId, queueKey, ids, store);
   return true;
+}
+
+/** La clase que pinta una fila nueva. El salto hasta la primera la busca por acá. */
+export const QUEUE_NEW_ROW_CLASS = "queue-new-row";
+
+/**
+ * La primera fila nueva que se ve, en el orden de la lista. La tabla dibuja cada
+ * orden dos veces (tarjeta para celular y renglón para escritorio) y una de las dos
+ * está oculta: esa no tiene caja en la página y no sirve como destino del salto.
+ */
+export function firstVisibleNewRow(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return null;
+  for (const element of root.querySelectorAll(`.${QUEUE_NEW_ROW_CLASS}`)) {
+    if (element.getClientRects().length > 0) return element;
+  }
+  return null;
+}
+
+/** Si la fila ya se ve entera, saltar sólo movería la pantalla sin motivo. */
+export function isRowInView(rect, viewportHeight) {
+  return rect.top >= 0 && rect.bottom <= viewportHeight;
 }

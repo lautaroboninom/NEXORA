@@ -2,6 +2,8 @@ from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
 
+from service.bejerman_sdk import BejermanSdkResponseError
+
 from service.bejerman_ris import (
     BejermanRisError,
     BejermanRisReviewRequiredError,
@@ -97,6 +99,137 @@ class BejermanRisSplitTests(SimpleTestCase):
 
         self.assertEqual(client.ingresar_comprobante_ventas_json.call_count, 1)
         restore.assert_not_called()
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=3, BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0)
+    def test_la_ris_entro_si_se_movio_una_sola_de_sus_partidas(self):
+        # RIS 00004-00005325 (21/09/2026, cinco equipos): el reintento entró, pero se
+        # exigía que se movieran todas las partidas y se miraba una sola vez. Una que
+        # todavía no se reflejaba bastó para reponer el ENT de las cinco: STR quedó en 2.
+        from service.bejerman_ris import _register_entries_moved_by_comprobante
+
+        entries = [
+            {"Comprobante_ArtPartida": partida, "Comprobante_Art_CodGen": "ART-RIS"}
+            for partida in ("P1", "P2", "P3")
+        ]
+        client = Mock()
+        client.obtener_stock_partida.side_effect = lambda partida: partida
+        # Primera vuelta: todas en cero. Segunda: P2 ya muestra la unidad de la RIS.
+        lecturas = iter([0, 0, 0, 0, 1])
+
+        with (
+            patch(
+                "service.bejerman_ris._records_for_partida_any_quantity",
+                side_effect=lambda _response, _partida, _deposit: [{"q": next(lecturas), "Art_CodGen": "ART-RIS"}],
+            ),
+            patch("service.bejerman_ris._quantity_from_record", side_effect=lambda record: record["q"]),
+        ):
+            self.assertTrue(_register_entries_moved_by_comprobante(client, entries, "STR"))
+
+    def test_falta_de_stock_no_dispara_la_recuperacion_de_partida(self):
+        from service.bejerman_ris import _is_partida_rejection_message
+
+        self.assertFalse(
+            _is_partida_rejection_message(
+                "El comprobante no se importó. No hay stock suficiente en la partida X para el artículo Y ."
+            )
+        )
+        self.assertTrue(_is_partida_rejection_message("Partida inexistente y/o no informada"))
+        self.assertFalse(_is_partida_rejection_message("El comprobante no se importó: stock insuficiente en la partida X"))
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=2, BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0)
+    def test_la_ris_no_entro_si_ninguna_partida_se_movio(self):
+        from service.bejerman_ris import _register_entries_moved_by_comprobante
+
+        client = Mock()
+        with (
+            patch("service.bejerman_ris._records_for_partida_any_quantity", return_value=[{"q": 0, "Art_CodGen": "ART-RIS"}]),
+            patch("service.bejerman_ris._quantity_from_record", side_effect=lambda record: record["q"]),
+        ):
+            self.assertFalse(
+                _register_entries_moved_by_comprobante(
+                    client, [{"Comprobante_ArtPartida": "P1", "Comprobante_Art_CodGen": "ART-RIS"}], "STR"
+                )
+            )
+        self.assertEqual(client.obtener_stock_partida.call_count, 2)
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=2, BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0)
+    def test_lectura_incierta_no_habilita_reponer_el_ent(self):
+        from service.bejerman_ris import _register_entries_moved_by_comprobante
+
+        client = Mock()
+        client.obtener_stock_partida.side_effect = RuntimeError("sin respuesta")
+        entries = [{"Comprobante_ArtPartida": "P1", "Comprobante_Art_CodGen": "ART-RIS"}]
+        self.assertIsNone(_register_entries_moved_by_comprobante(client, entries, "STR"))
+
+        with (
+            patch("service.bejerman_ris._ensure_register_stock_entries", return_value=entries),
+            patch("service.bejerman_ris._neutralize_register_stock_entries"),
+            patch("service.bejerman_ris._restore_register_stock_entries") as restore,
+        ):
+            client.ingresar_comprobante_ventas_json.side_effect = BejermanSdkResponseError(
+                "El comprobante no se importó. Partida inexistente."
+            )
+            with self.assertRaises(BejermanRisReviewRequiredError):
+                _recover_emit_partida_rejection(
+                    client,
+                    {"documentProfile": {"deposit": "STR"}},
+                    {"comprobante": {"Comprobante_Items": []}},
+                    operation="IngresarComprobanteJSON",
+                    numera_flex="S",
+                    emite_reg="E",
+                )
+        restore.assert_not_called()
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=2, BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0)
+    def test_cero_confirmado_permite_reponer_y_usar_el_fallback_sin_stock(self):
+        entries = [{"Comprobante_ArtPartida": "P1", "Comprobante_Art_CodGen": "ART-RIS"}]
+        client = Mock()
+        client.ingresar_comprobante_ventas_json.side_effect = [
+            BejermanSdkResponseError("Partida inexistente y/o no informada"),
+            {"Resultado": "OK"},
+        ]
+        with (
+            patch("service.bejerman_ris._ensure_register_stock_entries", return_value=entries),
+            patch("service.bejerman_ris._neutralize_register_stock_entries"),
+            patch("service.bejerman_ris._records_for_partida_any_quantity", return_value=[{"Art_CodGen": "ART-RIS", "Art_RealUM1": 0}]),
+            patch("service.bejerman_ris._restore_register_stock_entries") as restore,
+            patch("service.bejerman_ris._service_ingress_response", return_value={"success": True}),
+        ):
+            request_payload, response = _recover_emit_partida_rejection(
+                client,
+                {"documentProfile": {"deposit": "STR"}, "equipment": {"serial": "P1"}},
+                {"comprobante": {"Comprobante_Tipo": "RIS", "Comprobante_Items": []}},
+                operation="IngresarComprobanteJSON",
+                numera_flex="S",
+                emite_reg="E",
+            )
+        restore.assert_called_once_with(client, entries)
+        self.assertEqual(request_payload["comprobante"]["Comprobante_ActualizaStock"], "N")
+        self.assertTrue(response["success"])
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=1)
+    def test_partida_compartida_no_confunde_el_stock_de_otro_articulo(self):
+        from service.bejerman_ris import _register_entries_moved_by_comprobante
+
+        entries = [{"Comprobante_ArtPartida": "SERIE-COMPARTIDA", "Comprobante_Art_CodGen": "CPAP"}]
+        client = Mock()
+        with patch(
+            "service.bejerman_ris._records_for_partida_any_quantity",
+            return_value=[{"Art_CodGen": "HUMIDIFICADOR", "Art_RealUM1": 1}, {"Art_CodGen": "CPAP", "Art_RealUM1": 0}],
+        ):
+            self.assertFalse(_register_entries_moved_by_comprobante(client, entries, "STR"))
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=1)
+    def test_stock_negativo_requiere_revision(self):
+        from service.bejerman_ris import _register_entries_moved_by_comprobante
+
+        client = Mock()
+        entries = [{"Comprobante_ArtPartida": "P1", "Comprobante_Art_CodGen": "ART-RIS"}]
+        with patch(
+            "service.bejerman_ris._records_for_partida_any_quantity",
+            return_value=[{"Art_CodGen": "ART-RIS", "Art_RealUM1": -1}],
+        ):
+            self.assertIsNone(_register_entries_moved_by_comprobante(client, entries, "STR"))
 
     def test_preflight_de_12_equipos_cuenta_las_os_provisionales(self):
         payloads = [_equipment_payload(f"preflight-{index + 1}") for index in range(12)]

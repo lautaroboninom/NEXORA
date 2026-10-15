@@ -99,6 +99,7 @@ export default function Usuarios() {
   const [permData, setPermData] = useState(null);
   const [permOverrides, setPermOverrides] = useState({});
   const [permSearch, setPermSearch] = useState("");
+  const [permOnlyCustom, setPermOnlyCustom] = useState(false);
   const [permLoading, setPermLoading] = useState(false);
   const [permSaving, setPermSaving] = useState(false);
   const [permResetting, setPermResetting] = useState(false);
@@ -279,11 +280,49 @@ export default function Usuarios() {
     }
   }
 
+  // Los permisos personalizados no se borran al cambiar de rol (salvo al entrar o salir de
+  // Jefe): un "Permitir" pensado para el rol anterior puede quedar dando de más con el
+  // nuevo. Se avisa antes de cambiar y se ofrece restablecerlos después.
+  function personalizadosQueSeConservan(u, rol) {
+    const cantidad = Number(u?.permisos_personalizados || 0);
+    if (!cantidad || rol === u?.rol || rol === "jefe" || u?.rol === "jefe") return 0;
+    return cantidad;
+  }
+
+  function confirmarCambioDeRol(u, rol) {
+    const cantidad = personalizadosQueSeConservan(u, rol);
+    if (!cantidad) return true;
+    return window.confirm(
+      `${u.nombre} tiene ${cantidad} permiso(s) personalizado(s) que se conservan con el rol nuevo. ¿Cambiar el rol igual?`,
+    );
+  }
+
+  async function ofrecerRestablecerPermisos(u, rolAnterior, rolNuevo) {
+    const cantidad = personalizadosQueSeConservan({ ...u, rol: rolAnterior }, rolNuevo);
+    if (!cantidad || !canManagePermissions) return;
+    if (
+      !window.confirm(
+        `¿Restablecer ahora los ${cantidad} permiso(s) personalizado(s) de ${u.nombre} a lo que trae el rol nuevo?`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await postUsuarioPermisosReset(u.id);
+      setMsg("Rol actualizado y permisos restablecidos al rol nuevo");
+      await load();
+    } catch (e) {
+      setErr(normalizeErr(e));
+    }
+  }
+
   async function cambiarRol(u, rol) {
     if (!canChangeRole) return;
+    if (!confirmarCambioDeRol(u, rol)) return;
     try {
       await patchUsuarioRolePerm(u.id, { rol });
       setMsg("Rol actualizado");
+      await ofrecerRestablecerPermisos(u, u.rol, rol);
       await load();
       if (Number(selectedUser?.id) === Number(u.id)) {
         await openDetail(u.id);
@@ -383,6 +422,7 @@ export default function Usuarios() {
     list.forEach((item) => {
       const text = `${item?.label || ""} ${item?.code || ""} ${item?.group || ""} ${item?.type || ""}`.toLowerCase();
       if (needle && !text.includes(needle)) return;
+      if (permOnlyCustom && (permOverrides?.[item?.code] || "inherit") === "inherit") return;
       const groupName = item?.group || "Otros";
       if (!groups.has(groupName)) groups.set(groupName, []);
       groups.get(groupName).push(item);
@@ -390,7 +430,7 @@ export default function Usuarios() {
     return Array.from(groups.entries()).sort((a, b) =>
       a[0].localeCompare(b[0], "es", { sensitivity: "base" }),
     );
-  }, [permCatalog, permSearch]);
+  }, [permCatalog, permSearch, permOnlyCustom, permOverrides]);
 
   const permDirty = useMemo(() => {
     if (!permData) return false;
@@ -405,6 +445,15 @@ export default function Usuarios() {
 
   function setOverride(code, effect) {
     setPermOverrides((prev) => ({ ...prev, [code]: effect }));
+  }
+
+  // Lo que quedaría efectivo con lo elegido en pantalla, antes de guardar. Jefe tiene todo.
+  function permissionEffective(code) {
+    if (permData?.user?.rol === "jefe") return true;
+    const override = permOverrides?.[code] || "inherit";
+    if (override === "allow") return true;
+    if (override === "deny") return false;
+    return Boolean(permData?.role_defaults?.[code] ?? permData?.effective_permissions?.[code]);
   }
 
   async function savePermisos() {
@@ -997,6 +1046,8 @@ export default function Usuarios() {
             setSelectedUser(null);
             openPermEditor(user);
           }}
+          onBeforeRoleChange={confirmarCambioDeRol}
+          onAfterRoleChange={(prev, rol) => ofrecerRestablecerPermisos(prev, prev.rol, rol)}
           onOpenNotifications={(user) => {
             setSelectedUser(null);
             openNotifEditor(user);
@@ -1051,6 +1102,12 @@ export default function Usuarios() {
                       Este usuario no es editable por permisos granulares (rol jefe).
                     </div>
                   )}
+                  {Array.isArray(permData?.unknown_overrides) && permData.unknown_overrides.length > 0 && (
+                    <div className="bg-gray-50 text-gray-700 border rounded p-2 text-sm">
+                      Hay permisos guardados que ya no existen y no tienen efecto:{" "}
+                      {permData.unknown_overrides.join(", ")}. Se limpian con &quot;Restablecer&quot;.
+                    </div>
+                  )}
 
                   <div className="flex flex-col md:flex-row md:items-center gap-3">
                     <input
@@ -1060,6 +1117,14 @@ export default function Usuarios() {
                       value={permSearch}
                       onChange={(e) => setPermSearch(e.target.value)}
                     />
+                    <label className="inline-flex items-center gap-2 text-xs text-gray-600">
+                      <input
+                        type="checkbox"
+                        checked={permOnlyCustom}
+                        onChange={(e) => setPermOnlyCustom(e.target.checked)}
+                      />
+                      Sólo personalizados
+                    </label>
                     <div className="text-xs text-gray-500">
                       {groupedPermissions.reduce((acc, [, items]) => acc + items.length, 0)} permiso(s)
                     </div>
@@ -1092,18 +1157,28 @@ export default function Usuarios() {
                           {items.map((item) => {
                             const code = item.code;
                             const override = permOverrides?.[code] || "inherit";
-                            const effective = !!permData?.effective_permissions?.[code];
+                            const effective = permissionEffective(code);
+                            const pending = (permData?.overrides?.[code] || "inherit") !== override;
+                            const inheritedFromRole = permData?.role_defaults
+                              ? Boolean(permData.role_defaults[code])
+                              : null;
                             return (
                               <div key={code} className="px-3 py-2 flex flex-col md:flex-row md:items-center gap-2">
                                 <div className="flex-1 min-w-0">
                                   <div className="text-sm font-medium">{item.label || code}</div>
                                   <div className="text-xs text-gray-500">{code}</div>
+                                  {code === PERMISSION_CODES.ACTION_USERS_MANAGE_PERMISSIONS && (
+                                    <div className="mt-1 text-[11px] text-amber-700">
+                                      Sólo tiene efecto con rol Jefe: editar permisos exige ese rol.
+                                    </div>
+                                  )}
                                 </div>
                                 <div className="text-xs">
                                   <span
                                     className={`inline-flex px-2 py-1 rounded border ${effective ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"}`}
                                   >
                                     {effective ? "Efectivo: permitido" : "Efectivo: bloqueado"}
+                                    {pending ? " · sin guardar" : ""}
                                   </span>
                                 </div>
                                 <div className="w-full md:w-48">
@@ -1113,7 +1188,11 @@ export default function Usuarios() {
                                     disabled={!modalEditable}
                                     onChange={(e) => setOverride(code, e.target.value)}
                                   >
-                                    <option value="inherit">{EFFECT_LABELS.inherit}</option>
+                                    <option value="inherit">
+                                      {inheritedFromRole === null
+                                        ? EFFECT_LABELS.inherit
+                                        : `${EFFECT_LABELS.inherit} (${inheritedFromRole ? "permitido" : "bloqueado"} por el rol)`}
+                                    </option>
                                     <option value="allow">{EFFECT_LABELS.allow}</option>
                                     <option value="deny">{EFFECT_LABELS.deny}</option>
                                   </select>

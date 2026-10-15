@@ -41,7 +41,7 @@ from ..bejerman_user_credentials import (
     save_user_bejerman_credentials,
     set_user_bejerman_credentials_prompt_dismissed,
 )
-from ..permission_catalog import get_catalog, PERMISSION_CODES
+from ..permission_catalog import PERMISSION_CODES, PERMISSION_CODES_SET, get_catalog, get_role_defaults
 from ..permissions import (
     EFFECT_ALLOW,
     EFFECT_DENY,
@@ -213,6 +213,39 @@ def _guard_last_active_jefe(target, *, next_role=None, next_active=None, deletin
         raise ValidationError("Debe quedar al menos un usuario Jefe activo")
 
 
+JEFATURA_ROLES = {"jefe", "jefe_veedor", "jefe_suplente"}
+
+
+def _guard_role_assignment(request, target, *, next_role=None):
+    """Qué puede hacer sobre una cuenta quien administra usuarios sin ser Jefe.
+
+    `action.users.manage` se puede otorgar por usuario desde la pantalla de permisos, y el
+    rol se cambia con ese mismo permiso: sin este corte, a quien se lo dieran le alcanzaba
+    para ponerse rol Jefe y quedarse con todo. Por eso las cuentas de Jefe y los roles de
+    jefatura sólo los toca un Jefe, y nadie cambia su propio rol.
+    """
+    target = target or {}
+    current_role = _normalize_role(target.get("rol"))
+    resolved_role = current_role if next_role is None else _normalize_role(next_role)
+    changes_role = resolved_role != current_role
+    actor = getattr(request, "user", None)
+    actor_id = getattr(actor, "id", None)
+    target_id = target.get("id")
+    if (
+        changes_role
+        and actor_id is not None
+        and target_id is not None
+        and int(actor_id) == int(target_id)
+    ):
+        raise ValidationError("No podés cambiar tu propio rol")
+    if _normalize_role(getattr(actor, "rol", "")) == "jefe":
+        return
+    if current_role == "jefe":
+        raise PermissionDenied("Solo un usuario Jefe puede modificar la cuenta de otro Jefe")
+    if changes_role and (current_role in JEFATURA_ROLES or resolved_role in JEFATURA_ROLES):
+        raise PermissionDenied("Solo un usuario Jefe puede asignar o quitar roles de jefatura")
+
+
 def _validate_seller_code(uid, role, raw_code):
     code = _normalize_seller_code(raw_code)
     if len(code) > 4:
@@ -331,6 +364,7 @@ class UsuariosView(APIView):
             raise ValidationError("Nombre y email son requeridos")
         if rol not in ROLE_KEYS:
             raise ValidationError("Rol inválido")
+        _guard_role_assignment(request, {"id": None, "rol": ""}, next_role=rol)
 
         _set_audit_user(request)
         if q("SELECT id FROM users WHERE email=%s", [email], one=True):
@@ -387,6 +421,7 @@ class UsuarioActivoView(APIView):
         if not isinstance(activo, bool):
             raise ValidationError("activo debe ser verdadero o falso")
         target = _load_user(uid)
+        _guard_role_assignment(request, target)
         _guard_last_active_jefe(target, next_active=activo)
         q("UPDATE users SET activo = %(a)s WHERE id = %(id)s", {"a": activo, "id": uid})
         return Response({"ok": True, "activo": activo})
@@ -423,6 +458,7 @@ class UsuarioRolePermView(APIView):
             if r not in ROLE_KEYS:
                 raise ValidationError("Rol inválido")
             target = _load_user(uid)
+            _guard_role_assignment(request, target, next_role=r)
             _guard_last_active_jefe(target, next_role=r)
             sets.append("rol = %(rol)s")
             params["rol"] = r
@@ -551,6 +587,7 @@ class UsuarioDetailView(APIView):
             params["seller_code"] = code or None
             params["seller_confirmed_at"] = timezone.now() if code else None
 
+        _guard_role_assignment(request, target, next_role=next_role)
         _guard_last_active_jefe(
             target,
             next_role=next_role,
@@ -574,6 +611,7 @@ class UsuarioDetailView(APIView):
         actor_id = getattr(getattr(request, "user", None), "id", None)
         if actor_id is not None and int(actor_id) == int(uid):
             raise ValidationError("No podés eliminar tu propio usuario")
+        _guard_role_assignment(request, target)
         _guard_last_active_jefe(target, deleting=True)
         try:
             with transaction.atomic():
@@ -752,21 +790,31 @@ def _load_override_map(uid):
 
 def _serialize_user_permissions(uid):
     user_row = _load_user_for_permissions(uid)
-    override_map = _load_override_map(uid)
+    stored_overrides = _load_override_map(uid)
+    # Un código que ya no está en el catálogo no viaja en `overrides`: el editor manda el
+    # mapa completo al guardar y ese código hacía fallar el PUT entero.
+    override_map = {
+        code: effect for code, effect in stored_overrides.items() if code in PERMISSION_CODES_SET
+    }
     effective = resolve_effective_permissions(
         user_id=user_row["id"],
         role=user_row["rol"],
         overrides=override_map,
     )
     merged_states = {code: EFFECT_INHERIT for code in PERMISSION_CODES}
-    for code, effect in override_map.items():
-        merged_states[code] = effect
+    merged_states.update(override_map)
     return {
         "user": user_row,
         "editable": user_row["rol"] != "jefe",
         "overrides": merged_states,
         "effective_permissions": effective,
+        # Lo que el rol trae de fábrica: el editor lo usa para mostrar qué hereda cada
+        # permiso y calcular el efectivo antes de guardar.
+        "role_defaults": get_role_defaults(user_row["rol"]),
         "raw_overrides": override_map,
+        "unknown_overrides": sorted(
+            code for code in stored_overrides if code not in PERMISSION_CODES_SET
+        ),
     }
 
 

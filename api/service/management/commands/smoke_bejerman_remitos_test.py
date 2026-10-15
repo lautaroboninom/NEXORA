@@ -1,6 +1,6 @@
 import json
 import time
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from django.conf import settings
@@ -32,6 +32,7 @@ from service.management.commands.seed_bejerman_test_environment import (
     SAFE_TEST_COMPANY_KEYS,
     TEST_ARTICLES,
     TEST_CUSTOMER_CODE,
+    TEST_CUSTOMER_SITIVA5_CODE,
     TEST_CUSTOMER_SITIVA6_CODE,
 )
 
@@ -59,7 +60,7 @@ def _rt_point(company) -> str:
 
 
 def _scenarios_for_company(company, requested: str) -> tuple[str, ...]:
-    supported = ("rt-valued",) if company.key == "MGBIO" else ("emission", "manual", "rt-valued")
+    supported = ("rt-valued", "rt-exempt") if company.key == "MGBIO" else ("emission", "manual", "rt-valued", "rt-exempt")
     if requested == "all":
         return supported
     if requested not in supported:
@@ -159,6 +160,55 @@ def _find_free_manual_number(client: BejermanSDKClient, explicit: str | None = N
     raise CommandError("No se encontró número manual libre para RIS 00001 en el rango reservado.")
 
 
+def _verify_emitted_ris(client: BejermanSDKClient, serial: str, article_code: str, remito_number: str) -> None:
+    number = remito_number.rsplit("-", 1)[-1]
+    filters = [
+        bejerman_filter("Comprobante_Tipo", "IGUAL", "RIS"),
+        bejerman_filter("Comprobante_PtoVenta", "IGUAL", "00004"),
+        bejerman_filter("Comprobante_Numero", "IGUAL", number),
+    ]
+    detail = {}
+    for attempt in range(5):
+        if attempt:
+            time.sleep(2)
+        headers_response = client.list_comprobantes_ventas(filters)
+        _ensure_ok(headers_response, "Lectura posterior del RIS")
+        headers = records_from_response(headers_response)
+        if len(headers) != 1 or not comprobante_id_of(headers[0]):
+            continue
+        details_response = client.detalle_comprobante_ventas(comprobante_id_of(headers[0]))
+        _ensure_ok(details_response, "Detalle posterior del RIS")
+        details = records_from_response(details_response)
+        detail = details[0] if len(details) == 1 and isinstance(details[0], dict) else {}
+        if detail:
+            break
+    article_lines = [
+        item for item in detail.get("Comprobante_Items") or []
+        if isinstance(item, dict) and item.get("Item_Tipo") == "A"
+    ]
+    if (
+        _clean(detail.get("Comprobante_ActualizaStock")) != "S"
+        or len(article_lines) != 1
+        or _clean(article_lines[0].get("Item_CodigoArticulo")) != article_code
+        or _clean(article_lines[0].get("Item_Partida")) != serial
+        or Decimal(str(article_lines[0].get("Item_CantidadUM1") or 0)) != Decimal("-1")
+        or Decimal(str(article_lines[0].get("Item_CantidadUM2") or 0)) != Decimal("-1")
+    ):
+        raise CommandError(f"El RIS {remito_number} no conservó artículo, partida, signo negativo y ActualizaStock=S.")
+
+    last_rows = []
+    for attempt in range(5):
+        if attempt:
+            time.sleep(2)
+        response = client.obtener_stock_partida(serial)
+        _ensure_ok(response, "Lectura posterior del stock del RIS")
+        last_rows = _stock_rows_for_partida(response, serial, "STR")
+        matching = [row for row in last_rows if _clean(first_value(row, ("Art_CodGen", "Articulo_Codigo"))) == article_code]
+        if len(matching) == 1 and Decimal(str(first_value(matching[0], ("Art_RealUM1", "Stock", "Cantidad")) or 0)) == 1:
+            return
+    raise CommandError(f"El RIS {remito_number} no dejó exactamente una unidad de {article_code}/{serial} en STR: {last_rows}")
+
+
 def _run_emission(client: BejermanSDKClient, company, serial: str):
     payload = _base_payload(
         company,
@@ -178,7 +228,7 @@ def _run_emission(client: BejermanSDKClient, company, serial: str):
     )
     if not response.get("remitoNumber"):
         raise CommandError("Bejerman TEST no devolvió número de remito para emisión online.")
-    _verify_stock(client, serial, "STR")
+    _verify_emitted_ris(client, serial, TEST_ARTICLES[0]["code"], response["remitoNumber"])
     return response["remitoNumber"]
 
 
@@ -248,27 +298,38 @@ def _article_real_stock(client: BejermanSDKClient, article_code: str, deposit: s
     return sum(values, Decimal("0"))
 
 
-def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -> str:
+def _run_valued_rt(
+    client: BejermanSDKClient, company, reference: str, *, exempt: bool,
+    quantity: int = 1, discount_percent: int = 0, price_currency: str = "ARS",
+) -> str:
     article = TEST_ARTICLES[1]
+    customer_code = TEST_CUSTOMER_SITIVA5_CODE if exempt else TEST_CUSTOMER_SITIVA6_CODE
+    sitiva_code = "5" if exempt else "6"
+    unit_price = Decimal("40") if exempt else Decimal("100")
+    final_unit_price = unit_price * Decimal("1.21")
+    net_amount = (unit_price * quantity * (Decimal("1") - Decimal(discount_percent) / 100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    iva_amount = (net_amount * Decimal("0.21")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    gross_amount = net_amount + iva_amount
     deposit = "VAL"
     before_stock = _article_real_stock(client, article["code"], deposit)
-    if before_stock < 1:
-        raise CommandError(f"El artículo {article['code']} necesita al menos una unidad en {deposit} para el smoke RT.")
-    customer_fields = resolve_customer_document_fields(client, TEST_CUSTOMER_SITIVA6_CODE)
-    if _clean(customer_fields.get("Cliente_SitIVA")) != "6":
+    if before_stock < quantity:
+        raise CommandError(f"El artículo {article['code']} necesita al menos {quantity} unidades en {deposit} para el smoke RT.")
+    customer_fields = resolve_customer_document_fields(client, customer_code)
+    if _clean(customer_fields.get("Cliente_SitIVA")) != sitiva_code:
         raise CommandError(
-            f"El cliente {TEST_CUSTOMER_SITIVA6_CODE} no resolvió Cliente_SitIVA=6: {customer_fields.get('Cliente_SitIVA')}"
+            f"El cliente {customer_code} no resolvió Cliente_SitIVA={sitiva_code}: {customer_fields.get('Cliente_SitIVA')}"
         )
     issue_date = timezone.localdate().isoformat()
     request = {
         "groupId": reference,
         "companyKey": company.key,
         "issueDate": issue_date,
-        "customerCode": TEST_CUSTOMER_SITIVA6_CODE,
-        "customerName": "NEXORA TEST CLIENTE SITUACIÓN IVA 6",
+        "customerCode": customer_code,
+        "customerName": "NEXORA TEST CLIENTE EXENTO" if exempt else "NEXORA TEST CLIENTE SITUACIÓN IVA 6",
         "sellerCode": _clean(getattr(settings, "BEJERMAN_RIS_SELLER_CODE", "ADM")) or "ADM",
         "paymentTermCode": _clean(getattr(settings, "BEJERMAN_RIS_PAYMENT_TERM", "30")) or "30",
-        "priceCurrency": "ARS",
+        "priceCurrency": price_currency,
+        "exchangeRate": 1535 if price_currency == "USD" else None,
         "orders": [
             {
                 "orderNumber": reference,
@@ -277,10 +338,10 @@ def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -
                     {
                         "articleCode": article["code"],
                         "articleName": article["description"],
-                        "quantity": 1,
-                        "unitPrice": 100,
-                        "priceCurrency": "ARS",
-                        "discountPercent": 0,
+                        "quantity": quantity,
+                        "unitPrice": float(unit_price),
+                        "priceCurrency": price_currency,
+                        "discountPercent": discount_percent,
                         "stockDepositCode": deposit,
                     }
                 ],
@@ -305,11 +366,13 @@ def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -
     if (
         built.get("amountMode") != "tax_discriminated"
         or len(article_lines) != 1
-        or Decimal(str(article_lines[0].get("Item_ImporteTotal"))) != Decimal("100.0")
-        or Decimal(str(article_lines[0].get("Item_ImporteIVAInscrip"))) != Decimal("21.0")
-        or Decimal(str(comprobante.get("Comprobante_ImporteTotal"))) != Decimal("121.0")
+        or Decimal(str(article_lines[0].get("Item_PrecioUnitario"))) != final_unit_price
+        or Decimal(str(article_lines[0].get("Item_ImporteTotal"))) != net_amount
+        or Decimal(str(article_lines[0].get("Item_ImporteIVAInscrip"))) != iva_amount
+        or Decimal(str(article_lines[0].get("Item_Importe"))) != gross_amount
+        or Decimal(str(comprobante.get("Comprobante_ImporteTotal"))) != gross_amount
     ):
-        raise CommandError("El contrato local SitIVA 6 no produjo un RT de 100,00 neto + 21,00 de IVA discriminado.")
+        raise CommandError(f"El contrato local SitIVA {sitiva_code} no produjo los importes esperados.")
     response = client.ingresar_comprobante_ventas_json(
         comprobante,
         circuito="VENTAS",
@@ -317,14 +380,14 @@ def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -
         numera_flex="S",
         emite_reg="E",
     )
-    _ensure_ok(response, "Emisión RT valorizado SitIVA 6")
+    _ensure_ok(response, f"Emisión RT valorizado SitIVA {sitiva_code}")
     summary = parse_remito_response(response)
     remito_number = summary.get("remitoNumber")
     if not remito_number:
-        raise CommandError("Bejerman TEST no devolvió número para el RT valorizado SitIVA 6.")
+        raise CommandError(f"Bejerman TEST no devolvió número para el RT valorizado SitIVA {sitiva_code}.")
 
     headers = records_from_response(
-        client.list_comprobantes_ventas(build_sales_filters(TEST_CUSTOMER_SITIVA6_CODE, issue_date, issue_date, "RT", ""))
+        client.list_comprobantes_ventas(build_sales_filters(customer_code, issue_date, issue_date, "RT", ""))
     )
     number = _clean(summary.get("comprobanteNumero"))
     point = _clean(summary.get("comprobantePtoVenta"))
@@ -342,19 +405,33 @@ def _run_valued_rt_sitiva6(client: BejermanSDKClient, company, reference: str) -
     if len(detail_articles) != 1:
         raise CommandError(f"El RT leído tiene {len(detail_articles)} movimientos de artículo; se esperaba uno.")
     detail_total = Decimal(str(first_value(detail, ("Comprobante_ImporteTotal", "ImporteTotal")) or 0))
-    if detail_total != Decimal("121.0"):
-        raise CommandError(f"El read-back del RT devolvió total {detail_total}; se esperaba 121,00.")
+    detail_article = detail_articles[0]
+    detail_net = Decimal(str(detail_article.get("Item_ImporteTotal") or 0))
+    detail_vat = Decimal(str(detail_article.get("Item_ImporteIVAInscrip") or 0))
+    detail_rate = Decimal(str(detail_article.get("Item_TasaIVAInscrip") or 0))
+    detail_quantity = Decimal(str(detail_article.get("Item_CantidadUM1") or 0))
+    detail_unit_price = Decimal(str(detail_article.get("Item_PrecioUnitario") or 0))
+    if (
+        detail_total != gross_amount or detail_net != net_amount or detail_vat != iva_amount
+        or detail_rate != Decimal("21") or detail_quantity != Decimal(quantity)
+        or detail_unit_price != final_unit_price
+        or _clean(detail.get("Cliente_SitIVA")) != sitiva_code
+    ):
+        raise CommandError(
+            f"El read-back SitIVA {sitiva_code} no conservó neto, IVA, tasa y total: "
+            f"{detail_net} + {detail_vat} = {detail_total}, tasa {detail_rate}."
+        )
 
     after_stock = None
     for attempt in range(5):
         if attempt:
             time.sleep(2)
         after_stock = _article_real_stock(client, article["code"], deposit)
-        if before_stock - after_stock == Decimal("1"):
+        if before_stock - after_stock == Decimal(quantity):
             break
-    if after_stock is None or before_stock - after_stock != Decimal("1"):
+    if after_stock is None or before_stock - after_stock != Decimal(quantity):
         raise CommandError(
-            f"El stock de {article['code']} cambió de {before_stock} a {after_stock}; se esperaba un único movimiento de salida."
+            f"El stock de {article['code']} cambió de {before_stock} a {after_stock}; se esperaba una salida de {quantity} unidades."
         )
     return remito_number
 
@@ -364,11 +441,21 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--company-key", default="TEST")
-        parser.add_argument("--scenario", choices=("all", "emission", "manual", "rt-valued"), default="all")
+        parser.add_argument("--scenario", choices=("all", "emission", "manual", "rt-valued", "rt-exempt"), default="all")
         parser.add_argument("--manual-number", default="", help="Número RIS 00001 reservado; si se omite se busca uno alto libre.")
+        parser.add_argument("--price-currency", choices=("ARS", "USD"), default="ARS", help="Moneda de precio para los escenarios RT valorizados.")
+        parser.add_argument("--quantity", type=int, default=1, help="Cantidad de unidades para los escenarios RT valorizados.")
+        parser.add_argument("--discount-percent", type=int, choices=range(101), default=0, help="Descuento para los escenarios RT valorizados.")
 
     def handle(self, *args, **options):
         company = _assert_test_target(options["company_key"])
+        if options["quantity"] <= 0:
+            raise CommandError("La cantidad debe ser mayor que cero.")
+        valued_options = {
+            "quantity": options["quantity"],
+            "discount_percent": options["discount_percent"],
+            "price_currency": options["price_currency"],
+        }
         client = BejermanSDKClient(company_key=company.key, allow_system_credentials=True)
         stamp = timezone.now().strftime("%Y%m%d%H%M%S")
         self.stdout.write(f"Objetivo seguro TEST: {company.key}->{company.bejerman_company}")
@@ -383,8 +470,11 @@ class Command(BaseCommand):
                 remito = _run_manual_registration(client, company, f"NXTEST-{stamp}-R", options["manual_number"] or None)
                 self.stdout.write(f"OK registración manual: {remito}")
             if "rt-valued" in scenarios:
-                remito = _run_valued_rt_sitiva6(client, company, f"NXTEST-{stamp}-RT6")
+                remito = _run_valued_rt(client, company, f"NXTEST-{stamp}-RT6", exempt=False, **valued_options)
                 self.stdout.write(f"OK RT valorizado SitIVA 6: {remito}")
+            if "rt-exempt" in scenarios:
+                remito = _run_valued_rt(client, company, f"NXTEST-{stamp}-RT5", exempt=True, **valued_options)
+                self.stdout.write(f"OK RT valorizado SitIVA 5: {remito}")
         except BejermanSdkError as exc:
             raise CommandError(str(exc)) from exc
         self.stdout.write("OK: smoke Bejerman TEST completado")

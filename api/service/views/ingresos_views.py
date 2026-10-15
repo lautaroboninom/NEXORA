@@ -45,7 +45,7 @@ from .preventivos_sync import sync_plan_from_ingreso_fecha_servicio
 from .quotes_views import marcar_quote_no_aplica
 from .mg_state import is_mg_owner_device, normalize_mg, resolve_mg_flags
 from ..ingreso_duplicados import ingreso_es_de_hoy
-from ..mg_codes import normalize_mg_code, sql_is_mg_code, sql_mg_key
+from ..mg_codes import normalize_mg_code, normalize_mg_input, sql_is_mg_code, sql_mg_key
 from ..release_gate import sql_presupuesto_bloquea_salida
 from ..rejected_budget import (
     ensure_rejected_budget_charge_schema,
@@ -134,6 +134,9 @@ from ..notifications import (
     notify_ingreso_conflicto_abierto,
     notify_solicitud_asignacion,
     notify_solicitud_baja,
+    resolve_solicitud_asignacion,
+    solicitud_asignacion_email_recipients,
+    solicitud_asignacion_user_ids,
 )
 from ..patrimonial_notifications import notify_patrimonial_email
 from ..repair_ready_notifications import (
@@ -572,14 +575,37 @@ def _owner_name_expr(ingreso_alias: str = "t", device_alias: str = "d") -> str:
     return f"COALESCE({', '.join(parts)}, '')"
 
 
+# Estados en los que el equipo sigue en el taller. Una orden liberada que hoy está en uno de
+# éstos volvió atrás: la liberación se revirtió y el equipo nunca salió.
+_ESTADOS_EN_TALLER = (
+    "ingresado",
+    "diagnosticado",
+    "presupuestado",
+    "reparar",
+    "controlado_sin_defecto",
+    "no_se_repara",
+    "reparado",
+    "derivado",
+)
+
+
 def _salida_taller_lateral_sql(ingreso_alias: str = "t") -> str:
-    """JOIN que trae cuándo se liberó el ingreso, para acompañar a `_salida_taller_expr`."""
+    """JOIN que trae cuándo se liberó el ingreso, para acompañar a `_salida_taller_expr`.
+
+    El `liberado` de una orden que después volvió al taller no cuenta. El evento queda en el
+    historial aunque la liberación se revierta (limpieza del 14/07/2026, reversión del
+    09/09/2026), y contarlo como salida le regalaba garantía de reparación al equipo que
+    reingresaba: la OS 29875 la heredó del liberado revertido de la OS 27479, que quedaba
+    justo a 90 días.
+    """
+    en_taller = ", ".join(f"'{estado}'" for estado in _ESTADOS_EN_TALLER)
     return f"""
       LEFT JOIN LATERAL (
         SELECT MAX(ev.ts) AS ts
           FROM ingreso_events ev
          WHERE ev.ingreso_id = {ingreso_alias}.id
            AND ev.a_estado = 'liberado'
+           AND COALESCE({ingreso_alias}.estado::text, '') NOT IN ({en_taller})
       ) {ingreso_alias}_lib ON TRUE
     """
 
@@ -1793,8 +1819,10 @@ class PendientesPresupuestoView(APIView):
                   -- Al volver a alquilar un equipo propio, la OS que documenta la
                   -- reparación puede pasar a estado "alquilado". Eso no resuelve el
                   -- presupuesto por los daños del alquiler anterior: debe seguir en
-                  -- esta cola hasta que Comercial lo resuelva.
-                  AND t.estado NOT IN ('ingresado','entregado','liberado','baja','no_se_repara','vendido_pendiente_entrega','vendido_entregado')
+                  -- esta cola hasta que Comercial lo resuelva. Lo mismo si el equipo
+                  -- se da de baja. Las bajas que ya existían al cambiar la regla
+                  -- (15/09/2026) se pasaron a "no aplica" por script en sql/ops/.
+                  AND t.estado NOT IN ('ingresado','entregado','liberado','no_se_repara','vendido_pendiente_entrega','vendido_entregado')
                   AND (
                     t.estado <> 'alquilado'
                     OR (
@@ -2287,7 +2315,9 @@ class QuitarRepararView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_jefe(request)
+        # Pasa por la matriz (`action.ingreso.authorize_repair`); `require_jefe` la salteaba
+        # y el permiso no se podía dar ni quitar por usuario.
+        require_roles(request, ["jefe"])
         row = q(
             """
             SELECT
@@ -5427,7 +5457,9 @@ class IngresoAsignarTecnicoView(APIView):
             logger.info(f"[AsignarTecnico] ingreso={ingreso_id} after_update={post and post.get('asignado_a')}")
         except Exception:
             logger.warning(f"[AsignarTecnico] ingreso={ingreso_id} could not read asignado_a after update")
-        # Marcar solicitud aceptada si existe la tabla auxiliar (aislado en savepoint)
+        # Cerrar los pedidos de asignación del ingreso (aislado en savepoint): se
+        # acepta el del técnico elegido y se cancelan los de los demás, que antes
+        # quedaban pendientes para siempre y le escondían el botón al resto.
         if _table_exists("ingreso_assignment_requests"):
             try:
                 with transaction.atomic():
@@ -5442,9 +5474,27 @@ class IngresoAsignarTecnicoView(APIView):
                         """,
                         [ingreso_id, tecnico_id],
                     )
+                    exec_void(
+                        """
+                        UPDATE ingreso_assignment_requests
+                           SET canceled_at = now(), status = 'cancelado'
+                         WHERE ingreso_id = %s
+                           AND usuario_id <> %s
+                           AND accepted_at IS NULL
+                           AND canceled_at IS NULL
+                        """,
+                        [ingreso_id, tecnico_id],
+                    )
             except Exception:
                 # si falla, no romper la transacción principal
                 pass
+        try:
+            resolve_solicitud_asignacion(ingreso_id)
+        except Exception:
+            logger.exception(
+                "No se pudo cerrar el aviso de solicitud de asignación",
+                extra={"ingreso_id": ingreso_id},
+            )
         try:
             who = q("SELECT COALESCE(nombre,'') AS nombre, COALESCE(email,'') AS email FROM users WHERE id=%s", [tecnico_id], one=True)
             nombre = (who and who.get("nombre")) or ""
@@ -5661,6 +5711,7 @@ class IngresoSolicitarAsignacionView(APIView):
 
         # Enviar notificación por email (reportar éxito/fracaso)
         email_sent = False
+        notified = 0
         email_debug = {}
         try:
             # Datos del ingreso para el cuerpo
@@ -5714,19 +5765,19 @@ class IngresoSolicitarAsignacionView(APIView):
                 body = _email_append_footer_text(body)
             except Exception:
                 pass
-            # Destinatarios: primero los configurados, luego fallback a correos de la empresa
-            recips = getattr(settings, "ASSIGNMENT_REQUEST_RECIPIENTS", []) or []
-            if not isinstance(recips, (list, tuple)):
-                recips = [str(recips)] if recips else []
-            if not recips:
-                fallback1 = getattr(settings, "COMPANY_FOOTER_EMAIL_2", None)
-                fallback2 = getattr(settings, "COMPANY_FOOTER_EMAIL", None)
-                recips = [x for x in [fallback1, fallback2] if x]
-            # El toggle "Mail" del centro de notificaciones manda sobre la lista
-            # de entorno: si el usuario apagó el correo, no se le escribe.
-            recips = filter_email_recipients_by_preference("solicitud_asignacion", recips)
+            # La campana va a la jefatura suscripta al aviso y el correo a quien
+            # tenga el Mail prendido (más la lista de entorno). Antes la lista de
+            # correo ya filtrada era también la audiencia de la campana: apagar
+            # el Mail dejaba a jefatura sin ningún aviso.
+            recips = solicitud_asignacion_email_recipients(actor_user_id=uid)
             try:
-                notify_solicitud_asignacion(ingreso_id, uid, tecnico_nombre=tech_name, emails=recips)
+                notified = notify_solicitud_asignacion(
+                    ingreso_id,
+                    uid,
+                    tecnico_nombre=tech_name,
+                    user_ids=solicitud_asignacion_user_ids(actor_user_id=uid),
+                    solicitud_id=solicitud_row.get("id") if solicitud_row else None,
+                )
             except Exception:
                 logger.exception(
                     "No se pudo crear la notificación de solicitud de asignación",
@@ -5787,6 +5838,9 @@ class IngresoSolicitarAsignacionView(APIView):
         resp = {
             "ok": True,
             "email_sent": bool(email_sent),
+            # Avisos de campana/push creados: el front los cuenta como aviso aunque
+            # jefatura tenga el Mail apagado.
+            "notified": int(notified or 0),
             "solicitud_id": solicitud_row.get("id") if solicitud_row else None,
             "solicitud_fecha": solicitud_row.get("created_at") if solicitud_row else None,
         }
@@ -6741,9 +6795,10 @@ class NuevoIngresoView(APIView):
             motivo = motivo_label_raw
         permite_reparacion_default = not _motivo_is_cotizacion_equipo(motivo)
 
-        numero_interno = (equipo.get("numero_interno") or "").strip()
-        if numero_interno and not numero_interno.upper().startswith(("MG", "NM", "NV", "CE")):
-            numero_interno = "MG " + numero_interno
+        # El número interno no distingue mayúsculas (regla del 14/10/2026): "mg 7359" es el
+        # MG 7359. Guardarlo tal cual se tipeó dejó la OS 29098 en una ficha nueva, al lado de
+        # la que ya tenía ese MG y su N/S.
+        numero_interno = normalize_mg_input(equipo.get("numero_interno"))
         has_mg_schema = _has_mg_schema()
         mg_owner_id = _mg_owner_customer_id()
 
@@ -7750,13 +7805,13 @@ class GarantiaReparacionCheckView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         ns = (request.GET.get("numero_serie") or "").strip()
-        mg = (request.GET.get("numero_interno") or request.GET.get("mg") or "").strip()
+        # Normalizado igual que se guarda: con "mg 7359" la comparación exacta de abajo no
+        # encontraba la ficha "MG 7359" y la garantía de reparación no saltaba.
+        mg = normalize_mg_input(request.GET.get("numero_interno") or request.GET.get("mg"))
         # El tipo de equipo desempata los equipos que comparten número de serie: el
         # humidificador entra con la serie del CPAP y no hereda su garantía de reparación.
         # Es opcional: sin tipo el chequeo se comporta como antes.
         tipo_key = (request.GET.get("tipo_equipo") or "").strip().lower()
-        if mg and not mg.upper().startswith(("MG", "NM", "NV", "CE")):
-            mg = "MG " + mg
         if not ns and not mg:
             return Response({"within_90_days": False, "last_ingreso": None})
 
@@ -7822,9 +7877,7 @@ class GarantiaFabricaCheckView(APIView):
     def get(self, request):
         # Cálculo basado en venta Bejerman cacheada.
         ns = (request.GET.get("numero_serie") or "").strip()
-        mg = (request.GET.get("numero_interno") or request.GET.get("mg") or "").strip()
-        if mg and not mg.upper().startswith(("MG", "NM", "NV", "CE")):
-            mg = "MG " + mg
+        mg = normalize_mg_input(request.GET.get("numero_interno") or request.GET.get("mg"))
 
         if not ns and not mg:
             return Response({"within_365_days": None, "fecha_venta": None, "found": False})
@@ -8119,6 +8172,13 @@ class IngresoBejermanEstadoView(APIView):
             logger.warning("ingreso_bejerman_estado_failed", exc_info=True, extra={"ingreso_id": ingreso_id})
             return _bejerman_estado_error_response(exc, ingreso_id)
         status_code = int(payload.pop("_status_code", 200))
+        action = payload.get("action") or {}
+        if action.get("type") == "force_stock_entry" and not user_has_any_permission(
+            request, ["action.bejerman_sync.force_stock_entry"]
+        ):
+            # El botón se ofrece sólo a quien puede usarlo: antes lo veía cualquiera que
+            # abriera el estado y al apretarlo recibía "No autorizado".
+            payload["action"] = None
         return Response(payload, status=status_code)
 
 
@@ -8793,10 +8853,7 @@ class IngresoDetalleView(APIView):
             sets_no_estado.append("faja_garantia = NULLIF(%s,'')")
             params_no_estado.append((d.get("faja_garantia") or "").strip())
         if "numero_interno" in d:
-            val_raw = (d.get("numero_interno") or "").strip()
-            val = val_raw
-            if val and not val.upper().startswith(("MG", "NM", "NV", "CE")):
-                val = "MG " + val
+            val = normalize_mg_input(d.get("numero_interno"))
             try:
                 dev_row = q("SELECT device_id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
                 device_id = dev_row and dev_row.get("device_id")
@@ -9057,8 +9114,10 @@ class IngresoDetalleView(APIView):
                         exec_void("UPDATE devices SET marca_id=%s WHERE id=%s", [marca_id, device_id])
         if "alquilado" in d:
             new_alquilado = bool(d.get("alquilado"))
-            if alquilado_actual and not new_alquilado and rol != "jefe":
-                raise PermissionDenied("Solo jefe puede destildar alquiler")
+            if alquilado_actual and not new_alquilado and not user_has_permission(
+                request, "action.ingreso.uncheck_rental"
+            ):
+                raise PermissionDenied("No tenés permiso para destildar el alquiler")
             if alquilado_actual and not new_alquilado:
                 alquiler_remito_bloqueante = alquiler_remito_actual or (d.get("alquiler_remito") or "").strip()
                 entregado_bloqueante = bool(estado_actual == "entregado" or fecha_entrega_nueva)

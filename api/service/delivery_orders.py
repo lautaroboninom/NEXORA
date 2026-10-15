@@ -995,12 +995,16 @@ def seller_fields_for_delivery_order(
 
 
 def actor_is_delivery_discount_admin(actor_user_id: int | None) -> bool:
+    """Quién puede cargar descuentos por renglón en una orden de entrega.
+
+    Es el permiso editable `action.delivery_order.edit_discounts`. Por defecto lo tienen
+    jefatura, admin, supervisor y ventas: la lista de roles que antes estaba escrita acá.
+    """
     if actor_user_id is None:
         return False
-    with connection.cursor() as cur:
-        cur.execute("SELECT LOWER(TRIM(COALESCE(rol, ''))) FROM users WHERE id = %s", [actor_user_id])
-        row = cur.fetchone()
-    return bool(row and row[0] in {"jefe", "jefe_suplente", "admin", "supervisor", "ventas"})
+    role = _user_role(actor_user_id)
+    permissions = resolve_effective_permissions(user_id=actor_user_id, role=role)
+    return bool(permissions.get("action.delivery_order.edit_discounts", False))
 
 
 def _assert_item_discounts_allowed(
@@ -2975,24 +2979,27 @@ DELIVERY_ORDER_SORT_MAP = {
 }
 
 
-def delivery_order_order_sql(sort_raw: Any, pending_billing_requested: bool = False) -> str:
+def delivery_order_order_sql(sort_raw: Any, billing_queue_requested: bool = False) -> str:
+    # Las urgentes van siempre primero. Debajo, ventas y servicio técnico quedan
+    # intercaladas según el criterio elegido (por defecto, la más nueva arriba).
     raw = _optional_text(sort_raw) or ""
     sort_field = raw[1:] if raw.startswith("-") else raw
     sort_expression = DELIVERY_ORDER_SORT_MAP.get(sort_field)
     if sort_expression:
         direction = "DESC" if raw.startswith("-") else "ASC"
         return f"{DELIVERY_ORDER_URGENT_FIRST_SQL}, {sort_expression} {direction} NULLS LAST, o.id {direction}"
-    if pending_billing_requested:
-        return """
-          CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC,
+    if billing_queue_requested:
+        # La cola de Facturación atiende primero lo urgente y después lo más viejo.
+        return f"""
+          {DELIVERY_ORDER_URGENT_FIRST_SQL},
           COALESCE(g.generated_at, o.order_date::timestamptz, g.created_at, o.delivered_at, o.created_at) ASC,
           o.order_date ASC NULLS LAST,
           o.created_at ASC,
           o.id ASC
         """
-    return """
-          CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC,
-          """ + DELIVERY_ORDER_EFFECTIVE_RECENCY_SQL + """ DESC,
+    return f"""
+          {DELIVERY_ORDER_URGENT_FIRST_SQL},
+          {DELIVERY_ORDER_EFFECTIVE_RECENCY_SQL} DESC,
           o.id DESC
         """
 
@@ -3151,7 +3158,9 @@ def list_delivery_orders(filters: dict[str, Any] | None = None) -> dict[str, Any
     limit = max(1, min(200, int(filters.get("limit") or 80)))
     offset = max(0, int(filters.get("offset") or 0))
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-    order_sql = delivery_order_order_sql(filters.get("sort"), pending_billing_requested)
+    # El orden de cola (más viejo primero) es sólo para Facturación; filtrar por estado
+    # desde Órdenes de entrega mantiene el "más nuevo arriba".
+    order_sql = delivery_order_order_sql(filters.get("sort"), pending_billing_filter or postponed_billing_filter)
     join_sql = "LEFT JOIN bejerman_remito_groups g ON g.id = o.bejerman_remito_group_id" if pending_billing_requested else ""
 
     with connection.cursor() as cur:
@@ -4908,6 +4917,40 @@ def update_remito_location(order_id: str, actor_user_id: int | None, remito_loca
 
 
 @transaction.atomic
+def update_delivery_order_priority(order_id: str, actor_user_id: int | None, priority: Any) -> dict[str, Any]:
+    """Marca o quita la urgencia de una orden ya creada, sin tocar nada más.
+
+    Las de servicio técnico nacen siempre "normal" y la urgencia se decide después a mano.
+    "Editar orden" reescribe la orden entera (renglones, partidas, validación de stock), así
+    que para algo tan chico como la prioridad va por acá. Mientras la orden siga pendiente de
+    entrega se puede cambiar aunque ya tenga remito: la urgencia es de la entrega física.
+    """
+    next_priority = normalize_priority(priority)
+    current = get_delivery_order(order_id, include_events=False, for_update=True)
+    if current.get("status") not in EDITABLE_STATUSES:
+        raise DeliveryOrderError(
+            "DELIVERY_ORDER_PRIORITY_LOCKED",
+            "Sólo se puede cambiar la urgencia de una orden pendiente de entrega.",
+            status_code=409,
+        )
+    previous_priority = current.get("priority") or "normal"
+    if previous_priority == next_priority:
+        return get_delivery_order(order_id)
+    with connection.cursor() as cur:
+        cur.execute(
+            "UPDATE delivery_orders SET priority = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            [next_priority, order_id],
+        )
+    create_event(
+        order_id,
+        actor_user_id,
+        "delivery_order_priority_updated",
+        metadata={"previousPriority": previous_priority, "priority": next_priority},
+    )
+    return get_delivery_order(order_id)
+
+
+@transaction.atomic
 def update_item_article(order_id: str, item_id: str, actor_user_id: int | None, payload: dict[str, Any]) -> dict[str, Any]:
     current = get_delivery_order(order_id, include_events=False, for_update=True)
     _assert_order_editable(current)
@@ -6339,6 +6382,9 @@ def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str |
                    )
         """
         params.append(propietario_doc)
+    # Las órdenes importadas del portal viejo no reciben liberaciones nuevas: venían marcadas
+    # "urgente" de origen y con fecha de junio, y la liberación que caía adentro heredaba las
+    # dos cosas y quedaba primera en Órdenes de entrega (pasó con OS-29842 y OS-29773).
     with connection.cursor() as cur:
         cur.execute(
             f"""
@@ -6348,6 +6394,7 @@ def _find_compatible_open_service_release_order_id(row: dict[str, Any]) -> str |
                AND o.status IN ('pendiente_armado', 'armado_pendiente_entrega')
                AND NULLIF(BTRIM(COALESCE(o.remito_number, '')), '') IS NULL
                AND o.bejerman_remito_group_id IS NULL
+               AND COALESCE(o.source_system, '') <> 'portal'
            AND COALESCE(o.company_key, 'SEPID') = %s
            AND (
                 SELECT COUNT(*)

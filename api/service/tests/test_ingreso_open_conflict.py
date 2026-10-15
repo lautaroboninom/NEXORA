@@ -5,6 +5,7 @@ el equipo adentro, pero sin afirmar un número de OS que todavía puede cambiar.
 """
 
 from contextlib import nullcontext
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -371,7 +372,7 @@ class ResolverConflictoViewTests(SimpleTestCase):
         "reason": "Bejerman no tiene ningún comprobante 00004-00009999 en SEPID.",
     }
 
-    def _post(self, *, evidencia, permisos, data=None, documento=None):
+    def _post(self, *, evidencia, permisos, data=None, documento=None, reingreso=""):
         from service.views import ingreso_conflicts_views as vistas
 
         request = SimpleNamespace(
@@ -404,6 +405,7 @@ class ResolverConflictoViewTests(SimpleTestCase):
             patch.object(vistas, "require_permission", side_effect=_require),
             patch.object(vistas, "user_has_permission", side_effect=lambda req, code: code in permisos),
             patch.object(vistas, "get_conflict", return_value=None),
+            patch.object(vistas, "_reingreso_fecha", return_value=reingreso),
             patch.object(
                 vistas.IngresoCorreccionesHistoricasView, "post", return_value=correccion
             ) as correccion_post,
@@ -438,18 +440,73 @@ class ResolverConflictoViewTests(SimpleTestCase):
         self.assertEqual(response.status_code, 403)
         correccion_post.assert_not_called()
 
-    def test_sin_prueba_jefatura_igual_puede_forzar_el_cierre(self):
+    def test_sin_prueba_jefatura_tiene_que_indicar_la_fecha_de_salida(self):
+        """Sin comprobante no se inventa la fecha: se pide, en vez de fallar más abajo.
+
+        La corrección histórica exige `fecha_efectiva`. Antes el cierre forzado la mandaba
+        vacía y "Cerrar sin comprobante" fallaba siempre con "fecha_efectiva inválida"
+        (conflicto de la OS 29875 con la 27479, 14/10/2026).
+        """
+
         response, correccion_post = self._post(
             evidencia=self.SIN_EVIDENCIA,
             permisos={"action.ingreso.resolve_open_conflict", "action.ingreso.force_historical"},
         )
 
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("fecha", response.data["detail"])
+        correccion_post.assert_not_called()
+
+    def test_sin_prueba_jefatura_cierra_con_la_fecha_que_indica(self):
+        response, correccion_post = self._post(
+            evidencia=self.SIN_EVIDENCIA,
+            permisos={"action.ingreso.resolve_open_conflict", "action.ingreso.force_historical"},
+            data={"fecha_salida": "2026-07-24", "motivo": "Volvió al cliente sin reparar."},
+            reingreso="2026-10-13",
+        )
+
         self.assertEqual(response.status_code, 200)
         correccion_post.assert_called_once()
         child, _ = correccion_post.call_args[0]
+        self.assertEqual(child.data["accion"], "entrega")
+        self.assertEqual(child.data["fecha_efectiva"], "2026-07-24")
+        self.assertEqual(child.data["fecha_entrega"], "2026-07-24")
+        self.assertEqual(child.data["remito_salida"], "")
         self.assertIn("forzado por jefatura", child.data["motivo"])
-        # Sin comprobante no se inventa una fecha de entrega.
-        self.assertNotIn("fecha_entrega", child.data)
+        self.assertIn("Fecha de salida indicada por jefatura: 2026-07-24", child.data["motivo"])
+        self.assertIn("Volvió al cliente sin reparar.", child.data["motivo"])
+
+    def test_la_fecha_forzada_va_entre_el_ingreso_viejo_y_el_reingreso(self):
+        permisos = {"action.ingreso.resolve_open_conflict", "action.ingreso.force_historical"}
+        futura = (date.today() + timedelta(days=5)).isoformat()
+        casos = (
+            # (fecha pedida, reingreso, texto esperado en el rechazo)
+            ("2026-05-03", "", "anterior al ingreso"),
+            ("2026-10-14", "2026-10-13", "posterior al reingreso"),
+            (futura, "", "futura"),
+        )
+        for fecha, reingreso, esperado in casos:
+            with self.subTest(fecha=fecha):
+                response, correccion_post = self._post(
+                    evidencia=self.SIN_EVIDENCIA,
+                    permisos=permisos,
+                    data={"fecha_salida": fecha},
+                    reingreso=reingreso,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(esperado, response.data["detail"])
+                correccion_post.assert_not_called()
+
+        # Los dos extremos del tramo valen: el mismo día del ingreso viejo y el del reingreso.
+        for fecha in ("2026-05-04", "2026-10-13"):
+            with self.subTest(fecha=fecha):
+                response, _ = self._post(
+                    evidencia=self.SIN_EVIDENCIA,
+                    permisos=permisos,
+                    data={"fecha_salida": fecha},
+                    reingreso="2026-10-13",
+                )
+                self.assertEqual(response.status_code, 200)
 
     def test_el_numero_cargado_a_mano_se_verifica_y_alcanza_para_cerrar(self):
         """El caso real: la serie está escrita distinto acá y en Bejerman.

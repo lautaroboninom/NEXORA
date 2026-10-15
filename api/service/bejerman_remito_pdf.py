@@ -186,10 +186,11 @@ POINT_OF_SALE_COMPANIES = {"00004": "SEPID", "4": "SEPID", "00007": "MGBIO", "7"
 SIT_IVA_LABELS = {
     "1": "Responsable Inscripto",
     "2": "Responsable No Inscripto",
-    "3": "Responsable Inscripto",
-    "4": "Exento",
-    "5": "Consumidor Final",
+    "3": "Consumidor Final",
+    "4": "No Alcanzado",
+    "5": "Exento",
     "6": "Monotributo",
+    "7": "Sujeto no Categorizado",
 }
 
 

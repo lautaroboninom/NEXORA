@@ -126,6 +126,10 @@ def apply_overrides(user_id, raw_overrides, updated_by=None):
         c = (code or "").strip()
         e = (effect or "").strip().lower()
         if c not in PERMISSION_CODES_SET:
+            # Un código que salió del catálogo y vuelve como "heredar" (el editor manda el
+            # mapa completo) no puede tumbar el guardado de todos los demás.
+            if e in ("", EFFECT_INHERIT):
+                continue
             raise ValueError(f"permission_code invalido: {c}")
         if e not in VALID_EFFECTS:
             raise ValueError(f"effect invalido para {c}: {effect}")

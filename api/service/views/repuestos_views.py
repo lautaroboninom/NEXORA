@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .helpers import q, exec_void, exec_returning, require_roles, money, _email_append_footer_text
+from ..permissions import user_has_permission
 from ..notifications import emit_notification, filter_email_recipients_by_preference
 from ..repuestos import (
     get_repuestos_config,
@@ -26,8 +27,9 @@ FOUR_DEC = Decimal("0.0001")
 
 
 def _can_view_costs(user) -> bool:
-    rol = (getattr(user, "rol", "") or "").strip().lower()
-    return rol in ("jefe", "jefe_veedor", "jefe_suplente", "admin", "supervisor")
+    # Permiso editable por usuario. Por defecto lo tienen los roles que antes estaban
+    # escritos acá: jefatura, admin y supervisor.
+    return user_has_permission(user, "action.spare_parts.view_costs")
 
 
 def _parse_decimal_field(val, label, allow_none=False):

@@ -118,6 +118,22 @@ class IngresoAssignmentRequestAPITest(TestCase):
             activo=True,
         )
         cls.token = issue_token(cls.tecnico)
+        cls.otro_tecnico = User.objects.create(
+            nombre="Otro Técnico Asignación",
+            email="otro@assignment.test",
+            hash_pw="",
+            rol="tecnico",
+            activo=True,
+        )
+        cls.otro_token = issue_token(cls.otro_tecnico)
+        cls.jefe = User.objects.create(
+            nombre="Jefe Asignación",
+            email="jefe@assignment.test",
+            hash_pw="",
+            rol="jefe",
+            activo=True,
+        )
+        cls.jefe_token = issue_token(cls.jefe)
         with connection.cursor() as cur:
             cur.execute("INSERT INTO customers (razon_social) VALUES (%s) RETURNING id", ["Cliente Test"])
             customer_id = cur.fetchone()[0]
@@ -177,3 +193,40 @@ class IngresoAssignmentRequestAPITest(TestCase):
             count = int(cur.fetchone()[0])
 
         self.assertEqual(count, 1)
+
+    def test_asignar_acepta_el_pedido_elegido_y_cancela_los_de_otros_tecnicos(self):
+        """Asignar sólo cerraba el pedido del técnico elegido.
+
+        Los de los demás quedaban pendientes para siempre: la hoja seguía
+        mostrando "Solicitud de asignación pendiente" y al resto de los técnicos
+        les escondía el botón (caso real: OS 29650).
+        """
+        otro_client = APIClient()
+        otro_client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.otro_token}")
+        self.assertEqual(self.client.post(self._url(), {}, format="json").status_code, 200)
+        self.assertEqual(otro_client.post(self._url(), {}, format="json").status_code, 200)
+
+        jefe_client = APIClient()
+        jefe_client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.jefe_token}")
+        resp = jefe_client.patch(
+            f"/api/ingresos/{self.ingreso_id}/asignar-tecnico/",
+            {"tecnico_id": self.tecnico.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT usuario_id, status,
+                       accepted_at IS NOT NULL AS aceptada,
+                       canceled_at IS NOT NULL AS cancelada
+                  FROM ingreso_assignment_requests
+                 WHERE ingreso_id = %s
+                """,
+                [self.ingreso_id],
+            )
+            rows = {row[0]: tuple(row[1:]) for row in cur.fetchall()}
+
+        self.assertEqual(rows[self.tecnico.id], ("aceptado", True, False))
+        self.assertEqual(rows[self.otro_tecnico.id], ("cancelado", False, True))

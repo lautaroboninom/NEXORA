@@ -18,7 +18,7 @@ import {
   resolveFechaIngreso,
 } from "../../../lib/ui-helpers";
 import { resolutionLabel } from "../../../lib/constants";
-import { isJefe } from "../../../lib/authz";
+import { can, PERMISSION_CODES } from "../../../lib/permissions";
 import { documentNameFromRis, isRisRegistered, risRemitoFrom, risRemitoWithDocumentName } from "../../../lib/ris-print";
 import { getReleaseFlow } from "../../../lib/release-flow";
 import { getDeviceSwapState, swapConfirmMatches } from "../../../lib/device-swap.js";
@@ -446,7 +446,7 @@ export default function PrincipalTab(props) {
     maxDateOnly,
   } = props;
 
-  const canUncheckAlquilado = isJefe(user);
+  const canUncheckAlquilado = can(user, PERMISSION_CODES.ACTION_INGRESO_UNCHECK_RENTAL);
   const isRegisteredRis = isRisRegistered(data);
   const risRemito = risRemitoFrom(data);
   const remitoSalidaBejerman = (data?.remito_salida_bejerman || "").toString().trim();
@@ -1592,10 +1592,10 @@ export default function PrincipalTab(props) {
                   </>
                 ) : (
                   <div className="text-sm text-gray-500">
-                    {mailEnviado && (<div className="text-xs text-emerald-700">Se envió el mail</div>)}
+                    {mailEnviado && (<div className="text-xs text-emerald-700">Se avisó a jefatura</div>)}
                     {!mailEnviado && mailFallo && (
                       <div>
-                        <div className="text-xs text-amber-700">La solicitud quedó registrada. No se pudo enviar el aviso por email.</div>
+                        <div className="text-xs text-amber-700">La solicitud quedó registrada, pero no se pudo avisar a jefatura.</div>
                         {emailDebug && (
                           <div className="mt-1 text-[11px] text-gray-600">
                             <div>Destino: {(emailDebug.recipients || []).join(", ") || "-"}</div>
@@ -1628,8 +1628,11 @@ export default function PrincipalTab(props) {
                                 if (r && r.ok) {
                                   setSolicitudAsignacionEnviada(true);
                                 }
-                                setMailEnviado(!!(r && r.email_sent));
-                                if (r && r.ok && !r.already_pending && r.email_sent === false) {
+                                // La campana y el push también son aviso: jefatura puede tener el
+                                // Mail apagado y eso no es una falla.
+                                const avisado = Boolean(r && (r.email_sent || Number(r.notified || 0) > 0));
+                                setMailEnviado(avisado);
+                                if (r && r.ok && !r.already_pending && !avisado) {
                                   setMailFallo(true);
                                 }
                                 setEmailDebug(r && r.email_debug ? r.email_debug : null);

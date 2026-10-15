@@ -21,8 +21,6 @@ const VARIANT_BORDER = {
   gray: "border-gray-400",
 };
 
-const CUSTOMER_CATALOG_ROLES = new Set(["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente"]);
-
 function variantOfPath(to) {
   const p = String(to || "");
   if (p === "/tecnico") return "amber";
@@ -116,7 +114,7 @@ export default function Sidebar({ mobileOpen = false, onClose }) {
     PERMISSION_CODES.PAGE_NEW_INGRESO,
   ]);
   const canManageTestProtocols = can(user, PERMISSION_CODES.ACTION_TESTS_PROTOCOL_MANAGE);
-  const canCustomerCatalog = CUSTOMER_CATALOG_ROLES.has(String(user?.rol || "").trim().toLowerCase());
+  const canCustomerCatalog = can(user, PERMISSION_CODES.PAGE_CUSTOMER_CATALOG);
 
   const showRecepcion =
     canRecepcion ||

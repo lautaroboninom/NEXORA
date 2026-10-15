@@ -20,13 +20,13 @@ from service.bejerman_sdk import (
 
 class CustomerDocumentFieldsTests(SimpleTestCase):
     @staticmethod
-    def _customer_response(*, include_document_type=True):
+    def _customer_response(*, include_document_type=True, sitiva="1"):
         record = {
             "Cliente_Codigo": "SEDE",
             "Cliente_RazonSocial": "SEDESA S.A.",
             "Cliente_CUIT": "30710698267",
             "Cliente_CodigoProvincia": "002",
-            "Cliente_SituacionIVACodigo": "1",
+            "Cliente_SituacionIVACodigo": sitiva,
             "Cliente_NroIIBB": "30710698267",
         }
         if include_document_type:
@@ -94,6 +94,20 @@ class CustomerDocumentFieldsTests(SimpleTestCase):
         self.assertEqual(fields, cached_fields)
         local_lookup.assert_called_once_with(client, "SEDE")
         client.list_clientes.assert_not_called()
+
+    def test_monotributo_conserva_condicion_fiscal_desde_cache_o_bejerman(self):
+        response = self._customer_response(sitiva="6")
+        expected = build_customer_document_fields(response, "SEDE")
+        for use_cache in (False, True):
+            with self.subTest(use_cache=use_cache):
+                client = Mock()
+                client.company_key = "SEPID"
+                client.list_clientes.return_value = response
+                fields = resolve_customer_document_fields_cached(
+                    client, "SEDE", Mock(return_value=expected if use_cache else None),
+                    retry_delay_seconds=0,
+                )
+                self.assertEqual(fields["Cliente_SitIVA"], "6")
 
     def test_resolucion_cacheada_consulta_bejerman_si_la_cache_esta_incompleta(self):
         client = Mock()

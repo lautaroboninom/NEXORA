@@ -16,6 +16,7 @@ from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .bejerman_companies import DEFAULT_INGRESS_COMPANY_KEY, require_company
+from .bejerman_retry_advice import can_change_source, stock_diagnosis
 from .mg_codes import MG_CODE_RE
 from .bejerman_partida_grafias import stock_partida_sin_distinguir_mayusculas
 from .bejerman_partida_observacion import observacion_partida_de_equipo, observacion_partida_de_ingreso
@@ -1867,6 +1868,187 @@ def cancel_sync_job(job_id: int, actor_user_id: int | None, reason: str) -> dict
         [job_id],
         one=True,
     ) or {}
+
+
+def partida_stock_locations(
+    serial: str,
+    *,
+    company_key: str | None,
+    actor_user_id: int | None,
+    client: BejermanSDKClient | None = None,
+) -> list[dict[str, Any]]:
+    """Stock positivo de una partida en todos los depósitos de Bejerman.
+
+    Sólo lee. `ObtenerStockPartida` trae todos los depósitos en una sola consulta: por eso el
+    depósito que recibe `stock_by_deposit_partida` acá no importa.
+    """
+
+    serial = str(serial or "").strip()
+    if not serial:
+        return []
+    own_client = client is None
+    if own_client:
+        validate_bejerman_config()
+        client = BejermanSDKClient(
+            company_key=company_key or DEFAULT_INGRESS_COMPANY_KEY,
+            actor_user_id=actor_user_id,
+        )
+    try:
+        response = client.stock_by_deposit_partida("", serial)
+    finally:
+        if own_client:
+            client.close()
+    return _stock_records_summary(_records_for_partida(response, serial), limit=20)
+
+
+def _equipment_article_for_job(job: dict[str, Any]) -> str:
+    """El artículo que este equipo debería tener en Bejerman, con la misma prioridad que el traslado."""
+
+    confirmed_article, mapped_article = _mapping_article_codes_for_job(job)
+    return next(
+        (code for code in (confirmed_article, (job.get("article_code") or "").strip(), mapped_article) if code),
+        "",
+    )
+
+
+def diagnose_job_stock(
+    job_id: int,
+    actor_user_id: int | None,
+    *,
+    client: BejermanSDKClient | None = None,
+) -> dict[str, Any]:
+    """«Ver en Bejerman»: dónde tiene Bejerman el equipo de una operación y qué conviene hacer.
+
+    Antes había que averiguarlo por SQL: el panel decía «no tiene stock positivo en STR», pero
+    no dónde estaba el equipo, y sin eso no hay forma de saber si conviene reintentar, mover
+    desde otro depósito o descartar. Sólo lee de Bejerman; el resultado se guarda en el job
+    para que quien abra el panel después lo vea sin volver a consultar.
+    """
+
+    job = q("SELECT * FROM bejerman_sync_jobs WHERE id = %s", [job_id], one=True)
+    if not job:
+        raise BejermanBlockedError("Operación Bejerman no encontrada")
+    job = {**job, "request_payload": _dict_payload(job.get("request_payload"))}
+    serial = (job.get("numero_serie") or "").strip()
+    equipment_article = _equipment_article_for_job(job)
+    records = partida_stock_locations(
+        serial,
+        company_key=job.get("company_key"),
+        actor_user_id=actor_user_id,
+        client=client,
+    )
+    diagnosis = stock_diagnosis(
+        serial=serial,
+        source_deposit=job.get("source_deposit"),
+        target_deposit=job.get("target_deposit"),
+        records=records,
+        equipment_article=equipment_article,
+        movable=can_change_source(job),
+    )
+    diagnosis.update(
+        {
+            "equipmentArticle": equipment_article,
+            "checkedAt": timezone.now().isoformat(),
+            "checkedByUserId": actor_user_id,
+        }
+    )
+    # Sin tocar `updated_at`: consultar no es un intento, y el panel muestra esa fecha como tal.
+    q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET response_payload = COALESCE(response_payload, '{}'::jsonb)
+                                  || jsonb_build_object('diagnosis', %s::jsonb)
+         WHERE id = %s
+        """,
+        [_json_param(diagnosis), job_id],
+    )
+    return diagnosis
+
+
+def change_job_source_deposit(
+    job_id: int,
+    deposit: str,
+    actor_user_id: int | None,
+    *,
+    client: BejermanSDKClient | None = None,
+) -> dict[str, Any]:
+    """Cambia el depósito de origen de un traslado por el que Bejerman confirma que tiene el equipo.
+
+    La salida de «Mover desde donde está». Un cambio manual de ubicación se bloquea a propósito
+    cuando la partida no está en el origen declarado —nunca se crea stock por una selección de
+    pantalla—, y hasta ahora la única salida era corregir Bejerman por SQL. Acá el operador elige
+    el depósito y el cambio se aplica sólo si Bejerman confirma, en ese momento, que el equipo
+    está ahí. Queda asentado quién lo cambió, desde dónde y cuándo.
+    """
+
+    deposit = str(deposit or "").strip().upper()
+    if not deposit:
+        raise BejermanBlockedError("Indique desde qué depósito hay que mover el equipo.")
+    job = q("SELECT * FROM bejerman_sync_jobs WHERE id = %s", [job_id], one=True)
+    if not job:
+        raise BejermanBlockedError("Operación Bejerman no encontrada")
+    request_payload = _dict_payload(job.get("request_payload"))
+    job = {**job, "request_payload": request_payload}
+    if not can_change_source(job):
+        raise BejermanBlockedError(
+            "A esta operación no se le puede cambiar el origen: sólo a un traslado fallido o bloqueado "
+            "que todavía no emitió ningún movimiento y que no viaja en un lote."
+        )
+    previous = str(job.get("source_deposit") or "").strip().upper()
+    target = str(job.get("target_deposit") or "").strip().upper()
+    if deposit == target:
+        raise BejermanBlockedError(f"{deposit} es el destino de la operación, no puede ser también el origen.")
+    if deposit == previous:
+        raise BejermanBlockedError(f"{deposit} ya es el origen de la operación: reintente directamente.")
+    serial = (job.get("numero_serie") or "").strip()
+    if not serial:
+        raise BejermanBlockedError("Número de serie requerido para sincronizar Bejerman")
+    equipment_article = _equipment_article_for_job(job)
+    records = partida_stock_locations(
+        serial,
+        company_key=job.get("company_key"),
+        actor_user_id=actor_user_id,
+        client=client,
+    )
+    present = [
+        record
+        for record in records
+        if _norm(record.get("deposito") or "") == _norm(deposit)
+        and (not equipment_article or _norm(record.get("article_code") or "") in {"", _norm(equipment_article)})
+    ]
+    if not present:
+        raise BejermanBlockedError(
+            f"Bejerman no tiene la partida {serial} en {deposit}"
+            + (f" con el artículo {equipment_article}" if equipment_article else "")
+            + ": no se cambió nada."
+        )
+    override = {
+        "previousSourceDeposit": previous,
+        "sourceDeposit": deposit,
+        "actorUserId": actor_user_id,
+        "at": timezone.now().isoformat(),
+        "stock": present,
+    }
+    updated = q(
+        """
+        UPDATE bejerman_sync_jobs
+           SET source_deposit = %s,
+               request_payload = COALESCE(request_payload, '{}'::jsonb)
+                                 || jsonb_build_object('source_override', %s::jsonb)
+         WHERE id = %s
+           AND status IN ('failed', 'blocked')
+        RETURNING id, source_deposit
+        """,
+        [deposit, _json_param(override), job_id],
+        one=True,
+    )
+    if not updated:
+        raise BejermanBlockedError("La operación cambió de estado mientras se verificaba: actualice el panel.")
+    logger.info(
+        "bejerman_job_source_changed",
+        extra={"job_id": job_id, "from": previous, "to": deposit, "actor_user_id": actor_user_id},
+    )
+    return {**updated, "sourceOverride": override}
 
 
 def _retry_next_attempt(attempts: int, error: str, max_attempts: int):

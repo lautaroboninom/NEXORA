@@ -6,7 +6,7 @@ import re
 import time
 import unicodedata
 import zlib
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -50,6 +50,7 @@ from .bejerman_sdk import (
     format_remito_number,
     is_bejerman_already_imported_message,
     is_bejerman_sales_query_schema_message,
+    is_bejerman_stock_insuficiente_message,
     is_bejerman_success_message,
     is_occasional_customer_name,
     is_ok_response,
@@ -1931,8 +1932,18 @@ def _partition_service_ingress_payload(
 
 
 def _is_stock_ingress_payload(payload: dict[str, Any]) -> bool:
+    """Devoluciones con stock (RD/RDN/RDA): validan como devolución y toman el
+    artículo al que Bejerman ya vinculó la partida.
+
+    El RIS también viaja en negativo, porque así Bejerman registra una entrada,
+    pero queda afuera a propósito: desde junio de 2026 nunca pasó por estas ramas
+    y la partida sola no identifica al equipo (el CPAP y su humidificador comparten
+    N/S), así que tomar el artículo de la partida podría cambiarle el artículo a
+    un equipo de cliente."""
     profile = payload.get("documentProfile") if isinstance(payload.get("documentProfile"), dict) else {}
     document_type = _clean_upper(profile.get("type"))
+    if document_type == (_clean_upper(getattr(settings, "BEJERMAN_RIS_TYPE", "RIS")) or "RIS"):
+        return False
     return bool(profile.get("updateStock")) and sdk_uses_negative_article_quantity(document_type)
 
 
@@ -4127,56 +4138,68 @@ def _neutralize_register_stock_entries(
     if not is_ok_response(response):
         detail = _clean(response.get("ErrorMsg")) or _clean(response.get("Resultado")) or "sin detalle"
         raise BejermanRisError(f"Bejerman rechazó la salida que compensa el alta de partida. {detail}")
-    partidas = [_clean(entry.get("Comprobante_ArtPartida")) for entry in entries]
-    _verify_partidas_present(client, [p for p in partidas if p], deposit)
-
-
-def _verify_partidas_present(client: BejermanSDKClient, partidas: list[str], deposit: str) -> None:
-    """Confirma que la partida quedó en el depósito, con la cantidad que sea.
-
-    A diferencia de `_verify_register_stock_entries`, acá cero es el resultado
-    buscado, así que se mira presencia y no cantidad positiva.
-    """
-
-    faltantes = []
-    for partida in dict.fromkeys(partidas):
-        try:
-            response = client.obtener_stock_partida(partida)
-        except Exception:
-            faltantes.append(partida)
-            continue
-        if not _records_for_partida_any_quantity(response, partida, deposit):
-            faltantes.append(partida)
-    if faltantes:
-        raise BejermanRisError(
-            "No se pudo confirmar la partida en el depósito " + deposit + ": " + ", ".join(faltantes)
-        )
+    attempts = max(1, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS", 3) or 3))
+    delay_ms = max(0, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS", 1500) or 0))
+    for attempt in range(attempts):
+        if attempt and delay_ms:
+            time.sleep(delay_ms / 1000)
+        if _register_entries_moved_by_comprobante(client, entries, deposit) is False:
+            return
+    raise BejermanRisError(
+        "No se pudo confirmar en cero el stock compensado en " + deposit + "; requiere reconciliación."
+    )
 
 
 def _register_entries_moved_by_comprobante(
     client: BejermanSDKClient, entries: list[dict[str, Any]], deposit: str
-) -> bool:
-    """Indica si el reintento de VENTAS llegó a mover las partidas compensadas.
+) -> bool | None:
+    """Comprueba el stock de los artículos compensados en el depósito.
 
     Antes del reintento las partidas quedan deliberadamente en cero. Por eso la
     mera presencia de una fila en StockPar no sirve para distinguir una llamada
     que falló de una que Bejerman procesó pero cuya respuesta se perdió.
+
+    True significa que al menos un artículo tiene stock positivo; False exige
+    confirmar todos en cero. None significa que la lectura no permite decidir.
+    La partida sola no alcanza: dos artículos pueden compartir número de serie.
     """
 
     if not entries:
         return False
-    for entry in entries:
-        partida = _clean(entry.get("Comprobante_ArtPartida"))
-        if not partida:
-            return False
-        try:
-            response = client.obtener_stock_partida(partida)
-        except Exception:
-            return False
-        records = _records_for_partida_any_quantity(response, partida, deposit)
-        if not any((quantity := _quantity_from_record(record)) is not None and quantity != 0 for record in records):
-            return False
-    return True
+    targets = [
+        (_clean(entry.get("Comprobante_ArtPartida")), _clean(entry.get("Comprobante_Art_CodGen")))
+        for entry in entries
+    ]
+    if not all(partida and article for partida, article in targets):
+        return None
+    attempts = max(1, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS", 3) or 3))
+    delay_ms = max(0, int(getattr(settings, "BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS", 1500) or 0))
+    all_zero_across_attempts = True
+    for attempt in range(attempts):
+        all_zero = True
+        for partida, article in targets:
+            try:
+                response = client.obtener_stock_partida(partida)
+            except Exception:
+                all_zero = False
+                continue
+            records = [
+                record for record in _records_for_partida_any_quantity(response, partida, deposit)
+                if _article_code_from_record(record).upper() == article.upper()
+            ]
+            if not records:
+                all_zero = False
+                continue
+            quantities = [_quantity_from_record(record) for record in records]
+            if any(quantity is not None and quantity > 0 for quantity in quantities):
+                return True
+            if any(quantity is None or quantity < 0 for quantity in quantities):
+                all_zero = False
+        if not all_zero:
+            all_zero_across_attempts = False
+        if attempt < attempts - 1 and delay_ms:
+            time.sleep(delay_ms / 1000)
+    return False if all_zero_across_attempts else None
 
 
 def _restore_register_stock_entries(client: BejermanSDKClient, entries: list[dict[str, Any]]) -> None:
@@ -4264,10 +4287,35 @@ def force_stock_entry_for_ingreso(ingreso_id: int, user_id: int | None = None) -
 
 
 def _is_partida_rejection_message(message: Any) -> bool:
+    # "No hay stock suficiente en la partida X" nombra la partida y dice "no se
+    # importó", pero es falta de stock: recuperarlo emitiría sin mover stock y
+    # saltearía el control de Bejerman (ver bejerman_delivery._is_delivery_partida_rejection_message).
+    if is_bejerman_stock_insuficiente_message(message):
+        return False
     text = _clean_upper(message)
     if "PARTIDA" not in text:
         return False
-    return any(token in text for token in ("INEXISTENTE", "NO INFORMADA", "NO SE IMPORT", "NO INFORMO", "NO INFORMÓ"))
+    return any(token in text for token in ("INEXISTENTE", "NO INFORMADA", "NO INFORMO", "NO INFORMÓ"))
+
+
+def _ris_rejection_is_recoverable(message: Any, comprobante: dict[str, Any]) -> bool:
+    """Rechazos del primer intento que se resuelven dando de alta la partida con un ENT.
+
+    Además de la partida inexistente, para un RIS que ingresa stock cuenta "No hay stock
+    ingresado para el artículo X": el depósito todavía no tiene la fila de stock de ese
+    artículo y el importador de ventas no la crea. Le pasó al videolaringoscopio de la
+    OS 29470 el 02/07/2026, y fue lo que llevó a dar vuelta el signo del RIS por error.
+    El ENT de la recuperación crea la fila y la partida. En una salida ese mismo texto es
+    falta de stock real, por eso se exige que el RIS viaje como ingreso (en negativo).
+    """
+    if _is_partida_rejection_message(message):
+        return True
+    tipo = _clean_upper((comprobante or {}).get("Comprobante_Tipo"))
+    return (
+        tipo == (_clean_upper(getattr(settings, "BEJERMAN_RIS_TYPE", "RIS")) or "RIS")
+        and sdk_uses_negative_article_quantity(tipo)
+        and "NO HAY STOCK INGRESADO" in _clean_upper(message)
+    )
 
 
 def _comprobante_import_with_partidas(
@@ -4349,14 +4397,15 @@ def _recover_emit_partida_rejection(
                     raise BejermanRisReviewRequiredError(
                         "El reintento del remito de ingreso quedó sin confirmación; requiere reconciliación."
                     ) from retry_exc
-                if _register_entries_moved_by_comprobante(client, created_entries, deposit):
-                    # El cambio de stock contradice el rechazo: detenerse y reconciliar.
+                movement = _register_entries_moved_by_comprobante(client, created_entries, deposit)
+                if movement is not False:
+                    # Un movimiento o una lectura inconclusa impiden reponer el ENT.
                     logger.warning(
-                        "bejerman_ris_partida_stock_retry_entered_anyway",
+                        "bejerman_ris_partida_stock_retry_unconfirmed",
                         extra={"partidas": [_clean(e.get("Comprobante_ArtPartida")) for e in created_entries]},
                     )
                     raise BejermanRisReviewRequiredError(
-                        "El stock cambió durante el reintento del remito de ingreso; requiere reconciliación."
+                        "No se pudo descartar un movimiento de stock durante el reintento; requiere reconciliación."
                     ) from retry_exc
                 else:
                     _restore_register_stock_entries(client, created_entries)
@@ -4656,7 +4705,7 @@ def _send_service_ingress_comprobante(
             emite_reg=emite_reg,
         )
     except BejermanSdkResponseError as exc:
-        if not _is_partida_rejection_message(str(exc)):
+        if not _ris_rejection_is_recoverable(str(exc), built["comprobante"]):
             raise
         logger.warning(
             "bejerman_ris_emit_partida_rejection_fallback",
@@ -5102,7 +5151,9 @@ def resolve_bejerman_ingreso_remito_review(
         )
         return {"success": True, "ingresoId": ingreso_id, "reviewState": "ready_to_reissue"}
 
-    numero = _clean(payload.get("comprobanteNumero") or payload.get("remitoNumber"))
+    # El número completo («RIS R 00004-00005305») viene cuando se eligió un comprobante que
+    # encontró «Buscar en Bejerman»: con él no hace falta adivinar tipo ni punto de venta.
+    numero = _clean(payload.get("remitoNumber")) or _clean(payload.get("comprobanteNumero"))
     if not numero:
         numero = _clean(row.get("remito_ingreso"))
     if not numero:
@@ -5137,6 +5188,87 @@ def resolve_bejerman_ingreso_remito_review(
         "remitoNumber": _clean(adopted.get("remito_number")),
         "operatorResolution": resolution,
     }
+
+
+# Días antes del ingreso desde los que se buscan comprobantes: hay RIS que Recepción emite en
+# Bejerman antes de cargar la OS en NEXORA.
+INGRESO_REMITO_SEARCH_MARGIN_DAYS = 15
+
+
+def search_ingreso_remito_in_bejerman(process_id: Any, actor_user_id: int | None = None) -> dict[str, Any]:
+    """«Buscar en Bejerman» para un remito de ingreso en revisión.
+
+    La revisión pedía mirar Bejerman a mano: había que salir del panel, buscar el comprobante
+    por cliente y fecha y volver a escribir el número. Acá se buscan los RIS/RDA/RDN que citan
+    la serie del equipo desde unos días antes del ingreso y se dejan anotados en el proceso,
+    para que «Resolver revisión» los ofrezca. No adopta nada por su cuenta: un remito puede
+    llevar varios equipos, y la decisión sigue siendo de una persona.
+    """
+
+    from .bejerman_remito_lookup import ingreso_reference_date, search_remitos_by_serial
+
+    row = _row_for_ingreso_remito(process_id)
+    if not row or row.get("status") != "failed_review":
+        raise BejermanRisError("No se encontró un proceso pendiente de revisión.")
+    ingreso_id = int(row["ingreso_id"])
+    equipment = q(
+        """
+        SELECT COALESCE(d.numero_serie, '') AS numero_serie,
+               COALESCE(NULLIF(r.company_key, ''), NULLIF(i.empresa_bejerman, ''), 'SEPID') AS company_key
+          FROM bejerman_ingreso_remitos r
+          JOIN ingresos i ON i.id = r.ingreso_id
+          JOIN devices d ON d.id = i.device_id
+         WHERE r.id = %s
+        """,
+        [row["id"]],
+        one=True,
+    ) or {}
+    serial = _clean(equipment.get("numero_serie"))
+    if not serial:
+        raise BejermanRisError("El equipo no tiene número de serie: no se puede buscar su remito en Bejerman.")
+    since = ""
+    reference = _clean(ingreso_reference_date(ingreso_id))
+    if reference:
+        since = (date.fromisoformat(reference[:10]) - timedelta(days=INGRESO_REMITO_SEARCH_MARGIN_DAYS)).isoformat()
+    result = search_remitos_by_serial(
+        serial,
+        flow="ingress",
+        company_key=equipment.get("company_key"),
+        ingreso_id=ingreso_id,
+        since=since,
+    )
+    if result.get("status") != "ok":
+        raise BejermanRisError(result.get("detail") or "No se pudo consultar Bejerman para buscar el remito.")
+    candidates = []
+    for item in result.get("candidates") or []:
+        others = int(item.get("otherItemCount") or 0)
+        detail = [_clean(item.get("customerName"))]
+        if others:
+            detail.append(f"{others} equipo{'s' if others != 1 else ''} más en el mismo remito")
+        candidates.append(
+            {
+                "remitoNumber": _clean(item.get("remitoNumber")),
+                "comprobanteTipo": _clean(item.get("type")),
+                "comprobanteLetra": _clean(item.get("letter")),
+                "comprobantePtoVenta": _clean(item.get("pointOfSale")),
+                "comprobanteNumero": _clean(item.get("number")),
+                "fechaEmision": _clean(item.get("issueDate")),
+                "mensaje": " · ".join(part for part in detail if part),
+            }
+        )
+    verification = {
+        "at": timezone.now().isoformat(),
+        "actorUserId": actor_user_id,
+        "serial": serial,
+        "since": since,
+        "candidates": candidates,
+    }
+    _patch_ingreso_remito_review(ingreso_id, {"verification": verification})
+    logger.info(
+        "bejerman_ris_review_searched",
+        extra={"ingreso_id": ingreso_id, "actor_user_id": actor_user_id, "candidates": len(candidates)},
+    )
+    return verification
 
 
 def register_ris_batch(ingreso_ids: list[int], manual_remito_number: Any, user_id: int | None = None) -> dict[str, Any]:

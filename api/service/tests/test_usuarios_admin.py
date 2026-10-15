@@ -196,6 +196,85 @@ class UsuariosAdminApiTests(TestCase):
         self.assertEqual(downgrade.status_code, 400)
         self.assertEqual(User.objects.get(id=self.jefe.id).rol, "jefe")
 
+    def _admin_con_gestion_de_usuarios(self):
+        admin = self._create_target(
+            nombre="Admin con gestión de usuarios",
+            email="admin-usuarios@example.com",
+            rol="admin",
+        )
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_permission_overrides(user_id, permission_code, effect, updated_by)
+                VALUES (%s, 'action.users.manage', 'allow', %s),
+                       (%s, 'page.users', 'allow', %s)
+                """,
+                [admin.id, self.jefe.id, admin.id, self.jefe.id],
+            )
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        return admin, client
+
+    def test_gestionar_usuarios_no_alcanza_para_asignar_jefatura(self):
+        # `action.users.manage` se otorga por usuario: si con eso se pudiera cambiar a rol
+        # Jefe, a quien se lo dieran le alcanzaba para quedarse con todo.
+        admin, client = self._admin_con_gestion_de_usuarios()
+        target = self._create_target()
+
+        propio = client.patch(f"/api/usuarios/{admin.id}/", {"rol": "jefe"}, format="json")
+        self.assertEqual(propio.status_code, 400)
+        ajeno = client.patch(
+            f"/api/usuarios/{target.id}/roleperm/",
+            {"rol": "jefe_suplente"},
+            format="json",
+        )
+        self.assertEqual(ajeno.status_code, 403)
+        alta = client.post(
+            "/api/usuarios/",
+            {"nombre": "Jefe nuevo", "email": "jefe-nuevo@example.com", "rol": "jefe"},
+            format="json",
+        )
+        self.assertEqual(alta.status_code, 403)
+        desactivar_jefe = client.patch(
+            f"/api/usuarios/{self.jefe.id}/activar/",
+            {"activo": False},
+            format="json",
+        )
+        self.assertEqual(desactivar_jefe.status_code, 403)
+
+        self.assertEqual(User.objects.get(id=admin.id).rol, "admin")
+        self.assertEqual(User.objects.get(id=target.id).rol, "tecnico")
+        self.assertTrue(User.objects.get(id=self.jefe.id).activo)
+        self.assertFalse(User.objects.filter(email="jefe-nuevo@example.com").exists())
+
+        # Lo que sí puede: mover a alguien entre roles que no son de jefatura.
+        comun = client.patch(
+            f"/api/usuarios/{target.id}/roleperm/",
+            {"rol": "recepcion"},
+            format="json",
+        )
+        self.assertEqual(comun.status_code, 200)
+        self.assertEqual(User.objects.get(id=target.id).rol, "recepcion")
+
+    def test_nadie_cambia_su_propio_rol_aunque_haya_otro_jefe(self):
+        self._create_target(nombre="Otro jefe", email="otro-jefe@example.com", rol="jefe")
+
+        response = self.client.patch(f"/api/usuarios/{self.jefe.id}/", {"rol": "admin"}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("propio rol", str(response.data))
+        self.assertEqual(User.objects.get(id=self.jefe.id).rol, "jefe")
+
+    def test_el_editor_devuelve_lo_que_hereda_del_rol(self):
+        target = self._create_target(rol="recepcion")
+
+        response = self.client.get(f"/api/usuarios/{target.id}/permisos/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["role_defaults"]["page.recepcion"])
+        self.assertFalse(response.data["role_defaults"]["page.users"])
+        self.assertEqual(response.data["unknown_overrides"], [])
+
     @override_settings(BEJERMAN_CREDENTIALS_SECRET="usuarios-admin-secret")
     def test_jefe_can_replace_and_clear_bejerman_credentials_without_exposing_password(self):
         target = self._create_target()

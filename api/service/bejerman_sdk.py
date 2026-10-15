@@ -2836,10 +2836,14 @@ def append_remito_legend_lines(
     return sort_order
 
 
-# Bejerman's ventas SDK represents some stock-ingress remitos with negative
-# item quantities. RIS is a service ingress and must add stock, so it stays
-# positive; otherwise Bejerman treats it as an exit and asks for prior stock.
-DEFAULT_SDK_NEGATIVE_QUANTITY_TYPES = "RD,RDN,RDA"
+# En el circuito de ventas, Bejerman mueve el stock al revés del signo del renglón:
+# +1 saca del depósito y -1 mete. Por eso los comprobantes que ingresan equipos
+# (las devoluciones RD/RDN/RDA y el RIS de servicio técnico) viajan en negativo.
+# Medido en SBDASEP: los RIS que entraron a STR tienen sdv_CantUM1 = -1 y movimiento +1.
+# Con +1 el RIS es una salida de STR: Bejerman lo rechaza con "No hay stock suficiente
+# en la partida" y, si igual lo deja pasar, la partida queda en -1 (OS 29878,
+# RIS 00004-00005485, 15/10/2026). Los importes y los totales usan siempre la magnitud.
+DEFAULT_SDK_NEGATIVE_QUANTITY_TYPES = "RD,RDN,RDA,RIS"
 DEFAULT_EMISSION_NEGATIVE_QUANTITY_TYPES = DEFAULT_SDK_NEGATIVE_QUANTITY_TYPES
 
 
@@ -3463,6 +3467,7 @@ def build_delivery_remito_comprobante(
     sort_order = 1
     total = Decimal("0")
     tax_total = Decimal("0")
+    customer_uses_gross_unit_price = as_string(customer_fields.get("Cliente_SitIVA")) in {"5", "6"}
     for order in orders:
         is_service_release = order.get("deliveryType") == "service_release"
         is_sale = order.get("deliveryType") == "sale"
@@ -3562,13 +3567,10 @@ def build_delivery_remito_comprobante(
                 unit_price_decimal = _delivery_decimal(unit_price)
                 discount_decimal = _delivery_decimal(discount_percent)
                 vat_rate_decimal = _delivery_decimal(vat["rate"])
-                # El renglón siempre viaja con el neto y la alícuota del artículo discriminada,
-                # cualquiera sea la situación de IVA del cliente. Entre el 14/07 y el 07/08/2026
-                # los clientes que no eran responsables inscriptos salían con el precio
-                # multiplicado por 1+tasa y la alícuota en 0: Bejerman guardaba el renglón con
-                # código de IVA 04 (0%) y toda factura hecha desde ese remito —A, B o FCC—
-                # nacía con IVA cero. Cómo se imprime el precio (neto o final) lo decide la
-                # letra del comprobante en el ERP, no el remito.
+                # Para SitIVA 5 y 6 el importador de Bejerman interpreta el precio unitario
+                # y Item_Importe como importes con IVA incluido. El neto, la tasa y el
+                # IVA siguen discriminados: poner la tasa en cero rompería la factura
+                # posterior. Los demás clientes mantienen el contrato de precio neto.
                 item_unit_price = unit_price_decimal
                 gross_amount = quantity_decimal * item_unit_price
                 discount_amount = _delivery_money(gross_amount * discount_decimal / Decimal("100"))
@@ -3576,6 +3578,12 @@ def build_delivery_remito_comprobante(
                 final_unit_price = item_unit_price * (Decimal("1") - discount_decimal / Decimal("100"))
                 item_vat_rate = vat_rate_decimal
                 vat_amount = _delivery_money(amount * vat_rate_decimal / Decimal("100"))
+                imported_unit_price = (
+                    item_unit_price * (Decimal("1") + vat_rate_decimal / Decimal("100"))
+                    if customer_uses_gross_unit_price
+                    else item_unit_price
+                )
+                imported_amount = amount + vat_amount if customer_uses_gross_unit_price else amount
                 total += amount
                 tax_total += vat_amount
                 items.append(
@@ -3586,7 +3594,7 @@ def build_delivery_remito_comprobante(
                         "Item_CantidadUM1": signed_line_quantity if article_code else 0,
                         "Item_CantidadUM2": 0,
                         "Item_DescripArticulo": article_name[:250],
-                        "Item_PrecioUnitario": _delivery_unit_price_number(item_unit_price),
+                        "Item_PrecioUnitario": _delivery_unit_price_number(imported_unit_price),
                         "Item_TasaIVAInscrip": float(item_vat_rate),
                         "Item_TasaIVANoInscrip": 0,
                         "Item_ImporteIVAInscrip": _delivery_money_number(vat_amount),
@@ -3603,7 +3611,7 @@ def build_delivery_remito_comprobante(
                         "Item_Deposito": (line_deposit or profile["deposit"]) if article_code else None,
                         "Item_Partida": line_partida or " ",
                         "Item_TasaDescPorItem": discount_percent,
-                        "Item_Importe": _delivery_money_number(amount),
+                        "Item_Importe": _delivery_money_number(imported_amount),
                         "Item_FechaEntrega": issue_date,
                         "Item_Kit": None,
                         "Item_RenglonKit": 0,

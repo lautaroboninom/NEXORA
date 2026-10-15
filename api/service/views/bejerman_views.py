@@ -15,6 +15,13 @@ from ..bejerman_delivery import (
     review_candidates_for_group,
     verify_bejerman_remito_review,
 )
+from ..bejerman_retry_advice import (
+    advice_for_delivery_group,
+    advice_for_ingreso_remito,
+    advice_for_stock_job,
+    can_change_source,
+    repeated_serials_by_ingreso,
+)
 from ..bejerman_ris import (
     BejermanRisBusyError,
     BejermanRisError,
@@ -22,6 +29,7 @@ from ..bejerman_ris import (
     emit_or_get_ris,
     register_ris_batch,
     resolve_bejerman_ingreso_remito_review,
+    search_ingreso_remito_in_bejerman,
 )
 from ..bejerman_sync import (
     BejermanBlockedError,
@@ -37,7 +45,10 @@ from ..bejerman_sync import (
     apply_article_mapping_to_job,
     article_resolution_for_job_row,
     cancel_sync_job,
+    change_job_source_deposit,
+    diagnose_job_stock,
     is_supported_sync_type,
+    partida_stock_locations,
     article_context_for_job,
     article_context_for_model,
     process_bejerman_jobs,
@@ -75,6 +86,19 @@ def _as_int(value):
 
 def _wants_bejerman_history(params):
     return str(params.get("history") or "").strip() in {"1", "true", "True"}
+
+
+def _status_filter_values(params):
+    """Estados pedidos en `status`. Admite varios separados por coma: el panel filtra
+    por grupos ("con problemas", "correctos") que juntan más de un estado."""
+
+    raw = str(params.get("status") or "")
+    values = []
+    for part in raw.split(","):
+        value = part.strip().lower()
+        if value and value not in values:
+            values.append(value)
+    return values
 
 
 def _build_job_filters(params, *, include_status=True):
@@ -115,10 +139,11 @@ def _build_job_filters(params, *, include_status=True):
         sql_params.append(SYNC_TYPE_STOCK_TO_DESGUACE)
 
     if include_status:
-        status = (params.get("status") or "").strip()
-        if status:
-            where.append("j.status = %s")
-            sql_params.append(status)
+        statuses = _status_filter_values(params)
+        if statuses:
+            placeholders = ",".join(["%s"] * len(statuses))
+            where.append(f"j.status IN ({placeholders})")
+            sql_params.extend(statuses)
 
     sync_type = (params.get("sync_type") or params.get("type") or "").strip()
     if sync_type:
@@ -271,7 +296,7 @@ def _remito_process_is_archivable(row):
 
 def _filter_remito_processes(rows, params, *, include_status=True):
     source = _clean_filter(params.get("source") or params.get("origen")).lower()
-    status = _clean_filter(params.get("status")).lower()
+    statuses = set(_status_filter_values(params))
     company_key = _clean_filter(params.get("company_key") or params.get("company")).upper()
     os_value = _as_int(params.get("os") or params.get("ingreso_id"))
     cliente = _clean_filter(params.get("cliente")).lower()
@@ -282,7 +307,7 @@ def _filter_remito_processes(rows, params, *, include_status=True):
     for row in rows:
         if not show_history and _remito_process_is_archivable(row):
             continue
-        if include_status and status and str(row.get("status") or "").lower() != status:
+        if include_status and statuses and str(row.get("status") or "").lower() not in statuses:
             continue
         if source and str(row.get("source") or "").lower() != source:
             continue
@@ -410,6 +435,11 @@ def _ingreso_remito_processes(action_permissions=None):
         """,
         [DEFAULT_INGRESS_COMPANY_KEY],
     ) or []
+    # Dos equipos del mismo remito con la misma serie: Bejerman rechaza el RIS y ningún
+    # reintento lo arregla (OS 29880/29881, diez reintentos el 15/10/2026).
+    repeated_serials = repeated_serials_by_ingreso(
+        {**row, "request_payload": _json_value(row.get("request_payload"), {})} for row in rows
+    )
     out = []
     for row in rows:
         company = _company_payload(row.get("company_key"), row.get("company_label"), row.get("bejerman_company"))
@@ -419,6 +449,7 @@ def _ingreso_remito_processes(action_permissions=None):
         document_mode = row.get("document_mode") or "emit"
         generated = row.get("status") == "generated"
         response_payload = _json_value(row.get("response_payload"), {})
+        verification = response_payload.get("verification") if isinstance(response_payload.get("verification"), dict) else {}
         attempted_at = row.get("updated_at") or row.get("generated_at") or row.get("created_at")
         # Sin estas acciones el front caía en sus defaults (`?? (canManage && needsReview)`)
         # y dibujaba sobre una fila de ingreso los botones de las órdenes de entrega:
@@ -432,38 +463,48 @@ def _ingreso_remito_processes(action_permissions=None):
         blocked_reason = _clean_filter(response_payload.get("blockedReason"))
         needs_review = status == "failed_review" and not superseded
         actions = {
-            "verify": {"visible": False, "allowed": False, "blockedReason": ""},
+            # «Buscar en Bejerman»: trae los RIS/RDA/RDN que citan la serie, para que la
+            # revisión se resuelva sin salir del panel a buscar el comprobante a mano.
+            "verify": {
+                "visible": needs_review,
+                "allowed": needs_review and can_manage,
+                "blockedReason": "" if can_manage else "No tiene permiso para verificar comprobantes en Bejerman.",
+            },
             "edit": {"visible": False, "allowed": False, "blockedReason": ""},
             "resolve": {
                 "visible": needs_review,
                 "allowed": needs_review and can_manage,
                 "blockedReason": "" if can_manage else "No tiene permiso para resolver revisiones de Bejerman.",
-                "candidates": [],
+                "candidates": verification.get("candidates") if isinstance(verification.get("candidates"), list) else [],
                 "suggestedNumber": _clean_filter(row.get("remito_number")) or _clean_filter(row.get("manual_remito_number")),
             },
             "reissue": {"visible": False, "allowed": False, "blockedReason": ""},
         }
-        out.append(
-            {
-                **row,
-                **company,
-                "source": "ingreso",
-                "source_label": "Ingreso de servicio",
-                "process_id": f"ingreso:{row.get('id')}",
-                "display_id": f"OS-{row.get('ingreso_id')}",
-                "equipment_label": equipment_label,
-                "title": row.get("remito_number") or row.get("manual_remito_number") or "Remito de ingreso",
-                "operation_label": "Registrar remito" if document_mode == "register" else "Emitir remito",
-                "retryable": status == "failed" and not superseded,
-                "reviewState": review_state,
-                "actions": actions,
-                "blockedReason": blocked_reason,
-                "last_error": _remito_error_message(response_payload, row.get("last_error")),
-                "attempted_at": attempted_at,
-                "pdf_url": f"/api/ingresos/{row.get('ingreso_id')}/ris/pdf/" if generated and document_mode == "emit" else None,
-                "print_url": f"/api/ingresos/{row.get('ingreso_id')}/ris/print/" if generated and document_mode == "emit" else None,
-            }
+        process = {
+            **row,
+            **company,
+            "source": "ingreso",
+            "source_label": "Ingreso de servicio",
+            "process_id": f"ingreso:{row.get('id')}",
+            "display_id": f"OS-{row.get('ingreso_id')}",
+            "equipment_label": equipment_label,
+            "title": row.get("remito_number") or row.get("manual_remito_number") or "Remito de ingreso",
+            "operation_label": "Registrar remito" if document_mode == "register" else "Emitir remito",
+            "retryable": status == "failed" and not superseded,
+            "reviewState": review_state,
+            "actions": actions,
+            "verification": verification or None,
+            "blockedReason": blocked_reason,
+            "last_error": _remito_error_message(response_payload, row.get("last_error")),
+            "attempted_at": attempted_at,
+            "pdf_url": f"/api/ingresos/{row.get('ingreso_id')}/ris/pdf/" if generated and document_mode == "emit" else None,
+            "print_url": f"/api/ingresos/{row.get('ingreso_id')}/ris/print/" if generated and document_mode == "emit" else None,
+        }
+        process["retry_advice"] = advice_for_ingreso_remito(
+            process,
+            repeated_serial_os=repeated_serials.get(int(row.get("ingreso_id") or 0), []),
         )
+        out.append(process)
     return out
 
 
@@ -570,11 +611,33 @@ def _delivery_remito_processes(action_permissions=None):
           FROM bejerman_remito_groups
         """,
     ) or []
+    # Remitos que cada orden ya tiene emitidos. Con eso a la vista, un intento fallido de la
+    # misma orden deja de ser trabajo pendiente: la OE-00145 falló por timeout el 21/07/2026,
+    # salió dos minutos después con otro intento y su «Reintentar» siguió ofrecido tres meses.
+    issued_by_order: dict[str, list[tuple[str, str]]] = {}
+    for group in rows:
+        if group.get("status") not in {"generated", "reconciled"}:
+            continue
+        group_order_ids = _json_value(group.get("order_ids"), [])
+        for order_id in group_order_ids if isinstance(group_order_ids, list) else []:
+            issued_by_order.setdefault(str(order_id), []).append(
+                (str(group.get("id") or ""), _clean_filter(group.get("remito_number")))
+            )
     out = []
     for row in rows:
         order_ids = _json_value(row.get("order_ids"), [])
         if not isinstance(order_ids, list):
             order_ids = []
+        issued_elsewhere: list[str] = []
+        if row.get("status") in {"failed", "failed_review", "sent_unknown"} and order_ids:
+            issued_per_order = [
+                [label for group_id, label in issued_by_order.get(str(order_id), []) if group_id != str(row.get("id"))]
+                for order_id in order_ids
+            ]
+            if all(issued_per_order):
+                issued_elsewhere = list(dict.fromkeys(label for labels in issued_per_order for label in labels if label))
+                if not issued_elsewhere:
+                    issued_elsewhere = ["otro remito"]
         response_summary = _json_value(row.get("response_summary"), {})
         if not isinstance(response_summary, dict):
             response_summary = {}
@@ -724,6 +787,7 @@ def _delivery_remito_processes(action_permissions=None):
                     and bool(order_ids)
                     and not superseded
                     and not closed_order
+                    and not issued_elsewhere
                 ),
                 "retry_mode": "reconcile" if row.get("status") == "failed_review" else "retry",
                 "reviewState": review_state,
@@ -736,6 +800,7 @@ def _delivery_remito_processes(action_permissions=None):
                 "print_url": f"/api/ordenes-entrega/remito-bejerman/{row.get('id')}/print/" if generated else None,
             }
         )
+        out[-1]["retry_advice"] = advice_for_delivery_group(out[-1], issued_remitos=issued_elsewhere)
     return out
 
 
@@ -785,6 +850,9 @@ def _ingreso_conflict_processes(action_permissions=None):
                 "conflicting_os": os_previa,
                 "conflicting_fecha_ingreso": fecha_previa,
                 "conflicting_estado": row.get("conflicting_estado") or "",
+                # Fecha del reingreso: tope (y valor sugerido) para la salida que indica
+                # jefatura cuando cierra la orden anterior sin comprobante.
+                "ingreso_fecha_ingreso": row.get("ingreso_fecha_ingreso"),
                 "display_id": f"OS-{row.get('ingreso_id')}",
                 "numero_serie": row.get("numero_serie") or "",
                 "numero_interno": row.get("numero_interno") or "",
@@ -888,6 +956,7 @@ class BejermanJobsView(APIView):
                    j.response_payload,
                    j.created_at,
                    j.updated_at,
+                   j.lote_id,
                    d.model_id,
                    COALESCE(d.numero_interno, '') AS numero_interno,
                    COALESCE(c.razon_social, '') AS cliente,
@@ -935,6 +1004,10 @@ class BejermanJobsView(APIView):
                     f"NEXORA no tiene ninguna implementación para «{row.get('sync_type')}». "
                     "Reintentar vuelve a dar el mismo error: la salida es descartar la operación."
                 )
+            )
+            row["retry_advice"] = advice_for_stock_job(row)
+            row["can_change_source"] = can_change_source(
+                {**row, "request_payload": _json_value(row.get("request_payload"), {})}
             )
 
         counter_where, counter_params = _build_job_filters(request.GET, include_status=False)
@@ -1082,6 +1155,19 @@ class BejermanJobRetryView(APIView):
                     {"detail": "Solo se pueden reintentar operaciones pendientes, fallidas o bloqueadas"},
                     status=409,
                 )
+
+        # «Mover desde donde está»: antes de reintentar, el origen pasa a ser el depósito que
+        # eligió el operador, pero sólo si Bejerman confirma ahora que el equipo está ahí.
+        move_from = str((request.data or {}).get("move_from") or "").strip()
+        if move_from:
+            try:
+                change_job_source_deposit(job_id, move_from, _actor_id(request))
+            except (BejermanBlockedError, BejermanConfigError) as exc:
+                return Response({"detail": str(exc)}, status=409)
+            except BejermanTransientError as exc:
+                return Response({"detail": f"Bejerman no respondió al verificar el depósito: {exc}"}, status=503)
+
+        with connection.cursor() as cur:
             cur.execute(
                 """
                 UPDATE bejerman_sync_jobs
@@ -1127,6 +1213,58 @@ class BejermanJobCancelView(APIView):
         except BejermanBlockedError as exc:
             return Response({"detail": str(exc)}, status=409)
         return Response(updated)
+
+
+class BejermanJobDiagnoseView(APIView):
+    """«Ver en Bejerman»: dónde tiene Bejerman el equipo de una operación y qué conviene hacer.
+
+    Sólo lee de Bejerman, con las credenciales de quien consulta. El veredicto queda guardado
+    en la operación para que el próximo que abra el panel lo vea sin volver a consultar.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, job_id: int):
+        require_permission(request, "action.bejerman_sync.manage")
+        try:
+            diagnosis = diagnose_job_stock(job_id, _actor_id(request))
+        except (BejermanBlockedError, BejermanConfigError) as exc:
+            return Response({"detail": str(exc)}, status=409)
+        except BejermanTransientError as exc:
+            return Response({"detail": f"Bejerman no respondió: {exc}"}, status=503)
+        return Response(diagnosis)
+
+
+class BejermanPartidaStockView(APIView):
+    """Dónde tiene Bejerman una partida: para los remitos que Bejerman rechaza por su stock.
+
+    Sólo lee de Bejerman, con las credenciales de quien consulta.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        require_permission(request, "action.bejerman_sync.manage")
+        serial = _clean_filter(request.GET.get("serial"))
+        if not serial:
+            return Response({"detail": "Indique el número de serie."}, status=400)
+        company_param = _clean_filter(request.GET.get("company_key"))
+        company = company_for_key(company_param, default=None) if company_param else None
+        company_key = company.key if company else DEFAULT_INGRESS_COMPANY_KEY
+        try:
+            locations = partida_stock_locations(serial, company_key=company_key, actor_user_id=_actor_id(request))
+        except (BejermanBlockedError, BejermanConfigError) as exc:
+            return Response({"detail": str(exc)}, status=409)
+        except BejermanTransientError as exc:
+            return Response({"detail": f"Bejerman no respondió: {exc}"}, status=503)
+        return Response(
+            {
+                "serial": serial,
+                "companyKey": company_key,
+                "locations": locations,
+                "checkedAt": timezone.now().isoformat(),
+            }
+        )
 
 
 class BejermanRemitoProcessesView(APIView):
@@ -1184,9 +1322,17 @@ class BejermanRemitoProcessRetryView(APIView):
                 except BejermanRisError as exc:
                     return Response({"detail": str(exc)}, status=409)
                 return Response({"ok": True, "source": source, "result": result})
+            if action == "verify":
+                # «Buscar en Bejerman»: sólo lee y deja los comprobantes encontrados en el proceso,
+                # para que «Resolver revisión» los ofrezca. No adopta nada por su cuenta.
+                try:
+                    result = search_ingreso_remito_in_bejerman(row["id"], actor_id)
+                except BejermanRisError as exc:
+                    return Response({"detail": str(exc)}, status=409)
+                return Response({"ok": True, "source": source, "result": result})
             if action and action not in {"retry", "reissue_corrected"}:
                 return Response(
-                    {"detail": "Para un remito de ingreso indique action=resolve o action=retry."},
+                    {"detail": "Para un remito de ingreso indique action=verify, action=resolve o action=retry."},
                     status=400,
                 )
             if row.get("status") == "failed_review":

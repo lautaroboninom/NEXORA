@@ -5,8 +5,10 @@ from django.test import SimpleTestCase, override_settings
 
 from service.bejerman_ris import (
     BejermanRisError,
+    BejermanRisReviewRequiredError,
     _comprobante_import_with_partidas,
     _emit_payload_to_bejerman,
+    _is_stock_ingress_payload,
     _register_payload_to_bejerman,
 )
 from service.bejerman_sdk import BejermanSdkResponseError, build_service_ingress_comprobante
@@ -102,6 +104,84 @@ class PartidaRejectionClient(FakeRemitoContractClient):
         return super().ingresar_comprobante_ventas_json(comprobante, **kwargs)
 
 
+class BejermanStockSemanticsClient(FakeRemitoContractClient):
+    """Bejerman tal como se midió en SBDASEP el 15/10/2026 (OS 29878, RIS 00004-00005485).
+
+    - El circuito de STOCK guarda la cantidad con el signo que recibe (ENT +1, SAL -1).
+    - El de VENTAS no crea partidas: sin la fila (partida, artículo, depósito)
+      rechaza con "Partida inexistente y/o no informada", con o sin stock.
+    - Con ActualizaStock=S mueve el stock al revés del signo del renglón y no deja
+      la partida en negativo: un RIS en +1 es una salida de STR y, con la partida en
+      cero, contesta "No hay stock suficiente en la partida".
+    """
+
+    def __init__(self, *, number="00005490", stock=None):
+        super().__init__(number=number)
+        self.stock = dict(stock or {})
+
+    def obtener_stock_partida(self, partida):
+        partida = str(partida or "").strip()
+        records = [
+            {
+                "Art_CodDeposito": deposito,
+                "Art_Partida": clave_partida,
+                "Art_CodGen": articulo,
+                "Art_RealUM1": cantidad,
+                "Art_DispUM1": cantidad,
+            }
+            for (clave_partida, articulo, deposito), cantidad in self.stock.items()
+            if clave_partida == partida
+        ]
+        return {"Resultado": "OK", "DatosJSON": json.dumps(records)}
+
+    def ingresar_lista_comprobantes_stock_json(self, comprobantes, *, numera_flex="N"):
+        self.stock_comprobantes.append({"comprobantes": comprobantes, "numeraFlex": numera_flex})
+        for item in comprobantes or []:
+            clave = (
+                str(item.get("Comprobante_ArtPartida") or "").strip(),
+                str(item.get("Comprobante_Art_CodGen") or "").strip(),
+                str(item.get("Comprobante_ArtDeposito") or "").strip(),
+            )
+            self.stock[clave] = self.stock.get(clave, 0) + item["Comprobante_CantidadUM1"]
+        return {"Resultado": "OK", "DatosJSON": json.dumps(comprobantes or [])}
+
+    def ingresar_comprobante_ventas_json(self, comprobante, **kwargs):
+        movimientos = {}
+        for item in comprobante.get("Comprobante_Items") or []:
+            if item.get("Item_Tipo") != "A":
+                continue
+            clave = (
+                str(item.get("Item_Partida") or "").strip(),
+                str(item.get("Item_CodigoArticulo") or "").strip(),
+                str(item.get("Item_Deposito") or "").strip(),
+            )
+            if clave not in self.stock:
+                self._rechazar(
+                    comprobante,
+                    kwargs,
+                    f"El comprobante no se importó debido a que el ítem {clave[1]} tiene asignada una "
+                    "Partida inexistente y/o no informada.",
+                )
+            if comprobante.get("Comprobante_ActualizaStock") == "S":
+                movimientos[clave] = movimientos.get(clave, 0) - item["Item_CantidadUM1"]
+        for clave, delta in movimientos.items():
+            if self.stock[clave] + delta < 0:
+                self._rechazar(
+                    comprobante,
+                    kwargs,
+                    f"El comprobante no se importó. No hay stock suficiente en la partida {clave[0]} "
+                    f"para el artículo {clave[1]} .",
+                )
+        for clave, delta in movimientos.items():
+            self.stock[clave] += delta
+        return super().ingresar_comprobante_ventas_json(comprobante, **kwargs)
+
+    def _rechazar(self, comprobante, kwargs, mensaje):
+        self.comprobantes.append(comprobante)
+        self.ingresar_kwargs.append(kwargs)
+        raise BejermanSdkResponseError(mensaje)
+
+
 def _payload(*, company_key="SEPID", bejerman_company="SEP", point="00004", update_stock=True, serial="SN-RIS-001"):
     return {
         "requestId": f"reparaciones-ingreso-{serial}",
@@ -182,7 +262,7 @@ def _batch_register_payload(serials, *, existing_stock=False):
     BEJERMAN_STOCK_NUMERA_FLEX="N",
     BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=1,
     BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0,
-    BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RD,RDN,RDA",
+    BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RD,RDN,RDA,RIS",
 )
 class BejermanRemitoContractsTests(SimpleTestCase):
     def test_emision_online_ris_actualiza_stock_s_sin_ent(self):
@@ -204,6 +284,107 @@ class BejermanRemitoContractsTests(SimpleTestCase):
         self.assertEqual(comprobante["Cliente_TipoDocumento"], "1")
         self.assertEqual(article_lines[0]["Item_Deposito"], "STR")
         self.assertEqual(article_lines[0]["Item_Partida"], "SN-RIS-001")
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM2"], -1)
+
+    def _emitir_con(self, fake, payload):
+        with (
+            patch("service.bejerman_ris.BejermanSDKClient", return_value=fake),
+            patch("service.bejerman_ris.resolve_customer_document_fields", return_value=CUSTOMER_FIELDS),
+            patch("service.bejerman_ris._ensure_equipment_remito_not_duplicated"),
+        ):
+            return _emit_payload_to_bejerman(payload)
+
+    def test_ris_con_partida_nueva_entra_a_str_con_su_propio_movimiento(self):
+        # Primer intento: la partida no existe en STR. La recuperación la crea con ENT,
+        # la deja en cero con SAL y el reintento del RIS mete la unidad él mismo.
+        fake = BejermanStockSemanticsClient(number="00005490")
+
+        request_payload, response = self._emitir_con(fake, _payload(serial="SN-RIS-NUEVA"))
+
+        self.assertEqual(response["remitoNumber"], "RIS R 00004-00005490")
+        self.assertEqual(fake.stock[("SN-RIS-NUEVA", "NXTEST-PART", "STR")], 1)
+        movimientos = [
+            (item["Comprobante_Tipo"], item["Comprobante_CantidadUM1"])
+            for lote in fake.stock_comprobantes
+            for item in lote["comprobantes"]
+        ]
+        self.assertEqual(movimientos, [("ENT", 1), ("SAL", -1)])
+        self.assertEqual([item["Comprobante_ActualizaStock"] for item in fake.comprobantes], ["S", "S"])
+        self.assertTrue(request_payload["partidaNeutralized"])
+
+    def test_sal_sin_movimiento_confirmado_no_reintenta_el_ris(self):
+        class SalSinMovimiento(BejermanStockSemanticsClient):
+            def ingresar_lista_comprobantes_stock_json(self, comprobantes, *, numera_flex="N"):
+                if comprobantes and comprobantes[0].get("Comprobante_Tipo") == "SAL":
+                    self.stock_comprobantes.append({"comprobantes": comprobantes, "numeraFlex": numera_flex})
+                    return {"Resultado": "OK", "DatosJSON": json.dumps(comprobantes)}
+                return super().ingresar_lista_comprobantes_stock_json(comprobantes, numera_flex=numera_flex)
+
+        fake = SalSinMovimiento()
+        with self.assertRaises(BejermanRisReviewRequiredError):
+            self._emitir_con(fake, _payload(serial="SN-RIS-SAL-SIN-MOVIMIENTO"))
+
+        self.assertEqual(fake.stock[("SN-RIS-SAL-SIN-MOVIMIENTO", "NXTEST-PART", "STR")], 1)
+        self.assertEqual(len(fake.comprobantes), 1)
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=2, BEJERMAN_RIS_STOCK_VERIFY_DELAY_MS=0)
+    def test_sal_reflejada_con_demora_permite_emitir_el_ris(self):
+        class SalConLecturaRetrasada(BejermanStockSemanticsClient):
+            pending_sal = None
+
+            def ingresar_lista_comprobantes_stock_json(self, comprobantes, *, numera_flex="N"):
+                if comprobantes and comprobantes[0].get("Comprobante_Tipo") == "SAL":
+                    self.stock_comprobantes.append({"comprobantes": comprobantes, "numeraFlex": numera_flex})
+                    self.pending_sal = (comprobantes, numera_flex)
+                    return {"Resultado": "OK", "DatosJSON": json.dumps(comprobantes)}
+                return super().ingresar_lista_comprobantes_stock_json(comprobantes, numera_flex=numera_flex)
+
+            def obtener_stock_partida(self, partida):
+                response = super().obtener_stock_partida(partida)
+                if self.pending_sal:
+                    comprobantes, numera_flex = self.pending_sal
+                    self.pending_sal = None
+                    for item in comprobantes:
+                        clave = (item["Comprobante_ArtPartida"], item["Comprobante_Art_CodGen"], item["Comprobante_ArtDeposito"])
+                        self.stock[clave] += item["Comprobante_CantidadUM1"]
+                return response
+
+        fake = SalConLecturaRetrasada()
+        _, response = self._emitir_con(fake, _payload(serial="SN-RIS-SAL-CON-DEMORA"))
+
+        self.assertEqual(response["remitoNumber"], "RIS R 00004-00005490")
+        self.assertEqual(fake.stock[("SN-RIS-SAL-CON-DEMORA", "NXTEST-PART", "STR")], 1)
+
+    def test_ris_con_partida_en_cero_entra_al_primer_intento(self):
+        # OS 29879, 29880 y 29881 (15/10/2026): un intento anterior dejó la partida
+        # creada en STR con cero. El RIS entra solo, sin ENT ni SAL.
+        fake = BejermanStockSemanticsClient(stock={("SN-RIS-CERO", "NXTEST-PART", "STR"): 0})
+
+        _, response = self._emitir_con(fake, _payload(serial="SN-RIS-CERO"))
+
+        self.assertEqual(response["remitoNumber"], "RIS R 00004-00005490")
+        self.assertEqual(fake.stock[("SN-RIS-CERO", "NXTEST-PART", "STR")], 1)
+        self.assertEqual(fake.stock_comprobantes, [])
+        self.assertEqual(len(fake.comprobantes), 1)
+
+    @override_settings(BEJERMAN_RIS_NEGATIVE_SDK_QUANTITY_TYPES="RD,RDN,RDA")
+    def test_ris_en_positivo_es_una_salida_y_bejerman_lo_rechaza(self):
+        # La configuración del 25/06 al 15/10/2026: el RIS en +1 pide stock previo en STR.
+        fake = BejermanStockSemanticsClient(stock={("SN-RIS-POS", "NXTEST-PART", "STR"): 0})
+
+        with self.assertRaisesRegex(BejermanRisError, "No hay stock suficiente en la partida SN-RIS-POS"):
+            self._emitir_con(fake, _payload(serial="SN-RIS-POS"))
+
+        self.assertEqual(fake.stock[("SN-RIS-POS", "NXTEST-PART", "STR")], 0)
+
+    def test_el_ris_no_entra_en_la_rama_de_devoluciones(self):
+        # Viaja en negativo como RD/RDN/RDA, pero su artículo sigue saliendo del mapeo:
+        # la partida sola no identifica al equipo (CPAP y humidificador comparten N/S).
+        for document_type, esperado in (("RIS", False), ("RDA", True), ("RDN", True)):
+            with self.subTest(document_type=document_type):
+                payload = {"documentProfile": {"type": document_type, "updateStock": True}}
+                self.assertIs(_is_stock_ingress_payload(payload), esperado)
 
     def test_registracion_manual_crea_ent_verifica_y_luego_ris_n_con_partida(self):
         fake = FakeRemitoContractClient()
@@ -301,7 +482,7 @@ class BejermanRemitoContractsTests(SimpleTestCase):
 
     def test_fallback_partida_aplica_el_signo_semantico_del_comprobante(self):
         for document_type, quantity, expected in (
-            ("RIS", -2, 2),
+            ("RIS", 2, -2),
             ("RTA", -2, 2),
             ("RD", 2, -2),
             ("RDN", 2, -2),

@@ -252,8 +252,35 @@ class PendientesPresupuestoTests(TestCase):
         self.assertEqual(item["ubicacion_nombre"], "Estantería de Alquiler")
         self.assertEqual(item["motivo"], "reparación alquiler")
 
+    def test_equipo_propio_dado_de_baja_sigue_pendiente_de_presupuesto(self):
+        """La baja no salda el presupuesto por los daños: sale de la cola cuando Comercial
+        lo resuelve, por ejemplo con "no aplica"."""
+        pendiente_id = self._crear_equipo_e_ingreso(
+            numero_interno="MG 9905",
+            motivo="baja alquiler",
+            estado="baja",
+            presupuesto_estado="pendiente",
+        )
+        no_aplica_id = self._crear_equipo_e_ingreso(
+            numero_interno="MG 9906",
+            motivo="baja alquiler",
+            estado="baja",
+            presupuesto_estado="no_aplica",
+        )
+
+        response = self.client.get("/api/presupuestos/pendientes/", HTTP_HOST="localhost")
+        self.assertEqual(response.status_code, 200)
+        ids = [row["id"] for row in response.data]
+        self.assertIn(pendiente_id, ids)
+        self.assertNotIn(no_aplica_id, ids)
+
+        with connection.cursor() as cur:
+            cola_ids = _ids(cur, _SQL_PENDIENTES_PRESUPUESTO, [])
+            self.assertIn(pendiente_id, cola_ids)
+            self.assertNotIn(no_aplica_id, cola_ids)
+
     def test_estados_cerrados_no_aparecen_en_pendientes(self):
-        for estado_cerrado in ("ingresado", "entregado", "liberado", "baja", "no_se_repara"):
+        for estado_cerrado in ("ingresado", "entregado", "liberado", "no_se_repara"):
             with self.subTest(estado=estado_cerrado):
                 ingreso_id = self._crear_equipo_e_ingreso(
                     motivo="baja alquiler",

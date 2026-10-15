@@ -44,6 +44,8 @@ REMITO_TYPES_BY_FLOW = {
     # Match exacto contra `spvtco_Cod`, así que no arrastra RTA. El RTN entra porque los aportes
     # a NOVAMED salen con RTN, que no se factura (OS 29131); la venta la marca el operador.
     "sale": ("RT", "RTN"),
+    # Remito de ingreso: lo usa «Buscar en Bejerman» para resolver un RIS que quedó sin confirmar.
+    "ingress": ("RIS", "RDA", "RDN"),
 }
 SEARCH_LIMIT = 50
 # El detalle de cada comprobante multiplica las filas: se acota el total que viaja por SSH

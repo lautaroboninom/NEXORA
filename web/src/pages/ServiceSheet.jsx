@@ -60,7 +60,7 @@ import {
   nsPreferInternoOf,
 } from "../lib/ui-helpers";
 import { estadoLabel } from "../lib/constants";
-import { canActAsTech, hasAnyRole, isJefe, ROLES } from "../lib/authz";
+import { canActAsTech, ROLES } from "../lib/authz";
 import { can, canAny, PERMISSION_CODES } from "../lib/permissions";
 import { getDeviceSwapState, swapActionLabel } from "../lib/device-swap.js";
 import ArchivosTab from "./ServiceSheet/tabs/ArchivosTab";
@@ -421,7 +421,7 @@ export default function ServiceSheet() {
     PERMISSION_CODES.ACTION_INGRESO_FIX_RIS_PREFLIGHT,
     PERMISSION_CODES.ACTION_BEJERMAN_SYNC_MANAGE,
   ]);
-  const canForceBejermanStockFix = hasAnyRole(user, [ROLES.JEFE, ROLES.JEFE_VEEDOR, ROLES.SUPERVISOR]);
+  const canForceBejermanStockFix = can(user, PERMISSION_CODES.ACTION_BEJERMAN_SYNC_FORCE_STOCK_ENTRY);
   const canPrintBarcode = can(user, PERMISSION_CODES.ACTION_INGRESO_PRINT_BARCODE);
   const canBajaAltaPermission = can(user, PERMISSION_CODES.ACTION_INGRESO_BAJA_ALTA);
   const canForceHistorical = can(user, PERMISSION_CODES.ACTION_INGRESO_FORCE_HISTORICAL);
@@ -2062,7 +2062,9 @@ export default function ServiceSheet() {
   // El combo de resolución estaba clavado a jefe aunque admin y jefe_veedor ya tienen el
   // permiso que el backend realmente exige (action.ingreso.repair_transitions).
   const canResolve = canRepairTransitions;
-  const canAutorizarReparar = canRepairTransitions && isJefe(user);
+  // Autorizar o quitar la reparación es un permiso de jefatura propio. Clavado al rol Jefe
+  // dejaba afuera al suplente y al veedor, que el backend sí habilita.
+  const canAutorizarReparar = can(user, PERMISSION_CODES.ACTION_INGRESO_AUTHORIZE_REPAIR);
   const canSwapDevice = can(user, PERMISSION_CODES.ACTION_INGRESO_DEVICE_SWAP);
   const deviceSwapState = getDeviceSwapState(data || {}, { canSwap: canSwapDevice });
   const canDarBaja = Boolean(canBajaAltaPermission && isOwnedByMgCustomer);

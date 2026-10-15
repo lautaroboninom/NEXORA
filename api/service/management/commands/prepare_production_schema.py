@@ -44,6 +44,11 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     # abajo (el humidificador comparte la serie del CPAP) y el backfill de tipo_equipo que
     # hace adentro se apoya en que los modelos ya estén separados por tipo.
     ("apply_devices_ns_tipo_unique_schema", {}),
+    # Regla del 14/10/2026: el número interno no distingue mayúsculas ("mg 7359" es "MG 7359").
+    # Trigger que lo normaliza en cada escritura de devices + barrido de lo ya guardado, salteando
+    # los duplicados. Es CREATE OR REPLACE / DROP IF EXISTS y un UPDATE que sólo toca lo que no
+    # está normalizado, así que corre en cada arranque sin costo.
+    ("apply_devices_numero_interno_schema", {}),
     ("apply_ingreso_open_conflicts_schema", {}),
     ("apply_derivation_workflow_schema", {}),
     # Estaba excluido como "parche histórico ya aplicado" y resultó no estarlo: sin sus columnas,

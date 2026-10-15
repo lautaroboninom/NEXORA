@@ -95,11 +95,10 @@ const COLUMNS = [
 ];
 
 export default function ListosParaLiberar() {
-  // Abrir la pantalla apaga el indicador de novedades del menú.
-  useMarkQueueSeen(QUEUE_KEYS.LISTOS_PARA_LIBERAR);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const queueHighlight = useMarkQueueSeen(QUEUE_KEYS.LISTOS_PARA_LIBERAR, { ready: !loading && !err });
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
   const [releaseRow, setReleaseRow] = useState(null);
@@ -257,6 +256,7 @@ export default function ListosParaLiberar() {
       </ListToolbar>
 
       <IngresoTable
+        queueHighlight={queueHighlight}
         rows={filtered}
         columns={COLUMNS}
         sort={sort}

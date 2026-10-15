@@ -1,0 +1,107 @@
+﻿MG;Partida en Bejerman;Fecha de venta;Remito;Factura;Acción 13/10/2026;Última OS;Estado de la última OS (antes);Stock hoy en Bejerman
+MG 7444;MZJ2P01265;2026-01-08;RTN R 00001-00023897;;No es venta: NOVAMED lo devolvió y se volvió a alquilar;29777;alquilado;STR=1
+MG 007103;MZJ10S72892;2026-06-08;RTN R 00004-00004511;;Sin tocar: la partida está en dos equipos de NEXORA;28586;alquilado;
+MG 7103;MZJ10S72892;2026-06-08;RTN R 00004-00004511;;Sin tocar: la partida está en dos equipos de NEXORA;27425;alquilado;
+MG 7104;MZJ10S72903;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;Sin tocar: la partida está en dos equipos de NEXORA;28144;alquilado;
+NM0228;MZJ10S72903;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;Sin tocar: la partida está en dos equipos de NEXORA;29039;entregado;
+MG 0318;07-0559-10-A;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;28014;alquilado;
+MG 1006;06-0888-09-A;2025-09-18;RTN R 00001-00023776;;Venta cargada y OS cerrada como vendido_entregado;28124;reparado;STL=1
+MG 1231;PI-115382;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;28168;alquilado;
+MG 1292;07-0558-10-A;2025-12-23;RTN R 00001-00023863;;Venta cargada y OS cerrada como vendido_entregado;28774;reparado;STL=1
+MG 2817;21686646;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;21914;alquilado;
+MG 2889;560006909;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;27454;alquilado;
+MG 3078;P133516769DED;2026-08-03;;FC A 00002-00009911;Venta cargada y OS cerrada como vendido_entregado;29366;alquilado;STL=1
+MG 3121;011514040251;2026-02-13;RTN R 00001-00025983;;Venta cargada y OS cerrada como vendido_entregado;28817;reparado;STL=1
+MG 3131;11514040281;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;29215;alquilado;
+MG 3137;11514040214;2025-06-30;RT R 00001-00023269;FC A 00002-00018082;Venta cargada y OS cerrada como vendido_entregado;28119;alquilado;
+MG 3315;G003184210;2026-02-19;RTN R 00001-00025998;;Venta cargada y OS cerrada como vendido_entregado;28994;controlado_sin_defecto;
+MG 3399;D-0103;2025-04-30;RT R 00001-00023597;FC A 00002-00018009;Venta cargada y OS cerrada como vendido_entregado;27024;alquilado;
+MG 4442;560003624;2026-02-13;RTN R 00001-00025983;;Venta cargada y OS cerrada como vendido_entregado;28816;reparado;
+MG 4546;MZJ5S121739;2026-06-08;RTN R 00004-00004511;;Venta cargada y OS cerrada como vendido_entregado;29120;alquilado;STR=1
+MG 4595;MZJ5S121687;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;27701;alquilado;STR=1
+MG 4734;MZJ5S121817;2026-06-08;RTN R 00004-00004511;;Venta cargada y OS cerrada como vendido_entregado;27321;alquilado;STR=1
+MG 4793;MZJ5S121899;2025-12-05;RTN R 00001-00023865;;Venta cargada y OS cerrada como vendido_entregado;28740;reparado;STL=1
+MG 4862;P-06-400-19A;2025-12-23;RTN R 00001-00023863;;Venta cargada y OS cerrada como vendido_entregado;28736;reparado;STL=1
+MG 4894;MZJ5S121901;2026-06-08;RTN R 00004-00004511;;Venta cargada y OS cerrada como vendido_entregado;27718;alquilado;STR=1
+MG 4899;G02849323;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;25438;controlado_sin_defecto;STL=1
+MG 4929;MZJ5S121799;2026-06-08;RTN R 00004-00004511;;Venta cargada y OS cerrada como vendido_entregado;27711;alquilado;STR=1
+MG 4931;MZJ5S121762;2026-06-08;RTN R 00004-00004511;;Venta cargada y OS cerrada como vendido_entregado;27616;alquilado;DES=1
+MG 4993;MZJ5S121651;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;27707;alquilado;STR=1
+MG 5011;MZJ5S121665;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;27619;alquilado;
+MG 6411;MZJ5S121193;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;27353;alquilado;STR=1
+MG 6420;MZJ5S121235;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;28717;alquilado;STR=1
+MG 6572;MZJ5S121148;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;27128;alquilado;
+MG 6631;150650041;2026-02-13;RTN R 00001-00025983;;Venta cargada y OS cerrada como vendido_entregado;28815;alquilado;
+MG 6778;MZJ5S416941;2026-06-08;RTN R 00004-00004511;;Venta cargada y OS cerrada como vendido_entregado;27712;alquilado;STR=1
+MG 7096;MZJ10S72906;2025-10-29;RTN R 00001-00023820;;Venta cargada y OS cerrada como vendido_entregado;28048;alquilado;
+MG 7153;MBB2203480;2026-10-06;RT R 00001-00026397;FC A 00002-00010346;Venta cargada y OS cerrada como vendido_entregado;29403;controlado_sin_defecto;
+MG 7163;MBB2203490;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;27085;alquilado;
+MG 7167;MBB2203494;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;27070;alquilado;
+MG 7182;C8-1320;2026-06-08;RTN R 00004-00004510;;Venta cargada y OS cerrada como vendido_entregado;27167;alquilado;
+MG 7285;T2A22701092;2025-09-05;RTN R 00001-00023667;;Venta cargada y OS cerrada como vendido_entregado;27987;alquilado;
+MG 7288;H2122805350;2025-04-30;RT R 00001-00023599;FC A 00002-00018009;Venta cargada y OS cerrada como vendido_entregado;27482;reparado;STL=1
+MG 7289;T2A22701091;2025-04-30;RT R 00001-00023599;FC A 00002-00018009;Venta cargada y OS cerrada como vendido_entregado;27481;reparado;STL=1
+MG 7298;H2123405080;2026-09-04;RTN R 00001-00026460;;Venta cargada y OS cerrada como vendido_entregado;29630;liberado;
+MG 7303;09-23T-1004-0007;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;27450;alquilado;
+MG 7305;09-23T-1004-0015;2025-04-09;RT R 00001-00023394;FC A 00002-00017972;Venta cargada y OS cerrada como vendido_entregado;27307;alquilado;
+MG 7311;MA23080040053;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;26874;alquilado;
+MG 7316;MA23080040054;2026-06-08;RTN R 00004-00004509;;Venta cargada y OS cerrada como vendido_entregado;27301;alquilado;
+MG 0092;09-0001-10-A;2025-04-09;RT R 00001-00023560;FC A 00002-00017972;"Venta cargada; OS sin tocar";26575;baja;
+MG 1748;5143458;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;"Venta cargada; OS sin tocar";26694;baja;
+MG 1761;04-0506-11A;2025-09-18;RTN R 00001-00023778;;"Venta cargada; OS sin tocar";26246;baja;
+MG 1820;5143433;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;"Venta cargada; OS sin tocar";27146;baja;
+MG 2071;04-0497-11-A;2025-09-18;RTN R 00001-00023778;;"Venta cargada; OS sin tocar";23738;baja;
+MG 2242;5158302;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;"Venta cargada; OS sin tocar";27173;baja;
+MG 2887;560000838;2025-09-18;RTN R 00001-00023778;;"Venta cargada; OS sin tocar";28421;baja;
+MG 3239;G01840486;2025-09-18;RTN R 00001-00023778;;"Venta cargada; OS sin tocar";28193;baja;
+MG 3474;G07838665;2025-11-27;RTN R 00001-00023854;;"Venta cargada; OS sin tocar";25437;baja;
+MG 4061;MZJ5S121927;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;"Venta cargada; OS sin tocar";27298;baja;
+MG 4501;MZJ5S121955;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";24454;baja;
+MG 4735;MZJ5S121793;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";27322;baja;
+MG 4739;MZJ5S121848;2025-09-05;RTN R 00001-00023669;;"Venta cargada; OS sin tocar";27323;baja;
+MG 4763;MZJ5S121624;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";29160;vendido_entregado;
+MG 4908;MZJ5S121689;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";27488;baja;
+MG 4984;MZJ5S121698;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";27327;baja;
+MG 5827;H2120105352;2025-09-05;RTN R 00001-00023667;;"Venta cargada; OS sin tocar";27579;ingresado;
+MG 6330;MG6330;2025-05-30;RT R 00001-00023626;FC A 00002-00018040;"Venta cargada; OS sin tocar";25004;entregado;
+MG 6406;MZJ5S121176;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";27598;baja;
+MG 6447;MZJ5S121420;2025-09-05;RTN R 00007-00000221;;"Venta cargada; OS sin tocar";27600;baja;
+MG 6569;B0111;2025-10-15;RT R 00001-00023804;FC A 00002-00018206;"Venta cargada; OS sin tocar";22862;baja;
+MG 6700;B 2876;2025-04-09;RT R 00001-00023394;FC A 00002-00017972;"Venta cargada; OS sin tocar";27996;baja;
+MG 6759;MZJ5S416988;2026-04-30;RT R 00004-00004114;FC A 00002-00009305;"Venta cargada; OS sin tocar";29146;vendido_entregado;
+MG 7284;E7765;2025-11-26;RTN R 00001-00023836;;"Venta cargada; OS sin tocar";26165;ingresado;
+MG 7304;09-23T-1004-0018;2025-04-09;RT R 00001-00023560;FC A 00002-00017972;"Venta cargada; OS sin tocar";27266;baja;
+MG 7306;MA23080040049;2025-09-18;RTN R 00001-00023776;;"Venta cargada; OS sin tocar";28169;vendido_pendiente_entrega;
+MG 7558;MBB2600287;2026-10-06;RT R 00001-00026397;FC A 00002-00010346;"Venta cargada; OS sin tocar";29787;ingresado;
+MG 7985;A1-0137;2025-09-17;RTN R 00001-00023775;;"Venta cargada; OS sin tocar";29313;reparado;STR=1
+MG 7989;A1-0139;2025-07-15;RT R 00001-00023725;;"Venta cargada; OS sin tocar";29314;reparado;STR=1
+NM 0258;F0019;2025-09-18;RTN R 00001-00023778;;"Venta cargada; OS sin tocar";28803;alquilado;STC=1
+MG 0355;04-0023-06-A;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26560;vendido_entregado;
+MG 0580;60905026856;2026-06-08;RTN R 00004-00004510;;Ya estaba bien cargada;26867;vendido_entregado;
+MG 1516;C5-00764;2026-06-08;RTN R 00004-00004510;;Ya estaba bien cargada;26476;vendido_entregado;
+MG 2029;G00857688;2026-08-03;;FC A 00002-00009909;Ya estaba bien cargada;29284;vendido_entregado;STL=1
+MG 2094;04-0708-11A;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26559;vendido_entregado;
+MG 2633;011507040035 G70031;2026-06-08;RTN R 00001-00023778;;Ya estaba bien cargada;29349;entregado;
+MG 4198;MZJ5S121866;2026-10-06;;FC A 00002-00010346;Ya estaba bien cargada;29636;vendido_pendiente_entrega;STR=1
+MG 4333;H2118A04210;2026-06-08;RTN R 00004-00004510;;Ya estaba bien cargada;23871;vendido_entregado;
+MG 4869;P-06-377-19-A;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26460;vendido_entregado;
+MG 4978;E2318C03135;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;23792;vendido_entregado;
+MG 6567;MBB2009813;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26747;vendido_entregado;
+MG 6770;MZJ5S416952;2026-04-06;RTN R 00004-00004033;;Ya estaba bien cargada;29131;vendido_entregado;
+MG 6793;MZJ5S416965;2026-09-11;;FC A 00002-00010172;Ya estaba bien cargada;29640;vendido_pendiente_entrega;STR=1
+MG 7241;MZJ2P00010;2026-06-08;RTN R 00004-00004510;;Ya estaba bien cargada;25879;vendido_entregado;
+MG 7299;MBB2213533;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26724;vendido_entregado;
+MG 7307;09-23T-1004-0017;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26561;vendido_entregado;
+MG 7309;BTX16635094;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26322;vendido_entregado;
+MG 7321;MZJ2P00005;2026-09-15;RTN R 00001-00026417;;Ya estaba bien cargada;29704;vendido_entregado;
+MG 7354;F8810;2025-04-09;RT R 00001-00023551;FC A 00002-00017972;Ya estaba bien cargada;28956;entregado;
+MG1295;07-0562-10-A;2026-06-08;RTN R 00004-00004509;;Ya estaba bien cargada;26749;vendido_entregado;
+NV 0223;800354;2026-06-08;RTN R 00004-00004510;;Ya estaba bien cargada;26696;vendido_entregado;
+MG 2051;N5145150;2026-08-03;;FC A 00002-00009909;"Ya estaba cargada; se completaron remito/factura";29355;entregado;STC=1
+MG 4552;MZJ5S121776;2026-06-08;RTN R 00004-00004511;;"Ya estaba cargada; se completaron remito/factura";29838;reparado;STL=1 STR=1
+MG 4700;MZJ5S121902;2026-06-02;RT R 00001-00026226;FC A 00002-00009562;"Ya estaba cargada; se completaron remito/factura";29808;diagnosticado;STR=1
+MG 4801;MZJ5S121954;2026-06-08;RTN R 00004-00004511;;"Ya estaba cargada; se completaron remito/factura";29643;vendido_pendiente_entrega;STL=1
+MG 4988;MZJ5S121621;2026-09-11;;FC A 00002-00010172;"Ya estaba cargada; se completaron remito/factura";29780;entregado;STC=1 STR=1
+MG 5010;MZJ5S121627;2026-06-08;RTN R 00004-00004510;;"Ya estaba cargada; se completaron remito/factura";29740;entregado;STC=1
+MG 6561;MZJ5S121156;2026-06-08;RTN R 00004-00004510;;"Ya estaba cargada; se completaron remito/factura";29781;entregado;STC=1 STL=1 STR=1
+MG 7132;MZJ10S74116;2026-04-06;RTN R 00004-00004033;;"Ya estaba cargada; se completaron remito/factura y se cerró la OS 29134";29134;controlado_sin_defecto;

@@ -21,6 +21,8 @@ PERMISSION_CATALOG = [
     {"code": "page.users", "label": "Ver usuarios", "type": "page", "group": "Páginas"},
     {"code": "page.bejerman_sync", "label": "Ver sincronización Bejerman", "type": "page", "group": "Páginas"},
     {"code": "page.bejerman_purchase_entries", "label": "Ver ingresos de mercadería Bejerman", "type": "page", "group": "Páginas"},
+    {"code": "page.work_dashboard", "label": "Ver tablero de trabajo y búsqueda global", "type": "page", "group": "Páginas"},
+    {"code": "page.customer_catalog", "label": "Ver catálogo de clientes", "type": "page", "group": "Páginas"},
     {"code": "page.recepcion", "label": "Ver espacio de Recepción", "type": "page", "group": "NEXORA"},
     {"code": "page.delivery_orders", "label": "Ver órdenes de entrega", "type": "page", "group": "NEXORA"},
     {"code": "page.route_sheet", "label": "Ver Hoja de ruta", "type": "page", "group": "NEXORA"},
@@ -43,6 +45,10 @@ PERMISSION_CATALOG = [
     {"code": "action.ingreso.emit_ingress_order", "label": "Emitir RIS de ingreso", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.fix_ris_preflight", "label": "Corregir validación previa del RIS", "type": "action", "group": "Ingresos"},
     {"code": "action.ingreso.print_barcode", "label": "Imprimir códigos de barras", "type": "action", "group": "Ingresos"},
+    # Autorizar (o quitar) la reparación es decisión de jefatura: no alcanza con poder
+    # mover estados de reparación, que tiene el técnico.
+    {"code": "action.ingreso.authorize_repair", "label": "Autorizar / quitar reparación", "type": "action", "group": "Ingresos"},
+    {"code": "action.ingreso.uncheck_rental", "label": "Destildar alquiler", "type": "action", "group": "Ingresos"},
     {"code": "action.presupuesto.manage", "label": "Presupuestar y administrar", "type": "action", "group": "Presupuestos"},
     {"code": "action.presupuesto.view_costs", "label": "Ver costos", "type": "action", "group": "Presupuestos"},
     {"code": "action.users.manage", "label": "Gestionar usuarios", "type": "action", "group": "Usuarios"},
@@ -51,10 +57,16 @@ PERMISSION_CATALOG = [
     {"code": "action.tests_protocol.manage", "label": "Gestionar protocolos de test", "type": "action", "group": "Sistema"},
     {"code": "action.spare_parts.manage", "label": "Gestionar repuestos y stock", "type": "action", "group": "Repuestos"},
     {"code": "action.spare_parts.manage_24h_permissions", "label": "Gestionar permisos 24h de repuestos", "type": "action", "group": "Repuestos"},
+    {"code": "action.spare_parts.view_costs", "label": "Ver y editar costos de repuestos", "type": "action", "group": "Repuestos"},
     {"code": "action.devices_preventivos.manage", "label": "Gestionar edicion de equipos/preventivos", "type": "action", "group": "Equipos"},
     {"code": "action.devices_preventivos.create", "label": "Dar de alta equipos", "type": "action", "group": "Equipos"},
+    # El alta de un equipo propio y la masiva mueven stock real (VAL→STL). Tiene permiso
+    # propio para poder quitárselo a alguien sin sacarle el alta de equipos de clientes.
+    {"code": "action.devices_preventivos.create_own", "label": "Alta de equipos propios y alta masiva (mueve stock a STL)", "type": "action", "group": "Equipos"},
     {"code": "action.metrics.configure", "label": "Configurar metricas", "type": "action", "group": "Sistema"},
+    {"code": "action.work_dashboard.configure", "label": "Configurar objetivos y alertas del tablero", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_sync.manage", "label": "Gestionar sincronización Bejerman", "type": "action", "group": "Sistema"},
+    {"code": "action.bejerman_sync.force_stock_entry", "label": "Forzar ingreso de stock en Bejerman", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_purchase_entries.manage", "label": "Gestionar ingresos de mercadería Bejerman", "type": "action", "group": "Sistema"},
     {"code": "action.bejerman_purchase_entries.emit", "label": "Registrar RT de compra en Bejerman", "type": "action", "group": "Sistema"},
     {"code": "action.delivery_order.create", "label": "Crear órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
@@ -65,6 +77,8 @@ PERMISSION_CATALOG = [
     {"code": "action.delivery_order.update_remito_location", "label": "Actualizar ubicación de remitos", "type": "action", "group": "Cobranzas"},
     {"code": "action.delivery_order.generate_bejerman_remito", "label": "Generar remitos Bejerman", "type": "action", "group": "Ordenes de entrega"},
     {"code": "action.delivery_order.assign_articles", "label": "Asignar artículos y partidas", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.edit_discounts", "label": "Cargar descuentos en órdenes de entrega", "type": "action", "group": "Ordenes de entrega"},
+    {"code": "action.delivery_order.sync_drive", "label": "Sincronizar órdenes de entrega con Google Drive", "type": "action", "group": "Ordenes de entrega"},
     {"code": "action.delivery_order.correct_commercial_terms", "label": "Corregir precio y plazo post-remito", "type": "action", "group": "Cobranzas"},
     {"code": "action.route_sheet.manage", "label": "Gestionar Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
     {"code": "action.route_sheet.complete", "label": "Completar paradas de Hoja de ruta", "type": "action", "group": "Hoja de ruta"},
@@ -346,6 +360,42 @@ _grant(
 )
 
 
+# Permisos que antes eran listas de roles escritas en las vistas. Se otorgan a los mismos
+# roles que figuraban en esas listas: el deploy no cambia quién puede qué, sólo lo vuelve
+# configurable por usuario. Supervisor y suplente los reciben por las uniones de abajo.
+_grant("tecnico", "page.work_dashboard", "action.devices_preventivos.create_own")
+_grant(
+    "admin",
+    "page.work_dashboard",
+    "page.customer_catalog",
+    "action.work_dashboard.configure",
+    "action.spare_parts.view_costs",
+    "action.delivery_order.edit_discounts",
+    "action.delivery_order.sync_drive",
+    "action.devices_preventivos.create_own",
+)
+_grant(
+    "ventas",
+    "page.work_dashboard",
+    "page.customer_catalog",
+    "action.delivery_order.edit_discounts",
+    "action.delivery_order.sync_drive",
+    "action.devices_preventivos.create_own",
+)
+_grant(
+    "jefe_veedor",
+    "page.work_dashboard",
+    "page.customer_catalog",
+    "action.work_dashboard.configure",
+    "action.spare_parts.view_costs",
+    "action.ingreso.authorize_repair",
+    "action.bejerman_sync.force_stock_entry",
+    "action.devices_preventivos.create_own",
+)
+_grant("recepcion", "page.work_dashboard", "action.devices_preventivos.create_own")
+_grant("cobranzas", "page.work_dashboard")
+
+
 def _set_union_role_defaults(target_role, *source_roles):
     target = ROLE_DEFAULTS[target_role]
     for code in PERMISSION_CODES:
@@ -355,6 +405,9 @@ def _set_union_role_defaults(target_role, *source_roles):
 _set_union_role_defaults("supervisor", "admin", "ventas", "recepcion")
 _grant("supervisor", "action.route_sheet.postpone")
 _grant("supervisor", "action.delivery_order.correct_commercial_terms")
+# Forzar el ingreso de stock en Bejerman lo tenía supervisor sin que lo tuviera admin, así
+# que no sale de la unión.
+_grant("supervisor", "action.bejerman_sync.force_stock_entry")
 
 
 # jefe_suplente — quien cubre a jefatura mientras el titular no está.

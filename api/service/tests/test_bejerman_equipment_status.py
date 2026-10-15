@@ -42,11 +42,17 @@ class IngresoBejermanEstadoViewTests(SimpleTestCase):
             "empresa_bejerman": company,
         }
 
-    def _response(self, row, client):
+    def _response(self, row, client, *, puede_forzar=True):
         request = self.factory.get("/api/ingresos/29400/bejerman-estado/")
         force_authenticate(request, user=self.user)
+
+        def permisos(_request, codes):
+            if "action.bejerman_sync.force_stock_entry" in codes:
+                return puede_forzar
+            return True
+
         with (
-            patch("service.views.ingresos_views.user_has_any_permission", return_value=True),
+            patch("service.views.ingresos_views.user_has_any_permission", side_effect=permisos),
             patch("service.views.ingresos_views._has_table_column", return_value=True),
             patch("service.views.ingresos_views.q", return_value=row),
             patch("service.views.ingresos_views.BejermanSDKClient", return_value=client) as client_cls,
@@ -140,6 +146,25 @@ class IngresoBejermanEstadoViewTests(SimpleTestCase):
             response.data["action"],
             {"type": "force_stock_entry", "label": "Forzar ingreso de stock en Bejerman"},
         )
+
+    def test_zero_stock_sin_permiso_de_forzar_no_ofrece_el_boton(self):
+        # Antes el botón le aparecía a cualquiera que viera el estado y el POST le
+        # contestaba "No autorizado".
+        with (
+            patch(
+                "service.views.ingresos_views.get_ris_status_for_ingreso",
+                return_value={"status": "generated", "remito_number": "0001-00001234"},
+            ),
+            patch(
+                "service.views.ingresos_views._service_release_remito_salida_for_ingreso",
+                return_value="",
+            ),
+        ):
+            response, _ = self._response(self._row(), self._zero_stock_client(), puede_forzar=False)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "zero_stock")
+        self.assertIsNone(response.data["action"])
 
     def test_zero_stock_con_equipo_liberado_no_sugiere_forzar(self):
         # Un equipo que ya salió por RSS (liberación) queda en cero stock de forma

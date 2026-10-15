@@ -12,8 +12,9 @@ una corrección histórica de jefatura.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
+from django.utils import timezone
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -101,6 +102,59 @@ def _iso_date(value):
         return ""
 
 
+def _fecha_local(value):
+    """AAAA-MM-DD de una fecha de la base (en hora local) o de un formulario."""
+
+    if isinstance(value, datetime):
+        if timezone.is_aware(value):
+            value = timezone.localtime(value)
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return _iso_date(value)
+
+
+def _reingreso_fecha(conflict):
+    """Cuándo volvió a entrar el equipo. Vacío si el cierre no viene de un conflicto anotado."""
+
+    ingreso_id = _int_or_none((conflict or {}).get("ingreso_id"))
+    if not ingreso_id:
+        return ""
+    row = q(
+        "SELECT COALESCE(fecha_ingreso, fecha_creacion) AS fecha FROM ingresos WHERE id = %s",
+        [ingreso_id],
+        one=True,
+    )
+    return _fecha_local((row or {}).get("fecha"))
+
+
+def _problema_fecha_salida_forzada(fecha, previo, conflict):
+    """Valida la fecha de salida que pone jefatura al cerrar sin comprobante.
+
+    La corrección histórica que cierra la orden necesita una fecha, y sin remito no hay de
+    dónde sacarla. Antes se mandaba vacía y "Cerrar sin comprobante" fallaba siempre con un
+    "fecha_efectiva inválida" que no explicaba nada. Lo único que se sabe con certeza es que
+    el equipo salió después del ingreso viejo y antes del reingreso, así que la fecha se acota
+    a ese tramo. Devuelve el motivo del rechazo, o "" si la fecha sirve.
+    """
+
+    os_previa = os_label(previo.get("id"))
+    if not fecha:
+        return (
+            f"Indique en qué fecha salió el equipo para cerrar la OS {os_previa} sin comprobante. "
+            "Si no se sabe, use la del reingreso."
+        )
+    desde = _fecha_local(previo.get("fecha_ingreso"))
+    if desde and fecha < desde:
+        return f"La fecha de salida no puede ser anterior al ingreso de la OS {os_previa} ({desde})."
+    hasta = _reingreso_fecha(conflict)
+    if hasta and fecha > hasta:
+        return f"La fecha de salida no puede ser posterior al reingreso del equipo ({hasta})."
+    if fecha > timezone.localdate().isoformat():
+        return "La fecha de salida no puede ser futura."
+    return ""
+
+
 class IngresoConflictoEvidenciaView(APIView):
     """Busca en Bejerman un RSS/RTA de ese equipo posterior a la orden abierta."""
 
@@ -159,6 +213,7 @@ class IngresoConflictoResolverView(APIView):
         fecha_previa = previo.get("fecha_ingreso")
         manual_number = str(data.get("remito_salida") or data.get("remitoSalida") or "").strip()
         nota = str(data.get("motivo") or data.get("nota") or "").strip()
+        fecha_pedida = _iso_date(data.get("fecha_salida") or data.get("fechaSalida"))
 
         # La evidencia se vuelve a buscar del lado del servidor: el cliente puede mandar
         # cualquier cosa, y de esta consulta depende quién está autorizado a cerrar.
@@ -202,14 +257,25 @@ class IngresoConflictoResolverView(APIView):
                     status=403,
                 )
             require_permission(request, "action.ingreso.force_historical")
+            problema = _problema_fecha_salida_forzada(fecha_pedida, previo, conflict)
+            if problema:
+                # Si cargó un número que Bejerman no tiene, decirlo primero: es lo que esa
+                # persona está esperando saber, antes que el pedido de la fecha.
+                motivo_manual = str((manual_check or {}).get("reason") or "").strip()
+                return Response(
+                    {
+                        "detail": f"{motivo_manual} {problema}".strip(),
+                        "evidence": evidence,
+                        "manual": manual_check,
+                    },
+                    status=400,
+                )
         else:
             require_permission(request, "action.ingreso.resolve_open_conflict")
 
         verificado = bool(comprobante)
         remito = str(comprobante.get("remitoNumber") or "").strip() or (manual_number if not verificado else "")
-        fecha_salida = str(comprobante.get("issueDate") or "").strip() or _iso_date(
-            data.get("fecha_salida") or data.get("fechaSalida")
-        )
+        fecha_salida = str(comprobante.get("issueDate") or "").strip() or fecha_pedida
         if verificado:
             respaldo = f"Bejerman registra {remito} del {fecha_salida}, posterior al ingreso: el equipo ya había salido."
             if evidence.get("source") == "manual_number":
@@ -221,6 +287,8 @@ class IngresoConflictoResolverView(APIView):
             )
         else:
             respaldo = "Sin comprobante de salida en Bejerman; cierre forzado por jefatura."
+        if not verificado:
+            respaldo += f" Fecha de salida indicada por jefatura: {fecha_salida}."
         motivo = f"Cierre de orden abierta al reingresar el equipo {serial}. {respaldo}"
         if nota:
             motivo = f"{motivo} {nota}"

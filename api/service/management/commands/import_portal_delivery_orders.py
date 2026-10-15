@@ -280,7 +280,12 @@ def _delivery_type(value):
     return value if value in VALID_TYPES else "sale"
 
 
-def _priority(value):
+def _priority(value, delivery_type=None):
+    # El portal marcaba "urgente" casi todas sus liberaciones de servicio técnico, y al
+    # importarlas quedaban arriba de todo en Órdenes de entrega. En NEXORA la de servicio
+    # técnico entra siempre normal y la urgencia se marca después a mano.
+    if delivery_type == "service_release":
+        return "normal"
     value = _text(value or "normal")
     return value if value in {"normal", "urgente"} else "normal"
 
@@ -411,7 +416,7 @@ def apply_import(portal) -> dict[str, int]:
                         order.get("commercialCondition"),
                         order.get("commercialDeadline"),
                         _status(order.get("status")),
-                        _priority(order.get("priority")),
+                        _priority(order.get("priority"), _delivery_type(order.get("deliveryType"))),
                         order.get("remitoNumber"),
                         order.get("bejermanRemitoGroupId"),
                         order.get("remitoLocation"),

@@ -64,6 +64,27 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
+  // Los permisos se editan desde Usuarios mientras la persona tiene NEXORA abierto. Sin esto
+  // el menú y los botones seguían con lo viejo hasta recargar, aunque el backend ya aplicara
+  // el cambio. Se refresca al volver a la pestaña, como mucho una vez por minuto.
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    let lastRefresh = Date.now();
+    const onFocus = () => {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - lastRefresh < 60_000) return;
+      lastRefresh = Date.now();
+      refreshSession().catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
   async function login(email, password) {
     const data = await postLogin(email, password); // { token, user }
     const cleanUser = sanitizeUser(data.user);

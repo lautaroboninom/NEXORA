@@ -39,6 +39,7 @@ El seed verifica o crea:
 
 - cliente responsable inscripto `NXT001`;
 - cliente SitIVA 6 `NXT006`;
+- cliente exento SitIVA 5 `NXT005`;
 - artículo con partida `NXTPART`;
 - artículo sin partida `NXTNPRT`;
 - stock mínimo configurable de `NXTNPRT` en `VAL` —10 unidades por defecto—;
@@ -55,17 +56,39 @@ docker compose -f docker-compose.yml exec -T api python manage.py smoke_bejerman
 docker compose -f docker-compose.yml exec -T api python manage.py smoke_bejerman_remitos_test --company-key MGBIO --scenario all
 ```
 
-En SEPID, `all` valida RIS online, registración manual y RT valorizado SitIVA 6. En MGBIO valida el RT valorizado; los escenarios RIS se omiten porque ese tipo de comprobante no está definido en la base MGBIO TEST.
+En SEPID, `all` valida RIS online, registración manual y RT valorizados SitIVA 6 y SitIVA 5. En MGBIO valida los dos RT valorizados; los escenarios RIS se omiten porque ese tipo de comprobante no está definido en la base MGBIO TEST.
+
+El escenario `emission` relee el RIS emitido: exige `ActualizaStock=S`, un renglón del artículo y partida de prueba con cantidad `-1` en ambas unidades de medida, y exactamente una unidad final de ese artículo en `STR`.
 
 El RT valorizado verifica:
 
-- total final 121,00 para un neto NEXORA de 100,00;
-- IVA discriminado en cero para SitIVA 6;
+- SitIVA 6: neto 100,00, IVA 21,00 y total 121,00; precio unitario e `Item_Importe` con IVA incluido, con neto e IVA discriminados;
+- SitIVA 5: neto 40,00, IVA 8,40 y total 48,40; precio unitario e `Item_Importe` con IVA incluido, con neto e IVA discriminados;
 - read-back único del comprobante;
+- read-back de neto, IVA, alícuota y total iguales a los importes enviados;
 - un único movimiento de salida de stock en `VAL`;
 - punto de venta `00004` para SEPID y `00007` para MGBIO.
 
 No ejecutar estos comandos con `docker-compose.prod.yml` ni contra el WSDL productivo.
+
+Para verificar monotributistas con precios en USD, dos unidades y descuento del 10 %:
+
+```powershell
+docker compose -f docker-compose.yml exec -T api python manage.py smoke_bejerman_remitos_test --company-key SEPID --scenario rt-valued --price-currency USD --quantity 2 --discount-percent 10
+```
+
+El caso conserva precio neto unitario 100,00, neto descontado 180,00, IVA 37,80 y total 217,80. La cotización 1535 usada por este smoke es un dato fijo del ensayo TEST.
+
+### Aceptación de monotributistas del 14/10/2026
+
+El contrato anterior con precio unitario neto fue rechazado por SEPID TEST por diferencias entre ítems y cabecera. Con precio unitario e `Item_Importe` finales, manteniendo neto, tasa e IVA discriminados, la lectura posterior confirmó:
+
+| Empresa TEST | RT sin descuento | RT en USD con dos unidades y 10 % de descuento |
+| --- | --- | --- |
+| SEPID | R 00004-00004391: neto 100,00 + IVA 21,00 = 121,00 | R 00004-00004392: neto 180,00 + IVA 37,80 = 217,80 |
+| MGBIO | R 00007-00000351: neto 100,00 + IVA 21,00 = 121,00 | R 00007-00000352: neto 180,00 + IVA 37,80 = 217,80 |
+
+Los cuatro casos conservaron `Cliente_SitIVA=6`, la tasa del 21 % y la salida exacta de stock. Esta aceptación se ejecutó exclusivamente contra Bejerman TEST.
 
 ## Aceptación segura del circuito COMPRAS
 

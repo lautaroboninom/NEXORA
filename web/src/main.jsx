@@ -48,7 +48,7 @@ import RecepcionDashboard from "./pages/RecepcionDashboard.jsx";
 import DeliveryOrders from "./pages/DeliveryOrders.jsx";
 import HojaDeRuta from "./pages/HojaDeRuta.jsx";
 import Billing from "./pages/Billing.jsx";
-import { canAny, PERMISSION_CODES } from "./lib/permissions";
+import { can, canAny, PERMISSION_CODES } from "./lib/permissions";
 
 function NotFound() {
   return <div className="p-8 text-center text-gray-600">Página no encontrada</div>;
@@ -56,15 +56,9 @@ function NotFound() {
 
 function IndexRoute() {
   const { user } = useAuth();
-  const canUseDashboard = canAny(user, [
-    PERMISSION_CODES.PAGE_HOME_SEARCH,
-    PERMISSION_CODES.PAGE_RECEPCION,
-    PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
-    PERMISSION_CODES.PAGE_BILLING,
-    PERMISSION_CODES.ACTION_INGRESO_CREATE,
-    PERMISSION_CODES.PAGE_NEW_INGRESO,
-    PERMISSION_CODES.PAGE_LIBERADOS,
-  ]);
+  // El tablero pide `page.work_dashboard` en el backend. Decidirlo por otros permisos dejaba
+  // una pantalla que cargaba con "No autorizado" a quien se lo hubieran bloqueado.
+  const canUseDashboard = can(user, PERMISSION_CODES.PAGE_WORK_DASHBOARD);
   if (canUseDashboard) {
     return <WorkDashboard />;
   }
@@ -91,6 +85,7 @@ const router = createBrowserRouter([
         element: (
           <ProtectedRoute
             permissions={[
+              PERMISSION_CODES.PAGE_WORK_DASHBOARD,
               PERMISSION_CODES.PAGE_HOME_SEARCH,
               PERMISSION_CODES.PAGE_RECEPCION,
               PERMISSION_CODES.PAGE_DELIVERY_ORDERS,
@@ -387,7 +382,7 @@ const router = createBrowserRouter([
       {
         path: "catalogo/clientes",
         element: (
-          <ProtectedRoute roles={["jefe", "admin", "supervisor", "ventas", "jefe_veedor", "jefe_suplente"]}>
+          <ProtectedRoute permissions={PERMISSION_CODES.PAGE_CUSTOMER_CATALOG}>
             <CatalogoClientes />
           </ProtectedRoute>
         ),

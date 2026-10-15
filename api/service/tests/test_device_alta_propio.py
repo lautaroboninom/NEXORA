@@ -16,6 +16,7 @@ la decision de la view, no el INSERT.
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import JSONParser
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
@@ -52,7 +53,15 @@ class AltaEquipoPropioTests(SimpleTestCase):
         self.factory = APIRequestFactory()
         self.view = DeviceDirectCreateView()
 
-    def _post(self, payload, *, enqueue_side_effect=None, duplicados=None, mg_consultado=None):
+    def _post(
+        self,
+        payload,
+        *,
+        enqueue_side_effect=None,
+        duplicados=None,
+        mg_consultado=None,
+        permiso_propio=True,
+    ):
         """Corre la view con la capa SQL mockeada.
 
         `duplicados` permite simular que la serie o el MG ya existen; por defecto no hay
@@ -86,6 +95,10 @@ class AltaEquipoPropioTests(SimpleTestCase):
         request = _drf_request(self.factory, payload)
         with (
             patch("service.views.devices_views.require_roles", return_value=None),
+            patch(
+                "service.views.devices_views.require_permission",
+                side_effect=None if permiso_propio else PermissionDenied("No autorizado"),
+            ),
             patch("service.views.devices_views._set_audit_user", return_value=None),
             patch("service.views.devices_views.ensure_default_locations", return_value=None),
             patch("service.views.devices_views._mg_owner_customer_id", return_value=MG_OWNER_ID),
@@ -216,6 +229,12 @@ class AltaEquipoPropioTests(SimpleTestCase):
         self.assertEqual(response.data["stock_job"]["status"], "blocked")
         self.assertIn("Equipo vendido", response.data["stock_job"]["last_error"])
 
+    def test_sin_permiso_de_alta_propia_se_corta_antes_de_registrar(self):
+        # El alta propia mueve stock real a STL: con `create_own` bloqueado se corta aunque
+        # la matriz le permita a ese usuario el alta de equipos de clientes.
+        with self.assertRaises(PermissionDenied):
+            self._post(self._base(), permiso_propio=False)
+
 
 class AltaNormalSinCambiosTests(SimpleTestCase):
     """El alta de siempre no puede cambiar: sigue pidiendo institución y sin tocar stock."""
@@ -240,6 +259,12 @@ class AltaNormalSinCambiosTests(SimpleTestCase):
         request = _drf_request(self.factory, payload)
         with (
             patch("service.views.devices_views.require_roles", return_value=None),
+            # El alta de un equipo de cliente no pide el permiso de alta propia: si lo
+            # pidiera, estos tests cortarían con "No autorizado".
+            patch(
+                "service.views.devices_views.require_permission",
+                side_effect=PermissionDenied("No autorizado"),
+            ),
             patch("service.views.devices_views._set_audit_user", return_value=None),
             patch("service.views.devices_views.q", side_effect=fake_q),
             patch("service.views.devices_views.exec_returning", return_value=4413) as insert,

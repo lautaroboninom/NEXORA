@@ -513,7 +513,11 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         self.assertEqual(client.mock_calls, [])
 
     def _comprobante_con_partida(self):
+        # Una devolución: es donde la recuperación con ENT sigue siendo la correcta. Un
+        # renglón de salida con la partida fuera de su depósito ya no se recupera (ver
+        # test_salida_con_partida_fuera_del_deposito_no_se_emite).
         return {
+            "Comprobante_Tipo": "RDA",
             "Comprobante_Items": [
                 {
                     "Item_Tipo": "A",
@@ -672,6 +676,129 @@ class BejermanDocumentHelpersTests(SimpleTestCase):
         ]
         self.assertEqual(tipos, ["ENT"])
         self.assertEqual(enviado["Comprobante_ActualizaStock"], "N")
+
+    def test_salida_con_partida_fuera_del_deposito_no_se_emite(self):
+        # RSS 00004-00005366 (29/09/2026): un renglón sacaba de VAL un equipo que no
+        # estaba ahí; la recuperación terminó emitiendo el remito entero con
+        # ActualizaStock=N y los otros cinco equipos quedaron figurando en STC.
+        client = Mock()
+        comprobante = {
+            "Comprobante_Tipo": "RSS",
+            "Comprobante_Items": [
+                {"Item_Tipo": "A", "Item_CodigoArticulo": "1115003", "Item_Partida": "MZJ5S121621",
+                 "Item_Deposito": "STC", "Item_CantidadUM1": 1, "Item_CantidadUM2": 0},
+                {"Item_Tipo": "A", "Item_CodigoArticulo": "1115006", "Item_Partida": "N5125573",
+                 "Item_Deposito": "VAL", "Item_CantidadUM1": 1, "Item_CantidadUM2": 0},
+            ],
+        }
+
+        with patch(
+            "service.bejerman_delivery._delivery_stock_partida_present",
+            side_effect=lambda _client, partida, _deposit: partida != "N5125573",
+        ):
+            with self.assertRaises(BejermanSdkResponseError) as ctx:
+                _recover_delivery_partida_rejection(
+                    client,
+                    comprobante,
+                    delivery_type="service_release",
+                    numera_flex="N",
+                    emite_reg="E",
+                    circuito="VENTAS",
+                    operacion="RSS",
+                )
+
+        mensaje = str(ctx.exception)
+        self.assertIn("no se importó", mensaje)
+        self.assertIn("N5125573 en VAL", mensaje)
+        self.assertNotIn("MZJ5S121621", mensaje)
+        # Es un rechazo definitivo: la orden queda lista para reintentar.
+        self.assertTrue(bejerman_delivery._is_definitive_delivery_rejection(ctx.exception))
+        # No se crea la partida ni se emite nada.
+        client.ingresar_lista_comprobantes_stock_json.assert_not_called()
+        client.ingresar_comprobante_ventas_json.assert_not_called()
+
+    def test_falta_de_stock_no_es_un_rechazo_de_partida(self):
+        # RT 00004-00005453 (13/10/2026): Bejerman lo rechazó por falta de stock (la UM2
+        # en cajas pedía 0,111 de un lote con 0,106). El mensaje nombra la partida y dice
+        # "no se importó", y se tomaba como rechazo de partida: la recuperación lo
+        # emitía entero con ActualizaStock=N y se salteaba el control de stock.
+        falta_de_stock = (
+            "El comprobante no se importó. No hay stock suficiente en la partida D2504233F "
+            "para el artículo 1201012 ."
+        )
+        self.assertFalse(bejerman_delivery._is_delivery_partida_rejection_message(falta_de_stock))
+        # Queda como rechazo definitivo, con el texto de Bejerman tal cual.
+        self.assertTrue(
+            bejerman_delivery._is_definitive_delivery_rejection(BejermanSdkResponseError(falta_de_stock))
+        )
+        # El rechazo de partida de verdad sigue entrando a la recuperación.
+        self.assertTrue(
+            bejerman_delivery._is_delivery_partida_rejection_message("Partida inexistente y/o no informada")
+        )
+
+    def test_salida_rechazada_por_partida_existente_lleva_la_respuesta_de_bejerman(self):
+        # Si todas las partidas están en su depósito, el bloqueo no puede señalar un
+        # renglón: la respuesta de Bejerman es la que dice cuál es.
+        client = Mock()
+        comprobante = {
+            "Comprobante_Tipo": "RT",
+            "Comprobante_Items": [
+                {"Item_Tipo": "A", "Item_CodigoArticulo": "1216002", "Item_Partida": None,
+                 "Item_Deposito": "VAL", "Item_CantidadUM1": 200, "Item_CantidadUM2": 0},
+            ],
+        }
+
+        with self.assertRaises(BejermanSdkResponseError) as ctx:
+            _recover_delivery_partida_rejection(
+                client,
+                comprobante,
+                delivery_type="sale",
+                numera_flex="N",
+                emite_reg="E",
+                circuito="VENTAS",
+                operacion="RT",
+                rejection_message="Partida no informada para el artículo 1216002",
+            )
+
+        mensaje = str(ctx.exception)
+        self.assertIn("no se importó", mensaje)
+        self.assertIn("Partida no informada para el artículo 1216002", mensaje)
+        client.ingresar_lista_comprobantes_stock_json.assert_not_called()
+        client.ingresar_comprobante_ventas_json.assert_not_called()
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=3)
+    @patch("service.bejerman_delivery.time.sleep")
+    def test_alcanza_con_que_una_partida_se_haya_movido(self, _sleep):
+        # El remito entra entero o no entra: si una sola partida compensada dejó de
+        # estar en cero, el reintento se procesó. Exigir todas hacía reponer el ENT.
+        entries = [
+            {"Comprobante_ArtPartida": "A", "Comprobante_ArtDeposito": "STR"},
+            {"Comprobante_ArtPartida": "B", "Comprobante_ArtDeposito": "STR"},
+        ]
+        client = Mock()
+        client.obtener_stock_partida.side_effect = lambda partida: partida
+        lecturas = iter([0, 0, 0, 1])  # A y B en cero en la primera vuelta; en la segunda B ya se movió
+
+        with (
+            patch(
+                "service.bejerman_delivery._records_for_partida_any_quantity",
+                side_effect=lambda _response, _partida, _deposit: [{"q": next(lecturas)}],
+            ),
+            patch("service.bejerman_delivery._quantity_from_record", side_effect=lambda record: record["q"]),
+        ):
+            self.assertTrue(bejerman_delivery._delivery_entries_moved_by_comprobante(client, entries))
+
+    @override_settings(BEJERMAN_RIS_STOCK_VERIFY_ATTEMPTS=2)
+    @patch("service.bejerman_delivery.time.sleep")
+    def test_si_ninguna_partida_se_movio_el_remito_no_entro(self, _sleep):
+        entries = [{"Comprobante_ArtPartida": "A", "Comprobante_ArtDeposito": "STR"}]
+        client = Mock()
+        with (
+            patch("service.bejerman_delivery._records_for_partida_any_quantity", return_value=[{"q": 0}]),
+            patch("service.bejerman_delivery._quantity_from_record", side_effect=lambda record: record["q"]),
+        ):
+            self.assertFalse(bejerman_delivery._delivery_entries_moved_by_comprobante(client, entries))
+        self.assertEqual(client.obtener_stock_partida.call_count, 2)
 
     @override_settings(
         BEJERMAN_SALE_MAX_PRINT_LINES=22,
@@ -4324,7 +4451,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
             "RD": -1,
             "RDN": -1,
             "RDA": -1,
-            "RIS": 1,
+            "RIS": -1,
             "RT": 1,
             "RTN": 1,
             "RTA": 1,
@@ -4419,7 +4546,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(comprobante["Cliente_RazonSocial"], "ALCLA SRL")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
         self.assertEqual(article_lines[0]["Item_CantidadUM2"], 0)
         self.assertEqual(article_lines[0]["Item_Partida"], "SN-1")
 
@@ -4523,7 +4650,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         self.assertEqual(article_lines[0]["Item_DescripArticulo"], "CPAP | BMC | G3")
         self.assertEqual(article_lines[1]["Item_DescripArticulo"], "ResMed | AirSense 10")
         self.assertEqual(len(article_lines), 2)
-        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [1, 1])
+        self.assertEqual([item["Item_CantidadUM1"] for item in article_lines], [-1, -1])
         self.assertEqual([item["Item_CantidadUM2"] for item in article_lines], [0, 0])
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "N")
 
@@ -4772,7 +4899,7 @@ class BejermanIngressCompanyTests(SimpleTestCase):
 
                 comprobante = built["comprobante"]
                 article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
-                expected_quantity = 1 if document_type == "RIS" else -1
+                expected_quantity = -1
                 self.assertEqual(comprobante["Comprobante_Tipo"], document_type)
                 self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
                 self.assertEqual(article_lines[0]["Item_CantidadUM1"], expected_quantity)
@@ -4781,7 +4908,9 @@ class BejermanIngressCompanyTests(SimpleTestCase):
                 self.assertEqual(article_lines[0]["Item_Partida"], f"SN-{document_type}")
                 self.assertEqual(comprobante["Comprobante_ImporteTotal"], 0)
 
-    def test_ris_stock_ingress_sends_positive_quantity_for_new_equipment(self):
+    def test_ris_stock_ingress_sends_negative_quantity_for_new_equipment(self):
+        # Con +1 Bejerman toma el RIS como salida de STR: "No hay stock suficiente en
+        # la partida" o, si lo deja pasar, la partida en -1 (OS 29878, 15/10/2026).
         built = build_service_ingress_comprobante(
             {
                 "requestId": "reparaciones-ingreso-ris-stock-29470",
@@ -4819,8 +4948,8 @@ class BejermanIngressCompanyTests(SimpleTestCase):
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(comprobante["Comprobante_Tipo"], "RIS")
         self.assertEqual(comprobante["Comprobante_ActualizaStock"], "S")
-        self.assertEqual(article_lines[0]["Item_CantidadUM1"], 1)
-        self.assertEqual(article_lines[0]["Item_CantidadUM2"], 1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM1"], -1)
+        self.assertEqual(article_lines[0]["Item_CantidadUM2"], -1)
         self.assertEqual(article_lines[0]["Item_Deposito"], "STR")
         self.assertEqual(article_lines[0]["Item_Partida"], "2511062")
 
@@ -5595,11 +5724,12 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(article_lines[0]["Item_ImporteIVAInscrip"], 12495.86)
         self.assertEqual(comprobante["Comprobante_ImporteTotal"], 71999.96)
 
-    def test_delivery_rt_sitiva_6_discrimina_iva_igual_que_responsable_inscripto(self):
+    def test_delivery_rt_sitiva_6_conserva_iva_con_precio_unitario_final(self):
         # Regresión OE-00105 / ANDREOLI (monotributista, Cliente_SitIVA=6): el remito RT
         # 00023968 de MGBIO salió con el precio inflado por 1,21 y la alícuota en 0, y la
-        # Factura A 00002-00018489 del 21/07/2026 se emitió con IVA 0,00. La situación de
-        # IVA del cliente no cambia lo que va en el renglón del remito.
+        # Factura A 00002-00018489 del 21/07/2026 se emitió con IVA 0,00. El precio
+        # unitario final que espera el importador debe conservar el neto y el IVA
+        # discriminados, incluida la alícuota del artículo.
         built = build_delivery_remito_comprobante(
             {
                 "groupId": "brg-oe-00105",
@@ -5630,10 +5760,11 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         comprobante = built["comprobante"]
         article_lines = [item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A"]
         self.assertEqual(built["amountMode"], "tax_discriminated")
-        self.assertEqual([item["Item_PrecioUnitario"] for item in article_lines], [9438, 10280])
+        self.assertEqual([item["Item_PrecioUnitario"] for item in article_lines], [11419.98, 12438.8])
         self.assertEqual([item["Item_ImporteTotal"] for item in article_lines], [9438, 10280])
         self.assertEqual([item["Item_TasaIVAInscrip"] for item in article_lines], [21, 21])
         self.assertEqual([item["Item_ImporteIVAInscrip"] for item in article_lines], [1981.98, 2158.8])
+        self.assertEqual([item["Item_Importe"] for item in article_lines], [11419.98, 12438.8])
         self.assertEqual(comprobante["Comprobante_ImporteTotal"], 23858.78)
 
     def test_delivery_rt_sitiva_1_conserva_neto_mas_iva_discriminado(self):
@@ -5657,6 +5788,50 @@ class BejermanDeliveryRemitoPayloadTests(SimpleTestCase):
         self.assertEqual(article["Item_ImporteTotal"], 100)
         self.assertEqual(article["Item_ImporteIVAInscrip"], 21)
         self.assertEqual(built["comprobante"]["Comprobante_ImporteTotal"], 121)
+
+    def test_delivery_rt_exento_y_monotributo_conservan_iva_y_descuentos_en_ars_y_usd(self):
+        for sitiva, currency, quantity, discount, net, iva, gross in (
+            ("5", "ARS", 1, 0, 40, 8.4, 48.4),
+            ("5", "ARS", 2, 10, 72, 15.12, 87.12),
+            ("6", "ARS", 1, 0, 40, 8.4, 48.4),
+            ("6", "ARS", 2, 10, 72, 15.12, 87.12),
+            ("6", "USD", 2, 10, 72, 15.12, 87.12),
+        ):
+            with self.subTest(sitiva=sitiva, currency=currency, quantity=quantity, discount=discount):
+                built = build_delivery_remito_comprobante(
+                    {
+                        "groupId": "brg-sitiva-5",
+                        "issueDate": "2026-10-14",
+                        "customerCode": "NXT005",
+                        "customerName": "Cliente exento",
+                        "sellerCode": "ADM",
+                        "paymentTermCode": "30",
+                        "priceCurrency": currency,
+                        "exchangeRate": 1535 if currency == "USD" else None,
+                        "orders": [{
+                            "orderNumber": "OE-00647",
+                            "deliveryType": "sale",
+                            "items": [{
+                                "articleCode": "NXTNPRT",
+                                "quantity": quantity,
+                                "unitPrice": 40,
+                                "discountPercent": discount,
+                            }],
+                        }],
+                    },
+                    delivery_remito_config({"type": "RT", "operation": "MC", "deposit": "VAL", "pointOfSale": "00004"}),
+                    {"Cliente_SitIVA": sitiva},
+                    {"NXTNPRT": {"salesVatType": "1", "salesVatRate": 21}},
+                )
+                comprobante = built["comprobante"]
+                article = next(item for item in comprobante["Comprobante_Items"] if item["Item_Tipo"] == "A")
+                self.assertEqual(comprobante["Cliente_SitIVA"], sitiva)
+                self.assertEqual(article["Item_PrecioUnitario"], 48.4)
+                self.assertEqual(article["Item_ImporteTotal"], net)
+                self.assertEqual(article["Item_TasaIVAInscrip"], 21)
+                self.assertEqual(article["Item_ImporteIVAInscrip"], iva)
+                self.assertEqual(article["Item_Importe"], gross)
+                self.assertEqual(comprobante["Comprobante_ImporteTotal"], gross)
 
     def test_prevalidacion_bloquea_encabezado_que_no_cierra(self):
         comprobante = {

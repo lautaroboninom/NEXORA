@@ -14,6 +14,30 @@
 .card { @apply bg-white rounded-xl shadow p-4; }
 .h1 { @apply text-2xl font-semibold; }
 
+/* Una ventana por visita: cinco segundos de azul y cinco de desvanecimiento. */
+@keyframes queue-new-row {
+  0%, 50% { background-color: rgb(59 130 246 / 16%); }
+  100% { background-color: transparent; }
+}
+
+@keyframes queue-new-row-reduced {
+  0%, 100% { background-color: rgb(59 130 246 / 16%); }
+}
+
+.queue-new-row {
+  animation: queue-new-row 10s linear;
+  transition: none;
+}
+
+/* El fondo de las celdas al pasar el cursor no tapa la novedad de la fila. */
+.desktop-data-table tbody tr.queue-new-row:hover td {
+  background-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-new-row { animation-name: queue-new-row-reduced; }
+}
+
 @layer components {
   .desktop-data-table table {
     @apply min-w-full border-separate border-spacing-0 text-sm;

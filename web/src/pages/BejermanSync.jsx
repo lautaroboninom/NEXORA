@@ -6,6 +6,7 @@ import {
   ChevronRight,
   FileText,
   Loader2,
+  MapPin,
   Pencil,
   RefreshCw,
   RotateCcw,
@@ -17,12 +18,14 @@ import {
 import {
   getBejermanArticles,
   getBejermanJobs,
+  getBejermanPartidaStock,
   getBejermanPdfOutputSettings,
   getBejermanRemitoProcesses,
   getDeviceEditable,
   patchDeviceEditable,
   postBejermanArticleMapping,
   postBejermanJobCancel,
+  postBejermanJobDiagnose,
   postBejermanJobRetry,
   postBejermanRemitoProcessRetry,
   postIngresoConflictoEvidencia,
@@ -33,7 +36,13 @@ import { PDF_REPRINT_STEPS, reservePdfWindow, waitForPdfBlob } from "../lib/pdf"
 import { remitoDocumentLabel, remitoPdfUnavailableReason, remitoPrintableLabel } from "../lib/remitos";
 import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
-import { formatDateTime, formatOS } from "../lib/ui-helpers";
+import {
+  formatDateOnly,
+  formatDateTime,
+  formatOS,
+  localDateInputValue,
+  parseDateLocal,
+} from "../lib/ui-helpers";
 import BejermanPdfQueuePanel from "../components/BejermanPdfQueuePanel.jsx";
 import DeviceIdentifier from "../components/DeviceIdentifier.jsx";
 import { DesktopTableWrap, MobileDataCard, MobileDataField, MobileDataList } from "../components/Responsive.jsx";
@@ -49,6 +58,11 @@ const STATUS_LABELS = {
   failed_review: "Revisión requerida",
   blocked: "Bloqueada",
   cancelled: "Descartada",
+  // Estados propios de los remitos de orden de entrega.
+  reserved: "Reservado",
+  sending: "Enviando",
+  sent_unknown: "Sin confirmar",
+  reconciled: "Asociado",
 };
 
 const STATUS_CLASS = {
@@ -60,6 +74,10 @@ const STATUS_CLASS = {
   failed_review: "bg-orange-50 text-orange-800 border-orange-200",
   blocked: "bg-amber-50 text-amber-800 border-amber-200",
   cancelled: "bg-gray-100 text-gray-600 border-gray-300",
+  reserved: "bg-slate-100 text-slate-700 border-slate-200",
+  sending: "bg-blue-50 text-blue-700 border-blue-200",
+  sent_unknown: "bg-orange-50 text-orange-800 border-orange-200",
+  reconciled: "bg-emerald-50 text-emerald-700 border-emerald-200",
 };
 
 const TYPE_LABELS = {
@@ -99,6 +117,34 @@ const PROCESS_SORT_OPTIONS = [
 ];
 
 const PROCESS_STATUSES = ["failed_review", "failed", "blocked", "running", "pending", "generated", "succeeded", "cancelled"];
+
+// Cómo mira el panel un operador: lo que tuvo un problema y hay que atender, lo que
+// todavía se está moviendo y lo que ya salió bien. El orden de los grupos es también el
+// orden de la lista: los problemas arriba. "Descartada" queda afuera: ya la decidió alguien.
+const STATUS_GROUPS = [
+  { value: "con_problemas", label: "Con problemas", statuses: ["failed_review", "failed", "blocked", "sent_unknown"] },
+  { value: "en_curso", label: "En curso", statuses: ["pending", "running", "reserved", "sending"] },
+  { value: "correctos", label: "Correctos", statuses: ["succeeded", "generated", "reconciled"] },
+];
+
+const STATUS_RANK = Object.fromEntries(
+  STATUS_GROUPS.flatMap((group, index) => group.statuses.map((status) => [status, index])),
+);
+
+function processStatusRank(status) {
+  return STATUS_RANK[status] ?? STATUS_GROUPS.length;
+}
+
+/** Estados que abarca el valor del filtro: un grupo o un estado puntual. */
+function statusFilterValues(value) {
+  const group = STATUS_GROUPS.find((item) => item.value === value);
+  if (group) return group.statuses;
+  return value ? [value] : [];
+}
+
+function sumStatusCounters(counters, statuses) {
+  return statuses.reduce((acc, status) => acc + Number(counters?.[status] || 0), 0);
+}
 
 const AUTO_REFRESH_MS = 5000;
 
@@ -221,9 +267,15 @@ function formatProcessDateTime(value) {
   return new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
 }
 
+/** "2026-10-01" -> "01/10/2026", sin pasar por Date (que lo correría por la zona horaria). */
+function isoDateLabel(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : String(value || "");
+}
+
 function stockApiFilters(filters) {
   return {
-    status: filters.status,
+    status: statusFilterValues(filters.status).join(","),
     sync_type: filters.process_type === "stock" ? filters.sync_type : "",
     company_key: filters.company_key,
     q: filters.q,
@@ -235,7 +287,7 @@ function stockApiFilters(filters) {
 
 function remitoApiFilters(filters) {
   return {
-    status: filters.status,
+    status: statusFilterValues(filters.status).join(","),
     source: filters.process_type === "remito" ? filters.source : "",
     company_key: filters.company_key,
     q: filters.q,
@@ -632,6 +684,193 @@ function StatusBadge({ status }) {
   );
 }
 
+// Color del consejo según la clase de falla: verde si se resuelve sola o reintentando, ámbar si
+// antes hay que corregir algo, rojo si reintentar puede duplicar un comprobante.
+const ADVICE_TONE = {
+  transient: "border-emerald-200 bg-emerald-50 text-emerald-900",
+  already_done: "border-emerald-200 bg-emerald-50 text-emerald-900",
+  needs_data: "border-amber-200 bg-amber-50 text-amber-900",
+  check_bejerman: "border-amber-200 bg-amber-50 text-amber-900",
+  credentials: "border-amber-200 bg-amber-50 text-amber-900",
+  review: "border-amber-200 bg-amber-50 text-amber-900",
+  uncertain: "border-rose-200 bg-rose-50 text-rose-900",
+};
+
+/** «Qué hacer»: lo que conviene con un proceso que falló, según su último error. */
+function RetryAdvice({ advice, className = "" }) {
+  if (!advice?.title) return null;
+  const tone = ADVICE_TONE[advice.kind] || "border-slate-200 bg-slate-50 text-slate-800";
+  return (
+    <div className={`rounded border px-2 py-1.5 text-xs leading-snug ${tone} ${className}`.trim()}>
+      <span className="font-semibold">{advice.title}.</span> {advice.detail}
+    </div>
+  );
+}
+
+// Reintentar algo que va a volver a fallar no rompe nada, pero tampoco ayuda: el 15/10/2026 un
+// RIS se reintentó diez veces contra el mismo rechazo. Se pregunta antes, con el motivo a la vista.
+function confirmRetryAgainstAdvice(advice) {
+  if (advice?.retry === "pointless") {
+    return window.confirm(
+      `${advice.title}: ${advice.detail}\n\nReintentar sin cambiar nada va a dar el mismo error. ¿Reintentar igual?`,
+    );
+  }
+  if (advice?.retry === "dangerous") {
+    return window.confirm(
+      `${advice.title}: ${advice.detail}\n\nReintentar ahora puede duplicar el comprobante en Bejerman. ¿Reintentar igual?`,
+    );
+  }
+  return true;
+}
+
+const LOCATION_ROLE_LABELS = { target: "destino", source: "origen" };
+
+function formatStockQuantity(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString("es-AR") : String(value);
+}
+
+/** Dónde tiene Bejerman la partida: depósito, artículo y cantidad. */
+function StockLocationsTable({ locations }) {
+  const items = Array.isArray(locations) ? locations : [];
+  if (!items.length) return null;
+  return (
+    <div className="mt-2 overflow-x-auto">
+      <table className="w-auto min-w-[20rem] text-left text-xs">
+        <thead className="text-[10px] uppercase tracking-wide text-gray-500">
+          <tr>
+            <th className="py-1 pr-6 font-semibold">Depósito</th>
+            <th className="py-1 pr-6 font-semibold">Artículo</th>
+            <th className="py-1 pr-3 font-semibold">Cantidad</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item, index) => {
+            const deposit = item.deposit || item.deposito || "-";
+            const articleCode = item.articleCode || item.article_code || "";
+            const articleDescription = item.articleDescription || item.article_description || "";
+            return (
+              <tr key={`${deposit}-${articleCode}-${index}`} className="border-t border-gray-200/70">
+                <td className="py-1 pr-6 font-mono">
+                  {deposit}
+                  {LOCATION_ROLE_LABELS[item.role] && (
+                    <span className="ml-1 rounded bg-white/80 px-1 font-sans text-[10px] text-gray-600">
+                      {LOCATION_ROLE_LABELS[item.role]}
+                    </span>
+                  )}
+                </td>
+                <td className="py-1 pr-6">
+                  <span className="font-mono">{articleCode || "-"}</span>
+                  {articleDescription && <span className="ml-1 text-gray-600">{articleDescription}</span>}
+                  {item.matchesArticle === false && (
+                    <span className="ml-1 text-[10px] font-semibold text-amber-800">otro artículo</span>
+                  )}
+                </td>
+                <td className="py-1 pr-3">{formatStockQuantity(item.quantity)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const DIAGNOSIS_TONE = {
+  already_in_target: "border-emerald-200 bg-emerald-50",
+  in_source: "border-blue-200 bg-blue-50",
+  elsewhere: "border-amber-200 bg-amber-50",
+  several: "border-amber-200 bg-amber-50",
+  other_article: "border-amber-200 bg-amber-50",
+  no_serial: "border-amber-200 bg-amber-50",
+  not_in_stock: "border-rose-200 bg-rose-50",
+};
+
+/** «Ver en Bejerman»: dónde está el equipo y qué se puede hacer desde acá mismo. */
+function JobStockDiagnosisPanel({ row, diagnosis, canManage, busy, onRetry, onMoveFrom, onDiscard, onEdit }) {
+  if (!diagnosis?.verdict) return null;
+  const open = row?.status === "failed" || row?.status === "blocked";
+  const options = canManage && open && Array.isArray(diagnosis.options) ? diagnosis.options : [];
+  const tone = DIAGNOSIS_TONE[diagnosis.verdict] || "border-gray-200 bg-white";
+  const checkedAt = diagnosis.checkedAt ? formatProcessDateTime(diagnosis.checkedAt) : "";
+  const handlers = {
+    retry: () => onRetry(row, { skipConfirm: true }),
+    move_from: (option) => onMoveFrom(row, option.deposit),
+    discard: (option) => onDiscard(row, option.reason || ""),
+    edit: () => onEdit(row),
+  };
+  return (
+    <div className={`mb-3 rounded border p-3 text-sm text-gray-900 ${tone}`}>
+      <div className="flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
+        <div className="font-semibold">En Bejerman: {diagnosis.title}</div>
+        {checkedAt && <div className="text-xs text-gray-500">Consultado el {checkedAt}</div>}
+      </div>
+      <div className="mt-1 text-xs leading-relaxed text-gray-800">{diagnosis.detail}</div>
+      <StockLocationsTable locations={diagnosis.locations} />
+      {options.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {options.map((option) => {
+            const handler = handlers[option.action];
+            if (!handler) return null;
+            const primary = option.action === "retry" || option.action === "move_from";
+            return (
+              <button
+                key={`${option.action}-${option.deposit || ""}`}
+                type="button"
+                className={`inline-flex h-8 items-center justify-center gap-1 rounded border px-3 text-xs font-medium disabled:opacity-50 ${
+                  primary
+                    ? "border-gray-900 bg-gray-900 text-white hover:bg-gray-800"
+                    : "border-gray-300 bg-white text-gray-800 hover:bg-gray-50"
+                }`}
+                onClick={() => handler(option)}
+                disabled={busy}
+                title={option.detail}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {!open && (
+        <div className="mt-2 text-xs text-gray-600">
+          La operación ya no está fallida ni bloqueada: esta consulta quedó como registro.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Dónde tiene Bejerman la partida de un remito que rechazó por su stock. */
+function PartidaStockPanel({ state }) {
+  if (!state) return null;
+  if (state.loading) {
+    return <div className="mb-3 text-xs text-gray-500">Consultando Bejerman...</div>;
+  }
+  if (state.error) {
+    return (
+      <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{state.error}</div>
+    );
+  }
+  const locations = Array.isArray(state.data?.locations) ? state.data.locations : [];
+  return (
+    <div className="mb-3 rounded border border-gray-200 bg-white p-3 text-sm">
+      <div className="flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
+        <div className="font-semibold text-gray-900">Partida {state.data?.serial || "-"} en Bejerman</div>
+        {state.data?.checkedAt && (
+          <div className="text-xs text-gray-500">Consultado el {formatProcessDateTime(state.data.checkedAt)}</div>
+        )}
+      </div>
+      {locations.length ? (
+        <StockLocationsTable locations={locations} />
+      ) : (
+        <div className="mt-1 text-xs text-gray-700">Bejerman no tiene stock de esta partida en ningún depósito.</div>
+      )}
+    </div>
+  );
+}
+
 function operationLabel(row) {
   return TYPE_LABELS[row?.sync_type] || row?.sync_type || "-";
 }
@@ -674,24 +913,50 @@ function ArticleSummary({ row, className = "" }) {
   );
 }
 
-function JobActions({ row, canManage, onEdit, onRetry, onCancel, retryingJobId, className = "" }) {
+function JobActions({
+  row,
+  canManage,
+  onEdit,
+  onRetry,
+  onCancel,
+  onDiagnose,
+  retryingJobId,
+  diagnosingJobId,
+  className = "",
+}) {
   const canEdit = canManage && row?.device_id;
   // "En cola" también se puede forzar: si el worker de sincronización no está corriendo, el job
   // queda ahí sin intentos y sin errores, y no hay otra forma de empujarlo.
   const isPending = row?.status === "pending";
-  const openStatus = isPending || row?.status === "failed" || row?.status === "blocked";
+  const failedStatus = row?.status === "failed" || row?.status === "blocked";
+  const openStatus = isPending || failedStatus;
   // Un job cuyo tipo NEXORA no sabe ejecutar no se destraba reintentando: el
   // backend lo marca y acá se esconde el botón que no puede funcionar.
   const supported = row?.supported_sync_type !== false;
   const unsupportedReason = trimValue(row?.unsupported_reason);
   const canRetry = canManage && openStatus && supported;
   const canCancel = canManage && openStatus && Boolean(onCancel);
+  // «Ver en Bejerman» sólo sirve con serie: sin ella no hay partida que buscar.
+  const canDiagnose = canManage && failedStatus && supported && Boolean(onDiagnose) && Boolean(trimValue(row?.numero_serie));
   const retrying = retryingJobId === row?.id;
+  const diagnosing = diagnosingJobId === row?.id;
 
-  if (!canEdit && !canRetry && !canCancel && !unsupportedReason) return null;
+  if (!canEdit && !canRetry && !canCancel && !canDiagnose && !unsupportedReason) return null;
 
   return (
     <div className={`flex flex-wrap items-center gap-2 ${className}`.trim()}>
+      {canDiagnose && (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
+          onClick={() => onDiagnose(row)}
+          disabled={diagnosing || retrying}
+          title="Consultar en Bejerman dónde está el equipo, sin mover nada"
+        >
+          <MapPin className={`h-3.5 w-3.5 ${diagnosing ? "animate-pulse" : ""}`} />
+          {diagnosing ? "Consultando..." : "Ver en Bejerman"}
+        </button>
+      )}
       {canEdit && (
         <button
           type="button"
@@ -707,8 +972,8 @@ function JobActions({ row, canManage, onEdit, onRetry, onCancel, retryingJobId, 
         <button
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
-          onClick={() => onRetry(row.id)}
-          disabled={retrying}
+          onClick={() => onRetry(row)}
+          disabled={retrying || diagnosing}
           title={isPending ? "Ejecutar ahora sin esperar al worker" : "Reintentar la operación"}
         >
           <RotateCcw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} />
@@ -720,7 +985,7 @@ function JobActions({ row, canManage, onEdit, onRetry, onCancel, retryingJobId, 
           type="button"
           className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           onClick={() => onCancel(row)}
-          disabled={retrying}
+          disabled={retrying || diagnosing}
           title="Cerrar la operación sin ejecutarla, dejando escrito el motivo"
         >
           <XCircle className="h-3.5 w-3.5" />
@@ -856,15 +1121,28 @@ function RemitoPdfAction({ row }) {
  * falta es decidir qué pasa con la orden vieja, y para eso primero hay que saber si el equipo
  * había salido. Eso lo contesta Bejerman.
  */
+/** "AAAA-MM-DD" local de una fecha del servidor, para un <input type="date">. */
+function fechaParaInput(value) {
+  if (!value) return "";
+  const parsed = parseDateLocal(value);
+  return parsed && !Number.isNaN(parsed.getTime()) ? localDateInputValue(parsed) : "";
+}
+
 function IngresoConflictActions({ row, onRefresh, className = "" }) {
   const allowed = row?.actions?.resolve_conflict?.allowed !== false;
   const canForce = row?.actions?.force_close?.allowed === true;
   const blockedReason = row?.actions?.resolve_conflict?.blockedReason || "";
+  // Sin comprobante, la fecha de salida la pone jefatura: lo único seguro es que el equipo
+  // salió después del ingreso viejo y antes de volver a entrar. Se sugiere el reingreso.
+  const minSalida = fechaParaInput(row?.conflicting_fecha_ingreso);
+  const maxSalida = fechaParaInput(row?.ingreso_fecha_ingreso) || localDateInputValue();
   const [evidence, setEvidence] = useState(null);
   const [loading, setLoading] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [error, setError] = useState("");
   const [manual, setManual] = useState("");
+  const [fechaSalida, setFechaSalida] = useState(maxSalida);
+  const [notaCierre, setNotaCierre] = useState("");
 
   const payload = {
     conflict_id: row?.conflict_id || row?.id,
@@ -900,10 +1178,23 @@ function IngresoConflictActions({ row, onRefresh, className = "" }) {
   };
 
   const forzar = () => {
+    if (!fechaSalida) {
+      setError("Indique en qué fecha salió el equipo.");
+      return;
+    }
+    const numero = manual.trim();
     const confirmado = window.confirm(
-      `Se cerrará la OS ${row?.conflicting_os || ""} sin ningún comprobante de salida que lo respalde. ¿Desea continuar?`,
+      `Se cerrará la OS ${row?.conflicting_os || ""} como entregada el ${formatDateOnly(fechaSalida)}`
+        + `${numero ? ` con el remito ${numero}` : ""}, sin un comprobante de salida verificado en Bejerman. `
+        + "¿Desea continuar?",
     );
-    if (confirmado) cerrar();
+    if (!confirmado) return;
+    const nota = notaCierre.trim();
+    cerrar({
+      fecha_salida: fechaSalida,
+      ...(numero ? { remito_salida: numero } : {}),
+      ...(nota ? { motivo: nota } : {}),
+    });
   };
 
   const documents = Array.isArray(evidence?.documents) ? evidence.documents : [];
@@ -985,15 +1276,41 @@ function IngresoConflictActions({ row, onRefresh, className = "" }) {
             verifica contra Bejerman antes de cerrar.
           </div>
           {canForce && (
-            <button
-              type="button"
-              className="inline-flex h-7 w-fit shrink-0 items-center justify-center gap-1 rounded border border-amber-500 bg-white px-2 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={forzar}
-              disabled={resolving}
-              title="Cerrar la orden anterior sin comprobante de salida (queda asentado en el historial)"
-            >
-              Cerrar sin comprobante
-            </button>
+            <div className="mt-1 flex flex-col gap-1 rounded border border-amber-200 bg-amber-50 p-2">
+              <label className="flex flex-col gap-0.5 text-[11px] text-gray-700">
+                Fecha en que salió el equipo
+                <input
+                  type="date"
+                  className="h-7 w-[150px] rounded border border-gray-300 bg-white px-2 text-xs"
+                  value={fechaSalida}
+                  min={minSalida || undefined}
+                  max={maxSalida || undefined}
+                  onChange={(event) => setFechaSalida(event.target.value)}
+                  disabled={resolving}
+                />
+              </label>
+              <input
+                className="h-7 w-full rounded border border-gray-300 bg-white px-2 text-xs"
+                placeholder="Motivo (opcional)"
+                value={notaCierre}
+                onChange={(event) => setNotaCierre(event.target.value)}
+                disabled={resolving}
+              />
+              {row?.ingreso_fecha_ingreso && (
+                <div className="text-[11px] leading-snug text-gray-500">
+                  Si no se sabe cuándo salió, deje la fecha del reingreso.
+                </div>
+              )}
+              <button
+                type="button"
+                className="inline-flex h-7 w-fit shrink-0 items-center justify-center gap-1 rounded border border-amber-500 bg-white px-2 text-xs font-semibold text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={forzar}
+                disabled={resolving || !fechaSalida}
+                title="Cerrar la orden anterior sin comprobante de salida (queda asentado en el historial)"
+              >
+                Cerrar sin comprobante
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -1002,10 +1319,27 @@ function IngresoConflictActions({ row, onRefresh, className = "" }) {
   );
 }
 
-function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRetry, onResolve, onRefresh, actionState, className = "" }) {
+function RemitoActions({
+  row,
+  canManage,
+  canEditOrders,
+  canGenerateRemito,
+  onRetry,
+  onResolve,
+  onRefresh,
+  onPartidaStock,
+  actionState,
+  partidaStockState,
+  className = "",
+}) {
   if (row?.source === "ingreso_conflicto") {
     return <IngresoConflictActions row={row} onRefresh={onRefresh} className={className} />;
   }
+  // Lo que sugiere el consejo cuando reintentar no alcanza: ver la partida en Bejerman o ir a la OS
+  // a corregir la serie.
+  const adviceAction = row?.retry_advice?.action || "";
+  const showPartidaStock = canManage && adviceAction === "partida_stock" && Boolean(onPartidaStock) && Boolean(trimValue(row?.numero_serie));
+  const showOpenOs = adviceAction === "open_os" && Boolean(row?.ingreso_id);
   const needsReview = row?.status === "failed_review";
   const reviewState = row?.reviewState || (needsReview ? "requires_verification" : "");
   const actions = row?.actions || {};
@@ -1039,10 +1373,32 @@ function RemitoActions({ row, canManage, canEditOrders, canGenerateRemito, onRet
   const actionError = trimValue(actionState?.error);
   const verifyBlockedReason = !verifyAllowed ? trimValue(actions?.verify?.blockedReason) : "";
   const hasReviewActions = showVerify || showEdit || showResolve || showReissue;
-  if (!canRetry && !hasReviewActions && !hasPdfState) return null;
+  if (!canRetry && !hasReviewActions && !hasPdfState && !showPartidaStock && !showOpenOs) return null;
   return (
     <div className={`flex flex-wrap items-center gap-2 ${className}`.trim()}>
       {hasPdfState && <RemitoPdfAction row={row} />}
+      {showPartidaStock && (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50 disabled:opacity-50"
+          onClick={() => onPartidaStock(row)}
+          disabled={Boolean(partidaStockState?.loading)}
+          title="Consultar en Bejerman dónde está la partida, sin emitir nada"
+        >
+          <MapPin className={`h-3.5 w-3.5 ${partidaStockState?.loading ? "animate-pulse" : ""}`} />
+          {partidaStockState?.loading ? "Consultando..." : "Ver en Bejerman"}
+        </button>
+      )}
+      {showOpenOs && (
+        <Link
+          className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs hover:bg-gray-50"
+          to={`/ingresos/${row.ingreso_id}`}
+          title="Abrir la hoja de servicio para corregir los datos del equipo"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Abrir la OS
+        </Link>
+      )}
       {canRetry && (
         <button
           type="button"
@@ -1144,13 +1500,31 @@ function RemitoReviewResolveModal({ target, onClose, onSubmit }) {
   );
 
   useEffect(() => {
-    setDecision("adopt");
-    setReason("");
     setError("");
-    // Los remitos de ingreso no traen candidatos de Bejerman, pero muchos ya tienen el
-    // número anotado en la OS: se ofrece como sugerencia en vez de un campo vacío.
+    // Con «Verificar en Bejerman» hecho, la resolución llega casi escrita: lo que se encontró
+    // —o que no se encontró nada— queda propuesto y el operador sólo confirma.
+    const verification = row?.verification || null;
+    if (verification && !candidates.length) {
+      setDecision("not_emitted");
+      setNumero("");
+      setReason(
+        `Verificado en Bejerman desde NEXORA el ${formatProcessDateTime(verification.at)}: no hay ningún remito `
+          + `de ingreso de la serie ${verification.serial || "del equipo"}`
+          + `${verification.since ? ` desde el ${isoDateLabel(verification.since)}` : ""}.`,
+      );
+      return;
+    }
+    setDecision("adopt");
+    // Sin verificación, muchos ingresos ya tienen el número anotado en la OS: se ofrece como
+    // sugerencia en vez de un campo vacío.
     setNumero(trimValue(candidates[0]?.comprobanteNumero) || trimValue(row?.actions?.resolve?.suggestedNumber));
-  }, [row?.id, row?.actions?.resolve?.suggestedNumber, candidates]);
+    setReason(
+      verification && candidates.length === 1
+        ? `Verificado en Bejerman desde NEXORA el ${formatProcessDateTime(verification.at)}: está el `
+          + `${candidateLabel(candidates[0])} del ${trimValue(candidates[0]?.fechaEmision) || "-"}.`
+        : "",
+    );
+  }, [row?.id, row?.verification, row?.actions?.resolve?.suggestedNumber, candidates]);
 
   if (!target?.row) return null;
 
@@ -1172,6 +1546,9 @@ function RemitoReviewResolveModal({ target, onClose, onSubmit }) {
         const chosen = candidates.find((item) => trimValue(item?.comprobanteNumero) === trimValue(numero));
         payload.comprobanteNumero = trimValue(numero);
         if (chosen?.comprobantePtoVenta) payload.comprobantePtoVenta = trimValue(chosen.comprobantePtoVenta);
+        // En un ingreso, el comprobante encontrado viaja completo («RIS R 00004-…»): con el
+        // número solo habría que adivinar el tipo y el punto de venta.
+        if (row?.source === "ingreso" && chosen?.remitoNumber) payload.remitoNumber = trimValue(chosen.remitoNumber);
         if (candidates.length && !chosen) payload.allowUnlistedNumber = true;
       }
       await onSubmit(row, payload);
@@ -1380,13 +1757,28 @@ function RemitoReference({ row }) {
   );
 }
 
-function ExpandedRemitoDetail({ row }) {
+function ExpandedRemitoDetail({ row, partidaStock = null }) {
   const orders = Array.isArray(row?.orders) ? row.orders : [];
   const needsReview = row?.status === "failed_review";
   const diagnostic = row?.diagnostic || {};
   const solutions = Array.isArray(diagnostic?.solutions) ? diagnostic.solutions : [];
+  const verification = row?.verification || null;
+  const verificationCandidates = Array.isArray(row?.actions?.resolve?.candidates) ? row.actions.resolve.candidates : [];
   return (
     <>
+      <PartidaStockPanel state={partidaStock} />
+      {needsReview && verification && (
+        <div className="mb-3 rounded border border-gray-200 bg-white p-3 text-xs leading-relaxed text-gray-800">
+          <span className="font-semibold">Verificado en Bejerman el {formatProcessDateTime(verification.at)}:</span>{" "}
+          {verificationCandidates.length
+            ? `${verificationCandidates.length === 1 ? "apareció" : "aparecieron"} ${verificationCandidates
+              .map((candidate) => candidateLabel(candidate))
+              .join(", ")}. Use «Resolver revisión» para adoptarlo.`
+            : `no hay ningún remito de ingreso de la serie ${verification.serial || "del equipo"}`
+              + `${verification.since ? ` desde el ${isoDateLabel(verification.since)}` : ""}. `
+              + "Use «Resolver revisión» → «No se emitió» para poder volver a emitirlo."}
+        </div>
+      )}
       {(row?.last_error || needsReview) && (
         <div className="mb-3 rounded border border-orange-200 bg-orange-50 p-3 text-sm text-orange-950">
           <div className="font-semibold">Qué ocurrió</div>
@@ -1455,9 +1847,25 @@ function ExpandedJobDetail({
   onUpdateSearch,
   onSearch,
   onConfirm,
+  diagnosis = null,
+  diagnosisBusy = false,
+  onRetry,
+  onMoveFrom,
+  onDiscard,
+  onEdit,
 }) {
   return (
     <>
+      <JobStockDiagnosisPanel
+        row={row}
+        diagnosis={diagnosis}
+        canManage={canManage}
+        busy={diagnosisBusy}
+        onRetry={onRetry}
+        onMoveFrom={onMoveFrom}
+        onDiscard={onDiscard}
+        onEdit={onEdit}
+      />
       <ArticleResolutionPanel
         row={row}
         canManage={canManage}
@@ -1667,6 +2075,11 @@ export default function BejermanSync() {
   const [remitoActionState, setRemitoActionState] = useState({});
   const [resolveTarget, setResolveTarget] = useState(null);
   const [retryingJobId, setRetryingJobId] = useState(null);
+  const [diagnosingJobId, setDiagnosingJobId] = useState(null);
+  // Resultado de «Ver en Bejerman» de esta sesión, por job. El último también queda guardado en
+  // el job (response_payload.diagnosis) y es lo que se muestra si acá no hay uno más nuevo.
+  const [diagnoses, setDiagnoses] = useState({});
+  const [partidaStocks, setPartidaStocks] = useState({});
   const [msg, setMsg] = useState("");
   const [expanded, setExpanded] = useState({});
   const [remitoExpanded, setRemitoExpanded] = useState({});
@@ -1878,28 +2291,24 @@ export default function BejermanSync() {
     };
   }, [load, loadRemitos, shouldSkipAutoRefresh]);
 
-  const total = useMemo(
-    () => Object.values(counters || {}).reduce((acc, value) => acc + Number(value || 0), 0),
-    [counters],
-  );
-  const remitoTotal = useMemo(
-    () => Object.values(remitoCounters || {}).reduce((acc, value) => acc + Number(value || 0), 0),
-    [remitoCounters],
-  );
+  // Los contadores vienen sin el filtro de estado aplicado: cuentan todos los estados.
   const processCounters = useMemo(() => {
     const type = processTypeValue(filters);
     const next = {};
-    PROCESS_STATUSES.forEach((status) => {
-      const stockCount = type === "remito" ? 0 : Number(counters?.[status] || 0);
-      const remitoCount = type === "stock" ? 0 : Number(remitoCounters?.[status] || 0);
-      next[status] = stockCount + remitoCount;
-    });
+    const add = (source) => {
+      Object.entries(source || {}).forEach(([status, value]) => {
+        next[status] = (next[status] || 0) + Number(value || 0);
+      });
+    };
+    if (type !== "remito") add(counters);
+    if (type !== "stock") add(remitoCounters);
     return next;
   }, [counters, filters, remitoCounters]);
-  const processTotal = (
-    (processTypeValue(filters) === "remito" ? 0 : total) +
-    (processTypeValue(filters) === "stock" ? 0 : remitoTotal)
-  );
+  const allProcessCount = sumStatusCounters(processCounters, Object.keys(processCounters));
+  const activeStatuses = statusFilterValues(filters.status);
+  const processTotal = activeStatuses.length
+    ? sumStatusCounters(processCounters, activeStatuses)
+    : allProcessCount;
   const processRows = useMemo(() => {
     const type = processTypeValue(filters);
     const stockRows = type === "remito"
@@ -1919,6 +2328,9 @@ export default function BejermanSync() {
           sortAt: processAttemptedAt(row),
         }));
     return [...stockRows, ...remitoProcessRows].sort((a, b) => {
+      // Lo que tuvo un problema va arriba aunque sea viejo: es lo que hay que atender.
+      const byStatus = processStatusRank(a.row?.status) - processStatusRank(b.row?.status);
+      if (byStatus) return byStatus;
       const byDate = processDateMs(b.sortAt) - processDateMs(a.sortAt);
       if (byDate) return byDate;
       return String(b.key).localeCompare(String(a.key));
@@ -1927,7 +2339,12 @@ export default function BejermanSync() {
   const displayProcessRows = useMemo(
     () => sortRows(processRows, processSort, {
       estado_tipo: {
-        getValue: (item) => `${item.row?.status || ""} ${PROCESS_KIND_LABELS[item.kind] || ""} ${companyLabel(item.row)}`,
+        getValue: (item) => [
+          processStatusRank(item.row?.status),
+          STATUS_LABELS[item.row?.status] || item.row?.status || "",
+          PROCESS_KIND_LABELS[item.kind] || "",
+          companyLabel(item.row),
+        ].join(" "),
       },
       documento: {
         getValue: (item) => item.kind === "remito"
@@ -2009,35 +2426,84 @@ export default function BejermanSync() {
     }
   };
 
-  const retry = async (jobId) => {
+  const retry = async (row, { moveFrom = "", skipConfirm = false } = {}) => {
+    const jobId = row?.id;
+    if (!jobId) return;
+    if (moveFrom) {
+      const confirmado = window.confirm(
+        `Se va a cambiar el origen de la operación #${jobId} de ${row.source_deposit || "-"} a ${moveFrom} y reintentarla: `
+          + `el equipo sale de ${moveFrom} y entra en ${row.target_deposit || "-"}. `
+          + "Antes de mover nada se vuelve a confirmar en Bejerman que el equipo está ahí. ¿Continuar?",
+      );
+      if (!confirmado) return;
+    } else if (!skipConfirm && !confirmRetryAgainstAdvice(row?.retry_advice)) {
+      return;
+    }
     setErr("");
     setMsg("");
     // El backend procesa el job dentro del request, así que esto puede tardar unos segundos.
     setRetryingJobId(jobId);
     try {
-      const updated = await postBejermanJobRetry(jobId);
+      const updated = await postBejermanJobRetry(jobId, moveFrom ? { move_from: moveFrom } : {});
       const status = String(updated?.status || "").trim();
       if (status === "succeeded") setMsg("La operación se sincronizó con Bejerman.");
       else if (updated?.last_error) setErr(updated.last_error);
       else if (status === "pending") setMsg("La operación quedó encolada para reintentar.");
       await load();
     } catch (e) {
-      setErr(e?.message || "No se pudo reintentar la operación.");
+      setErr(e?.data?.detail || e?.message || "No se pudo reintentar la operación.");
     } finally {
       setRetryingJobId(null);
     }
   };
 
+  // «Ver en Bejerman»: sólo lee. Abre el detalle de la fila, que es donde se ve el resultado y
+  // las salidas que ofrece (dar por hecha, mover desde donde está, descartar).
+  const diagnose = async (row) => {
+    if (!row?.id) return;
+    setErr("");
+    setMsg("");
+    setDiagnosingJobId(row.id);
+    try {
+      const result = await postBejermanJobDiagnose(row.id);
+      setDiagnoses((prev) => ({ ...prev, [row.id]: result }));
+      setExpanded((prev) => ({ ...prev, [row.id]: true }));
+    } catch (e) {
+      setErr(e?.data?.detail || e?.message || "No se pudo consultar Bejerman.");
+    } finally {
+      setDiagnosingJobId(null);
+    }
+  };
+
+  // Mismo «Ver en Bejerman» para los remitos que Bejerman rechaza por el stock de la partida.
+  const lookupPartidaStock = async (row) => {
+    const key = row?.process_id || `${row?.source}:${row?.id}`;
+    const serial = trimValue(row?.numero_serie);
+    if (!serial) return;
+    setPartidaStocks((prev) => ({ ...prev, [key]: { loading: true } }));
+    setRemitoExpanded((prev) => ({ ...prev, [`remito:${key}`]: true }));
+    try {
+      const data = await getBejermanPartidaStock({ serial, company_key: row?.company_key || "" });
+      setPartidaStocks((prev) => ({ ...prev, [key]: { data } }));
+    } catch (e) {
+      setPartidaStocks((prev) => ({
+        ...prev,
+        [key]: { error: e?.data?.detail || e?.message || "No se pudo consultar Bejerman." },
+      }));
+    }
+  };
+
   // Descartar pide el motivo y lo guarda: un job cerrado sin explicación es
-  // indistinguible de un movimiento de stock que se perdió.
-  const cancelJob = async (row) => {
+  // indistinguible de un movimiento de stock que se perdió. Desde «Ver en Bejerman» el motivo
+  // llega propuesto con lo que se consultó.
+  const cancelJob = async (row, suggestedReason = "") => {
     if (!row?.id) return;
     const reason = window.prompt(
       `Se va a cerrar la operación #${row.id} sin ejecutarla.
 
 ` +
         "Escriba por qué (queda asentado en el historial):",
-      "",
+      suggestedReason || "",
     );
     if (reason === null) return;
     if (!reason.trim()) {
@@ -2067,6 +2533,7 @@ export default function BejermanSync() {
       );
       if (!confirmed) return;
     }
+    if (action === "retry" && !confirmRetryAgainstAdvice(row?.retry_advice)) return;
     setRemitoErr("");
     setMsg("");
     setRemitoActionState((prev) => ({
@@ -2074,7 +2541,7 @@ export default function BejermanSync() {
       [actionKey]: { loading: true, action, error: "" },
     }));
     try {
-      await postBejermanRemitoProcessRetry(
+      const response = await postBejermanRemitoProcessRetry(
         row.source,
         row.id,
         extraPayload
@@ -2092,6 +2559,14 @@ export default function BejermanSync() {
           mensajePorDecision[extraPayload?.decision]
             || `${remitoDocumentLabel(row)} quedó habilitado para corregir y reemitir.`,
         );
+      } else if (action === "verify" && row.source === "ingreso") {
+        const found = Array.isArray(response?.result?.candidates) ? response.result.candidates : [];
+        setMsg(
+          found.length
+            ? `Bejerman tiene ${found.length === 1 ? "un remito" : `${found.length} remitos`} de ingreso de esta serie para ${remitoDocumentLabel(row)}: use «Resolver revisión» para adoptarlo.`
+            : `No hay ningún remito de ingreso de esta serie en Bejerman para ${remitoDocumentLabel(row)}: use «Resolver revisión» → «No se emitió» para poder volver a emitirlo.`,
+        );
+        setRemitoExpanded((prev) => ({ ...prev, [`remito:${actionKey}`]: true }));
       } else if (action === "verify") {
         setMsg(`Se verificó ${remitoDocumentLabel(row)} en Bejerman. Revise el nuevo estado antes de continuar.`);
       } else if (action === "reissue_corrected") {
@@ -2438,6 +2913,12 @@ export default function BejermanSync() {
         onUpdateSearch={(query) => updateArticleSearch(row.id, query)}
         onSearch={() => searchArticles(row)}
         onConfirm={() => confirmMapping(row)}
+        diagnosis={diagnoses[row.id] || row?.response_payload?.diagnosis || null}
+        diagnosisBusy={retryingJobId === row.id || diagnosingJobId === row.id}
+        onRetry={retry}
+        onMoveFrom={(target, deposit) => retry(target, { moveFrom: deposit })}
+        onDiscard={cancelJob}
+        onEdit={openEditModal}
       />
     );
   };
@@ -2521,6 +3002,8 @@ export default function BejermanSync() {
           </MobileDataField>
         </div>
 
+        <RetryAdvice advice={row.retry_advice} />
+
         {isRemito ? (
           <RemitoActions
             row={row}
@@ -2530,7 +3013,9 @@ export default function BejermanSync() {
             onRetry={retryRemito}
             onResolve={(target) => setResolveTarget({ row: target })}
             onRefresh={() => loadRemitos()}
+            onPartidaStock={lookupPartidaStock}
             actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
+            partidaStockState={partidaStocks[row.process_id || `${row.source}:${row.id}`]}
           />
         ) : (
           <JobActions
@@ -2539,13 +3024,22 @@ export default function BejermanSync() {
             onEdit={openEditModal}
             onRetry={retry}
             onCancel={cancelJob}
+            onDiagnose={diagnose}
             retryingJobId={retryingJobId}
+            diagnosingJobId={diagnosingJobId}
           />
         )}
 
         {isOpen && (
           <div className="rounded border border-gray-200 bg-gray-50 p-3">
-            {isRemito ? <ExpandedRemitoDetail row={row} /> : renderExpandedDetail(row)}
+            {isRemito ? (
+              <ExpandedRemitoDetail
+                row={row}
+                partidaStock={partidaStocks[row.process_id || `${row.source}:${row.id}`]}
+              />
+            ) : (
+              renderExpandedDetail(row)
+            )}
           </div>
         )}
       </MobileDataCard>
@@ -2628,6 +3122,7 @@ export default function BejermanSync() {
             <div className="mt-1.5 line-clamp-3 text-xs leading-snug text-gray-700" title={message}>
               {message}
             </div>
+            <RetryAdvice advice={row.retry_advice} className="mt-1.5" />
           </td>
           <td className="px-3 py-2">
             {isRemito ? (
@@ -2639,7 +3134,9 @@ export default function BejermanSync() {
                 onRetry={retryRemito}
                 onResolve={(target) => setResolveTarget({ row: target })}
                 onRefresh={() => loadRemitos()}
+                onPartidaStock={lookupPartidaStock}
                 actionState={remitoActionState[row.process_id || `${row.source}:${row.id}`]}
+                partidaStockState={partidaStocks[row.process_id || `${row.source}:${row.id}`]}
                 className="justify-end"
               />
             ) : (
@@ -2649,7 +3146,9 @@ export default function BejermanSync() {
                 onEdit={openEditModal}
                 onRetry={retry}
                 onCancel={cancelJob}
+                onDiagnose={diagnose}
                 retryingJobId={retryingJobId}
+                diagnosingJobId={diagnosingJobId}
                 className="justify-end"
               />
             )}
@@ -2658,7 +3157,14 @@ export default function BejermanSync() {
         {isOpen && (
           <tr className="border-t border-gray-100 bg-gray-50/60">
             <td colSpan={6} className="p-3">
-              {isRemito ? <ExpandedRemitoDetail row={row} /> : renderExpandedDetail(row)}
+              {isRemito ? (
+                <ExpandedRemitoDetail
+                  row={row}
+                  partidaStock={partidaStocks[row.process_id || `${row.source}:${row.id}`]}
+                />
+              ) : (
+                renderExpandedDetail(row)
+              )}
             </td>
           </tr>
         )}
@@ -2730,7 +3236,7 @@ export default function BejermanSync() {
               key={status}
               type="button"
               onClick={() => updateFilter("status", filters.status === status ? "" : status)}
-              className={`rounded border px-3 py-2 text-left text-sm ${filters.status === status ? "border-gray-900 bg-gray-50" : "border-gray-200 bg-white hover:bg-gray-50"}`}
+              className={`rounded border px-3 py-2 text-left text-sm ${activeStatuses.includes(status) ? "border-gray-900 bg-gray-50" : "border-gray-200 bg-white hover:bg-gray-50"}`}
             >
               <div className="text-xs text-gray-500">{STATUS_LABELS[status]}</div>
               <div className="text-xl font-semibold">{Number(processCounters?.[status] || 0)}</div>
@@ -2758,10 +3264,21 @@ export default function BejermanSync() {
               value={filters.status}
               onChange={(e) => updateFilter("status", e.target.value)}
             >
-              <option value="">Estados</option>
-              {PROCESS_STATUSES.map((status) => (
-                <option key={status} value={status}>{STATUS_LABELS[status]}</option>
-              ))}
+              <option value="">Todos los estados ({allProcessCount})</option>
+              <optgroup label="Agrupados">
+                {STATUS_GROUPS.map((group) => (
+                  <option key={group.value} value={group.value}>
+                    {group.label} ({sumStatusCounters(processCounters, group.statuses)})
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Un estado">
+                {PROCESS_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {STATUS_LABELS[status]} ({Number(processCounters?.[status] || 0)})
+                  </option>
+                ))}
+              </optgroup>
             </select>
             {filters.process_type === "remito" ? (
               <select

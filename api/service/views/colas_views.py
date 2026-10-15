@@ -50,9 +50,9 @@ _SQL_PENDIENTES_PRESUPUESTO = f"""
       FROM ingresos t
       JOIN devices d ON d.id = t.device_id
      WHERE COALESCE(t.presupuesto_estado, 'pendiente') = 'pendiente'
-       -- Es el mismo recorte que PendientesPresupuestoView: una nueva salida de
-       -- alquiler no resuelve el presupuesto pendiente de la reparación anterior.
-       AND t.estado NOT IN ('ingresado','entregado','liberado','baja','no_se_repara',
+       -- Es el mismo recorte que PendientesPresupuestoView: ni una nueva salida de
+       -- alquiler ni la baja del equipo resuelven el presupuesto pendiente.
+       AND t.estado NOT IN ('ingresado','entregado','liberado','no_se_repara',
                             'vendido_pendiente_entrega','vendido_entregado')
        AND (
          t.estado <> 'alquilado'

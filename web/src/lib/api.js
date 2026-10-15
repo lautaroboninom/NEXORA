@@ -990,13 +990,24 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const putBejermanPdfOutputSettings = (payload = {}) =>
     api.put("/api/bejerman/pdf-output-settings/", payload);
 
-  export const postBejermanJobRetry = (jobId) =>
-    api.post(`/api/bejerman/jobs/${jobId}/retry/`, {});
+  // `{ move_from: "STL" }` cambia antes el origen al depósito donde Bejerman tiene el equipo.
+  export const postBejermanJobRetry = (jobId, payload = {}) =>
+    api.post(`/api/bejerman/jobs/${jobId}/retry/`, payload || {});
 
   // Cierra una operación que no puede terminar bien nunca (tipo sin implementación,
   // movimiento que alguien ya hizo a mano en Bejerman). El motivo es obligatorio.
   export const postBejermanJobCancel = (jobId, reason) =>
     api.post(`/api/bejerman/jobs/${jobId}/cancel/`, { reason });
+
+  // «Ver en Bejerman»: dónde tiene Bejerman el equipo de la operación. Sólo lee.
+  export const postBejermanJobDiagnose = (jobId) =>
+    api.post(`/api/bejerman/jobs/${jobId}/diagnose/`, {});
+
+  // Stock de una partida en todos los depósitos de Bejerman. Sólo lee.
+  export const getBejermanPartidaStock = (params = {}) => {
+    const qs = buildQuery(params);
+    return api.get(`/api/bejerman/partidas/stock/${qs ? `?${qs}` : ""}`);
+  };
 
   export const getBejermanPdfQueueStatus = (params = {}) => {
     const qs = buildQuery(params);
@@ -1166,6 +1177,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
 
   export const patchDeliveryOrderRemitoLocation = (orderId, payload = {}) =>
     api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/remito-ubicacion/`, payload);
+
+  export const patchDeliveryOrderPriority = (orderId, priority) =>
+    api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/prioridad/`, { priority });
 
   export const patchDeliveryOrderCommercialCorrection = (orderId, payload = {}) =>
     api.patch(`/api/ordenes-entrega/${encodeURIComponent(orderId)}/correccion-comercial/`, payload);

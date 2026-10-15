@@ -76,11 +76,10 @@ const COLUMNS = [
 ];
 
 export default function PendientesPresupuesto() {
-  // Abrir la pantalla apaga el indicador de novedades del menú.
-  useMarkQueueSeen(QUEUE_KEYS.PENDIENTES_PRESUPUESTO);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const queueHighlight = useMarkQueueSeen(QUEUE_KEYS.PENDIENTES_PRESUPUESTO, { ready: !loading && !err });
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
   const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
@@ -200,6 +199,7 @@ export default function PendientesPresupuesto() {
       />
 
       <IngresoTable
+        queueHighlight={queueHighlight}
         rows={filtered}
         columns={COLUMNS}
         sort={sort}

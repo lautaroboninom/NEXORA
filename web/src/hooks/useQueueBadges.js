@@ -6,7 +6,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { getColasNovedades } from "../lib/api";
-import { markQueueSeen, queueBadgeCounts, reconcileSeenIds } from "../lib/queue-badges";
+import {
+  firstVisibleNewRow,
+  isRowInView,
+  markQueueSeen,
+  newQueueIds,
+  readSeenIds,
+  queueBadgeCounts,
+  reconcileSeenIds,
+} from "../lib/queue-badges";
+
+export const QUEUE_HIGHLIGHT_MS = 10000;
 
 // Mismo ritmo que la campana de notificaciones: la consulta es de ids sueltos.
 const REFRESH_MS = 60000;
@@ -90,16 +100,21 @@ export function useQueueBadges({ enabled = true } = {}) {
  * varios listados filtran (por técnico, por texto) y si marcáramos lo filtrado,
  * lo que quedó fuera del filtro seguiría contando como novedad para siempre.
  */
-export function useMarkQueueSeen(queueKey) {
+export function useMarkQueueSeen(queueKey, { ready = true } = {}) {
   const { user } = useAuth();
   const userId = user?.id;
+  const [visit, setVisit] = useState(null);
   useEffect(() => {
-    if (!queueKey) return undefined;
+    setVisit(null);
+    if (!queueKey || userId == null) return undefined;
     let cancelado = false;
     (async () => {
       try {
         const foto = await refrescarFoto(userId);
-        if (cancelado) return;
+        if (cancelado || ultimaFotoDe !== userId) return;
+        // Capturar antes de escribir la nueva foto: después la diferencia sería cero.
+        const ids = newQueueIds(readSeenIds(userId, queueKey), foto[queueKey]);
+        setVisit({ userId, queueKey, ids, startedAt: null });
         if (markQueueSeen(foto, queueKey, userId)) notificar();
       } catch (_) {
         // Sin foto no se marca nada: el número queda hasta la próxima visita.
@@ -109,4 +124,48 @@ export function useMarkQueueSeen(queueKey) {
       cancelado = true;
     };
   }, [queueKey, userId]);
+
+  const currentVisit = visit?.userId === userId && visit?.queueKey === queueKey ? visit : null;
+  useEffect(() => {
+    if (!ready || !currentVisit?.ids.size || currentVisit.startedAt !== null) return;
+    setVisit((previous) => previous === currentVisit ? { ...previous, startedAt: Date.now() } : previous);
+  }, [ready, currentVisit]);
+
+  const startedAt = currentVisit?.startedAt;
+  useEffect(() => {
+    if (startedAt == null) return undefined;
+    const timer = window.setTimeout(() => {
+      setVisit((previous) => previous?.startedAt === startedAt
+        ? { ...previous, ids: new Set() }
+        : previous);
+    }, Math.max(0, QUEUE_HIGHLIGHT_MS - (Date.now() - startedAt)));
+    return () => window.clearTimeout(timer);
+  }, [startedAt]);
+
+  return startedAt == null ? null : currentVisit;
+}
+
+/**
+ * Al abrir una cola con novedades, lleva la pantalla hasta la primera.
+ *
+ * Las colas van de la orden más vieja a la más nueva, así que lo que entró queda
+ * al final de la lista, fuera de la vista. Se mueve una sola vez por visita, en el
+ * orden que se está mostrando, y no se mueve si la fila ya se ve.
+ */
+export function useScrollToFirstNewRow(containerRef, highlight) {
+  const startedAt = highlight?.startedAt;
+  useEffect(() => {
+    if (startedAt == null) return undefined;
+    // Dos cuadros de espera: que la lista termine de dibujarse y que Pendientes de
+    // presupuesto restaure antes su scroll guardado, que si no pisaría el salto.
+    let frame = window.requestAnimationFrame(() => {
+      frame = window.requestAnimationFrame(() => {
+        const row = firstVisibleNewRow(containerRef.current);
+        if (!row || isRowInView(row.getBoundingClientRect(), window.innerHeight)) return;
+        const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+        row.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [containerRef, startedAt]);
 }

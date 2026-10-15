@@ -64,6 +64,8 @@ export default function UserDetailDrawer({
   onRefresh,
   onOpenPermissions,
   onOpenNotifications,
+  onBeforeRoleChange,
+  onAfterRoleChange,
   onResetPassword,
   onToggleActive,
   onDelete,
@@ -124,13 +126,20 @@ export default function UserDetailDrawer({
     setError("");
     setMessage("");
     try {
+      // El rol lo cambia sólo un Jefe (el backend lo exige): quien administra usuarios sin
+      // serlo edita nombre y email.
+      const roleChanged = isJefe && profile.rol !== user.rol;
+      if (roleChanged && !((await onBeforeRoleChange?.(user, profile.rol)) ?? true)) {
+        return;
+      }
       const next = await patchUsuario(user.id, {
         nombre: profile.nombre,
         email: profile.email,
-        rol: profile.rol,
+        ...(isJefe ? { rol: profile.rol } : {}),
       });
       setMessage("Datos del usuario actualizados.");
       await refresh(next);
+      if (roleChanged) await onAfterRoleChange?.(user, profile.rol);
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {
@@ -371,22 +380,28 @@ export default function UserDetailDrawer({
                 </label>
                 <label className="text-sm font-medium text-gray-700">
                   Rol
-                  <select
-                    className={`${inputClass} mt-1`}
-                    value={profile.rol}
-                    onChange={(event) =>
-                      setProfile((current) => ({
-                        ...current,
-                        rol: event.target.value,
-                      }))
-                    }
-                  >
-                    {roles.map((role) => (
-                      <option key={role.value} value={role.value}>
-                        {role.label}
-                      </option>
-                    ))}
-                  </select>
+                  {isJefe ? (
+                    <select
+                      className={`${inputClass} mt-1`}
+                      value={profile.rol}
+                      onChange={(event) =>
+                        setProfile((current) => ({
+                          ...current,
+                          rol: event.target.value,
+                        }))
+                      }
+                    >
+                      {roles.map((role) => (
+                        <option key={role.value} value={role.value}>
+                          {role.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className={`${inputClass} mt-1 block bg-gray-50 text-gray-600`}>
+                      {roles.find((role) => role.value === profile.rol)?.label || profile.rol}
+                    </span>
+                  )}
                 </label>
                 <div className="flex items-end justify-end">
                   <button

@@ -37,6 +37,12 @@ class PaginatedTableSortingTests(SimpleTestCase):
         self.assertRegex(order_sql, r"END\s+DESC NULLS LAST")
         self.assertIn("DESC NULLS LAST", order_sql)
 
+    def test_billing_queue_keeps_urgent_first_then_oldest(self):
+        order_sql = delivery_order_order_sql("", billing_queue_requested=True)
+
+        self.assertIn("CASE WHEN o.priority = 'urgente' THEN 0 ELSE 1 END ASC", order_sql)
+        self.assertIn("o.created_at ASC", order_sql)
+
     def test_historico_merges_deleted_rows_before_sorting_and_keeps_empty_last(self):
         rows = [
             {"id": 10, "razon_social": "Beta"},

@@ -27,6 +27,7 @@ import {
 } from "@/lib/api";
 import { isPendingPdfError, openPdfBlob, PDF_REPRINT_STEPS } from "@/lib/pdf";
 import { MOTIVO } from "@/lib/constants";
+import { normalizeMgInput } from "@/lib/ui-helpers";
 import {
   equipmentKeyOf,
   findDuplicateEquipmentIndex,
@@ -1562,17 +1563,27 @@ export default function NuevoIngreso() {
   };
 
   const onNumeroInternoChange = (e) => {
-    forgetOtroEquipoIfCodeChanged("interno", e.target.value);
+    // El número interno no distingue mayúsculas (regla del 14/10/2026): lo que se escribe "mg"
+    // se ve y se guarda "MG". La OS 29098 entró como "mg 7359" y terminó en una ficha duplicada.
+    const value = String(e.target.value ?? "").toUpperCase();
+    forgetOtroEquipoIfCodeChanged("interno", value);
     setMgInactiveInfo(null);
     setMgLookup((s) => (s.notFound ? { ...s, notFound: false } : s));
     setAppliedBejermanSale(null);
     setEquipoAlquiladoOrigen(false);
     setEsEquipoPropioMg(false);
-    onChange("equipo.numero_interno")(e);
+    onChange("equipo.numero_interno")({ target: { value } });
   };
 
   const onLookupFieldBlur = (source) => (e) => {
-    triggerLookupRequest(source, e.currentTarget.value);
+    let code = e.currentTarget.value;
+    if (source === "interno") {
+      // Al salir del campo queda como lo va a guardar NEXORA: "MG7359" -> "MG 7359".
+      const normalized = normalizeMgInput(code);
+      if (normalized !== code) onChange("equipo.numero_interno")({ target: { value: normalized } });
+      code = normalized;
+    }
+    triggerLookupRequest(source, code);
   };
 
   const onLookupFieldKeyDown = (source) => (e) => {

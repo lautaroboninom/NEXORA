@@ -507,6 +507,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_ns_tipo_norm
   WHERE NULLIF(TRIM(numero_serie), '') IS NOT NULL;
 
 -- Unicidad por número interno normalizado a 'XX ####' (MG|NM|NV|CE)
+-- OJO: esta expresión distingue mayúsculas (la regex corre antes del UPPER) y LPAD('\2',4,'0')
+-- rellena la cadena literal «\2», no los dígitos: 'mg 7359' y 'MG 7359' dan claves distintas. Con
+-- el trigger trg_devices_normalize_numero_interno (abajo) los valores guardados ya son canónicos;
+-- el índice se rehace con la clave de service/mg_codes.py cuando se unifiquen los MG duplicados.
 DO $$
 BEGIN
   BEGIN
@@ -522,6 +526,51 @@ BEGIN
       WHERE numero_interno ~* '^(MG|NM|NV|CE)\s*\d{1,4}$';
   END;
 END $$;
+
+-- Regla del 14/10/2026: el número interno no distingue mayúsculas. Cualquier escritura de
+-- devices.numero_interno se guarda canónica: 'mg 7359', 'MG7359' y 'MG 007359' -> 'MG 7359';
+-- 'MG 42' -> 'MG 0042'. Lo que no es código numérico ('mg sm-004') sólo sube el prefijo. Los
+-- espacios duros (NBSP) cuentan como espacio. Misma regla que service/mg_codes.py
+-- (normalize_mg_input / NORMALIZE_NUMERO_INTERNO_FUNCTION_SQL); la aplica
+-- apply_devices_numero_interno_schema, que además normaliza lo ya guardado.
+CREATE OR REPLACE FUNCTION public.normalize_numero_interno(valor text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  limpio text;
+  partes text[];
+BEGIN
+  IF valor IS NULL THEN
+    RETURN NULL;
+  END IF;
+  limpio := regexp_replace(translate(valor, chr(160) || chr(8199) || chr(8239), '   '), '^\s+|\s+$', '', 'g');
+  partes := regexp_match(UPPER(limpio), '^(MG|NM|NV|CE)\s*0*(\d{1,6})$');
+  IF partes IS NOT NULL THEN
+    RETURN partes[1] || ' ' || CASE WHEN length(partes[2]) < 4 THEN lpad(partes[2], 4, '0') ELSE partes[2] END;
+  END IF;
+  IF UPPER(limpio) ~ '^(MG|NM|NV|CE)' THEN
+    RETURN UPPER(left(limpio, 2)) || substr(limpio, 3);
+  END IF;
+  RETURN valor;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.normalize_device_numero_interno()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.numero_interno := public.normalize_numero_interno(NEW.numero_interno);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_devices_normalize_numero_interno ON devices;
+CREATE TRIGGER trg_devices_normalize_numero_interno
+BEFORE INSERT OR UPDATE OF numero_interno ON devices
+FOR EACH ROW EXECUTE FUNCTION public.normalize_device_numero_interno();
 
 CREATE TABLE IF NOT EXISTS ingresos (
   id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

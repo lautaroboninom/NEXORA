@@ -5,7 +5,6 @@ from urllib.parse import quote
 
 from django.db import connection
 from django.http import HttpResponse
-from rest_framework.exceptions import PermissionDenied
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -52,6 +51,7 @@ from ..delivery_orders import (
     postpone_delivery_order_billing,
     reactivate_delivery_order_billing,
     update_delivery_order,
+    update_delivery_order_priority,
     update_item_article,
     update_item_partidas,
     update_remito_location,
@@ -130,13 +130,14 @@ class DeliveryOrdersView(DeliveryOrderPermissionMixin, APIView):
             return _error_response(exc)
 
 
-class DeliveryOrderDriveSyncView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class DeliveryOrderDriveSyncView(DeliveryOrderPermissionMixin, APIView):
+    """Pasa las órdenes de entrega a la planilla de Google Drive.
+
+    Quién puede lo decide `action.delivery_order.sync_drive` en la matriz. Por defecto lo
+    tienen jefatura, admin, supervisor y ventas: la lista de roles que antes vivía acá.
+    """
 
     def post(self, request):
-        role = str(getattr(request.user, "rol", "") or "").strip().lower()
-        if role not in {"jefe", "jefe_suplente", "admin", "supervisor", "ventas"}:
-            raise PermissionDenied("Solo jefe, admin, supervisor o ventas pueden sincronizar órdenes de entrega con Google Drive.")
         try:
             return Response(sync_delivery_orders_to_drive())
         except DriveDeliverySyncError as exc:
@@ -311,6 +312,16 @@ class DeliveryOrderRemitoLocationView(DeliveryOrderPermissionMixin, APIView):
     def patch(self, request, order_id):
         try:
             return Response(update_remito_location(order_id, _actor_id(request), (request.data or {}).get("remitoLocation")))
+        except Exception as exc:
+            return _error_response(exc)
+
+
+class DeliveryOrderPriorityView(DeliveryOrderPermissionMixin, APIView):
+    """Marca o quita la urgencia de una orden ya creada (la de servicio técnico nace normal)."""
+
+    def patch(self, request, order_id):
+        try:
+            return Response(update_delivery_order_priority(order_id, _actor_id(request), (request.data or {}).get("priority")))
         except Exception as exc:
             return _error_response(exc)
 
@@ -746,6 +757,7 @@ __all__ = [
     "DeliveryOrderBillingReactivationView",
     "DeliveryOrderCancelView",
     "DeliveryOrderRemitoLocationView",
+    "DeliveryOrderPriorityView",
     "DeliveryOrderCommercialCorrectionView",
     "DeliveryOrderItemArticleView",
     "DeliveryOrderItemPartidasView",

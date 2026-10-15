@@ -15,11 +15,10 @@ import { useMarkQueueSeen } from "../hooks/useQueueBadges";
 const ENDPOINT = "/api/ingresos/pendientes/";
 
 export default function PendientesGeneral() {
-  // Abrir la pantalla apaga el indicador de novedades del menú.
-  useMarkQueueSeen(QUEUE_KEYS.PENDIENTES_GENERAL);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const queueHighlight = useMarkQueueSeen(QUEUE_KEYS.PENDIENTES_GENERAL, { ready: !loading && !err });
   const [q, setQ] = useQueryState("q", "");
   const [sort, setSort] = useQueryState("sort", "");
   const { filters, setFilter, clearFilters, activeCount } = useColumnFilters();
@@ -97,6 +96,7 @@ export default function PendientesGeneral() {
       />
 
       <WorkQueueTable
+        queueHighlight={queueHighlight}
         rows={filteredAndSorted}
         totalCount={rows.length}
         loading={loading}

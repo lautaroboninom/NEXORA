@@ -15,6 +15,7 @@ from service.bejerman_remito_pdf import (
     TEMPLATE_MGBIO,
     TEMPLATE_SEPID,
     _format_quantity,
+    _sit_iva_label,
     _wrap_descripcion,
     company_for,
     render_remito_pdf,
@@ -97,6 +98,20 @@ COMPROBANTE = {
         },
     ],
 }
+
+
+class RemitoPdfCondicionIvaTests(SimpleTestCase):
+    def test_etiquetas_coinciden_con_la_tabla_sitiva_de_bejerman(self):
+        labels = {
+            "3": "Consumidor Final",
+            "4": "No Alcanzado",
+            "5": "Exento",
+            "6": "Monotributo",
+            "7": "Sujeto no Categorizado",
+        }
+        for code, expected in labels.items():
+            with self.subTest(code=code):
+                self.assertEqual(_sit_iva_label({"Cliente_SitIVA": code}), expected)
 
 
 class RemitoPdfGeometriaTests(SimpleTestCase):

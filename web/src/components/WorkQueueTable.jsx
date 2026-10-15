@@ -82,6 +82,7 @@ export default function WorkQueueTable({
   onFilterChange,
   filterOptions = {},
   totalCount,
+  queueHighlight,
 }) {
   const columns = useMemo(() => {
     const list = [
@@ -183,6 +184,7 @@ export default function WorkQueueTable({
 
   return (
     <IngresoTable
+      queueHighlight={queueHighlight}
       rows={rows}
       columns={columns}
       sortColumns={WORK_QUEUE_SORT_COLUMNS}
