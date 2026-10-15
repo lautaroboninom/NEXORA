@@ -55,3 +55,9 @@ Se corrigió además la ubicación omitida en los ejemplos: las colas de trabajo
 Se incorporó la lista de equipos ya configurados en el catálogo a la respuesta técnica y a las opciones del selector. Al elegir un repuesto se muestra el detalle completo debajo del selector; si no hay asociaciones se informa esa condición. El recurso técnico conserva una lista explícita de campos permitidos: identificador, código, nombre y equipos asociados.
 
 Pasaron 33 pruebas focalizadas de intervención técnica y repuestos, incluida una regresión con varios equipos asociados y sin asociaciones. La compilación del frontend finalizó correctamente. La comprobación con Chromium verificó las etiquetas del selector, el detalle seleccionado y la ausencia de información comercial en la respuesta; también se comprobó el mensaje sin asociaciones mediante una respuesta simulada del navegador. No se modificaron asociaciones del catálogo durante esa comprobación ni se registraron errores de JavaScript.
+
+## Cantidad única por trabajo o repuesto
+
+La carga técnica muestra una sola columna «Cantidad» y una casilla «Realizado» para trabajos o «Instalado» para repuestos. La revisión administrativa utiliza el mismo criterio de cantidad única y estado. Se conserva el avance existente; los artículos con ejecución parcial previa se identifican como «En curso».
+
+La compilación del frontend finalizó correctamente. En Chromium se verificaron marcar y desmarcar, cambiar la cantidad de un artículo ya completado, conservar cantidades parciales anteriores y presentar una sola columna de cantidad en escritorio y móvil. Se inspeccionaron las solicitudes de guardado con respuestas simuladas, sin modificar las órdenes de demostración; no se registraron errores de JavaScript. Este ajuste no modifica el esquema ni las reglas de precio y stock.

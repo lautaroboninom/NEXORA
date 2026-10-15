@@ -47,7 +47,7 @@ Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` 
 
 ## Operación
 
-1. El técnico asignado abre Diagnóstico y Reparación y completa diagnóstico, trabajos y repuestos de catálogo, cantidades previstas y realizadas, y tiempos estimado y real. Guarda sus cambios y confirma «Enviar a presupuestar».
+1. El técnico asignado abre Diagnóstico y Reparación y completa diagnóstico, trabajos y repuestos de catálogo, una cantidad por artículo y tiempos estimado y real. Marca «Realizado» en los trabajos terminados e «Instalado» en las piezas colocadas. Guarda sus cambios y confirma «Enviar a presupuestar».
    El selector de repuestos muestra código, descripción y equipos asociados cuando están configurados. Al seleccionar uno se puede consultar la lista completa de marcas, modelos y variantes asociadas. Esta información se obtiene del mismo catálogo administrativo y no incluye importes.
 2. Si falta un artículo, solicita su alta. Administración lo crea o identifica en el catálogo y resuelve la solicitud; el artículo aprobado se agrega a la intervención. Las solicitudes pendientes impiden completar el envío.
 3. En Pendientes de presupuesto se distingue la preparación, las altas pendientes, la revisión y las ampliaciones. Desde «Trabajos, tarifas y solicitudes de alta» se administran los catálogos y los valores monetarios.

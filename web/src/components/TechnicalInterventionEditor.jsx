@@ -6,6 +6,13 @@ export const TECHNICAL_STATUS_LABELS = {
   alta_pendiente: "Alta de catálogo pendiente", ampliacion_pendiente: "Ampliación pendiente", historico: "Carga anterior",
 };
 
+function prepareForm(value) {
+  return { ...value, items: value.items.map((item) => {
+    const quantity = Math.max(Number(item.cantidad_prevista), Number(item.cantidad_realizada));
+    return { ...item, cantidad_prevista: quantity, realizado: quantity > 0 && Number(item.cantidad_realizada) >= quantity };
+  }) };
+}
+
 export function DurationInput({ value = 0, onChange, disabled, label }) {
   const total = Number(value) || 0;
   return <fieldset disabled={disabled} className="min-w-0">
@@ -36,7 +43,7 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
   useEffect(() => {
     let alive = true;
     Promise.all([getTechnicalIntervention(ingresoId), getTechnicalWorks()])
-      .then(([value, catalog]) => { if (alive) { setForm(value); setWorks(catalog); setDirty(false); } })
+      .then(([value, catalog]) => { if (alive) { setForm(prepareForm(value)); setWorks(catalog); setDirty(false); } })
       .catch((e) => { if (alive) setError(e.message); });
     return () => { alive = false; };
   }, [ingresoId, refreshKey]);
@@ -57,20 +64,26 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
 
   function change(patch) { setForm((old) => ({ ...old, ...patch })); setDirty(true); setNotice(""); }
   function changeItem(index, patch) { change({ items: form.items.map((item, i) => i === index ? { ...item, ...patch } : item) }); }
+  function changeQuantity(index, value) {
+    const item = form.items[index];
+    changeItem(index, { cantidad_prevista: value,
+      realizado: item.realizado || (Number(value) > 0 && Number(item.cantidad_realizada) >= Number(value)) });
+  }
   function add(kind, row) {
     if (!row) return;
     const existing = form.items.findIndex((item) => item.tipo === kind && Number(item[kind === "trabajo" ? "trabajo_id" : "repuesto_id"]) === Number(row.id));
     if (existing >= 0) { changeItem(existing, { cantidad_prevista: Number(form.items[existing].cantidad_prevista) + 1 }); return; }
     change({ items: [...form.items, { tipo: kind, trabajo_id: kind === "trabajo" ? row.id : null, repuesto_id: kind === "repuesto" ? row.id : null,
-      descripcion: row.nombre, codigo: row.codigo, cantidad_prevista: 1, cantidad_realizada: 0, observaciones: "" }] });
+      descripcion: row.nombre, codigo: row.codigo, cantidad_prevista: 1, cantidad_realizada: 0, realizado: false, observaciones: "" }] });
   }
   async function persist() {
     const payload = { revision: form.revision, diagnostico: form.diagnostico, minutos_estimados: form.minutos_estimados,
       minutos_reales: form.minutos_reales, sin_falla: form.sin_falla, observaciones: form.observaciones,
-      items: form.items.map(({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista, cantidad_realizada, observaciones }) =>
-        ({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista, cantidad_realizada, observaciones })) };
+      items: form.items.map(({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista, cantidad_realizada, realizado, observaciones }) =>
+        ({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista,
+          cantidad_realizada: realizado ? cantidad_prevista : Math.min(Number(cantidad_realizada), Number(cantidad_prevista)), observaciones })) };
     const value = await saveTechnicalIntervention(ingresoId, payload);
-    setForm(value); setDirty(false); await onSaved?.(); return value;
+    setForm(prepareForm(value)); setDirty(false); await onSaved?.(); return value;
   }
   async function run(action) {
     setBusy(true); setError(""); setNotice("");
@@ -108,10 +121,13 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
         </div>}
       </div>
     </div>
-    <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Trabajo o repuesto</th><th className="p-2">Cantidad prevista</th><th className="p-2">Cantidad realizada</th><th className="p-2">Observaciones</th><th className="p-2"><span className="sr-only">Acciones</span></th></tr></thead>
+    <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Trabajo o repuesto</th><th className="p-2">Cantidad</th><th className="p-2">Observaciones</th><th className="p-2"><span className="sr-only">Acciones</span></th></tr></thead>
       <tbody>{form.items.map((item, index) => <tr className="border-b" key={item.id || `new-${index}`}>
-        <td className="p-2 min-w-44"><span className="text-xs text-slate-500 block">{item.tipo === "repuesto" ? item.codigo : "Trabajo"}</span>{item.descripcion}</td>
-        {["cantidad_prevista", "cantidad_realizada"].map((key) => <td className="p-2" key={key}><input aria-label={`${key === "cantidad_prevista" ? "Cantidad prevista" : "Cantidad realizada"}: ${item.descripcion}`} className="border rounded p-2 w-24" disabled={locked} type="number" min={key === "cantidad_prevista" ? "0.01" : "0"} step="0.01" value={item[key]} onChange={(e) => changeItem(index, { [key]: e.target.value })} /></td>)}
+        <td className="p-2 min-w-44"><span className="text-xs text-slate-500 block">{item.tipo === "repuesto" ? item.codigo : "Trabajo"}</span>{item.descripcion}
+          <label className="flex items-center gap-2 mt-2 text-sm text-slate-600"><input aria-label={`${item.tipo === "repuesto" ? "Instalado" : "Realizado"}: ${item.descripcion}`} type="checkbox" disabled={locked} checked={item.realizado} onChange={(e) => changeItem(index, { realizado: e.target.checked, cantidad_realizada: 0 })} />{item.tipo === "repuesto" ? "Instalado" : "Realizado"}</label>
+          {!item.realizado && Number(item.cantidad_realizada) > 0 && <span className="block mt-1 text-xs text-slate-500">En curso</span>}
+        </td>
+        <td className="p-2"><input aria-label={`Cantidad: ${item.descripcion}`} className="border rounded p-2 w-24" disabled={locked} type="number" min="0.01" step="0.01" value={item.cantidad_prevista} onChange={(e) => changeQuantity(index, e.target.value)} /></td>
         <td className="p-2"><input aria-label={`Observaciones: ${item.descripcion}`} className="border rounded p-2 min-w-40 w-full" disabled={locked} value={item.observaciones} onChange={(e) => changeItem(index, { observaciones: e.target.value })} /></td>
         <td className="p-2"><button type="button" className="text-red-700 underline" disabled={locked} onClick={() => change({ items: form.items.filter((_, i) => i !== index) })}>Quitar</button></td>
       </tr>)}</tbody></table>{!form.items.length && <p className="text-sm text-slate-500 py-3">Agregá los trabajos previstos y las piezas que requiere la reparación.</p>}</div>
@@ -123,10 +139,10 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
     <label className="block text-sm font-medium">Observaciones generales<textarea className="block mt-1 w-full border rounded p-2 font-normal" disabled={locked} value={form.observaciones} onChange={(e) => change({ observaciones: e.target.value })} /></label>
     <div className="flex flex-wrap gap-2 items-center">
       <button type="button" disabled={locked || !dirty} className="border rounded px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { await persist(); setNotice("Cambios guardados."); })}>Guardar cambios</button>
-      <button type="button" disabled={locked} className="rounded bg-blue-700 text-white px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { const saved = dirty || !form.revision ? await persist() : form; const sent = await submitTechnicalIntervention(ingresoId, saved.revision); setForm(sent); await onSaved?.(); setNotice("Carga enviada para revisión del presupuesto."); })}>{busy ? "Guardando..." : "Enviar a presupuestar"}</button>
+      <button type="button" disabled={locked} className="rounded bg-blue-700 text-white px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { const saved = dirty || !form.revision ? await persist() : form; const sent = await submitTechnicalIntervention(ingresoId, saved.revision); setForm(prepareForm(sent)); await onSaved?.(); setNotice("Carga enviada para revisión del presupuesto."); })}>{busy ? "Guardando..." : "Enviar a presupuestar"}</button>
       <button type="button" disabled={locked} className="text-blue-700 underline p-2" onClick={() => setShowRequest((value) => !value)}>Solicitar alta de trabajo o repuesto</button>
     </div>
-    {showRequest && <form className="rounded bg-slate-50 border p-3 grid gap-3 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); run(async () => { if (dirty || !form.revision) await persist(); await requestTechnicalCatalogItem({ ...request, ingreso_id: ingresoId }); setForm(await getTechnicalIntervention(ingresoId)); setRequest({ tipo: "repuesto", nombre: "", cantidad: 1, observaciones: "" }); setShowRequest(false); setNotice("Solicitud de alta enviada a administración."); }); }}>
+    {showRequest && <form className="rounded bg-slate-50 border p-3 grid gap-3 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); run(async () => { if (dirty || !form.revision) await persist(); await requestTechnicalCatalogItem({ ...request, ingreso_id: ingresoId }); setForm(prepareForm(await getTechnicalIntervention(ingresoId))); setRequest({ tipo: "repuesto", nombre: "", cantidad: 1, observaciones: "" }); setShowRequest(false); setNotice("Solicitud de alta enviada a administración."); }); }}>
       <label className="text-sm">Tipo<select className="block border rounded p-2 w-full" disabled={locked} value={request.tipo} onChange={(e) => setRequest({ ...request, tipo: e.target.value })}><option value="repuesto">Repuesto</option><option value="trabajo">Trabajo</option></select></label>
       <label className="text-sm">Cantidad<input className="block border rounded p-2 w-full" disabled={locked} type="number" min="0.01" step="0.01" value={request.cantidad} onChange={(e) => setRequest({ ...request, cantidad: e.target.value })} /></label>
       <label className="text-sm">Nombre solicitado<input required className="block border rounded p-2 w-full" disabled={locked} value={request.nombre} onChange={(e) => setRequest({ ...request, nombre: e.target.value })} /></label>
