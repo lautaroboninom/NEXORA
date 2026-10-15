@@ -16,7 +16,7 @@ Las imágenes incorporan el código y el esquema: después de modificar archivos
 
 ## Casos disponibles para probar
 
-La carga ampliada agrega quince órdenes, tres clientes, diez repuestos con códigos `DEMO-…` y seis tipos de equipo. Conserva la OS 1 y los cambios que ya se hayan realizado. Los números de OS de la tabla corresponden a la base de demostración actual; en una instalación nueva el comando informa sus identificadores.
+La carga ampliada agrega veinte órdenes, tres clientes, diez repuestos con códigos `DEMO-…` y seis tipos de equipo. Conserva la OS 1 y los cambios que ya se hayan realizado: la base actual tiene 21 órdenes. Los números de OS de la tabla corresponden a la base de demostración actual; en una instalación nueva el comando informa sus identificadores. Los ejemplos activos se ubican en Taller para aparecer en las listas de trabajo.
 
 | OS | Caso |
 | --- | --- |
@@ -35,8 +35,15 @@ La carga ampliada agrega quince órdenes, tres clientes, diez repuestos con cód
 | 14 | Aprobado, con 35 minutos reales: completar ejecución |
 | 15 | Reparación terminada, con 100 minutos reales |
 | 16 | Adicional enviado sobre una versión aprobada |
+| 17 | CPAP que no enciende, pendiente de diagnóstico |
+| 18 | Aspirador con baja succión, pendiente de diagnóstico |
+| 19 | Monitor con lectura intermitente, pendiente de diagnóstico |
+| 20 | Nebulizador que no nebuliza, pendiente de diagnóstico |
+| 21 | Concentrador con alarma, pendiente de diagnóstico |
 
 El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. Las tarifas de ejemplo usan un mínimo por primera hora y adicionales proporcionales; el cargo general sin falla de ejemplo es de $ 6.000 netos. Repetir el seed no reinicia los casos, no repone stock consumido y no duplica presupuestos.
+
+Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` en http://localhost:5177/tecnico. Las OS 17 a 21 tienen diagnóstico vacío y están asignadas a ese técnico. Administración puede verlas en http://localhost:5177/pendientes; «Mis pendientes» muestra únicamente las asignadas al usuario que inició sesión.
 
 ## Operación
 

@@ -41,6 +41,11 @@ SCENARIOS = [
     ('EJECUCION', 'Presupuesto aprobado: registrar ejecución y tiempo real', 'Aspirador', 90, ['BATERIA'], 'aprobado'),
     ('REPARADO', 'Reparación terminada con tiempo real registrado', 'CPAP', 80, ['MANGUERA'], 'reparado'),
     ('AMPLIACION', 'Adicional enviado sobre un presupuesto aprobado', 'Concentrador de oxígeno', 80, ['FILTRO'], 'ampliacion'),
+    ('DIAG-CPAP', 'Diagnóstico pendiente: CPAP que no enciende', 'CPAP', 0, [], 'nuevo'),
+    ('DIAG-ASPIRADOR', 'Diagnóstico pendiente: aspirador con baja succión', 'Aspirador', 0, [], 'nuevo'),
+    ('DIAG-MONITOR', 'Diagnóstico pendiente: monitor con lectura intermitente', 'Monitor multiparamétrico', 0, [], 'nuevo'),
+    ('DIAG-NEBULIZADOR', 'Diagnóstico pendiente: nebulizador que no nebuliza', 'Nebulizador', 0, [], 'nuevo'),
+    ('DIAG-CONCENTRADOR', 'Diagnóstico pendiente: concentrador con alarma', 'Concentrador de oxígeno', 0, [], 'nuevo'),
 ]
 
 
@@ -71,6 +76,14 @@ class Command(BaseCommand):
             self.tech, self.manager = people['tecnico'], people['jefe']
             self.client = APIClient()
             self.client.force_authenticate(self.manager)
+            exec_void("INSERT INTO locations(nombre) VALUES ('Taller') ON CONFLICT DO NOTHING")
+            self.workshop = q("SELECT id FROM locations WHERE LOWER(nombre)='taller' ORDER BY id LIMIT 1", one=True)['id']
+            # Reparar los ejemplos anteriores que omitían la ubicación necesaria
+            # para aparecer en Mis pendientes y Pendientes general.
+            exec_void('''UPDATE ingresos i SET ubicacion_id=%s FROM devices d
+                WHERE d.id=i.device_id AND i.ubicacion_id IS NULL
+                  AND (d.numero_serie LIKE 'DEMO-TEC-%%' OR d.numero_serie='DEMO-CARGA-TECNICA')
+                  AND i.estado NOT IN ('entregado','liberado','alquilado','baja','vendido_pendiente_entrega','vendido_entregado')''', [self.workshop])
             brand = q("SELECT id FROM marcas WHERE nombre='Demostración técnica' ORDER BY id LIMIT 1", one=True)
             self.brand = brand['id'] if brand else exec_returning("INSERT INTO marcas(nombre) VALUES ('Demostración técnica') RETURNING id")
             self.customers = []
@@ -120,9 +133,9 @@ class Command(BaseCommand):
         exec_void('INSERT INTO catalogo_tipos_equipo(nombre) VALUES (%s) ON CONFLICT DO NOTHING', [kind])
         device = exec_returning('''INSERT INTO devices(customer_id,marca_id,model_id,numero_serie,tipo_equipo)
             VALUES (%s,%s,%s,%s,%s) RETURNING id''', [self.customers[index % len(self.customers)], self.brand, model_id, serial, kind])
-        ingreso = exec_returning('''INSERT INTO ingresos(device_id,motivo,asignado_a,fecha_ingreso,comentarios,informe_preliminar)
-            VALUES (%s,'reparación',%s,now()-(%s * interval '1 day'),%s,%s) RETURNING id''',
-            [device, None if stage=='sin_asignar' else self.tech.id, index % 10,
+        ingreso = exec_returning('''INSERT INTO ingresos(device_id,motivo,asignado_a,ubicacion_id,fecha_ingreso,comentarios,informe_preliminar)
+            VALUES (%s,'reparación',%s,%s,now()-(%s * interval '1 day'),%s,%s) RETURNING id''',
+            [device, None if stage=='sin_asignar' else self.tech.id, self.workshop, index % 10,
              'DEMO · '+label+' · Datos e importes ficticios de desarrollo.', label])
         if stage not in {'nuevo', 'sin_asignar'}:
             rows = [dict(tipo='trabajo', trabajo_id=w['id'], cantidad_prevista=1, cantidad_realizada=0,
