@@ -1,3 +1,4 @@
+import TechnicalInterventionEditor from "../../../components/TechnicalInterventionEditor";
 import { useCallback, useEffect, useState } from "react";
 
 import IngresoPhotos from "../../../components/IngresoPhotos";
@@ -95,6 +96,7 @@ export default function DiagnosticoTab({
   onOpenReleaseModal,
   onOpenSwapModal,
 }) {
+  const [technicalDirty, setTechnicalDirty] = useState(false);
   const [addingAcc, setAddingAcc] = useState(false);
   const [deletingAccId, setDeletingAccId] = useState(null);
   const [savingAll, setSavingAll] = useState(false);
@@ -266,6 +268,7 @@ export default function DiagnosticoTab({
   }
 
   async function marcarControladoSinDefecto() {
+    if (technicalDirty) { setErr("Guardá los cambios de la intervención técnica antes de cambiar el estado."); return; }
     try {
       setSavingAll(true);
       const resp = await postMarcarControladoSinDefecto(id);
@@ -284,6 +287,7 @@ export default function DiagnosticoTab({
   }
 
   async function marcarReparado() {
+    if (technicalDirty) { setErr("Guardá los cambios de la intervención técnica antes de cambiar el estado."); return; }
     try {
       setMarcandoReparado(true);
       const resp = await postMarcarReparado(id);
@@ -306,6 +310,7 @@ export default function DiagnosticoTab({
   }
 
   async function marcarNoSeRepara() {
+    if (technicalDirty) { setErr("Guardá los cambios de la intervención técnica antes de cambiar el estado."); return; }
     try {
       setMarcandoNoSeRepara(true);
       await postMarcarNoSeRepara(id);
@@ -524,7 +529,7 @@ export default function DiagnosticoTab({
           />
         </div>
 
-        <div className="ml-auto flex items-end gap-2">
+        <div className="flex w-full flex-wrap items-end gap-2 lg:ml-auto lg:w-auto">
           {reparacionBloqueadaCotizacion ? (
             <div className="max-w-xs rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               Ingreso en cotización de equipo. La reparación está bloqueada hasta habilitarla.
@@ -647,28 +652,9 @@ export default function DiagnosticoTab({
         </div>
       </div>
 
-      <div className="border rounded p-4 mt-4">
-        <h2 className="font-semibold mb-2">Descripción del problema (diagnóstico)</h2>
-        <textarea
-          className="w-full border rounded p-2 min-h-[180px]"
-          value={descripcion}
-          onChange={(e) => setDescripcion(e.target.value)}
-          disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
-          placeholder="Ej.: Ingreso de agua; placa de control con óxido; válvula X no abre..."
-        />
-
-        <h2 className="font-semibold mb-2">Trabajos a realizar/realizados</h2>
-        <textarea
-          className="w-full border rounded p-2 min-h-[200px]"
-          value={trabajos}
-          onChange={(e) => setTrabajos(e.target.value)}
-          disabled={typeof canEditDiag === "boolean" ? !canEditDiag : false}
-          placeholder="Ej.: Cambio de turbina; limpieza y secado; resoldado de conector; calibración; pruebas OK."
-        />
-        <div className="mt-2 text-xs text-gray-500" aria-live="polite">
-          {savingDiag || savingAll ? "Guardando..." : "Los cambios se guardan automáticamente"}
-        </div>
-      </div>
+      <TechnicalInterventionEditor ingresoId={id} disabled={!canEditDiag} refreshKey={data?.estado}
+        equipmentHint={[data?.marca, data?.modelo, data?.equipo_variante].filter(Boolean).join(" | ")}
+        onSaved={refreshIngreso} onDirtyChange={setTechnicalDirty} />
 
       <IngresoPhotos ingresoId={Number(id)} canManage={canManagePhotos} />
 

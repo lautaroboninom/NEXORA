@@ -133,12 +133,12 @@ const historicalCustomerLabel = (customer) => {
 };
 
 const Tabs = ({ value, onChange, items, extraRight }) => (
-  <div className="border-b mb-4 flex items-center">
+  <div className="border-b mb-4 flex min-w-0 items-center overflow-x-auto">
     <div className="flex gap-2">
       {items.map((it) => (
         <button
           key={it.value}
-          className={`px-3 py-2 rounded-t ${value === it.value ? "bg-white border border-b-0" : "text-gray-600 hover:text-black"}`}
+          className={`shrink-0 whitespace-nowrap px-3 py-2 rounded-t ${value === it.value ? "bg-white border border-b-0" : "text-gray-600 hover:text-black"}`}
           onClick={() => onChange(it.value)}
           type="button"
         >
@@ -919,6 +919,7 @@ export default function ServiceSheet() {
     try {
       const ing = await getIngreso(id, params || undefined);
       setData(ing);
+      setFechaServStr(toDatetimeLocalStr(ing?.fecha_servicio));
       return ing;
     } catch (e) {
       setErr(e?.message || "No se pudo refrescar el ingreso");
@@ -2027,8 +2028,8 @@ export default function ServiceSheet() {
     const curFechaStr = toDatetimeLocalStr(data?.fecha_servicio);
 
     const payload = {};
-    if (descripcion !== curDesc) payload.descripcion_problema = descripcion;
-    if (trabajos !== curTrab) payload.trabajos_realizados = trabajos;
+    // El diagnóstico y las listas se guardan juntos desde la intervención técnica.
+
     if ((fechaServStr || "") !== (curFechaStr || "")) payload.fecha_servicio = (fechaServStr || "").trim() || null;
 
     if (Object.keys(payload).length === 0) return;

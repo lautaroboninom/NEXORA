@@ -1,3 +1,5 @@
+import TechnicalQuoteReview from "../../../components/TechnicalQuoteReview";
+import TechnicalCatalogAdmin from "../../../components/TechnicalCatalogAdmin";
 import { useEffect, useRef, useState } from "react";
 import { getBlob } from "../../../lib/api";
 import RejectedBudgetChargeModal from "../../../components/RejectedBudgetChargeModal";
@@ -52,12 +54,14 @@ function buildEquipoHints(data) {
 
 function quoteStatusLabel(estado, tituloDocCap) {
   const normalizedEstado = normalizeQuoteEstado(estado);
+  const ending = tituloDocCap === 'Cotización' ? 'a' : 'o';
   const labels = {
     pendiente: `${tituloDocCap} pendiente`,
-    presupuestado: `${tituloDocCap} emitida`,
-    aprobado: `${tituloDocCap} aprobada`,
-    rechazado: `${tituloDocCap} rechazada`,
-    anulado: `${tituloDocCap} anulada`,
+    presupuestado: `${tituloDocCap} emitid${ending}`,
+    aprobado: `${tituloDocCap} aprobad${ending}`,
+    rechazado: `${tituloDocCap} rechazad${ending}`,
+    anulado: `${tituloDocCap} anulad${ending}`,
+    sustituido: `${tituloDocCap} sustituid${ending}`,
     no_aplica: "No aplica",
   };
   return labels[normalizedEstado] || normalizedEstado || "-";
@@ -110,7 +114,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
   const activeQuoteId = Number(quote?.quote_id ?? currentQuoteId ?? 0) || null;
   const quoteEstado = normalizeQuoteEstado(quote?.estado || data?.presupuesto_estado || "pendiente");
   const isAprobado = quoteEstado === "aprobado";
-  const isEditableQuote = Boolean(quote?.is_editable) || (Boolean(quote?.is_current) && ["pendiente", "presupuestado"].includes(quoteEstado));
+  const isEditableQuote = Boolean(quote?.is_editable) || (Boolean(quote?.is_current) && quoteEstado === "pendiente");
   const isReadOnlyQuote = !canManagePresupuesto || !isEditableQuote;
   const canOpenPdf = Boolean(activeQuoteId) && (Boolean(quote?.pdf_url) || ["presupuestado", "aprobado", "rechazado"].includes(quoteEstado));
   const canRejectQuote = Boolean(quote?.can_reject) || quoteEstado === "presupuestado";
@@ -596,6 +600,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     try {
       setEmitiendo(true);
       const r = await postQuoteEmitir(id, {
+        technical_revision: quote?.technical?.technical_revision,
         autorizado_por: autorizadoPor,
         forma_pago: formaPago,
         plazo_entrega_txt: plazoEntregaTxt,
@@ -776,12 +781,12 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <div className="text-sm text-gray-600">Diagnóstico</div>
-            <div className="whitespace-pre-wrap">{(data?.descripcion_problema || "-")}</div>
+            <div className="whitespace-pre-wrap">{(quote?.technical?.technical_snapshot?.diagnostico ?? data?.descripcion_problema) || "-"}</div>
           </div>
-          <div>
-            <div className="text-sm text-gray-600">Trabajos realizados</div>
+          {(!quote?.technical || data?.trabajos_realizados) && <div>
+            <div className="text-sm text-gray-600">{quote?.technical ? "Trabajos históricos" : "Trabajos realizados"}</div>
             <div className="whitespace-pre-wrap">{(data?.trabajos_realizados || "-")}</div>
-          </div>
+          </div>}
         </div>
       </div>
 
@@ -801,6 +806,9 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
         </div>
       )}
 
+      {canManagePresupuesto && <TechnicalCatalogAdmin />}
+      <TechnicalQuoteReview ingresoId={id} quote={quote} editable={!isReadOnlyQuote}
+        onUpdated={setQuote} onError={setQErr} onVersion={crearNuevaVersion} canCreateVersion={canManagePresupuesto && Boolean(quote?.is_current)} />
       {qErr && (
         <div className="bg-red-100 border border-red-300 text-red-700 p-2 rounded mb-3">{qErr}</div>
       )}
@@ -833,7 +841,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
           <input className="border rounded p-2" value={mantOfertaTxt} onChange={(e) => setMantOfertaTxt(e.target.value)} disabled={isReadOnlyQuote} />
         </label>
         {canManagePresupuesto && quote?.is_current && quoteEstado === "pendiente" && (
-          <button className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60" onClick={emitirPresupuesto} disabled={emitiendo}>
+          <button className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60" onClick={emitirPresupuesto} disabled={emitiendo || Boolean(quote?.technical && (quote.technical.labor_snapshot?.tarifa_pendiente || quote.technical.requiere_actualizacion || quote.technical.submitted_revision !== quote.technical.scope_revision))}>
             {emitiendo ? "Emitiendo..." : `Emitir ${tituloDoc}`}
           </button>
         )}
@@ -865,7 +873,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
             {anulando ? "Anulando..." : `Anular ${tituloDoc}`}
           </button>
         )}
-        {canManagePresupuesto && quote?.is_current && quote?.can_create_new_version && (
+        {canManagePresupuesto && !quote?.technical && quote?.is_current && quote?.can_create_new_version && (
           <button className="bg-slate-700 text-white px-3 py-2 rounded disabled:opacity-60" onClick={crearNuevaVersion} disabled={creandoVersion} type="button">
             {creandoVersion ? "Creando..." : `Nuevo ${tituloDoc}`}
           </button>
@@ -938,6 +946,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
           )}
 
           <h3 className="font-medium mb-2">Repuestos</h3>
+          {quote.technical && <p className="text-sm text-slate-600 mb-2">Los artículos y sus cantidades se modifican desde Diagnóstico y Reparación. Aquí podés revisar sus costos y precios.</p>}
           <table className="min-w-full text-sm mb-3">
             <thead>
               <tr className="text-left">
@@ -975,7 +984,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                             updateItemDraft(it.id, { repuesto_codigo: raw });
                           }}
                           onBlur={() => { void commitItemDraft(it); }}
-                          disabled={isReadOnlyQuote}
+                          disabled={isReadOnlyQuote || Boolean(quote.technical)}
                         />
                         {repListOpen && repActiveKey === `code-${it.id}` ? (
                           <RepuestosList onPick={(rep) => selectRepuestoForItem(it, rep)} />
@@ -1001,7 +1010,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                             updateItemDraft(it.id, { descripcion: raw });
                           }}
                           onBlur={() => { void commitItemDraft(it); }}
-                          disabled={isReadOnlyQuote}
+                          disabled={isReadOnlyQuote || Boolean(quote.technical)}
                         />
                         {repListOpen && repActiveKey === `desc-${it.id}` ? (
                           <RepuestosList onPick={(rep) => selectRepuestoForItem(it, rep)} />
@@ -1022,7 +1031,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                             void commitItemDraft(it);
                           }
                         }}
-                        disabled={isReadOnlyQuote}
+                        disabled={isReadOnlyQuote || Boolean(quote.technical)}
                       />
                     </td>
                     {canSeeCosts ? (
@@ -1084,14 +1093,14 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                     </td>
                     <td className="p-2 text-right">{money(it.subtotal)}</td>
                     <td className="p-2">
-                      <button className="text-red-600 hover:underline" onClick={() => handleRemoveItem(it)} type="button" disabled={isReadOnlyQuote}>
+                      {!quote.technical && <button className="text-red-600 hover:underline disabled:opacity-50" onClick={() => handleRemoveItem(it)} type="button" disabled={isReadOnlyQuote}>
                         borrar
-                      </button>
+                      </button>}
                     </td>
                   </tr>
                 ))}
 
-              <tr className="border-t bg-gray-50">
+              {!quote.technical && <tr className="border-t bg-gray-50">
                 <td className="p-2">
                   <div className="relative">
                     <input
@@ -1180,15 +1189,16 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                     agregar
                   </button>
                 </td>
-              </tr>
+              </tr>}
             </tbody>
           </table>
           {canSeeCosts ? (
             <div className="mb-4 text-xs text-gray-500">
-              {"Si cambi\u00e1s el costo o el multiplicador, el precio unitario se recalcula desde ah\u00ed. Si edit\u00e1s el precio a mano, el multiplicador mostrado se ajusta solo. Para descuentos, ingres\u00e1 una cantidad negativa; el multiplicador debe permanecer positivo."}
+              {"Si cambiás el costo o el multiplicador, el precio unitario se recalcula desde ahí. Si editás el precio a mano, el multiplicador mostrado se ajusta solo. El multiplicador debe permanecer positivo."}
+              {!quote.technical && " Para descuentos, ingresá una cantidad negativa."}
             </div>
           ) : null}
-          <div className="flex items-end gap-3 mb-4">
+          {!quote.technical && <div className="flex items-end gap-3 mb-4">
             <div>
               <label className="block text-sm text-gray-600 mb-1">Mano de obra</label>
               <input type="number" step="0.01" min="0" className="border rounded p-2 w-48 text-right" value={manoObraStr} onChange={(e) => setManoObraStr(e.target.value)} disabled={isReadOnlyQuote} />
@@ -1198,6 +1208,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
             </button>
           </div>
 
+          }
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <div className="border rounded p-3">
               <div className="text-gray-600 text-sm">Total repuestos</div>

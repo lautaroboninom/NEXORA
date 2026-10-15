@@ -1,0 +1,337 @@
+from decimal import Decimal
+from unittest.mock import patch
+
+from django.test import TestCase, SimpleTestCase
+from rest_framework.test import APIClient
+
+from service.models import User
+from service import technical_interventions as technical
+from service.views.helpers import q, exec_returning, exec_void
+
+
+class LaborCalculationTests(SimpleTestCase):
+    def test_minimum_and_proportional_minutes(self):
+        for minutes, expected in [(1,'100.00'),(30,'100.00'),(60,'100.00'),(80,'120.00'),(120,'160.00'),(150,'190.00')]:
+            with self.subTest(minutes=minutes):
+                self.assertEqual(technical.calculate_labor(minutes,100,60),Decimal(expected))
+
+    def test_invalid_times_and_values(self):
+        from rest_framework.exceptions import ValidationError
+        for value in [-1,0,True,1.5,'NaN',525601]:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                technical.calculate_labor(value,100,60)
+        for value in ['NaN','Infinity',-1,'12.333']:
+            with self.subTest(rate=value),self.assertRaises(ValidationError):
+                technical.calculate_labor(60,value,60)
+
+
+class TechnicalInterventionAPITests(TestCase):
+    """Ejecutar con settings_technical_dev: clona únicamente la base aislada."""
+
+    def setUp(self):
+        self.manager = User.objects.create(nombre='Jefatura técnica',email='jefatura-tecnica-test@example.invalid',rol='jefe')
+        self.tech = User.objects.create(nombre='Técnico de prueba',email='tecnico-carga-test@example.invalid',rol='tecnico')
+        self.other = User.objects.create(nombre='Otro técnico',email='otro-carga-test@example.invalid',rol='tecnico')
+        customer = exec_returning("INSERT INTO customers(razon_social) VALUES ('Cliente de prueba técnica') RETURNING id")
+        device = exec_returning("INSERT INTO devices(customer_id,numero_serie,tipo_equipo) VALUES (%s,'TECNICA-PRUEBA','Concentrador') RETURNING id",[customer])
+        self.ingreso = exec_returning("""INSERT INTO ingresos(device_id,motivo,asignado_a,fecha_ingreso)
+                         VALUES (%s,(SELECT unnest(enum_range(NULL::motivo_ingreso)) LIMIT 1),%s,now()) RETURNING id""",[device,self.tech.id])
+        self.part = exec_returning("""INSERT INTO catalogo_repuestos(codigo,nombre,costo_neto,costo_moneda,stock_on_hand,stock_min)
+                         VALUES ('TEC-TEST','Filtro técnico de prueba',10,'ARS',20,0) RETURNING id""")
+        self.work = q("SELECT id FROM technical_work_catalog ORDER BY id LIMIT 1",one=True)['id']
+        exec_void("""INSERT INTO technical_labor_rates(tipo_equipo,primera_hora,hora_adicional) VALUES ('concentrador',100,60)
+                     ON CONFLICT (tipo_equipo) DO UPDATE SET primera_hora=100,hora_adicional=60""")
+        exec_void("UPDATE technical_billing_config SET diagnostico_limpieza=35 WHERE id=1")
+        self.client = APIClient()
+        self.client.force_authenticate(self.tech)
+        self.base = f'/api/ingresos/{self.ingreso}/intervencion/'
+        self.quote_base = f'/api/quotes/{self.ingreso}/'
+
+    def save(self,**changes):
+        data = self.client.get(self.base).json()
+        payload = dict(revision=data['revision'],diagnostico='No concentra correctamente.',minutos_estimados=80,
+                       minutos_reales=0,sin_falla=False,items=[dict(tipo='trabajo',trabajo_id=self.work,cantidad_prevista=1,cantidad_realizada=0),
+                       dict(tipo='repuesto',repuesto_id=self.part,cantidad_prevista=1,cantidad_realizada=0)])
+        if data['items']:
+            payload['items']=data['items']
+        payload.update(changes)
+        response = self.client.patch(self.base,payload,format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        return response.json()
+
+    def send(self):
+        current = self.client.get(self.base).json()
+        response = self.client.post(self.base+'enviar/',{'revision':current['revision']},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        return response.json()
+
+    def quote(self):
+        self.client.force_authenticate(self.manager)
+        response=self.client.get(self.quote_base)
+        self.assertEqual(response.status_code,200,response.content)
+        return response.json()
+
+    def issue(self):
+        quote=self.quote()
+        with patch('service.views.quotes_views.render_quote_pdf',return_value=('Presupuesto.pdf',b'%PDF-documento-original')):
+            response=self.client.post(self.quote_base+'emitir/',{'technical_revision':quote['technical']['technical_revision']},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        return response.json()
+
+    def approve(self):
+        self.client.force_authenticate(self.manager)
+        with patch('service.views.quotes_views.notify_presupuesto_aprobado'),patch('service.views.quotes_views.notify_quote_mg_approved'),patch('service.views.quotes_views.notify_repair_ready_for_remito'):
+            response=self.client.post(self.quote_base+'aprobar/',{},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        return response.json()
+
+    def test_single_load_submit_and_idempotent_draft(self):
+        saved=self.save()
+        self.assertEqual(saved['estado_revision'],'en_preparacion')
+        self.send(); self.send()
+        quote=self.quote()
+        self.assertEqual(len(quote['items']),3)
+        self.assertEqual(Decimal(quote['mano_obra']),Decimal('120.00'))
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],20)
+
+    def test_technical_responses_and_commercial_permissions(self):
+        self.save();self.send()
+        for suffix in ['', 'repuestos/?q=TEC']:
+            response=self.client.get(self.base+suffix)
+            self.assertEqual(response.status_code,200,response.content)
+            text=response.content.decode('utf-8')
+            for secret in ['costo','precio','multiplicador','subtotal','importe']:
+                self.assertNotIn(secret,text)
+        self.assertEqual(self.client.get(self.quote_base).status_code,403)
+        self.assertEqual(self.client.get('/api/tarifas-mano-obra/').status_code,403)
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.get(self.base).status_code,403)
+
+    def test_stale_save_and_submission(self):
+        data=self.save()
+        response=self.client.patch(self.base,{'revision':data['revision']-1,'minutos_reales':50},format='json')
+        self.assertEqual(response.status_code,409)
+        response=self.client.post(self.base+'enviar/',{'revision':data['revision']-1},format='json')
+        self.assertEqual(response.status_code,409)
+
+    def test_progress_keeps_scope_and_quoted_price(self):
+        self.save();self.send();issued=self.issue()
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json()
+        for item in data['items']:item['cantidad_realizada']=item['cantidad_prevista']
+        result=self.save(items=data['items'],minutos_reales=150)
+        self.assertEqual(result['scope_revision'],issued['technical']['technical_revision'])
+        quote=self.quote()
+        self.assertEqual(quote['mano_obra'],issued['mano_obra'])
+        self.assertFalse(quote['technical']['requiere_actualizacion'])
+
+    def test_changes_during_review_prevent_issue(self):
+        self.save();self.send();quote=self.quote()
+        self.client.force_authenticate(self.tech);self.save(diagnostico='Diagnóstico corregido.')
+        self.client.force_authenticate(self.manager)
+        response=self.client.post(self.quote_base+'emitir/',{'technical_revision':quote['technical']['technical_revision']},format='json')
+        self.assertEqual(response.status_code,409)
+
+    def test_execution_of_previously_selected_inactive_articles(self):
+        self.save();self.send();issued=self.issue()
+        exec_void("UPDATE technical_work_catalog SET activo=FALSE WHERE id=%s",[self.work])
+        exec_void("UPDATE catalogo_repuestos SET activo=FALSE WHERE id=%s",[self.part])
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json()
+        for item in data['items']:item['cantidad_realizada']=item['cantidad_prevista']
+        saved=self.save(items=data['items'],minutos_reales=100)
+        self.assertEqual(saved['scope_revision'],issued['technical']['technical_revision'])
+        extra=dict(tipo='trabajo',trabajo_id=self.work,cantidad_prevista=1,cantidad_realizada=0)
+        result=self.client.patch(self.base,{'revision':saved['revision'],'items':[*saved['items'],extra]},format='json')
+        self.assertEqual(result.status_code,400)
+
+    def test_missing_rate_blocks_issue_until_review(self):
+        exec_void("DELETE FROM technical_labor_rates WHERE tipo_equipo='concentrador'")
+        self.save();self.send();quote=self.quote()
+        self.assertTrue(quote['technical']['labor_snapshot']['tarifa_pendiente'])
+        response=self.client.post(self.quote_base+'emitir/',{'technical_revision':quote['technical']['technical_revision']},format='json')
+        self.assertEqual(response.status_code,400)
+        self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Concentrador',primera_hora=100,hora_adicional=60),format='json')
+        response=self.client.patch(self.quote_base+'mano-obra-tecnica/',{'minutos_presupuestados':80},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        self.issue()
+
+    def test_no_fault_global_fee_and_bonus(self):
+        self.save(sin_falla=True,minutos_estimados=0);self.send()
+        quote=self.quote();self.assertEqual(Decimal(quote['mano_obra']),35)
+        response=self.client.patch(self.quote_base+'mano-obra-tecnica/',{'bonificado':True},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        self.assertEqual(Decimal(response.json()['mano_obra']),0)
+        self.issue()
+
+    def test_pending_request_requires_resolution(self):
+        self.save()
+        response=self.client.post('/api/solicitudes-catalogo/',dict(ingreso_id=self.ingreso,tipo='trabajo',nombre='Calibración solicitada'),format='json')
+        self.assertEqual(response.status_code,201,response.content)
+        data=self.client.get(self.base).json()
+        self.assertEqual(data['estado_revision'],'alta_pendiente')
+        self.assertEqual(self.client.post(self.base+'enviar/',{'revision':data['revision']},format='json').status_code,400)
+        self.client.force_authenticate(self.manager)
+        created=self.client.post('/api/catalogo-trabajos/',{'nombre':'Calibración solicitada'},format='json')
+        result=self.client.patch(f"/api/solicitudes-catalogo/{response.json()['id']}/",{'estado':'aprobada','catalog_id':created.json()['id']},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        self.client.force_authenticate(self.tech);self.send()
+        self.assertEqual(len(self.client.get(self.base).json()['items']),3)
+
+    def test_approved_extension_consumes_only_difference_and_preserves_document(self):
+        self.save();self.send();original=self.issue();self.approve();self.approve()
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],19)
+        self.client.force_authenticate(self.tech)
+        current=self.client.get(self.base).json()
+        current['items'][1]['cantidad_prevista']=3
+        self.save(items=current['items']);self.send()
+        self.client.force_authenticate(self.manager)
+        version=self.client.post(self.quote_base+'versiones/',{},format='json')
+        self.assertEqual(version.status_code,200,version.content)
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],19)
+        self.issue();self.approve();self.approve()
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],17)
+        old=q("SELECT estado::text FROM quotes WHERE id=%s",[original['quote_id']],one=True)
+        self.assertEqual(old['estado'],'sustituido')
+        response=self.client.get(self.quote_base+f"pdf/?quote_id={original['quote_id']}")
+        self.assertEqual(response.status_code,200,response.content)
+        self.assertEqual(response.content,b'%PDF-documento-original')
+        self.assertEqual(q("SELECT COUNT(*) AS n FROM quotes WHERE ingreso_id=%s AND estado='aprobado'",[self.ingreso],one=True)['n'],1)
+
+    def test_emitted_items_are_immutable(self):
+        self.save();self.send();quote=self.issue()
+        item=quote['items'][0]
+        response=self.client.patch(self.quote_base+f"items/{item['id']}/",{'precio_u':999},format='json')
+        self.assertEqual(response.status_code,400)
+
+    def test_individual_permission_override(self):
+        exec_void("INSERT INTO user_permission_overrides(user_id,permission_code,effect) VALUES (%s,'action.presupuesto.manage','allow')",[self.other.id])
+        self.client.force_authenticate(self.other)
+        response=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Otro equipo',primera_hora=50,hora_adicional=20),format='json')
+        self.assertEqual(response.status_code,200,response.content)
+
+    def test_repeated_submission_preserves_reviewed_hours_and_part_price(self):
+        self.save();self.send();quote=self.quote()
+        part=next(row for row in quote['items'] if row['tipo']=='repuesto')
+        result=self.client.patch(self.quote_base+f"items/{part['id']}/",{'precio_u':99},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        result=self.client.patch(self.quote_base+'mano-obra-tecnica/',{'minutos_presupuestados':120},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        self.client.force_authenticate(self.tech);self.send()
+        quote=self.quote()
+        self.assertEqual(Decimal(quote['mano_obra']),160)
+        self.assertEqual(Decimal(next(row for row in quote['items'] if row['tipo']=='repuesto')['precio_u']),99)
+
+    def test_scope_has_one_source_and_malformed_catalog_items_are_rejected(self):
+        data=self.save();self.send();quote=self.quote()
+        part=next(row for row in quote['items'] if row['tipo']=='repuesto')
+        self.assertEqual(self.client.patch(self.quote_base+f"items/{part['id']}/",{'qty':5},format='json').status_code,400)
+        self.assertEqual(self.client.post(self.quote_base+'items/',{'tipo':'repuesto','qty':1,'descripcion':'Duplicado','precio_u':20},format='json').status_code,400)
+        self.client.force_authenticate(self.tech)
+        response=self.client.patch(self.base,{'revision':data['revision'],'items':[{'tipo':'repuesto','repuesto_id':'inválido'}]},format='json')
+        self.assertEqual(response.status_code,400)
+
+    def test_history_preserves_legacy_text_and_hides_commercial_changes(self):
+        exec_void("UPDATE ingresos SET trabajos_realizados='Texto histórico conservado.' WHERE id=%s",[self.ingreso])
+        data=self.save()
+        self.assertEqual(data['trabajos_historicos'],'Texto histórico conservado.')
+        self.send();self.issue()
+        self.client.force_authenticate(self.tech)
+        response=self.client.get(f'/api/ingresos/{self.ingreso}/historial/')
+        self.assertEqual(response.status_code,200,response.content)
+        for row in response.json():
+            self.assertNotIn(row['table_name'],['quotes','quote_items','technical_labor_rates','technical_billing_config'])
+
+    def test_portal_extension_uses_same_stock_delta(self):
+        from service.views.portal_integration_views import _approve_budget_from_portal
+        self.save();self.send();self.issue();self.approve()
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json();data['items'][1]['cantidad_prevista']=3
+        self.save(items=data['items']);self.send()
+        self.client.force_authenticate(self.manager)
+        self.assertEqual(self.client.post(self.quote_base+'versiones/',{},format='json').status_code,200)
+        issued=self.issue()
+        with patch('service.views.portal_integration_views._save_budget_pdf_copy'):
+            self.assertTrue(_approve_budget_from_portal({'id':self.ingreso,'quote_id':issued['quote_id']})[0])
+            self.assertFalse(_approve_budget_from_portal({'id':self.ingreso,'quote_id':issued['quote_id']})[0])
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],17)
+
+    def test_real_pdf_renders_structured_diagnosis_and_work(self):
+        import fitz
+        self.save();self.send();quote=self.quote()
+        result=self.client.post(self.quote_base+'emitir/',{'technical_revision':quote['technical']['technical_revision']},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        response=self.client.get(self.quote_base+'pdf/')
+        self.assertEqual(response.status_code,200,response.content)
+        with fitz.open(stream=response.content,filetype='pdf') as document:
+            text='\n'.join(page.get_text() for page in document)
+        self.assertIn('No concentra correctamente.',text)
+        self.assertIn('Filtro técnico de prueba',text)
+
+    def test_complete_repair_keeps_real_time(self):
+        self.save();self.send();self.issue();self.approve()
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json()
+        for item in data['items']:item['cantidad_realizada']=item['cantidad_prevista']
+        self.save(items=data['items'],minutos_reales=110)
+        response=self.client.post(f'/api/ingresos/{self.ingreso}/reparado/',{},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        self.assertEqual(q("SELECT estado::text FROM ingresos WHERE id=%s",[self.ingreso],one=True)['estado'],'reparado')
+        self.assertEqual(self.client.get(self.base).json()['minutos_reales'],110)
+
+    def test_technician_must_request_catalog_creation(self):
+        result=self.client.post('/api/repuestos/',{'subrubro_codigo':'1208','nombre':'Alta sin revisión'},format='json')
+        self.assertEqual(result.status_code,403)
+        result=self.client.post('/api/catalogo-trabajos/',{'nombre':'Alta sin revisión'},format='json')
+        self.assertEqual(result.status_code,403)
+
+    def test_legacy_budget_can_create_an_extension_without_duplicate_stock(self):
+        initial=self.quote()
+        exec_void("INSERT INTO quote_items(quote_id,tipo,repuesto_id,descripcion,qty,precio_u) VALUES (%s,'repuesto',%s,'Filtro anterior',1,20)",[initial['quote_id'],self.part])
+        with patch('service.views.quotes_views.render_quote_pdf',return_value=('Anterior.pdf',b'%PDF-anterior')):
+            issued=self.client.post(self.quote_base+'emitir/',{},format='json')
+        self.assertEqual(issued.status_code,200,issued.content)
+        self.approve()
+        response=self.client.post(self.quote_base+'versiones/',{},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        draft=response.json()
+        self.assertTrue(draft['is_editable'])
+        self.assertIsNone(draft['technical'])
+        self.assertEqual(draft['version_num'],2)
+        result=self.client.patch(self.quote_base+f"items/{draft['items'][0]['id']}/",{'qty':3},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        with patch('service.views.quotes_views.render_quote_pdf',return_value=('Ampliado.pdf',b'%PDF-ampliado')):
+            self.assertEqual(self.client.post(self.quote_base+'emitir/',{},format='json').status_code,200)
+        cancelled=self.client.post(self.quote_base+'anular/',{},format='json')
+        self.assertEqual(cancelled.status_code,200,cancelled.content)
+        self.assertEqual(cancelled.json()['version_num'],3)
+        with patch('service.views.quotes_views.render_quote_pdf',return_value=('Ampliado.pdf',b'%PDF-ampliado')):
+            self.assertEqual(self.client.post(self.quote_base+'emitir/',{},format='json').status_code,200)
+        self.approve();self.approve()
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],17)
+
+    def test_existing_no_fault_action_selects_the_global_diagnostic_fee(self):
+        self.save()
+        result=self.client.post(f'/api/ingresos/{self.ingreso}/controlado-sin-defecto/',{},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        self.assertTrue(self.client.get(self.base).json()['sin_falla'])
+        self.send()
+        self.assertEqual(Decimal(self.quote()['mano_obra']),35)
+
+    def test_diagnosis_deny_is_effective_even_with_budget_permission(self):
+        exec_void("INSERT INTO user_permission_overrides(user_id,permission_code,effect) VALUES (%s,'action.presupuesto.manage','allow'),(%s,'action.ingreso.edit_diagnosis','deny')",[self.tech.id,self.tech.id])
+        result=self.client.patch(self.base,{'revision':0,'diagnostico':'No permitido'},format='json')
+        self.assertEqual(result.status_code,403)
+
+    def test_cancelling_unapproved_extension_keeps_consumed_baseline(self):
+        self.save();self.send();self.issue();self.approve()
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json();data['items'][1]['cantidad_prevista']=3
+        self.save(items=data['items']);self.send()
+        self.client.force_authenticate(self.manager)
+        self.assertEqual(self.client.post(self.quote_base+'versiones/',{},format='json').status_code,200)
+        self.issue()
+        result=self.client.post(self.quote_base+'anular/',{},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        self.issue();self.approve()
+        self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],17)

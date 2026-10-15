@@ -48,6 +48,7 @@ class ModelSerializer(serializers.ModelSerializer):
 # --- NUEVOS: útiles para endpoints de lista/detalle que devuelven dicts (SQL crudo) ---
 
 class IngresoListItemSerializer(serializers.Serializer):
+    estado_revision_tecnica = serializers.CharField(required=False, allow_null=True)
     """
     Útil para endpoints tipo:
       PendientesGeneral, PendientesPresupuesto, Presupuestados,
@@ -289,6 +290,7 @@ class QuoteVersionSummarySerializer(serializers.Serializer):
 
 
 class QuoteDetailSerializer(serializers.Serializer):
+    technical = serializers.JSONField(required=False, allow_null=True)
     ingreso_id = serializers.IntegerField()
     quote_id = serializers.IntegerField()
     current_quote_id = serializers.IntegerField(required=False)

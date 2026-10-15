@@ -55,6 +55,7 @@ PERMISSION_CATALOG = [
     {"code": "action.users.manage_permissions", "label": "Editar permisos por usuario", "type": "action", "group": "Usuarios"},
     {"code": "action.catalogs.manage", "label": "Gestionar catalogos y garantias", "type": "action", "group": "Sistema"},
     {"code": "action.tests_protocol.manage", "label": "Gestionar protocolos de test", "type": "action", "group": "Sistema"},
+    {"code": "action.spare_parts.create", "label": "Dar de alta repuestos", "type": "action", "group": "Repuestos"},
     {"code": "action.spare_parts.manage", "label": "Gestionar repuestos y stock", "type": "action", "group": "Repuestos"},
     {"code": "action.spare_parts.manage_24h_permissions", "label": "Gestionar permisos 24h de repuestos", "type": "action", "group": "Repuestos"},
     {"code": "action.spare_parts.view_costs", "label": "Ver y editar costos de repuestos", "type": "action", "group": "Repuestos"},
@@ -427,6 +428,12 @@ SUPLENTE_EXCLUSIONES = (
 )
 _set_union_role_defaults("jefe_suplente", "tecnico", "jefe")
 _revoke("jefe_suplente", *SUPLENTE_EXCLUSIONES)
+
+
+# El técnico solicita el alta; conservar la autorización de creación de los gestores actuales.
+for _role, _defaults in ROLE_DEFAULTS.items():
+    if _role != 'tecnico' and _defaults.get('action.spare_parts.manage'):
+        _grant(_role, 'action.spare_parts.create')
 
 
 def normalize_role(role):

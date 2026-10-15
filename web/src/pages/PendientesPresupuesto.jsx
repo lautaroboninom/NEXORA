@@ -1,3 +1,5 @@
+import TechnicalCatalogAdmin from "../components/TechnicalCatalogAdmin";
+import { TECHNICAL_STATUS_LABELS } from "../components/TechnicalInterventionEditor";
 // web/src/pages/PendientesPresupuesto.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getPendientesPresupuesto } from "../lib/api";
@@ -24,6 +26,9 @@ import { useMarkQueueSeen } from "../hooks/useQueueBadges";
 const SCROLL_STORAGE_KEY = "nexora:pendientes-presupuesto:scroll-y";
 
 const COLUMNS = [
+  { field: "estado_revision_tecnica", label: "Revisión técnica", filter: "select",
+    filterLabel: (value) => TECHNICAL_STATUS_LABELS[value] || value,
+    render: (row) => <span className="text-sm">{TECHNICAL_STATUS_LABELS[row.estado_revision_tecnica] || "Carga anterior"}</span> },
   {
     field: "os",
     label: "OS",
@@ -198,6 +203,7 @@ export default function PendientesPresupuesto() {
         onClearFilters={clearFilters}
       />
 
+      <TechnicalCatalogAdmin />
       <IngresoTable
         queueHighlight={queueHighlight}
         rows={filtered}

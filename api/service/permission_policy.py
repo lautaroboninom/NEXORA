@@ -7,6 +7,15 @@
 # - string: single required permission
 # - list[str]: OR semantics (any permission grants access)
 VIEW_PERMISSION_MATRIX = {
+    "TechnicalInterventionView": {"GET": ["action.ingreso.edit_diagnosis", "action.presupuesto.manage"], "PATCH": "action.ingreso.edit_diagnosis"},
+    "TechnicalSubmitView": {"POST": ["action.ingreso.edit_diagnosis", "action.presupuesto.manage"]},
+    "TechnicalPartsView": {"GET": ["action.ingreso.edit_diagnosis", "action.presupuesto.manage"]},
+    "TechnicalWorkCatalogView": {"GET": ["action.ingreso.edit_diagnosis", "action.presupuesto.manage"], "POST": "action.presupuesto.manage"},
+    "TechnicalWorkCatalogDetailView": {"PATCH": "action.presupuesto.manage"},
+    "TechnicalRatesView": {"GET": "action.presupuesto.manage", "PUT": "action.presupuesto.manage"},
+    "TechnicalLaborReviewView": {"PATCH": "action.presupuesto.manage"},
+    "TechnicalCatalogRequestsView": {"GET": "action.presupuesto.manage", "POST": ["action.ingreso.edit_diagnosis", "action.presupuesto.manage"]},
+    "TechnicalCatalogRequestDetailView": {"PATCH": "action.presupuesto.manage"},
     # Ingresos / operacion
     "MisPendientesView": {"GET": "page.work_queues"},
     # Autorizar la reparación es decisión de jefatura. Con `repair_transitions` el técnico
@@ -272,7 +281,7 @@ VIEW_PERMISSION_MATRIX = {
     "ServiceOrderBillingInvoiceView": {"POST": "action.billing.register_os_invoice"},
     "ServiceOrderBillingPdfView": {"GET": "action.billing.view"},
     # Presupuestos
-    "QuoteDetailView": {"GET": ["page.ingresos_history", "page.budget_queues", "action.presupuesto.manage"]},
+    "QuoteDetailView": {"GET": ["page.budget_queues", "action.presupuesto.manage", "action.presupuesto.view_costs"]},
     "QuoteItemsView": {"POST": "action.presupuesto.manage"},
     "QuoteItemDetailView": {"PATCH": "action.presupuesto.manage", "DELETE": "action.presupuesto.manage"},
     "QuoteResumenView": {"PATCH": "action.presupuesto.manage"},
@@ -306,7 +315,7 @@ VIEW_PERMISSION_MATRIX = {
     "UsuarioNotificacionesView": {"GET": "action.users.manage_permissions", "PUT": "action.users.manage_permissions"},
     # Repuestos
     "CatalogoRepuestosView": {"GET": "page.spare_parts"},
-    "RepuestosView": {"GET": "page.spare_parts", "POST": "action.spare_parts.manage"},
+    "RepuestosView": {"GET": "page.spare_parts", "POST": "action.spare_parts.create"},
     "RepuestosSubrubrosView": {"GET": "page.spare_parts", "POST": "action.spare_parts.manage"},
     "RepuestosSubrubroDetailView": {"PATCH": "action.spare_parts.manage", "DELETE": "action.spare_parts.manage"},
     "RepuestoDetailView": {"GET": "page.spare_parts", "PATCH": "action.spare_parts.manage", "DELETE": "action.spare_parts.manage"},

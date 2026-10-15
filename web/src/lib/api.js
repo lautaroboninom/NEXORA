@@ -1687,3 +1687,18 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const getFeriados = () => api.get(`/api/metricas/feriados/`);
   export const postFeriado = (fecha, nombre) => api.post(`/api/metricas/feriados/`, { fecha, nombre });
   export const deleteFeriado = (fecha) => api.del(`/api/metricas/feriados/?fecha=${encodeURIComponent(fecha||"")}`);
+
+// Carga técnica: estos recursos no entregan información comercial.
+export const getTechnicalIntervention = (id) => api.get(`/api/ingresos/${id}/intervencion/`);
+export const saveTechnicalIntervention = (id, data) => api.patch(`/api/ingresos/${id}/intervencion/`, data);
+export const submitTechnicalIntervention = (id, revision) => api.post(`/api/ingresos/${id}/intervencion/enviar/`, { revision });
+export const getTechnicalWorks = (all = false) => api.get(`/api/catalogo-trabajos/${all ? '?todos=1' : ''}`);
+export const createTechnicalWork = (nombre) => api.post('/api/catalogo-trabajos/', { nombre });
+export const patchTechnicalWork = (id, data) => api.patch(`/api/catalogo-trabajos/${id}/`, data);
+export const getTechnicalParts = (id, query = '', hint = '') => api.get(`/api/ingresos/${id}/intervencion/repuestos/?${new URLSearchParams({ q: query, limit: '50', equipo_hint: hint })}`);
+export const requestTechnicalCatalogItem = (data) => api.post('/api/solicitudes-catalogo/', data);
+export const getTechnicalCatalogRequests = () => api.get('/api/solicitudes-catalogo/');
+export const resolveTechnicalCatalogRequest = (id, data) => api.patch(`/api/solicitudes-catalogo/${id}/`, data);
+export const getTechnicalRates = () => api.get('/api/tarifas-mano-obra/');
+export const saveTechnicalRates = (data) => api.put('/api/tarifas-mano-obra/', data);
+export const reviewTechnicalLabor = (id, data) => api.patch(`/api/quotes/${id}/mano-obra-tecnica/`, data);

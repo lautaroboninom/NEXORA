@@ -1783,6 +1783,12 @@ class PendientesPresupuestoView(APIView):
     def get(self, request):
         mg_list_sql = _mg_list_select_sql()
         owner_list_sql = _owner_list_select_sql()
+        from .. import technical_interventions as technical
+        has_technical = technical.available()
+        technical_extra = """ OR EXISTS (
+          SELECT 1 FROM technical_interventions ti WHERE ti.ingreso_id=t.id
+          AND ti.scope_revision IS DISTINCT FROM q.technical_revision
+        )""" if has_technical else ""
         with connection.cursor() as cur:
             _set_audit_user(request)
             cur.execute(
@@ -1815,7 +1821,7 @@ class PendientesPresupuestoView(APIView):
                   LIMIT 1
                 )
                 LEFT JOIN locations loc ON loc.id = t.ubicacion_id
-                WHERE COALESCE(t.presupuesto_estado, 'pendiente') = 'pendiente'
+                WHERE (COALESCE(t.presupuesto_estado, 'pendiente') = 'pendiente' {technical_extra})
                   -- Al volver a alquilar un equipo propio, la OS que documenta la
                   -- reparación puede pasar a estado "alquilado". Eso no resuelve el
                   -- presupuesto por los daños del alquiler anterior: debe seguir en
@@ -1835,6 +1841,9 @@ class PendientesPresupuestoView(APIView):
                 """
             )
             data = _fetchall_dicts(cur)
+        statuses = technical.queue_status([row['id'] for row in data]) if has_technical else {}
+        for row in data:
+            row['estado_revision_tecnica'] = statuses.get(row['id'], 'historico')
         attach_active_derivations(data)
         return Response(IngresoListItemSerializer(data, many=True).data)
 
@@ -6582,6 +6591,12 @@ class IngresoHistorialView(APIView):
             # Orden final por fecha desc y sin modificar formato esperado
             out.sort(key=lambda x: (_history_ts_sort_value(x), _history_id_sort_value(x)), reverse=True)
             rows = out
+        from ..permissions import user_has_permission
+        commercial = any(user_has_permission(request.user, code) for code in ('action.presupuesto.manage','action.presupuesto.view_costs','page.budget_queues'))
+        if not commercial:
+            rows = [row for row in rows if row.get('table_name') not in ('quotes','quote_items','technical_labor_rates','technical_billing_config')]
+        elif not user_has_permission(request.user, 'action.presupuesto.view_costs'):
+            rows = [row for row in rows if 'costo' not in str(row.get('column_name','')).lower()]
         return Response(rows)
 
 
@@ -6643,6 +6658,9 @@ class CerrarReparacionView(APIView):
                 )
 
         with connection.cursor() as cur:
+            if r == 'no_se_encontro_falla':
+                from .. import technical_interventions as technical
+                technical.mark_no_fault(ingreso_id, request.user)
             _set_audit_user(request)
             # Detectar si existe columna serial_cambio
             cur.execute(
@@ -8788,6 +8806,14 @@ class IngresoDetalleView(APIView):
             sets_no_estado.append("ubicacion_id=%s")
             params_no_estado.append(ubicacion_id)
 
+        if any(key in d for key in ('descripcion_problema','trabajos_realizados')):
+            from .. import technical_interventions as technical
+            if technical.available() and q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+                if 'trabajos_realizados' in d:
+                    raise ValidationError("Los trabajos se registran mediante la lista de la intervención técnica.")
+                old_diagnosis = q("SELECT descripcion_problema FROM ingresos WHERE id=%s FOR UPDATE", [ingreso_id], one=True)
+                if (old_diagnosis['descripcion_problema'] or '') != str(d.get('descripcion_problema') or '').strip():
+                    exec_void("UPDATE technical_interventions SET revision=revision+1, scope_revision=scope_revision+1 WHERE ingreso_id=%s", [ingreso_id])
         desc_present = False
         trab_present = False
         fecha_present = False
@@ -9326,6 +9352,8 @@ class MarcarControladoSinDefectoView(APIView):
                 raise PermissionDenied("Solo el técnico asignado puede marcar como controlado")
 
         _prev_estado = _estado_actual_txt(ingreso_id)
+        from .. import technical_interventions as technical
+        technical.mark_no_fault(ingreso_id, request.user)
         _set_audit_user(request)
         # El pase automático a 'no_aplica' solo aplica a los equipos propios de MG BIO
         # (patrimonio de la empresa / alquiler / demo). Para los equipos de clientes, no

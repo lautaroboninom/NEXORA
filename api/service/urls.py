@@ -170,7 +170,22 @@ from .views.portal_integration_views import (
 )
 
 
+from .views.technical_interventions_views import (
+    TechnicalInterventionView, TechnicalSubmitView, TechnicalPartsView,
+    TechnicalWorkCatalogView, TechnicalWorkCatalogDetailView, TechnicalRatesView,
+    TechnicalLaborReviewView, TechnicalCatalogRequestsView, TechnicalCatalogRequestDetailView,
+)
+
 urlpatterns = [
+    path("ingresos/<int:ingreso_id>/intervencion/", TechnicalInterventionView.as_view()),
+    path("ingresos/<int:ingreso_id>/intervencion/enviar/", TechnicalSubmitView.as_view()),
+    path("ingresos/<int:ingreso_id>/intervencion/repuestos/", TechnicalPartsView.as_view()),
+    path("catalogo-trabajos/", TechnicalWorkCatalogView.as_view()),
+    path("catalogo-trabajos/<int:item_id>/", TechnicalWorkCatalogDetailView.as_view()),
+    path("tarifas-mano-obra/", TechnicalRatesView.as_view()),
+    path("quotes/<int:ingreso_id>/mano-obra-tecnica/", TechnicalLaborReviewView.as_view()),
+    path("solicitudes-catalogo/", TechnicalCatalogRequestsView.as_view()),
+    path("solicitudes-catalogo/<int:request_id>/", TechnicalCatalogRequestDetailView.as_view()),
     # salud y login
 
     path("ping/", ping),

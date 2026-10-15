@@ -41,6 +41,8 @@ from .helpers import (
 )
 from ..repuestos import get_repuestos_config, calc_costo_ars, calc_precio_venta
 
+from .. import technical_interventions as technical
+
 logger = logging.getLogger(__name__)
 
 
@@ -599,6 +601,8 @@ def _get_quote_total_update_columns():
 
 
 def _get_current_quote_row(ingreso_id: int, *, for_update: bool = False):
+    if for_update:
+        q("SELECT id FROM ingresos WHERE id=%s FOR UPDATE", [ingreso_id], one=True)
     return q(
         f"""
         SELECT
@@ -705,10 +709,10 @@ def _ensure_current_quote(ingreso_id: int):
 
 def _ensure_current_quote_editable(ingreso_id: int):
     _ensure_current_quote(ingreso_id)
-    current = _get_current_quote_row(ingreso_id)
+    current = _get_current_quote_row(ingreso_id, for_update=True)
     if not current:
         raise ValidationError("Ingreso no encontrado o sin presupuesto")
-    if (current.get("estado") or "").strip() in {"aprobado", "rechazado", "no_aplica"}:
+    if (current.get("estado") or "").strip() != "pendiente":
         raise ValidationError("La versión vigente del presupuesto no es editable.")
     return current
 
@@ -874,7 +878,7 @@ def _load_quote_payload(ingreso_id: int, quote_id: int | None = None):
     is_current = int(selected["id"]) == int(current["id"])
     selected_estado = _quote_estado_str(selected.get("estado"))
     head_estado = _quote_estado_str(head.get("estado"))
-    is_editable = is_current and _quote_estado_for_response(selected_estado) in {"pendiente", "presupuestado"}
+    is_editable = is_current and _quote_estado_for_response(selected_estado) == "pendiente"
 
     return {
         "ingreso_id": ingreso_id,
@@ -897,8 +901,9 @@ def _load_quote_payload(ingreso_id: int, quote_id: int | None = None):
         "is_current": is_current,
         "is_editable": is_editable,
         "can_reject": is_current and _is_emitted_quote_state(head_estado),
-        "can_create_new_version": is_current and (head.get("estado") or "").strip() == "rechazado",
+        "can_create_new_version": is_current and (head.get("estado") or "").strip() in {"rechazado", "presupuestado", "emitido", "aprobado"},
         "items": items,
+        "technical": technical.quote_info(ingreso_id, head["quote_id"]),
         "versions": versions,
         "pdf_url": head.get("pdf_url") or "",
         "tot_repuestos": tot_rep,
@@ -909,15 +914,18 @@ def _load_quote_payload(ingreso_id: int, quote_id: int | None = None):
     }
 
 
-def _clone_current_quote_version_from_rejected(ingreso_id: int) -> int:
+def _clone_current_quote_version(ingreso_id: int) -> int:
     with transaction.atomic():
         current = _get_current_quote_row(ingreso_id, for_update=True)
         if not current:
             raise ValidationError("Ingreso no encontrado o sin presupuesto")
-        if (current.get("estado") or "").strip() != "rechazado":
-            raise ValidationError("Solo se puede crear una nueva versión cuando la vigente está rechazada.")
+        if (current.get("estado") or "").strip() not in {"rechazado", "presupuestado", "emitido", "aprobado"}:
+            raise ValidationError("La versión vigente debe estar emitida, aprobada o rechazada.")
 
         new_id = _clone_quote_version(current["id"])
+        if technical.available():
+            baseline = q("SELECT id FROM quotes WHERE ingreso_id=%s AND estado='aprobado' ORDER BY version_num DESC,id DESC LIMIT 1", [ingreso_id], one=True)
+            exec_void("UPDATE quotes SET supersedes_quote_id=%s WHERE id=%s", [baseline['id'] if baseline else None,new_id])
         # La nueva versión deja sin efecto el rechazo, así que también se va la resolución
         # que el rechazo había dejado: si no, la OS seguiría saliendo como "Presupuesto
         # rechazado" después de aprobar y reparar la versión nueva.
@@ -1037,6 +1045,8 @@ class QuoteDetailView(APIView):
 
     def get(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"])
+        if not any(user_has_permission(request.user, code) for code in ("action.presupuesto.manage", "action.presupuesto.view_costs", "page.budget_queues")):
+            raise PermissionDenied("No autorizado para consultar información comercial.")
         quote_id = _parse_quote_id(request.query_params.get("quote_id"))
         _ensure_current_quote(ingreso_id)
         return _quote_response(request, ingreso_id, quote_id=quote_id)
@@ -1047,6 +1057,8 @@ class QuoteItemsView(APIView):
 
     def post(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico"])
+        if technical.available() and q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+            raise ValidationError("Agregá el artículo desde la intervención técnica y volvé a enviar la carga.")
         d = request.data or {}
         tipo = (d.get("tipo") or "").strip()
         if tipo not in ("repuesto", "mano_obra", "servicio"):
@@ -1132,6 +1144,9 @@ class QuoteItemDetailView(APIView):
         current = _ensure_current_quote_editable(ingreso_id)
         current_quote_id = current["id"]
         d = request.data or {}
+        structured = technical.available() and q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True)
+        if structured and set(d) - {'precio_u','costo_u_neto'}:
+            raise ValidationError("Revisá las cantidades y los artículos desde la intervención técnica.")
         sets, params = [], []
         desc_from_rep = None
         auto_precio = _QUOTE_COST_MISSING
@@ -1148,6 +1163,8 @@ class QuoteItemDetailView(APIView):
             raise ValidationError("\u00cdtem no encontrado")
 
         final_tipo = (current_item.get("tipo") or "").strip()
+        if structured and final_tipo != 'repuesto':
+            raise ValidationError("La mano de obra se calcula desde las horas presupuestadas.")
         target_repuesto_id = current_item.get("repuesto_id")
         target_repuesto_codigo = current_item.get("repuesto_codigo")
         custom_cost = _parse_quote_item_cost_input(d, request.user)
@@ -1253,6 +1270,8 @@ class QuoteItemDetailView(APIView):
         return _quote_response(request, ingreso_id)
 
     def delete(self, request, ingreso_id: int, item_id: int):
+        if technical.available() and q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+            raise ValidationError("Quitá el artículo desde la intervención técnica y volvé a enviar la carga.")
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico"])
         current = _ensure_current_quote_editable(ingreso_id)
         _set_audit_user(request)
@@ -1272,6 +1291,8 @@ class QuoteResumenView(APIView):
 
     def patch(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico"])
+        if technical.available() and q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+            raise ValidationError("Revisá las horas y la tarifa desde Mano de obra por tiempo.")
         mo = request.data.get("mano_obra")
         if mo is None:
             raise ValidationError("mano_obra requerido")
@@ -1308,7 +1329,8 @@ class RechazarPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        if not user_has_permission(request.user, "action.presupuesto.manage"):
+            raise PermissionDenied("Se requiere permiso para administrar presupuestos.")
         if not ensure_rejected_budget_charge_schema():
             raise ValidationError(
                 "No se pudo preparar el esquema de cobro para presupuesto rechazado. "
@@ -1391,9 +1413,13 @@ class QuoteVersionesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        if not user_has_permission(request.user, "action.presupuesto.manage"):
+            raise PermissionDenied("Se requiere permiso para administrar presupuestos.")
         _set_audit_user(request)
-        _clone_current_quote_version_from_rejected(ingreso_id)
+        if technical.available() and q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+            technical.new_version(ingreso_id, request.user)
+        else:
+            _clone_current_quote_version(ingreso_id)
         return _quote_response(request, ingreso_id)
 
 
@@ -1401,14 +1427,24 @@ class EmitirPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        if not user_has_permission(request.user, "action.presupuesto.manage"):
+            raise PermissionDenied("Se requiere permiso para administrar presupuestos.")
+        q("SELECT id FROM ingresos WHERE id=%s FOR UPDATE", [ingreso_id], one=True)
         autorizado_por = _clean_text_or_default(request.data.get("autorizado_por"), DEFAULT_AUTORIZADO_POR)
         forma_pago = _clean_text_or_default(request.data.get("forma_pago"), "A definir")
         plazo_entrega_txt = _clean_text_or_default(request.data.get("plazo_entrega_txt"), DEFAULT_PLAZO_ENTREGA_TXT)
         garantia_txt = _clean_text_or_default(request.data.get("garantia_txt"), DEFAULT_GARANTIA_TXT)
         mant_oferta_txt = _clean_text_or_default(request.data.get("mant_oferta_txt"), DEFAULT_MANT_OFERTA_TXT)
+        existing = _get_current_quote_row(ingreso_id, for_update=True)
+        if existing and _is_emitted_quote_state(existing['estado']):
+            saved_terms = q("SELECT autorizado_por,forma_pago,plazo_entrega_txt,garantia_txt,mant_oferta_txt FROM quotes WHERE id=%s", [existing['id']], one=True)
+            requested_terms = dict(autorizado_por=autorizado_por,forma_pago=forma_pago,plazo_entrega_txt=plazo_entrega_txt,garantia_txt=garantia_txt,mant_oferta_txt=mant_oferta_txt)
+            if saved_terms == requested_terms:
+                return _quote_response(request, ingreso_id)
+            raise ValidationError("La versión ya fue emitida. Creá una nueva versión para cambiar sus condiciones.")
         current = _ensure_current_quote_editable(ingreso_id)
         qid = current["id"]
+        technical.validate_issue(ingreso_id, qid, request.data.get("technical_revision"))
         estado_actual = _quote_estado_str(current.get("estado"))
         if estado_actual not in {"pendiente", *EMITTED_QUOTE_STATES}:
             raise ValidationError("Solo se puede emitir la versión vigente cuando está pendiente.")
@@ -1442,6 +1478,8 @@ class EmitirPresupuestoView(APIView):
                     f.write(pdf)
         except Exception:
             pass
+        if technical.available() and pdf:
+            exec_void("INSERT INTO technical_quote_documents(quote_id,filename,pdf) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING", [qid, fname, pdf])
         pdf_url = f"/api/quotes/{ingreso_id}/pdf/?quote_id={qid}"
         exec_void("UPDATE quotes SET pdf_url=%s WHERE id=%s", [pdf_url, qid])
         return _quote_response(request, ingreso_id)
@@ -1452,11 +1490,18 @@ class QuotePdfView(APIView):
 
     def get(self, request, ingreso_id: int):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"])
+        if not any(user_has_permission(request.user, code) for code in ("action.presupuesto.manage", "action.presupuesto.view_costs", "page.budget_queues")):
+            raise PermissionDenied("No autorizado para consultar información comercial.")
         quote_id = _parse_quote_id(request.query_params.get("quote_id"))
         _ensure_current_quote(ingreso_id)
         if quote_id is not None and not _get_quote_row(ingreso_id, quote_id):
             raise ValidationError("La versión solicitada no pertenece a este ingreso.")
-        fname, pdf = render_quote_pdf(ingreso_id, quote_id=quote_id)
+        selected = _get_current_quote_row(ingreso_id) if quote_id is None else _get_quote_row(ingreso_id, quote_id)
+        stored = technical.stored_document(selected["id"]) if technical.available() and selected else None
+        if stored:
+            fname, pdf = stored
+        else:
+            fname, pdf = render_quote_pdf(ingreso_id, quote_id=quote_id)
         if not pdf:
             raise ValidationError("Ingreso no encontrado o sin presupuesto")
         resp = HttpResponse(pdf, content_type="application/pdf")
@@ -1468,12 +1513,14 @@ class AprobarPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        if not user_has_permission(request.user, "action.presupuesto.manage"):
+            raise PermissionDenied("Se requiere permiso para administrar presupuestos.")
         qid = None
         was_approved = False
         should_notify_repair_ready = False
         alert_items = []
         with transaction.atomic():
+            q("SELECT id FROM ingresos WHERE id=%s FOR UPDATE", [ingreso_id], one=True)
             current = _get_current_quote_row(ingreso_id, for_update=True)
             if not current:
                 raise ValidationError("Ingreso no encontrado o sin presupuesto")
@@ -1552,6 +1599,8 @@ class AprobarPresupuestoView(APIView):
                     """,
                     [qid],
                 ) or []
+                if technical.available():
+                    items = technical.approval_stock_delta(ingreso_id, qid)
                 for it in items:
                     rep_id = it.get("repuesto_id")
                     if not rep_id:
@@ -1595,6 +1644,9 @@ class AprobarPresupuestoView(APIView):
                             "stock_min": stock_min,
                             "ubicacion_deposito": rep_row.get("ubicacion_deposito"),
                         })
+
+            if not was_approved and technical.available():
+                technical.finish_approval(qid)
 
         if was_approved:
             return _quote_response(request, ingreso_id)
@@ -1733,7 +1785,8 @@ class AnularPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        if not user_has_permission(request.user, "action.presupuesto.manage"):
+            raise PermissionDenied("Se requiere permiso para administrar presupuestos.")
         if not _annulled_quote_state_available():
             raise ValidationError(
                 "La base todavía no conoce el estado 'anulado'. Reiniciá el contenedor "
@@ -1845,7 +1898,15 @@ class AnularPresupuestoView(APIView):
                 """,
                 [qid],
             )
-            _clone_quote_version(qid)
+            replacement_id = _clone_quote_version(qid)
+            if technical.available():
+                exec_void("UPDATE quotes SET stock_applied=FALSE WHERE id=%s", [qid])
+                if current_estado != 'aprobado':
+                    previous_approval = q("SELECT id FROM quotes WHERE ingreso_id=%s AND estado='aprobado' ORDER BY version_num DESC,id DESC LIMIT 1", [ingreso_id], one=True)
+                    exec_void("UPDATE quotes SET supersedes_quote_id=%s WHERE id=%s", [previous_approval['id'] if previous_approval else None,replacement_id])
+                if q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+                    exec_void("DELETE FROM quote_items WHERE quote_id=%s", [replacement_id])
+                    technical.sync_draft(ingreso_id, replacement_id)
             if current_estado == "aprobado":
                 exec_void(
                     """
@@ -1868,7 +1929,8 @@ class NoAplicaPresupuestoView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, ingreso_id: int):
-        require_roles_strict(request, ["jefe", "admin", "jefe_suplente"])
+        if not user_has_permission(request.user, "action.presupuesto.manage"):
+            raise PermissionDenied("Se requiere permiso para administrar presupuestos.")
         ingreso = q("SELECT id FROM ingresos WHERE id=%s", [ingreso_id], one=True)
         if not ingreso:
             raise ValidationError("Ingreso no encontrado")

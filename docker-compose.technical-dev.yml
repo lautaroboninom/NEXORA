@@ -1,0 +1,52 @@
+name: nexora-technical-dev
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: deploy/technical-postgres.Dockerfile
+    environment:
+      POSTGRES_DB: nexora_technical_dev
+      POSTGRES_USER: nexora_technical
+      POSTGRES_PASSWORD: desarrollo_tecnico_local
+    volumes:
+      - technical_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U nexora_technical -d nexora_technical_dev']
+      interval: 3s
+      retries: 30
+  api:
+    build: ./api
+    environment:
+      POSTGRES_DB: nexora_technical_dev
+      POSTGRES_USER: nexora_technical
+      POSTGRES_PASSWORD: desarrollo_tecnico_local
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: '5432'
+      DJANGO_SETTINGS_MODULE: app.settings_technical_dev
+      DJANGO_SECRET_KEY: desarrollo-tecnico-aislado
+      DJANGO_DEBUG: 'true'
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,testserver,api
+      EMAIL_BACKEND: django.core.mail.backends.locmem.EmailBackend
+      BEJERMAN_SYNC_ENABLED: '0'
+      BEJERMAN_PURCHASE_EMISSION_ENABLED: '0'
+      BEJERMAN_WSDL_URL: http://127.0.0.1:9/integracion-deshabilitada
+      ALLOWED_ORIGINS: http://localhost:5177
+      PUBLIC_WEB_URL: http://localhost:5177
+    ports: ['127.0.0.1:18110:8000']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >-
+      sh -c 'python manage.py migrate --noinput &&
+      python manage.py prepare_production_schema --strict &&
+      python manage.py runserver 0.0.0.0:8000 --noreload'
+  web:
+    build: ./web
+    environment:
+      VITE_DEV_API_PROXY: http://api:8000
+      VITE_SW: '0'
+    ports: ['127.0.0.1:5177:5173']
+    depends_on: [api]
+    command: npm run dev -- --host 0.0.0.0
+volumes:
+  technical_pg:

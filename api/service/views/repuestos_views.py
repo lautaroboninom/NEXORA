@@ -884,12 +884,14 @@ class RepuestosView(APIView):
 
     def post(self, request):
         require_roles(request, ["jefe", "jefe_veedor", "tecnico"])
+        if not user_has_permission(request.user, "action.spare_parts.create"):
+            raise PermissionDenied("Solicitá el alta del repuesto desde la intervención técnica.")
         d = request.data or {}
         is_manager = _is_manager(request.user)
         is_tech = _rol(request.user) == "tecnico"
         if not is_manager:
-            if not (is_tech and _can_edit_stock(request.user)):
-                raise PermissionDenied("No autorizado")
+            if d.get('stock_on_hand') not in (None, '', 0, '0') and not _can_edit_stock(request.user):
+                raise PermissionDenied("No autorizado para definir stock inicial.")
             forbidden = set(d.keys()) - {"subrubro_codigo", "nombre", "stock_on_hand"}
             if forbidden:
                 raise PermissionDenied("No autorizado para editar detalles")

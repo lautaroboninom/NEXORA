@@ -365,7 +365,7 @@ export default function Repuestos() {
   const canEditStock = canManage || !!activePerm;
   const canEditDetalle = canEditStock;
   const canDelete = canEditStock;
-  const canAdd = canManage || (isTech && !!activePerm);
+  const canAdd = can(user, PERMISSION_CODES.ACTION_SPARE_PARTS_CREATE);
   const colCount = 6;
   const compraSelectedRepuesto = useMemo(() => {
     const byInput = findRepuestoCompraMatch(compraForm.repuesto_input);

@@ -75,6 +75,7 @@ SCHEMA_COMMANDS: tuple[tuple[str, dict], ...] = (
     # Suplencias temporales: guarda cómo estaba el suplente antes de cubrir a alguien,
     # que es lo único que permite devolverlo exactamente ahí cuando el titular vuelve.
     ("apply_suplencias_schema", {}),
+    ("apply_technical_interventions_schema", {}),
 )
 
 

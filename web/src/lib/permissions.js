@@ -45,6 +45,7 @@ export const PERMISSION_CODES = {
   ACTION_USERS_MANAGE_PERMISSIONS: "action.users.manage_permissions",
   ACTION_CATALOGS_MANAGE: "action.catalogs.manage",
   ACTION_TESTS_PROTOCOL_MANAGE: "action.tests_protocol.manage",
+  ACTION_SPARE_PARTS_CREATE: "action.spare_parts.create",
   ACTION_SPARE_PARTS_MANAGE: "action.spare_parts.manage",
   ACTION_SPARE_PARTS_MANAGE_24H_PERMISSIONS: "action.spare_parts.manage_24h_permissions",
   ACTION_DEVICES_PREVENTIVOS_MANAGE: "action.devices_preventivos.manage",
@@ -263,6 +264,7 @@ export const ROLE_DEFAULT_PERMISSIONS = {
     PERMISSION_CODES.ACTION_SPARE_PARTS_VIEW_COSTS,
     PERMISSION_CODES.ACTION_INGRESO_AUTHORIZE_REPAIR,
     PERMISSION_CODES.ACTION_BEJERMAN_SYNC_FORCE_STOCK_ENTRY,
+      PERMISSION_CODES.ACTION_SPARE_PARTS_CREATE,
   ]),
   recepcion: new Set([
     PERMISSION_CODES.PAGE_HOME_SEARCH,

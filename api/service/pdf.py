@@ -1181,6 +1181,14 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
     if not head:
         return None, None
 
+    from . import technical_interventions as technical
+    if head.get('quote_id') and technical.available():
+        stored = technical.q("SELECT technical_snapshot FROM quotes WHERE id=%s", [head['quote_id']], one=True)
+        if stored and stored['technical_snapshot']:
+            snapshot = technical.json_object(stored['technical_snapshot'])
+            head['descripcion_problema'] = snapshot.get('diagnostico','')
+            head['trabajos_realizados'] = technical.work_text(snapshot)
+
     # Recalcular totales desde items (evita depender de quotes.subtotal desactualizado)
     try:
         row = {"subtotal": 0}
@@ -1518,6 +1526,10 @@ def render_remito_salida_pdf(ingreso_id: int, printed_by: str = ""):
     head, _items = _get_data(ingreso_id)
     if not head:
         return b"", f"Remito_{ingreso_id}.pdf"
+    from . import technical_interventions as technical
+    if technical.available() and technical.q("SELECT ingreso_id FROM technical_interventions WHERE ingreso_id=%s", [ingreso_id], one=True):
+        live = technical.detail(ingreso_id)
+        head['trabajos_realizados'] = technical.work_text(live, actual=True)
     rejected_budget_context = get_rejected_budget_context(ingreso_id)
     rejected_quote = rejected_budget_context.get("rejected_quote")
 

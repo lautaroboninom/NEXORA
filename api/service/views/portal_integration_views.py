@@ -1,3 +1,4 @@
+from .. import technical_interventions as technical
 import hashlib
 import hmac
 import ipaddress
@@ -464,6 +465,12 @@ def _budget_summary_payload(row):
             "items": [_quote_item_payload(item) for item in items],
         }
     )
+    if technical.available():
+        stored = q("SELECT technical_snapshot FROM quotes WHERE id=%s", [row.get('quote_id')], one=True)
+        if stored and stored['technical_snapshot']:
+            snapshot = technical.json_object(stored['technical_snapshot'])
+            payload['diagnosis'] = snapshot.get('diagnostico','')
+            payload['workToDo'] = technical.work_text(snapshot)
     return payload
 
 
@@ -1144,6 +1151,7 @@ def _approve_budget_from_portal(row):
     qid = row.get("quote_id")
     alert_items = []
     with transaction.atomic():
+        q("SELECT id FROM ingresos WHERE id=%s FOR UPDATE", [ingreso_id], one=True)
         locked = q("SELECT estado FROM quotes WHERE id=%s FOR UPDATE", [qid], one=True) or {}
         if (locked.get("estado") or "").strip() != "presupuestado":
             return False, "conflict"
@@ -1205,6 +1213,8 @@ def _approve_budget_from_portal(row):
             """,
             [qid],
         ) or []
+        if technical.available():
+            items = technical.approval_stock_delta(ingreso_id, qid)
         for item in items:
             rep_id = item.get("repuesto_id")
             if not rep_id:
@@ -1251,6 +1261,9 @@ def _approve_budget_from_portal(row):
                         "ubicacion_deposito": rep_row.get("ubicacion_deposito"),
                     }
                 )
+
+        if technical.available():
+            technical.finish_approval(qid)
 
     if alert_items:
         try:
@@ -1347,7 +1360,11 @@ class PortalClientePresupuestoPdfView(PortalIntegrationBaseView):
             )
             return Response({"detail": "Not found"}, status=404)
 
-        fname, pdf = render_quote_pdf(ingreso_id, quote_id=row.get("quote_id"))
+        stored = technical.stored_document(row.get("quote_id")) if technical.available() else None
+        if stored:
+            fname, pdf = stored
+        else:
+            fname, pdf = render_quote_pdf(ingreso_id, quote_id=row.get("quote_id"))
         if not pdf:
             return Response({"detail": "Not found"}, status=404)
         _audit_portal_call(request, "portal_client_budget_pdf", {"customer_id": customer_id, "ingreso_id": ingreso_id})

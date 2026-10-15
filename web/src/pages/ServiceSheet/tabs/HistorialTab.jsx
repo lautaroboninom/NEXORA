@@ -15,6 +15,9 @@ const roleLabel = (value) => {
 };
 
 const fieldLabels = {
+  minutos_estimados: "Tiempo estimado (minutos)", minutos_reales: "Tiempo real (minutos)",
+  cantidad_prevista: "Cantidad prevista", cantidad_realizada: "Cantidad realizada",
+  sin_falla: "Sin falla", observaciones: "Observaciones", submitted_at: "Envío a presupuestar",
   asignado_a: "Asignado a",
   alquiler_a: "Alquilado a",
   alquiler_fecha: "Fecha de alquiler",
@@ -24,6 +27,9 @@ const fieldLabels = {
 };
 
 const entityLabels = {
+  technical_interventions: "Intervención técnica", technical_intervention_items: "Trabajos y repuestos",
+  technical_catalog_requests: "Solicitud de catálogo", technical_work_catalog: "Catálogo de trabajos",
+  technical_labor_rates: "Tarifa de mano de obra", technical_billing_config: "Tarifa de diagnóstico y limpieza",
   devices: "Equipo",
   ingresos: "Ingreso",
   ingreso_accesorios: "Accesorios",

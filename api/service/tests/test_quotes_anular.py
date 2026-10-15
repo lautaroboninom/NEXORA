@@ -550,7 +550,7 @@ class QuoteAnularAPITest(TestCase):
         resp = self.client.get(self._url_detail(ingreso_id))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data.get("estado"), "presupuestado")
-        self.assertTrue(resp.data.get("is_editable"))
+        self.assertFalse(resp.data.get("is_editable"))
         self.assertTrue(resp.data.get("can_reject"))
         self.assertEqual(resp.data.get("versions")[0].get("estado"), "presupuestado")
 

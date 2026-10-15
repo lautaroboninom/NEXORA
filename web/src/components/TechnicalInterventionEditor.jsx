@@ -1,0 +1,134 @@
+import { useEffect, useState } from "react";
+import { getTechnicalIntervention, saveTechnicalIntervention, submitTechnicalIntervention, getTechnicalParts, getTechnicalWorks, requestTechnicalCatalogItem } from "../lib/api";
+
+export const TECHNICAL_STATUS_LABELS = {
+  en_preparacion: "En preparación", listo_revision: "Listo para revisar",
+  alta_pendiente: "Alta de catálogo pendiente", ampliacion_pendiente: "Ampliación pendiente", historico: "Carga anterior",
+};
+
+export function DurationInput({ value = 0, onChange, disabled, label }) {
+  const total = Number(value) || 0;
+  return <fieldset disabled={disabled} className="min-w-0">
+    <legend className="text-sm font-medium mb-1">{label}</legend>
+    <div className="flex items-center gap-2">
+      <input aria-label={`${label}: horas`} type="number" min="0" max="8760" step="1" className="border rounded p-2 w-24" value={Math.floor(total / 60)} onChange={(e) => onChange(Math.max(0, Math.trunc(Number(e.target.value) || 0)) * 60 + total % 60)} />
+      <span>h</span>
+      <input aria-label={`${label}: minutos`} type="number" min="0" max="59" step="1" className="border rounded p-2 w-20" value={total % 60} onChange={(e) => onChange(Math.floor(total / 60) * 60 + Math.max(0, Math.min(59, Math.trunc(Number(e.target.value) || 0))))} />
+      <span>min</span>
+    </div>
+  </fieldset>;
+}
+
+export default function TechnicalInterventionEditor({ ingresoId, disabled = false, equipmentHint, onSaved, onDirtyChange, refreshKey }) {
+  const [form, setForm] = useState(null);
+  const [works, setWorks] = useState([]);
+  const [parts, setParts] = useState([]);
+  const [search, setSearch] = useState("");
+  const [selectedWork, setSelectedWork] = useState("");
+  const [selectedPart, setSelectedPart] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [request, setRequest] = useState({ tipo: "repuesto", nombre: "", cantidad: 1, observaciones: "" });
+  const [showRequest, setShowRequest] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([getTechnicalIntervention(ingresoId), getTechnicalWorks()])
+      .then(([value, catalog]) => { if (alive) { setForm(value); setWorks(catalog); setDirty(false); } })
+      .catch((e) => { if (alive) setError(e.message); });
+    return () => { alive = false; };
+  }, [ingresoId, refreshKey]);
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const listener = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", listener);
+    return () => window.removeEventListener("beforeunload", listener);
+  }, [dirty]);
+  useEffect(() => {
+    let alive = true;
+    const timer = setTimeout(() => getTechnicalParts(ingresoId, search, equipmentHint)
+      .then((rows) => { if (alive) setParts(rows); })
+      .catch((e) => { if (alive) setError(e.message); }), 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [ingresoId, search, equipmentHint]);
+
+  function change(patch) { setForm((old) => ({ ...old, ...patch })); setDirty(true); setNotice(""); }
+  function changeItem(index, patch) { change({ items: form.items.map((item, i) => i === index ? { ...item, ...patch } : item) }); }
+  function add(kind, row) {
+    if (!row) return;
+    const existing = form.items.findIndex((item) => item.tipo === kind && Number(item[kind === "trabajo" ? "trabajo_id" : "repuesto_id"]) === Number(row.id));
+    if (existing >= 0) { changeItem(existing, { cantidad_prevista: Number(form.items[existing].cantidad_prevista) + 1 }); return; }
+    change({ items: [...form.items, { tipo: kind, trabajo_id: kind === "trabajo" ? row.id : null, repuesto_id: kind === "repuesto" ? row.id : null,
+      descripcion: row.nombre, codigo: row.codigo, cantidad_prevista: 1, cantidad_realizada: 0, observaciones: "" }] });
+  }
+  async function persist() {
+    const payload = { revision: form.revision, diagnostico: form.diagnostico, minutos_estimados: form.minutos_estimados,
+      minutos_reales: form.minutos_reales, sin_falla: form.sin_falla, observaciones: form.observaciones,
+      items: form.items.map(({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista, cantidad_realizada, observaciones }) =>
+        ({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista, cantidad_realizada, observaciones })) };
+    const value = await saveTechnicalIntervention(ingresoId, payload);
+    setForm(value); setDirty(false); await onSaved?.(); return value;
+  }
+  async function run(action) {
+    setBusy(true); setError(""); setNotice("");
+    try { await action(); } catch (e) { setError(`${e.message}${e.status === 409 ? " Guardá una copia de tus cambios y recargá la ficha para comparar." : ""}`); }
+    finally { setBusy(false); }
+  }
+
+  if (!form) return <div className="border rounded p-4 mt-4" role="status">{error || "Cargando intervención técnica..."}</div>;
+  const locked = disabled || busy;
+  return <section className="min-w-0 max-w-full border rounded-lg p-4 mt-4 space-y-4" aria-label="Intervención técnica">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h2 className="font-semibold text-lg">Diagnóstico, trabajos y repuestos</h2>
+      <span className="text-sm rounded bg-slate-100 px-3 py-1">{dirty ? "Cambios sin guardar" : TECHNICAL_STATUS_LABELS[form.estado_revision]}</span>
+    </div>
+    {error && <div role="alert" className="rounded bg-red-50 p-3 text-red-800">{error}</div>}
+    {notice && <div role="status" className="rounded bg-green-50 p-3 text-green-800">{notice}</div>}
+    <label className="block font-medium">Diagnóstico
+      <textarea className="block w-full border rounded p-2 min-h-[140px] mt-1 font-normal" value={form.diagnostico} disabled={locked} onChange={(e) => change({ diagnostico: e.target.value })} placeholder="Describí la falla encontrada y el diagnóstico técnico." />
+    </label>
+    {form.trabajos_historicos && <details className="rounded bg-slate-50 p-3"><summary className="cursor-pointer text-sm font-medium">Trabajos registrados anteriormente</summary><p className="whitespace-pre-wrap text-sm mt-2">{form.trabajos_historicos}</p></details>}
+    <div className="grid gap-4 md:grid-cols-2">
+      <div><label htmlFor={`work-${ingresoId}`} className="block text-sm font-medium mb-1">Trabajo del catálogo</label>
+        <div className="flex gap-2"><select id={`work-${ingresoId}`} className="border rounded p-2 w-full min-w-0" disabled={locked} value={selectedWork} onChange={(e) => setSelectedWork(e.target.value)}>
+          <option value="">Seleccionar trabajo</option>{works.map((row) => <option key={row.id} value={row.id}>{row.nombre}</option>)}
+        </select><button type="button" className="border rounded px-3" disabled={locked || !selectedWork} onClick={() => { add("trabajo", works.find((row) => Number(row.id) === Number(selectedWork))); setSelectedWork(""); }}>Agregar</button></div>
+      </div>
+      <div><label htmlFor={`part-search-${ingresoId}`} className="block text-sm font-medium mb-1">Repuesto del catálogo</label>
+        <input id={`part-search-${ingresoId}`} className="border rounded p-2 w-full mb-2" value={search} disabled={locked} onChange={(e) => { setSearch(e.target.value); setSelectedPart(""); }} placeholder="Buscar por código o nombre" />
+        <div className="flex gap-2"><select aria-label="Repuesto encontrado" className="border rounded p-2 w-full min-w-0" disabled={locked} value={selectedPart} onChange={(e) => setSelectedPart(e.target.value)}>
+          <option value="">Seleccionar repuesto</option>{parts.map((row) => <option key={row.id} value={row.id}>{row.codigo} · {row.nombre}</option>)}
+        </select><button type="button" className="border rounded px-3" disabled={locked || !selectedPart} onClick={() => { add("repuesto", parts.find((row) => Number(row.id) === Number(selectedPart))); setSelectedPart(""); }}>Agregar</button></div>
+      </div>
+    </div>
+    <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Trabajo o repuesto</th><th className="p-2">Cantidad prevista</th><th className="p-2">Cantidad realizada</th><th className="p-2">Observaciones</th><th className="p-2"><span className="sr-only">Acciones</span></th></tr></thead>
+      <tbody>{form.items.map((item, index) => <tr className="border-b" key={item.id || `new-${index}`}>
+        <td className="p-2 min-w-44"><span className="text-xs text-slate-500 block">{item.tipo === "repuesto" ? item.codigo : "Trabajo"}</span>{item.descripcion}</td>
+        {["cantidad_prevista", "cantidad_realizada"].map((key) => <td className="p-2" key={key}><input aria-label={`${key === "cantidad_prevista" ? "Cantidad prevista" : "Cantidad realizada"}: ${item.descripcion}`} className="border rounded p-2 w-24" disabled={locked} type="number" min={key === "cantidad_prevista" ? "0.01" : "0"} step="0.01" value={item[key]} onChange={(e) => changeItem(index, { [key]: e.target.value })} /></td>)}
+        <td className="p-2"><input aria-label={`Observaciones: ${item.descripcion}`} className="border rounded p-2 min-w-40 w-full" disabled={locked} value={item.observaciones} onChange={(e) => changeItem(index, { observaciones: e.target.value })} /></td>
+        <td className="p-2"><button type="button" className="text-red-700 underline" disabled={locked} onClick={() => change({ items: form.items.filter((_, i) => i !== index) })}>Quitar</button></td>
+      </tr>)}</tbody></table>{!form.items.length && <p className="text-sm text-slate-500 py-3">Agregá los trabajos previstos y las piezas que requiere la reparación.</p>}</div>
+    <div className="grid gap-4 md:grid-cols-2">
+      <DurationInput label="Tiempo estimado para presupuestar" value={form.minutos_estimados} disabled={locked} onChange={(value) => change({ minutos_estimados: value })} />
+      <DurationInput label="Tiempo real dedicado" value={form.minutos_reales} disabled={locked} onChange={(value) => change({ minutos_reales: value })} />
+    </div>
+    <label className="flex items-center gap-2 text-sm"><input type="checkbox" disabled={locked} checked={form.sin_falla} onChange={(e) => change({ sin_falla: e.target.checked })} />No se encontró falla</label>
+    <label className="block text-sm font-medium">Observaciones generales<textarea className="block mt-1 w-full border rounded p-2 font-normal" disabled={locked} value={form.observaciones} onChange={(e) => change({ observaciones: e.target.value })} /></label>
+    <div className="flex flex-wrap gap-2 items-center">
+      <button type="button" disabled={locked || !dirty} className="border rounded px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { await persist(); setNotice("Cambios guardados."); })}>Guardar cambios</button>
+      <button type="button" disabled={locked} className="rounded bg-blue-700 text-white px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { const saved = dirty || !form.revision ? await persist() : form; const sent = await submitTechnicalIntervention(ingresoId, saved.revision); setForm(sent); await onSaved?.(); setNotice("Carga enviada para revisión del presupuesto."); })}>{busy ? "Guardando..." : "Enviar a presupuestar"}</button>
+      <button type="button" disabled={locked} className="text-blue-700 underline p-2" onClick={() => setShowRequest((value) => !value)}>Solicitar alta de trabajo o repuesto</button>
+    </div>
+    {showRequest && <form className="rounded bg-slate-50 border p-3 grid gap-3 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); run(async () => { if (dirty || !form.revision) await persist(); await requestTechnicalCatalogItem({ ...request, ingreso_id: ingresoId }); setForm(await getTechnicalIntervention(ingresoId)); setRequest({ tipo: "repuesto", nombre: "", cantidad: 1, observaciones: "" }); setShowRequest(false); setNotice("Solicitud de alta enviada a administración."); }); }}>
+      <label className="text-sm">Tipo<select className="block border rounded p-2 w-full" disabled={locked} value={request.tipo} onChange={(e) => setRequest({ ...request, tipo: e.target.value })}><option value="repuesto">Repuesto</option><option value="trabajo">Trabajo</option></select></label>
+      <label className="text-sm">Cantidad<input className="block border rounded p-2 w-full" disabled={locked} type="number" min="0.01" step="0.01" value={request.cantidad} onChange={(e) => setRequest({ ...request, cantidad: e.target.value })} /></label>
+      <label className="text-sm">Nombre solicitado<input required className="block border rounded p-2 w-full" disabled={locked} value={request.nombre} onChange={(e) => setRequest({ ...request, nombre: e.target.value })} /></label>
+      <label className="text-sm">Descripción técnica<input className="block border rounded p-2 w-full" disabled={locked} value={request.observaciones} onChange={(e) => setRequest({ ...request, observaciones: e.target.value })} /></label>
+      <button type="submit" className="rounded bg-slate-700 text-white px-4 py-2" disabled={locked}>Enviar solicitud</button>
+    </form>}
+    {form.solicitudes.length > 0 && <div className="text-sm space-y-2"><h3 className="font-medium">Solicitudes de catálogo</h3>{form.solicitudes.map((row) => <p key={row.id}>{row.nombre} · {row.estado}{row.respuesta ? ` · ${row.respuesta}` : ""}</p>)}</div>}
+  </section>;
+}
