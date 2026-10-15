@@ -114,6 +114,19 @@ class TechnicalInterventionAPITests(TestCase):
         response=self.client.post(self.base+'enviar/',{'revision':data['revision']-1},format='json')
         self.assertEqual(response.status_code,409)
 
+    def test_technical_parts_include_configured_equipment_without_commercial_data(self):
+        equipment = ['Longfian | JAY-5', 'Longfian | JAY-10 | Doble flujo']
+        exec_void("UPDATE catalogo_repuestos SET estado=%s WHERE id=%s",['\n'.join(equipment),self.part])
+        response=self.client.get(self.base+'repuestos/?q=TEC-TEST')
+        self.assertEqual(response.status_code,200,response.content)
+        part=next(row for row in response.json() if row['id']==self.part)
+        self.assertEqual(set(part),{'id','codigo','nombre','equipos_asociados'})
+        self.assertEqual(part['equipos_asociados'],equipment)
+        exec_void("UPDATE catalogo_repuestos SET estado=NULL WHERE id=%s",[self.part])
+        response=self.client.get(self.base+'repuestos/?q=TEC-TEST')
+        self.assertEqual(response.status_code,200,response.content)
+        self.assertEqual(next(row for row in response.json() if row['id']==self.part)['equipos_asociados'],[])
+
     def test_progress_keeps_scope_and_quoted_price(self):
         self.save();self.send();issued=self.issue()
         self.client.force_authenticate(self.tech)

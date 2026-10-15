@@ -37,7 +37,7 @@ class TechnicalPartsView(APIView):
         from .repuestos_views import CatalogoRepuestosView
         technical.ingreso_data(ingreso_id,request.user)
         response = CatalogoRepuestosView().get(request)
-        return Response([{key:row.get(key) for key in ('id','codigo','nombre')} for row in response.data])
+        return Response([{key:row.get(key) for key in ('id','codigo','nombre','equipos_asociados')} for row in response.data])
 
 
 class TechnicalWorkCatalogView(APIView):

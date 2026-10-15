@@ -801,6 +801,7 @@ class CatalogoRepuestosView(APIView):
         rows = rows[:limit]
 
         for row in rows:
+            row['equipos_asociados'] = _parse_equipo_lines(row.get('estado'))
             _serialize_repuesto_cost(row, cfg, allow_costs)
             row.pop("multiplicador", None)
             row.pop("estado", None)

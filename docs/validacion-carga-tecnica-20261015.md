@@ -49,3 +49,9 @@ Se ejecutó el seed en desarrollo y se verificaron importes de mano de obra de $
 Una segunda ejecución conservó los identificadores, las cantidades de stock, las versiones y las solicitudes, sin duplicarlos. La revisión en Chromium confirmó los casos en Pendientes de presupuesto, la OS 6 lista para emitir y la OS 2 disponible para la carga del técnico; la búsqueda técnica ofreció los 11 repuestos sin datos comerciales. No se registraron errores de JavaScript.
 
 Se corrigió además la ubicación omitida en los ejemplos: las colas de trabajo requieren Taller. Se agregaron cinco ingresos sin diagnóstico, OS 17 a 21, asignados al técnico de demostración. Se consultaron los endpoints con las sesiones correspondientes y se confirmó su presencia tanto en Mis pendientes como en Pendientes general. La base quedó con 21 órdenes, de las cuales 20 aparecen en la lista del técnico y una permanece sin asignación. No se modifican ubicaciones que ya tengan un valor.
+
+## Equipos asociados en la selección técnica de repuestos
+
+Se incorporó la lista de equipos ya configurados en el catálogo a la respuesta técnica y a las opciones del selector. Al elegir un repuesto se muestra el detalle completo debajo del selector; si no hay asociaciones se informa esa condición. El recurso técnico conserva una lista explícita de campos permitidos: identificador, código, nombre y equipos asociados.
+
+Pasaron 33 pruebas focalizadas de intervención técnica y repuestos, incluida una regresión con varios equipos asociados y sin asociaciones. La compilación del frontend finalizó correctamente. La comprobación con Chromium verificó las etiquetas del selector, el detalle seleccionado y la ausencia de información comercial en la respuesta; también se comprobó el mensaje sin asociaciones mediante una respuesta simulada del navegador. No se modificaron asociaciones del catálogo durante esa comprobación ni se registraron errores de JavaScript.

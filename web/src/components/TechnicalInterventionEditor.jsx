@@ -80,6 +80,7 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
 
   if (!form) return <div className="border rounded p-4 mt-4" role="status">{error || "Cargando intervención técnica..."}</div>;
   const locked = disabled || busy;
+  const selectedPartInfo = parts.find((row) => String(row.id) === String(selectedPart));
   return <section className="min-w-0 max-w-full border rounded-lg p-4 mt-4 space-y-4" aria-label="Intervención técnica">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h2 className="font-semibold text-lg">Diagnóstico, trabajos y repuestos</h2>
@@ -98,10 +99,13 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
         </select><button type="button" className="border rounded px-3" disabled={locked || !selectedWork} onClick={() => { add("trabajo", works.find((row) => Number(row.id) === Number(selectedWork))); setSelectedWork(""); }}>Agregar</button></div>
       </div>
       <div><label htmlFor={`part-search-${ingresoId}`} className="block text-sm font-medium mb-1">Repuesto del catálogo</label>
-        <input id={`part-search-${ingresoId}`} className="border rounded p-2 w-full mb-2" value={search} disabled={locked} onChange={(e) => { setSearch(e.target.value); setSelectedPart(""); }} placeholder="Buscar por código o nombre" />
+        <input id={`part-search-${ingresoId}`} className="border rounded p-2 w-full mb-2" value={search} disabled={locked} onChange={(e) => { setSearch(e.target.value); setSelectedPart(""); setParts([]); }} placeholder="Buscar por código o nombre" />
         <div className="flex gap-2"><select aria-label="Repuesto encontrado" className="border rounded p-2 w-full min-w-0" disabled={locked} value={selectedPart} onChange={(e) => setSelectedPart(e.target.value)}>
-          <option value="">Seleccionar repuesto</option>{parts.map((row) => <option key={row.id} value={row.id}>{row.codigo} · {row.nombre}</option>)}
+          <option value="">Seleccionar repuesto</option>{parts.map((row) => <option key={row.id} value={row.id}>{row.codigo} · {row.nombre}{row.equipos_asociados?.length ? ` — Equipos: ${row.equipos_asociados.join("; ")}` : ""}</option>)}
         </select><button type="button" className="border rounded px-3" disabled={locked || !selectedPart} onClick={() => { add("repuesto", parts.find((row) => Number(row.id) === Number(selectedPart))); setSelectedPart(""); }}>Agregar</button></div>
+        {selectedPartInfo && <div className="mt-2 text-sm text-slate-600" role="status" aria-label="Equipos asociados al repuesto seleccionado">
+          {selectedPartInfo.equipos_asociados?.length ? <><p className="font-medium">Equipos asociados</p><ul className="list-disc ml-5 break-words">{selectedPartInfo.equipos_asociados.map((equipment, index) => <li key={`${equipment}-${index}`}>{equipment}</li>)}</ul></> : <p>Sin equipos asociados configurados.</p>}
+        </div>}
       </div>
     </div>
     <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Trabajo o repuesto</th><th className="p-2">Cantidad prevista</th><th className="p-2">Cantidad realizada</th><th className="p-2">Observaciones</th><th className="p-2"><span className="sr-only">Acciones</span></th></tr></thead>
