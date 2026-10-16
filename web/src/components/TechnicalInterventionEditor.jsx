@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getTechnicalIntervention, saveTechnicalIntervention, submitTechnicalIntervention, getTechnicalParts, getTechnicalWorks, requestTechnicalCatalogItem } from "../lib/api";
+import { hoursTextFromMinutes, minutesFromHoursText } from "../lib/labor-hours";
 
 export const TECHNICAL_STATUS_LABELS = {
   en_preparacion: "En preparación", listo_revision: "Listo para revisar",
@@ -7,23 +8,16 @@ export const TECHNICAL_STATUS_LABELS = {
 };
 
 function prepareForm(value) {
-  return { ...value, items: value.items.map((item) => {
+  return { ...value, horas_mano_obra: hoursTextFromMinutes(value.minutos_estimados), items: value.items.map((item) => {
     const quantity = Math.max(Number(item.cantidad_prevista), Number(item.cantidad_realizada));
     return { ...item, cantidad_prevista: quantity, realizado: quantity > 0 && Number(item.cantidad_realizada) >= quantity };
   }) };
 }
 
-export function DurationInput({ value = 0, onChange, disabled, label }) {
-  const total = Number(value) || 0;
-  return <fieldset disabled={disabled} className="min-w-0">
-    <legend className="text-sm font-medium mb-1">{label}</legend>
-    <div className="flex items-center gap-2">
-      <input aria-label={`${label}: horas`} type="number" min="0" max="8760" step="1" className="border rounded p-2 w-24" value={Math.floor(total / 60)} onChange={(e) => onChange(Math.max(0, Math.trunc(Number(e.target.value) || 0)) * 60 + total % 60)} />
-      <span>h</span>
-      <input aria-label={`${label}: minutos`} type="number" min="0" max="59" step="1" className="border rounded p-2 w-20" value={total % 60} onChange={(e) => onChange(Math.floor(total / 60) * 60 + Math.max(0, Math.min(59, Math.trunc(Number(e.target.value) || 0))))} />
-      <span>min</span>
-    </div>
-  </fieldset>;
+export function LaborHoursInput({ value, onChange, disabled, label = "Mano de obra (horas)" }) {
+  return <label className="block text-sm font-medium">{label}
+    <input aria-label={label} type="text" inputMode="decimal" className="block border rounded p-2 w-40 mt-1 font-normal" value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} placeholder="Ej.: 1,5" />
+  </label>;
 }
 
 export default function TechnicalInterventionEditor({ ingresoId, disabled = false, equipmentHint, onSaved, onDirtyChange, refreshKey }) {
@@ -77,8 +71,10 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
       descripcion: row.nombre, codigo: row.codigo, cantidad_prevista: 1, cantidad_realizada: 0, realizado: false, observaciones: "" }] });
   }
   async function persist() {
-    const payload = { revision: form.revision, diagnostico: form.diagnostico, minutos_estimados: form.minutos_estimados,
-      minutos_reales: form.minutos_reales, sin_falla: form.sin_falla, observaciones: form.observaciones,
+    const minutes = minutesFromHoursText(form.horas_mano_obra);
+    if (minutes === null) throw new Error("Ingresá la mano de obra en horas, por ejemplo 1,5.");
+    const payload = { revision: form.revision, diagnostico: form.diagnostico, minutos_estimados: minutes,
+      sin_falla: form.sin_falla, observaciones: form.observaciones,
       items: form.items.map(({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista, cantidad_realizada, realizado, observaciones }) =>
         ({ id, tipo, trabajo_id, repuesto_id, cantidad_prevista,
           cantidad_realizada: realizado ? cantidad_prevista : Math.min(Number(cantidad_realizada), Number(cantidad_prevista)), observaciones })) };
@@ -131,10 +127,7 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
         <td className="p-2"><input aria-label={`Observaciones: ${item.descripcion}`} className="border rounded p-2 min-w-40 w-full" disabled={locked} value={item.observaciones} onChange={(e) => changeItem(index, { observaciones: e.target.value })} /></td>
         <td className="p-2"><button type="button" className="text-red-700 underline" disabled={locked} onClick={() => change({ items: form.items.filter((_, i) => i !== index) })}>Quitar</button></td>
       </tr>)}</tbody></table>{!form.items.length && <p className="text-sm text-slate-500 py-3">Agregá los trabajos previstos y las piezas que requiere la reparación.</p>}</div>
-    <div className="grid gap-4 md:grid-cols-2">
-      <DurationInput label="Tiempo estimado para presupuestar" value={form.minutos_estimados} disabled={locked} onChange={(value) => change({ minutos_estimados: value })} />
-      <DurationInput label="Tiempo real dedicado" value={form.minutos_reales} disabled={locked} onChange={(value) => change({ minutos_reales: value })} />
-    </div>
+    <LaborHoursInput value={form.horas_mano_obra} disabled={locked} onChange={(value) => change({ horas_mano_obra: value })} />
     <label className="flex items-center gap-2 text-sm"><input type="checkbox" disabled={locked} checked={form.sin_falla} onChange={(e) => change({ sin_falla: e.target.checked })} />No se encontró falla</label>
     <label className="block text-sm font-medium">Observaciones generales<textarea className="block mt-1 w-full border rounded p-2 font-normal" disabled={locked} value={form.observaciones} onChange={(e) => change({ observaciones: e.target.value })} /></label>
     <div className="flex flex-wrap gap-2 items-center">

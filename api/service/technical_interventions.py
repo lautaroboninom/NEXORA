@@ -278,7 +278,8 @@ def _labor(ingreso_id, quote_id, overrides=None):
         raise ValidationError("La bonificación prevista corresponde al diagnóstico y limpieza sin falla.")
     exec_void("UPDATE quotes SET labor_snapshot=%s::jsonb WHERE id=%s",[_json(result),quote_id])
     exec_void("DELETE FROM quote_items WHERE quote_id=%s AND tipo='mano_obra'",[quote_id])
-    label = 'Diagnóstico y limpieza' + (' (bonificado)' if bonified else '') if data['sin_falla'] else f"Mano de obra ({minutes//60} h {minutes%60:02} min)"
+    hours = format(Decimal(minutes)/60, '.2f').rstrip('0').rstrip('.').replace('.',',')
+    label = 'Diagnóstico y limpieza' + (' (bonificado)' if bonified else '') if data['sin_falla'] else f"Mano de obra ({hours} h)"
     exec_void("INSERT INTO quote_items(quote_id,tipo,descripcion,qty,precio_u) VALUES (%s,'mano_obra',%s,1,%s)",[quote_id,label,result['importe'] or 0])
     return result
 

@@ -94,6 +94,19 @@ class TechnicalInterventionAPITests(TestCase):
         self.assertEqual(Decimal(quote['mano_obra']),Decimal('120.00'))
         self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],20)
 
+    def test_single_labor_time_preserves_history_and_calculates_decimal_hours(self):
+        self.save(minutos_estimados=90,minutos_reales=40);self.send()
+        quote=self.quote()
+        self.assertEqual(Decimal(quote['mano_obra']),Decimal('130.00'))
+        self.assertEqual(next(row['descripcion'] for row in quote['items'] if row['tipo']=='mano_obra'),'Mano de obra (1,5 h)')
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json()
+        saved=self.client.patch(self.base,{'revision':data['revision'],'minutos_estimados':120},format='json')
+        self.assertEqual(saved.status_code,200,saved.content)
+        self.assertEqual(saved.json()['minutos_reales'],40)
+        self.send()
+        self.assertEqual(Decimal(self.quote()['mano_obra']),Decimal('160.00'))
+
     def test_technical_responses_and_commercial_permissions(self):
         self.save();self.send()
         for suffix in ['', 'repuestos/?q=TEC']:

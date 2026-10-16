@@ -32,8 +32,8 @@ La carga ampliada agrega veinte órdenes, tres clientes, diez repuestos con cód
 | 11 | Sin falla con diagnóstico y limpieza bonificados |
 | 12 | Tipo de equipo sin tarifa: emisión bloqueada |
 | 13 | Presupuesto emitido, listo para aprobar |
-| 14 | Aprobado, con 35 minutos reales: completar ejecución |
-| 15 | Reparación terminada, con 100 minutos reales |
+| 14 | Aprobado: completar los trabajos y repuestos |
+| 15 | Reparación terminada |
 | 16 | Adicional enviado sobre una versión aprobada |
 | 17 | CPAP que no enciende, pendiente de diagnóstico |
 | 18 | Aspirador con baja succión, pendiente de diagnóstico |
@@ -47,23 +47,23 @@ Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` 
 
 ## Operación
 
-1. El técnico asignado abre Diagnóstico y Reparación y completa diagnóstico, trabajos y repuestos de catálogo, una cantidad por artículo y tiempos estimado y real. Marca «Realizado» en los trabajos terminados e «Instalado» en las piezas colocadas. Guarda sus cambios y confirma «Enviar a presupuestar».
+1. El técnico asignado abre Diagnóstico y Reparación y completa diagnóstico, trabajos y repuestos de catálogo, una cantidad por artículo y un único campo «Mano de obra (horas)». Admite decimales con coma, por ejemplo `0,5`, `1,25` o `1,5`. Marca «Realizado» en los trabajos terminados e «Instalado» en las piezas colocadas. Guarda sus cambios y confirma «Enviar a presupuestar».
    El selector de repuestos muestra código, descripción y equipos asociados cuando están configurados. Al seleccionar uno se puede consultar la lista completa de marcas, modelos y variantes asociadas. Esta información se obtiene del mismo catálogo administrativo y no incluye importes.
 2. Si falta un artículo, solicita su alta. Administración lo crea o identifica en el catálogo y resuelve la solicitud; el artículo aprobado se agrega a la intervención. Las solicitudes pendientes impiden completar el envío.
 3. En Pendientes de presupuesto se distingue la preparación, las altas pendientes, la revisión y las ampliaciones. Desde «Trabajos, tarifas y solicitudes de alta» se administran los catálogos y los valores monetarios.
 4. Administración revisa los precios de los repuestos y el tiempo facturable. La lista técnica define los artículos; los cambios de alcance se hacen allí y se vuelven a enviar.
-5. Una vez emitida, la versión queda cerrada y se conserva el PDF original. El avance de ejecución y las horas reales se registran sin modificar lo cotizado.
+5. Una vez emitida, la versión queda cerrada y se conserva el PDF original. Marcar trabajos como realizados o repuestos como instalados no modifica lo cotizado. Un cambio de horas pasa por revisión en una nueva versión.
 6. Para un adicional, el técnico modifica el alcance y vuelve a enviarlo. Administración crea una nueva versión, la revisa y la emite. La aprobación sustituye la anterior y aplica solamente la diferencia de stock. El Portal Cliente utiliza la misma regla.
 
 ## Cálculo
 
-Cada tipo de equipo tiene primera hora y hora adicional, en pesos netos. Para `m > 0` minutos se calcula `primera_hora + max(m - 60, 0) × hora_adicional / 60`, redondeando el resultado final a centavos. Se conserva el tratamiento de IVA existente.
+Cada tipo de equipo tiene primera hora y hora adicional, en pesos netos. Se cobra un mínimo de una hora y luego el tiempo adicional proporcional. Por ejemplo, `1,5` horas corresponde a la primera hora más la mitad de una hora adicional. Internamente se conserva el almacenamiento en minutos enteros y el resultado monetario se redondea a centavos. Se conserva el tratamiento de IVA existente.
 
 La modalidad sin falla utiliza una tarifa general de diagnóstico y limpieza, común a todos los equipos; administración puede bonificarla por completo. Los técnicos no reciben importes en los recursos de intervención ni de selección de repuestos. Si falta una tarifa, se permite enviar la carga técnica y se bloquea la emisión hasta completarla y actualizar el cálculo.
 
 La acción existente «Controlado sin defecto» también activa esta modalidad. Un artículo desactivado del catálogo conserva su ejecución en las intervenciones donde ya estaba seleccionado.
 
-Los tiempos reales no recalculan automáticamente el cobro. Las versiones guardan el tiempo facturable, las tarifas y el detalle técnico utilizados. Las órdenes anteriores conservan su texto histórico.
+Las versiones guardan las horas de mano de obra, las tarifas y el detalle técnico utilizados. Las órdenes anteriores conservan su texto y sus datos históricos.
 
 ## Verificación
 
@@ -75,6 +75,7 @@ docker compose -f docker-compose.technical-dev.yml exec -T web npm run build
 Las pruebas se ejecutan en `test_nexora_technical_dev`, clonada exclusivamente desde la base aislada. El script detiene temporalmente la API de esa configuración para permitir la clonación y luego vuelve a iniciarla. No ejecutar estas pruebas con configuraciones productivas.
 
 La [validación del 15/10/2026](validacion-carga-tecnica-20261015.md) detalla las pruebas ejecutadas y el estado de la demostración.
+El [ajuste del 16/10/2026](validacion-carga-tecnica-20261016.md) verifica el campo único de horas con coma decimal.
 
 ## Informe de trabajos del último año
 
