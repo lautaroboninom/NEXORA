@@ -8,12 +8,9 @@ La rama `feature/presupuestos-carga-tecnica` contiene este desarrollo separado. 
 docker compose -f docker-compose.technical-dev.yml up -d --build
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py apply_technical_interventions_schema
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py seed_technical_dev_preview --password 'CargaTecnica-demo-2026!'
-docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_hourly_rates --apply
-docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_fixed_prices --apply
-docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py seed_technical_dev_preview --password 'CargaTecnica-demo-2026!'
 ```
 
-La interfaz está en http://localhost:5177 y la API en http://localhost:18110. Los usuarios de demostración son `presupuestos@tecnica.invalid` y `tecnico@tecnica.invalid`, con la contraseña elegida al ejecutar el comando. El seed incluye clientes, equipos, repuestos con stock y **tarifas ficticias exclusivas de prueba**. No representan la tabla de precios del negocio. La base `nexora_technical_dev`, su volumen y sus contenedores son exclusivos de este trabajo. No se usan `.env.prod`, trabajadores de correo ni sincronizadores externos. El comando de demostración rechaza otras bases de datos y no reemplaza órdenes ni valores ya cargados.
+La interfaz está en http://localhost:5177 y la API en http://localhost:18110. Los usuarios de demostración son `presupuestos@tecnica.invalid` y `tecnico@tecnica.invalid`, con la contraseña elegida al ejecutar el comando. El seed de demostración incluye clientes, equipos, repuestos y stock ficticios. Las tarifas y los precios completos confirmados por el negocio se instalan con el esquema, mediante un seed separado y versionado. La base `nexora_technical_dev`, su volumen y sus contenedores son exclusivos de este trabajo. No se usan `.env.prod`, trabajadores de correo ni sincronizadores externos. El comando de demostración rechaza otras bases de datos y no reemplaza órdenes ni valores ya cargados.
 
 Las imágenes incorporan el código y el esquema: después de modificar archivos, reconstruir el servicio correspondiente. Esta configuración evita montajes de archivos desde rutas UNC, que Docker Desktop puede interpretar como directorios.
 
@@ -48,7 +45,7 @@ La carga ampliada agrega veinticuatro órdenes, tres clientes y trece repuestos 
 | 24 | Polywatch: pila y software, reparación completa por $40.000 |
 | 25 | Compresor: reparación completa por $140.000 |
 
-El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. En una base nueva, el seed carga tarifas ficticias para probar. La base actual ya utiliza la [tabla aportada por el negocio con el 34 % confirmado](tarifas-servicio-tecnico-20261016.md). El diagnóstico sin falla conserva la configuración administrativa existente. Repetir el seed no reinicia los casos, no repone stock consumido ni restaura tarifas de ejemplo cuando hay tarifas de tres tramos.
+El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. La preparación instala la [tabla aportada por el negocio con el 34 % confirmado](tarifas-servicio-tecnico-20261016.md), sin depender de cuentas de demostración. El diagnóstico sin falla conserva la configuración administrativa existente. Repetir el seed de demostración no reinicia los casos, no repone stock consumido ni restaura tarifas de ejemplo cuando hay tarifas de tres tramos.
 
 Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` en http://localhost:5177/tecnico. Las OS 17 a 21 tienen diagnóstico vacío y están asignadas a ese técnico. Administración puede verlas en http://localhost:5177/pendientes; «Mis pendientes» muestra únicamente las asignadas al usuario que inició sesión.
 
@@ -98,3 +95,5 @@ Se realizó la consulta real del [último año en SERVERDATA](reportes/carga_tec
 ## Esquema
 
 `apply_technical_interventions_schema` es idempotente y está incluido en `prepare_production_schema`. El mismo DDL figura en `sql/schema.sql`. Incluye auditoría de alcance, cantidades, tiempos, altas y tarifas. Los documentos emitidos se almacenan aparte para conservar los bytes originales y evitar duplicar contenido binario en la auditoría de cambios.
+
+También instala los datos de negocio iniciales mediante el seed `technical_pricing_20261016_v1`, registrado en `technical_data_seeds`. Incluye los once grupos de horas con sus tres tramos y los cuatro precios completos de Polywatch y compresores. Se ejecuta una sola vez en instalaciones y actualizaciones; conserva configuraciones monetarias previas y no repone valores que administración retire después. No crea usuarios, órdenes, repuestos ni movimientos de stock. La [guía del futuro despliegue](despliegue-carga-tecnica.md) describe esta separación y la comprobación de la carga.

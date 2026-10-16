@@ -3810,3 +3810,49 @@ DO $$ DECLARE tabla TEXT; BEGIN
   END LOOP;
  END IF;
 END $$;
+
+-- Seed de negocio versionado: se aplica también al actualizar una base existente.
+-- No incluye usuarios, órdenes, stock ni otros datos de demostración.
+CREATE TABLE IF NOT EXISTS technical_data_seeds (
+  nombre TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+DO $$ BEGIN
+  PERFORM pg_advisory_xact_lock(7162026101601);
+  IF EXISTS (SELECT 1 FROM technical_data_seeds WHERE nombre='technical_pricing_20261016_v1') THEN
+    RETURN;
+  END IF;
+
+  -- Valores impresos aumentados una sola vez en un 34 % y redondeados a centavos.
+  -- Los alias conservan las denominaciones existentes del catálogo de equipos.
+  INSERT INTO technical_labor_rates(tipo_equipo,marca,primera_hora,hora_adicional,hora_desde_septima)
+  SELECT LOWER(item.nombre),rates.marca,rates.primera,rates.adicional,rates.septima
+  FROM (VALUES
+    (24909.21,10073.57,6959.92,NULL::TEXT,ARRAY['Aspirador','Aspirador a baterías']),
+    (29539.39,11428.93,9670.63,NULL::TEXT,ARRAY['Bomba de alimentación','Bomba de alimentacion','Bomba de aspiración de drenaje','Bomba de aspiracion de drenaje','Bomba de infusión','Cabezales de bomba']),
+    (38829.06,16336.92,12067.05,NULL::TEXT,ARRAY['BPAP','Auto BPAP','BPAP c/AVAPS','BPAP c/BIFLEX','BPAP c/frec.','BPAP c/humidificador']),
+    (30770.19,12067.05,10210.57,NULL::TEXT,ARRAY['Concentrador de oxígeno','Concentrador portátil de oxígeno']),
+    (30770.19,12067.05,10210.57,NULL::TEXT,ARRAY['CPAP','Auto CPAP','CPAP c/CFLEX','CPAP c/humidif']),
+    (29539.39,11428.93,9670.63,NULL::TEXT,ARRAY['Calentador humidificador']),
+    (38829.06,16336.92,12067.05,NULL::TEXT,ARRAY['Incubadora','Incubadora de transporte','Grupo motor de incubadora']),
+    (38829.06,16336.92,12067.05,NULL::TEXT,ARRAY['Monitor auxiliar','Monitor de apnea','Monitor de presión no invasivo','Monitor multiparamétrico','Central de monitoreo']),
+    (38829.06,16336.92,12067.05,NULL::TEXT,ARRAY['Oxímetro de pulso','Oxímetro de pulso c/curva']),
+    (47903.06,19165.60,14368.73,NULL::TEXT,ARRAY['Respirador']),
+    (80711.44,40355.72,32284.58,'Inogen'::TEXT,ARRAY['Inogen'])
+  ) AS rates(primera,adicional,septima,marca,aliases)
+  CROSS JOIN LATERAL UNNEST(rates.aliases) AS item(nombre)
+  ON CONFLICT DO NOTHING;
+
+  -- Precios completos confirmados, sin el aumento de la tabla de horas.
+  -- Una configuración monetaria existente tiene prioridad sobre este valor inicial.
+  INSERT INTO technical_work_catalog(nombre,precio_final) VALUES
+    ('Polywatch: cambio de cánula nasal',35000.00),
+    ('Polywatch: cambio de pila',30000.00),
+    ('Polywatch: cambio de pila y actualización de software',40000.00),
+    ('Reparación de compresores en general',140000.00)
+  ON CONFLICT (LOWER(BTRIM(nombre))) DO UPDATE
+    SET precio_final=EXCLUDED.precio_final
+    WHERE technical_work_catalog.precio_final IS NULL;
+
+  INSERT INTO technical_data_seeds(nombre) VALUES ('technical_pricing_20261016_v1');
+END $$;

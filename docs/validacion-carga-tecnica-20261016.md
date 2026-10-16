@@ -40,3 +40,11 @@ Pasaron 55 pruebas focalizadas. La cobertura nueva comprueba cobro único sin su
 La carga de precios y el seed se repitieron sin duplicados ni alteraciones de los cinco PDF anteriores. Se agregaron cuatro casos en revisión, OS 22–25, con piezas de demostración. La compilación del frontend finalizó correctamente.
 
 La revisión en Chromium verificó los cuatro importes, la edición y persistencia del precio completo, los campos de piezas incluidos deshabilitados y la ausencia de importes en la vista y el catálogo del técnico. Se inspeccionaron las capturas de escritorio y móvil, sin errores de JavaScript.
+
+## Seed de negocio para el futuro despliegue
+
+Se incorporó `technical_pricing_20261016_v1` al SQL aplicado por `apply_technical_interventions_schema` y a `sql/schema.sql`. El mecanismo de preparación existente lo ejecutará en instalaciones y actualizaciones, sin depender de cuentas ni comandos de demostración. El seed inicial conserva las tarifas y los importes previamente configurados; su registro impide que posteriores reinicios restauren precios retirados o valores anteriores a una edición administrativa.
+
+Se ejecutó el apply en desarrollo y en su base de pruebas. Se comprobó la existencia de `technical_data_seeds`, sus columnas y el registro persistido. Tras recrear la API y volver a preparar la base, el registro mantuvo su fecha y se conservaron las 33 tarifas, los cuatro precios completos, las 25 órdenes y la configuración de diagnóstico y limpieza existente.
+
+Pasaron 57 pruebas de seed, preparación e intervenciones. Las pruebas nuevas comparan los valores iniciales con la tabla confirmada, comprueban la creación de los cuatro trabajos, conservan configuraciones previas y una tarifa Inogen con referencia propia, y verifican que dos reaplicaciones respetan importes editados, precios vacíos, bajas de tarifas y trabajos desactivados. También se comprobó que el seed no crea usuarios u órdenes ni cambia stock o documentos emitidos. El SQL de instalación y actualización coincide. No se ejecutaron comandos ni pruebas en producción.

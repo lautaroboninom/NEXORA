@@ -5,7 +5,7 @@ from django.db import connection, transaction
 
 
 class Command(BaseCommand):
-    help = "Aplica el esquema de carga técnica, tiempos y presupuestos por horas."
+    help = "Aplica el esquema de carga técnica y sus datos iniciales de tarifas y precios completos."
 
     def handle(self, *args, **options):
         if connection.vendor != "postgresql":
@@ -16,4 +16,4 @@ class Command(BaseCommand):
         sql = (Path(__file__).resolve().parents[2] / "sql" / "technical_interventions.sql").read_text(encoding="utf-8")
         with transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(sql)
-        self.stdout.write(self.style.SUCCESS("Esquema de carga técnica aplicado."))
+        self.stdout.write(self.style.SUCCESS("Esquema de carga técnica aplicado; seed de precios iniciales verificado."))

@@ -46,6 +46,10 @@ La selección y el importe quedan congelados en cada versión emitida. Los docum
 
 ## Aplicación y validación en desarrollo
 
+La carga normal se realiza automáticamente con `apply_technical_interventions_schema`, llamado también por `prepare_production_schema`. El seed de negocio `technical_pricing_20261016_v1` está versionado en el SQL y se registra una sola vez en `technical_data_seeds`, tanto en una instalación nueva como al actualizar. Esto permite incorporarlo en el futuro despliegue productivo sin usar datos de demostración. La [guía de despliegue](despliegue-carga-tecnica.md) detalla su comportamiento.
+
+Los comandos siguientes permanecen como herramientas manuales exclusivas de desarrollo: vuelven a cargar los valores originales y pueden reemplazar precios editados. No forman parte del arranque ni se deben utilizar para producción.
+
 ```powershell
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py apply_technical_interventions_schema
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_hourly_rates --apply --refresh-drafts
