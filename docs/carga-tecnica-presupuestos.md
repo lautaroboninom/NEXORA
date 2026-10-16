@@ -41,7 +41,7 @@ La carga ampliada agrega veinte órdenes, tres clientes, diez repuestos con cód
 | 20 | Nebulizador que no nebuliza, pendiente de diagnóstico |
 | 21 | Concentrador con alarma, pendiente de diagnóstico |
 
-El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. Las tarifas de ejemplo usan un mínimo por primera hora y adicionales proporcionales; el cargo general sin falla de ejemplo es de $ 6.000 netos. Repetir el seed no reinicia los casos, no repone stock consumido y no duplica presupuestos.
+El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. En una base nueva, el seed carga tarifas ficticias para probar. La base actual ya utiliza la [tabla aportada por el negocio con el 34 % confirmado](tarifas-servicio-tecnico-20261016.md). El diagnóstico sin falla conserva la configuración administrativa existente. Repetir el seed no reinicia los casos, no repone stock consumido ni restaura tarifas de ejemplo cuando hay tarifas de tres tramos.
 
 Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` en http://localhost:5177/tecnico. Las OS 17 a 21 tienen diagnóstico vacío y están asignadas a ese técnico. Administración puede verlas en http://localhost:5177/pendientes; «Mis pendientes» muestra únicamente las asignadas al usuario que inició sesión.
 
@@ -58,7 +58,7 @@ Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` 
 
 ## Cálculo
 
-Cada tipo de equipo tiene primera hora y hora adicional, en pesos netos. Se cobra un mínimo de una hora y luego el tiempo adicional proporcional. Por ejemplo, `1,5` horas corresponde a la primera hora más la mitad de una hora adicional. Internamente se conserva el almacenamiento en minutos enteros y el resultado monetario se redondea a centavos. Se conserva el tratamiento de IVA existente.
+Cada tarifa tiene primera hora, valor de la segunda a la sexta y valor desde la séptima, en pesos netos. Se cobra un mínimo de una hora y luego el tiempo proporcional del tramo correspondiente. Por ejemplo, `1,5` horas corresponde a la primera hora más la mitad de la segunda; `6,5` horas corresponde a la primera hora, cinco horas del segundo tramo y media hora del tercero. Una tarifa configurada por marca tiene prioridad sobre la del tipo de equipo, como sucede con Inogen. Internamente se conserva el almacenamiento en minutos enteros y el resultado monetario se redondea a centavos. Se conserva el tratamiento de IVA existente.
 
 La modalidad sin falla utiliza una tarifa general de diagnóstico y limpieza, común a todos los equipos; administración puede bonificarla por completo. Los técnicos no reciben importes en los recursos de intervención ni de selección de repuestos. Si falta una tarifa, se permite enviar la carga técnica y se bloquea la emisión hasta completarla y actualizar el cálculo.
 

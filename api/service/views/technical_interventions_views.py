@@ -77,7 +77,7 @@ class TechnicalRatesView(APIView):
 
     def get(self,request):
         require_manager(request)
-        return Response(dict(tarifas=q("SELECT tipo_equipo,primera_hora,hora_adicional FROM technical_labor_rates ORDER BY tipo_equipo"),
+        return Response(dict(tarifas=q("SELECT tipo_equipo,marca,primera_hora,hora_adicional,hora_desde_septima FROM technical_labor_rates ORDER BY tipo_equipo"),
             configuracion=q("SELECT diagnostico_limpieza FROM technical_billing_config WHERE id=1",one=True),
             tipos_equipo=q("SELECT nombre FROM catalogo_tipos_equipo WHERE activo ORDER BY nombre")))
 
@@ -95,9 +95,18 @@ class TechnicalRatesView(APIView):
                     raise ValidationError("Seleccioná un tipo de equipo.")
                 first = technical.decimal_value(data.get('primera_hora'),'Primera hora')
                 following = technical.decimal_value(data.get('hora_adicional'),'Hora adicional')
-                exec_void("""INSERT INTO technical_labor_rates(tipo_equipo,primera_hora,hora_adicional) VALUES (%s,%s,%s)
+                previous = q('SELECT marca,hora_desde_septima FROM technical_labor_rates WHERE tipo_equipo=%s',[kind],one=True) or {}
+                brand = str(data.get('marca',previous.get('marca')) or '').strip()
+                if len(brand)>160:
+                    raise ValidationError('La marca admite hasta 160 caracteres.')
+                if brand and q('SELECT id FROM technical_labor_rates WHERE LOWER(BTRIM(marca))=LOWER(%s) AND tipo_equipo<>%s',[brand,kind],one=True):
+                    raise ValidationError('La marca ya tiene una tarifa configurada. Editá esa tarifa.')
+                third_raw = data.get('hora_desde_septima',previous.get('hora_desde_septima'))
+                third = technical.decimal_value(third_raw,'Hora desde la séptima') if third_raw not in (None,'') else None
+                exec_void("""INSERT INTO technical_labor_rates(tipo_equipo,primera_hora,hora_adicional,hora_desde_septima,marca) VALUES (%s,%s,%s,%s,%s)
                            ON CONFLICT (tipo_equipo) DO UPDATE SET primera_hora=EXCLUDED.primera_hora,
-                           hora_adicional=EXCLUDED.hora_adicional,updated_at=now()""",[kind,first,following])
+                           hora_adicional=EXCLUDED.hora_adicional,hora_desde_septima=EXCLUDED.hora_desde_septima,
+                           marca=EXCLUDED.marca,updated_at=now()""",[kind,first,following,third,brand or None])
         return self.get(request)
 
 

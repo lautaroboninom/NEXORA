@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS technical_billing_config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   diagnostico_limpieza NUMERIC(12,2) NULL CHECK (diagnostico_limpieza >= 0)
 );
+ALTER TABLE technical_labor_rates ADD COLUMN IF NOT EXISTS hora_desde_septima NUMERIC(12,2) NULL CHECK (hora_desde_septima >= 0);
+ALTER TABLE technical_labor_rates ADD COLUMN IF NOT EXISTS marca TEXT NULL CHECK (marca IS NULL OR BTRIM(marca) <> '');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_technical_labor_brand ON technical_labor_rates (LOWER(BTRIM(marca))) WHERE marca IS NOT NULL;
 INSERT INTO technical_billing_config(id) VALUES (1) ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS technical_interventions (

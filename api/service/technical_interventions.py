@@ -57,13 +57,15 @@ def catalog_identifier(value):
         raise ValidationError("Identificador de catálogo inválido.")
 
 
-def calculate_labor(minutes, first_hour, additional_hour):
+def calculate_labor(minutes, first_hour, additional_hour, seventh_hour=None):
     minutes = minutes_value(minutes)
     if minutes == 0:
         raise ValidationError("Ingresá el tiempo estimado antes de presupuestar.")
     first = decimal_value(first_hour, "Primera hora")
     additional = decimal_value(additional_hour, "Hora adicional")
-    return (first + Decimal(max(minutes - 60, 0)) * additional / 60).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+    seventh = decimal_value(seventh_hour, "Hora desde la séptima") if seventh_hour is not None else additional
+    return (first + Decimal(min(max(minutes - 60, 0), 300)) * additional / 60
+            + Decimal(max(minutes - 360, 0)) * seventh / 60).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
 
 
 def can_manage(user):
@@ -73,9 +75,11 @@ def can_manage(user):
 def ingreso_data(ingreso_id, user=None, *, write=False, lock=False):
     row = q("""SELECT i.id, i.asignado_a, i.estado::text, i.resolucion, i.descripcion_problema,
                COALESCE(i.trabajos_realizados,'') AS trabajos_historicos,
-               COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo,'') AS tipo_equipo
+               COALESCE(NULLIF(d.tipo_equipo,''), m.tipo_equipo,'') AS tipo_equipo, COALESCE(b.nombre,'') AS marca
           FROM ingresos i JOIN devices d ON d.id=i.device_id
-          LEFT JOIN models m ON m.id=d.model_id WHERE i.id=%s""" + (" FOR UPDATE OF i" if lock else ""), [ingreso_id], one=True)
+          LEFT JOIN models m ON m.id=d.model_id
+          LEFT JOIN marcas b ON b.id=COALESCE(d.marca_id,m.marca_id)
+          WHERE i.id=%s""" + (" FOR UPDATE OF i" if lock else ""), [ingreso_id], one=True)
     if not row:
         raise NotFound("Orden de servicio inexistente.")
     if user is not None:
@@ -268,12 +272,17 @@ def _labor(ingreso_id, quote_id, overrides=None):
         else:
             result.update(tarifa_pendiente=False,tarifa_diagnostico=str(value),importe=str(Decimal('0.00') if bonified else value))
     else:
-        rate = q("SELECT primera_hora,hora_adicional FROM technical_labor_rates WHERE tipo_equipo=LOWER(BTRIM(%s))",[ingreso['tipo_equipo']],one=True)
+        rate = q("""SELECT tipo_equipo,marca,primera_hora,hora_adicional,hora_desde_septima FROM technical_labor_rates
+                    WHERE (marca IS NOT NULL AND LOWER(BTRIM(marca))=LOWER(BTRIM(%s)))
+                       OR (marca IS NULL AND tipo_equipo=LOWER(BTRIM(%s)))
+                    ORDER BY (marca IS NOT NULL) DESC LIMIT 1""",[ingreso['marca'],ingreso['tipo_equipo']],one=True)
         if rate is None:
             result.update(tarifa_pendiente=True,importe=None)
         else:
             result.update(tarifa_pendiente=False,primera_hora=str(rate['primera_hora']),hora_adicional=str(rate['hora_adicional']),
-                          importe=str(calculate_labor(minutes,rate['primera_hora'],rate['hora_adicional'])))
+                          hora_desde_septima=str(rate['hora_desde_septima'] if rate['hora_desde_septima'] is not None else rate['hora_adicional']),
+                          tarifa_tipo_equipo=rate['tipo_equipo'],marca_tarifa=rate['marca'],
+                          importe=str(calculate_labor(minutes,rate['primera_hora'],rate['hora_adicional'],rate['hora_desde_septima'])))
     if bonified and not data['sin_falla']:
         raise ValidationError("La bonificación prevista corresponde al diagnóstico y limpieza sin falla.")
     exec_void("UPDATE quotes SET labor_snapshot=%s::jsonb WHERE id=%s",[_json(result),quote_id])

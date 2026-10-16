@@ -18,3 +18,13 @@ No se utilizaron la configuración de producción, su correo ni sus sincronizaci
 Tras un envío exitoso, el botón queda gris y deshabilitado, con el texto «Enviado a presupuestar». El estado se conserva al recargar, utilizando la revisión técnica enviada. Modificar la carga habilita el reenvío y un fallo de red no la marca como enviada.
 
 Se verificaron en Chromium el estado gris, la recarga, la edición y el reenvío, además de un error de envío simulado seguido de un reintento. La comprobación utilizó respuestas simuladas para conservar las órdenes de demostración. La compilación del frontend finalizó correctamente.
+
+## Tabla de tarifas aportada por el negocio
+
+Se incorporó la [tabla de horas con el aumento confirmado del 34 %](tarifas-servicio-tecnico-20261016.md). El cálculo utiliza primera hora, segunda a sexta y séptima en adelante. Se agregó una tarifa por marca con prioridad sobre el tipo para Inogen.
+
+Se ejecutó `apply_technical_interventions_schema` en desarrollo y en su base aislada de pruebas, y se verificaron las columnas `marca` y `hora_desde_septima` y el índice único de marca. El DDL coincide con `sql/schema.sql`. Se cargaron los once grupos de la hoja en 33 referencias de tipos o marca y se actualizaron los borradores vigentes enviados a revisión.
+
+Pasaron 47 pruebas focalizadas de intervención, cálculos y PDF. Se probaron los límites de seis y siete horas, minutos proporcionales, compatibilidad con tarifas anteriores, prioridad de marca, rechazo de marcas duplicadas y conservación de una versión emitida después de cambiar las tarifas. La compilación del frontend y la revisión visual de los tres tramos y de Inogen en administración finalizaron correctamente, sin errores de JavaScript.
+
+Se repitió la importación y se confirmó que no acumula el 34 %. También se repitió el seed y se verificó que conserva las tarifas confirmadas. Los cinco PDF emitidos de demostración mantuvieron sus hashes. Las consultas al catálogo de SERVERDATA se realizaron dentro de transacciones de solo lectura; no hubo cambios ni pruebas en producción. La aplicación de los importes fijos queda pendiente de confirmar si incluyen repuestos.

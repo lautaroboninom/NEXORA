@@ -10,6 +10,19 @@ from service.views.helpers import q, exec_returning, exec_void
 
 
 class LaborCalculationTests(SimpleTestCase):
+    def test_second_to_sixth_and_seventh_hour_boundaries(self):
+        for minutes,expected in [(30,'100.00'),(60,'100.00'),(80,'120.00'),(360,'400.00'),
+                                 (361,'400.50'),(390,'415.00'),(420,'430.00'),(480,'460.00')]:
+            with self.subTest(minutes=minutes):
+                self.assertEqual(technical.calculate_labor(minutes,100,60,30),Decimal(expected))
+        self.assertEqual(technical.calculate_labor(420,100,60),Decimal('460.00'))
+
+    def test_business_hourly_table_applies_the_increase_once(self):
+        from service.management.commands.load_technical_hourly_rates import adjusted_rates
+        rates={row[0]:row[1:4] for row in adjusted_rates()}
+        self.assertEqual(rates['Aspiradores'],(Decimal('24909.21'),Decimal('10073.57'),Decimal('6959.92')))
+        self.assertEqual(rates['Inogen'],(Decimal('80711.44'),Decimal('40355.72'),Decimal('32284.58')))
+
     def test_minimum_and_proportional_minutes(self):
         for minutes, expected in [(1,'100.00'),(30,'100.00'),(60,'100.00'),(80,'120.00'),(120,'160.00'),(150,'190.00')]:
             with self.subTest(minutes=minutes):
@@ -93,6 +106,39 @@ class TechnicalInterventionAPITests(TestCase):
         self.assertEqual(len(quote['items']),3)
         self.assertEqual(Decimal(quote['mano_obra']),Decimal('120.00'))
         self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],20)
+
+    def test_rate_administration_and_brand_override_are_frozen_at_issue(self):
+        self.client.force_authenticate(self.manager)
+        response=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Inogen',marca='Inogen',
+            primera_hora=500,hora_adicional=250,hora_desde_septima=100),format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        duplicate=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Otra referencia',marca=' inogen ',
+            primera_hora=500,hora_adicional=250,hora_desde_septima=100),format='json')
+        self.assertEqual(duplicate.status_code,400,duplicate.content)
+        existing=q("SELECT id FROM marcas WHERE LOWER(nombre)='inogen' ORDER BY id LIMIT 1",one=True)
+        brand=existing['id'] if existing else exec_returning("INSERT INTO marcas(nombre) VALUES ('Inogen') RETURNING id")
+        exec_void('UPDATE devices SET marca_id=%s WHERE id=(SELECT device_id FROM ingresos WHERE id=%s)',[brand,self.ingreso])
+        self.client.force_authenticate(self.tech)
+        self.save(minutos_estimados=420);self.send()
+        issued=self.issue()
+        self.assertEqual(Decimal(issued['mano_obra']),Decimal('1850.00'))
+        self.assertEqual(issued['technical']['labor_snapshot']['marca_tarifa'],'Inogen')
+        self.assertEqual(Decimal(issued['technical']['labor_snapshot']['hora_desde_septima']),100)
+        updated=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Inogen',marca='Inogen',
+            primera_hora=900,hora_adicional=500,hora_desde_septima=250),format='json')
+        self.assertEqual(updated.status_code,200,updated.content)
+        self.assertEqual(self.quote()['mano_obra'],issued['mano_obra'])
+
+    def test_rate_api_keeps_legacy_additional_rate_when_third_band_is_omitted(self):
+        self.client.force_authenticate(self.manager)
+        response=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Concentrador',
+            primera_hora=100,hora_adicional=60,hora_desde_septima=30),format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        response=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Concentrador',primera_hora=100,hora_adicional=60),format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        self.client.force_authenticate(self.tech)
+        self.save(minutos_estimados=390);self.send()
+        self.assertEqual(Decimal(self.quote()['mano_obra']),Decimal('415.00'))
 
     def test_single_labor_time_preserves_history_and_calculates_decimal_hours(self):
         self.save(minutos_estimados=90,minutos_reales=40);self.send()

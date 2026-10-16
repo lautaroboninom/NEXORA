@@ -98,19 +98,23 @@ class Command(BaseCommand):
                     VALUES (%s,%s,%s,'ARS',%s,%s,%s,2,%s,%s) RETURNING id''',
                     ['DEMO-'+code, name, cost, price, price/cost, stock,
                      'Artículo ficticio. Importes exclusivos de prueba.', kind])
+            confirmed_rates = bool(q('SELECT id FROM technical_labor_rates WHERE hora_desde_septima IS NOT NULL LIMIT 1',one=True))
             for kind, first, additional in [('Concentrador de oxígeno', 18000, 12000), ('CPAP', 22000, 15000),
                                             ('Aspirador', 16000, 10000), ('Monitor multiparamétrico', 24000, 16000),
                                             ('Nebulizador', 12000, 8000)]:
                 exec_void('INSERT INTO catalogo_tipos_equipo(nombre) VALUES (%s) ON CONFLICT DO NOTHING', [kind])
-                exec_void('''INSERT INTO technical_labor_rates(tipo_equipo,primera_hora,hora_adicional)
-                    VALUES (LOWER(%s),%s,%s) ON CONFLICT DO NOTHING''', [kind, first, additional])
-            exec_void('UPDATE technical_billing_config SET diagnostico_limpieza=6000 WHERE id=1 AND diagnostico_limpieza IS NULL')
+                if not confirmed_rates:
+                    exec_void('''INSERT INTO technical_labor_rates(tipo_equipo,primera_hora,hora_adicional)
+                        VALUES (LOWER(%s),%s,%s) ON CONFLICT DO NOTHING''', [kind, first, additional])
+            if not confirmed_rates:
+                exec_void('UPDATE technical_billing_config SET diagnostico_limpieza=6000 WHERE id=1 AND diagnostico_limpieza IS NULL')
             self.works = q('SELECT id FROM technical_work_catalog WHERE activo ORDER BY id LIMIT 2')
             if len(self.works) < 2:
                 raise CommandError('Se necesitan los dos trabajos iniciales activos en el catálogo.')
             for index, scenario in enumerate(SCENARIOS):
                 self.seed_scenario(index, *scenario)
-        self.stdout.write(self.style.SUCCESS('Escenarios listos. Los importes son ficticios; no se reemplazaron tarifas ni órdenes existentes.'))
+        note = 'Se conservaron las tarifas confirmadas y las órdenes existentes.' if confirmed_rates else 'Los importes son ficticios; no se reemplazaron tarifas ni órdenes existentes.'
+        self.stdout.write(self.style.SUCCESS('Escenarios listos. '+note))
 
     def post(self, path, data=None):
         response = self.client.post(path, data or {}, format='json')

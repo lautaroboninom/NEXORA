@@ -3,6 +3,9 @@ import { useAuth } from "../context/AuthContext";
 import { can, PERMISSION_CODES } from "../lib/permissions";
 import { getTechnicalRates, saveTechnicalRates, getTechnicalWorks, createTechnicalWork, patchTechnicalWork, getTechnicalCatalogRequests, resolveTechnicalCatalogRequest, getTechnicalParts } from "../lib/api";
 
+const newRate = { tipo_equipo: "", marca: "", primera_hora: "", hora_adicional: "", hora_desde_septima: "" };
+const editableRate = (row) => ({ ...row, marca: row.marca || "", hora_desde_septima: row.hora_desde_septima ?? row.hora_adicional });
+
 export default function TechnicalCatalogAdmin() {
   const { user } = useAuth();
   const allowed = can(user, PERMISSION_CODES.ACTION_PRESUPUESTO_MANAGE);
@@ -10,7 +13,7 @@ export default function TechnicalCatalogAdmin() {
   const [data, setData] = useState(null);
   const [works, setWorks] = useState([]);
   const [requests, setRequests] = useState([]);
-  const [rate, setRate] = useState({ tipo_equipo: "", primera_hora: "", hora_adicional: "" });
+  const [rate, setRate] = useState(newRate);
   const [diagnostic, setDiagnostic] = useState("");
   const [newWork, setNewWork] = useState("");
   const [error, setError] = useState("");
@@ -42,15 +45,17 @@ export default function TechnicalCatalogAdmin() {
     <div className="px-4 pb-4 space-y-5">
       {error && <p role="alert" className="bg-red-50 text-red-800 rounded p-3">{error}</p>}
       {!data ? <p>Cargando configuración...</p> : <>
-        <section><h3 className="font-semibold mb-2">Tarifas por tipo de equipo</h3><p className="text-sm text-slate-600 mb-3">Importes netos en pesos. Se cobra como mínimo una hora y luego los minutos adicionales proporcionales.</p>
+        <section><h3 className="font-semibold mb-2">Tarifas por tipo de equipo</h3><p className="text-sm text-slate-600 mb-3">Importes netos en pesos. Mínimo de una hora; luego se aplica la fracción proporcional del tramo correspondiente. Una tarifa por marca tiene prioridad sobre el tipo de equipo.</p>
           <form className="flex flex-wrap gap-3 items-end" onSubmit={(e) => { e.preventDefault(); run(() => saveTechnicalRates(rate)); }}>
-            <label className="text-sm">Tipo de equipo<input required list="technical-equipment-types" className="block border rounded p-2" value={rate.tipo_equipo} onChange={(e) => { const match = data.tarifas.find((row) => row.tipo_equipo === e.target.value.toLowerCase()); setRate(match || { ...rate, tipo_equipo: e.target.value }); }} />
+            <label className="text-sm">Tipo de equipo<input required list="technical-equipment-types" className="block border rounded p-2" value={rate.tipo_equipo} onChange={(e) => { const match = data.tarifas.find((row) => row.tipo_equipo === e.target.value.toLowerCase()); setRate(match ? editableRate(match) : { ...rate, tipo_equipo: e.target.value }); }} />
               <datalist id="technical-equipment-types">{data.tipos_equipo.map((row) => <option key={row.nombre} value={row.nombre} />)}</datalist></label>
+            <label className="text-sm">Marca (opcional)<input className="block border rounded p-2 w-36" value={rate.marca} onChange={(e) => setRate({ ...rate, marca: e.target.value })} placeholder="Ej.: Inogen" /></label>
             <label className="text-sm">Primera hora<input required type="number" step="0.01" min="0" className="block border rounded p-2 w-36" value={rate.primera_hora} onChange={(e) => setRate({ ...rate, primera_hora: e.target.value })} /></label>
-            <label className="text-sm">Hora adicional<input required type="number" step="0.01" min="0" className="block border rounded p-2 w-36" value={rate.hora_adicional} onChange={(e) => setRate({ ...rate, hora_adicional: e.target.value })} /></label>
+            <label className="text-sm">De la 2.ª a la 6.ª hora<input required type="number" step="0.01" min="0" className="block border rounded p-2 w-36" value={rate.hora_adicional} onChange={(e) => setRate({ ...rate, hora_adicional: e.target.value })} /></label>
+            <label className="text-sm">Desde la 7.ª hora<input required type="number" step="0.01" min="0" className="block border rounded p-2 w-36" value={rate.hora_desde_septima} onChange={(e) => setRate({ ...rate, hora_desde_septima: e.target.value })} /></label>
             <button disabled={busy} className="border rounded px-3 py-2">Guardar tarifa</button>
           </form>
-          <ul className="text-sm space-y-1 mt-3">{data.tarifas.map((row) => <li key={row.tipo_equipo}><button type="button" className="text-blue-700 underline text-left" onClick={() => setRate(row)}>{row.tipo_equipo}</button>: primera hora $ {row.primera_hora}; adicional $ {row.hora_adicional}</li>)}</ul>
+          <ul className="text-sm space-y-1 mt-3">{data.tarifas.map((row) => <li key={row.tipo_equipo}><button type="button" className="text-blue-700 underline text-left" onClick={() => setRate(editableRate(row))}>{row.tipo_equipo}{row.marca ? ` (marca: ${row.marca})` : ""}</button>: primera hora $ {row.primera_hora}; de la 2.ª a la 6.ª $ {row.hora_adicional}; desde la 7.ª $ {row.hora_desde_septima ?? row.hora_adicional}</li>)}</ul>
         </section>
         <form className="flex flex-wrap gap-3 items-end" onSubmit={(e) => { e.preventDefault(); run(() => saveTechnicalRates({ diagnostico_limpieza: diagnostic })); }}>
           <label className="text-sm">Diagnóstico y limpieza sin falla · tarifa general<input required type="number" min="0" step="0.01" className="block border rounded p-2 w-40" value={diagnostic} onChange={(e) => setDiagnostic(e.target.value)} /></label>
