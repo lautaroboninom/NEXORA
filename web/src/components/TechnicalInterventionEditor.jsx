@@ -89,6 +89,7 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
 
   if (!form) return <div className="border rounded p-4 mt-4" role="status">{error || "Cargando intervención técnica..."}</div>;
   const locked = disabled || busy;
+  const alreadySent = !dirty && form.submitted_revision != null && form.submitted_revision === form.scope_revision;
   const selectedPartInfo = parts.find((row) => String(row.id) === String(selectedPart));
   return <section className="min-w-0 max-w-full border rounded-lg p-4 mt-4 space-y-4" aria-label="Intervención técnica">
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -132,7 +133,7 @@ export default function TechnicalInterventionEditor({ ingresoId, disabled = fals
     <label className="block text-sm font-medium">Observaciones generales<textarea className="block mt-1 w-full border rounded p-2 font-normal" disabled={locked} value={form.observaciones} onChange={(e) => change({ observaciones: e.target.value })} /></label>
     <div className="flex flex-wrap gap-2 items-center">
       <button type="button" disabled={locked || !dirty} className="border rounded px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { await persist(); setNotice("Cambios guardados."); })}>Guardar cambios</button>
-      <button type="button" disabled={locked} className="rounded bg-blue-700 text-white px-4 py-2 disabled:opacity-50" onClick={() => run(async () => { const saved = dirty || !form.revision ? await persist() : form; const sent = await submitTechnicalIntervention(ingresoId, saved.revision); setForm(prepareForm(sent)); await onSaved?.(); setNotice("Carga enviada para revisión del presupuesto."); })}>{busy ? "Guardando..." : "Enviar a presupuestar"}</button>
+      <button type="button" disabled={locked || alreadySent} className="rounded bg-blue-700 text-white px-4 py-2 disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed" onClick={() => run(async () => { const saved = dirty || !form.revision ? await persist() : form; const sent = await submitTechnicalIntervention(ingresoId, saved.revision); setForm(prepareForm(sent)); await onSaved?.(); setNotice("Carga enviada para revisión del presupuesto."); })}>{busy ? "Guardando..." : alreadySent ? "Enviado a presupuestar" : "Enviar a presupuestar"}</button>
       <button type="button" disabled={locked} className="text-blue-700 underline p-2" onClick={() => setShowRequest((value) => !value)}>Solicitar alta de trabajo o repuesto</button>
     </div>
     {showRequest && <form className="rounded bg-slate-50 border p-3 grid gap-3 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); run(async () => { if (dirty || !form.revision) await persist(); await requestTechnicalCatalogItem({ ...request, ingreso_id: ingresoId }); setForm(prepareForm(await getTechnicalIntervention(ingresoId))); setRequest({ tipo: "repuesto", nombre: "", cantidad: 1, observaciones: "" }); setShowRequest(false); setNotice("Solicitud de alta enviada a administración."); }); }}>

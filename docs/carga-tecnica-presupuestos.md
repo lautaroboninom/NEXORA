@@ -48,6 +48,7 @@ Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` 
 ## Operación
 
 1. El técnico asignado abre Diagnóstico y Reparación y completa diagnóstico, trabajos y repuestos de catálogo, una cantidad por artículo y un único campo «Mano de obra (horas)». Admite decimales con coma, por ejemplo `0,5`, `1,25` o `1,5`. Marca «Realizado» en los trabajos terminados e «Instalado» en las piezas colocadas. Guarda sus cambios y confirma «Enviar a presupuestar».
+   Cuando el envío termina correctamente, el botón queda gris, deshabilitado y con el texto «Enviado a presupuestar». Se vuelve a habilitar al modificar la carga; si el envío falla, permite reintentarlo.
    El selector de repuestos muestra código, descripción y equipos asociados cuando están configurados. Al seleccionar uno se puede consultar la lista completa de marcas, modelos y variantes asociadas. Esta información se obtiene del mismo catálogo administrativo y no incluye importes.
 2. Si falta un artículo, solicita su alta. Administración lo crea o identifica en el catálogo y resuelve la solicitud; el artículo aprobado se agrega a la intervención. Las solicitudes pendientes impiden completar el envío.
 3. En Pendientes de presupuesto se distingue la preparación, las altas pendientes, la revisión y las ampliaciones. Desde «Trabajos, tarifas y solicitudes de alta» se administran los catálogos y los valores monetarios.

@@ -12,3 +12,9 @@ Se verificó exclusivamente en el proyecto `nexora-technical-dev`:
 - Revisión en Chromium del campo único, la carga con coma y punto, el bloqueo de entradas inválidas y el uso del mismo formato en administración. Se inspeccionaron las solicitudes con respuestas simuladas, sin modificar las órdenes de demostración. No se registraron errores de JavaScript.
 
 No se utilizaron la configuración de producción, su correo ni sus sincronizaciones.
+
+## Estado visual del envío a presupuestar
+
+Tras un envío exitoso, el botón queda gris y deshabilitado, con el texto «Enviado a presupuestar». El estado se conserva al recargar, utilizando la revisión técnica enviada. Modificar la carga habilita el reenvío y un fallo de red no la marca como enviada.
+
+Se verificaron en Chromium el estado gris, la recarga, la edición y el reenvío, además de un error de envío simulado seguido de un reintento. La comprobación utilizó respuestas simuladas para conservar las órdenes de demostración. La compilación del frontend finalizó correctamente.
