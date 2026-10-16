@@ -8,6 +8,9 @@ La rama `feature/presupuestos-carga-tecnica` contiene este desarrollo separado. 
 docker compose -f docker-compose.technical-dev.yml up -d --build
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py apply_technical_interventions_schema
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py seed_technical_dev_preview --password 'CargaTecnica-demo-2026!'
+docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_hourly_rates --apply
+docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_fixed_prices --apply
+docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py seed_technical_dev_preview --password 'CargaTecnica-demo-2026!'
 ```
 
 La interfaz está en http://localhost:5177 y la API en http://localhost:18110. Los usuarios de demostración son `presupuestos@tecnica.invalid` y `tecnico@tecnica.invalid`, con la contraseña elegida al ejecutar el comando. El seed incluye clientes, equipos, repuestos con stock y **tarifas ficticias exclusivas de prueba**. No representan la tabla de precios del negocio. La base `nexora_technical_dev`, su volumen y sus contenedores son exclusivos de este trabajo. No se usan `.env.prod`, trabajadores de correo ni sincronizadores externos. El comando de demostración rechaza otras bases de datos y no reemplaza órdenes ni valores ya cargados.
@@ -16,7 +19,7 @@ Las imágenes incorporan el código y el esquema: después de modificar archivos
 
 ## Casos disponibles para probar
 
-La carga ampliada agrega veinte órdenes, tres clientes, diez repuestos con códigos `DEMO-…` y seis tipos de equipo. Conserva la OS 1 y los cambios que ya se hayan realizado: la base actual tiene 21 órdenes. Los números de OS de la tabla corresponden a la base de demostración actual; en una instalación nueva el comando informa sus identificadores. Los ejemplos activos se ubican en Taller para aparecer en las listas de trabajo.
+La carga ampliada agrega veinticuatro órdenes, tres clientes y trece repuestos con códigos `DEMO-…`. Conserva la OS 1 y los cambios que ya se hayan realizado: la base actual tiene 25 órdenes. Los números de OS de la tabla corresponden a la base de demostración actual; en una instalación nueva el comando informa sus identificadores. Los ejemplos activos se ubican en Taller para aparecer en las listas de trabajo.
 
 | OS | Caso |
 | --- | --- |
@@ -40,6 +43,10 @@ La carga ampliada agrega veinte órdenes, tres clientes, diez repuestos con cód
 | 19 | Monitor con lectura intermitente, pendiente de diagnóstico |
 | 20 | Nebulizador que no nebuliza, pendiente de diagnóstico |
 | 21 | Concentrador con alarma, pendiente de diagnóstico |
+| 22 | Polywatch: cánula nasal, reparación completa por $35.000 |
+| 23 | Polywatch: pila, reparación completa por $30.000 |
+| 24 | Polywatch: pila y software, reparación completa por $40.000 |
+| 25 | Compresor: reparación completa por $140.000 |
 
 El técnico puede comenzar en http://localhost:5177/ingresos/2?tab=diagnostico. Administración puede comenzar en http://localhost:5177/pendientes-presupuesto o revisar la OS 6. En una base nueva, el seed carga tarifas ficticias para probar. La base actual ya utiliza la [tabla aportada por el negocio con el 34 % confirmado](tarifas-servicio-tecnico-20261016.md). El diagnóstico sin falla conserva la configuración administrativa existente. Repetir el seed no reinicia los casos, no repone stock consumido ni restaura tarifas de ejemplo cuando hay tarifas de tres tramos.
 
@@ -61,6 +68,8 @@ Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` 
 Cada tarifa tiene primera hora, valor de la segunda a la sexta y valor desde la séptima, en pesos netos. Se cobra un mínimo de una hora y luego el tiempo proporcional del tramo correspondiente. Por ejemplo, `1,5` horas corresponde a la primera hora más la mitad de la segunda; `6,5` horas corresponde a la primera hora, cinco horas del segundo tramo y media hora del tercero. Una tarifa configurada por marca tiene prioridad sobre la del tipo de equipo, como sucede con Inogen. Internamente se conserva el almacenamiento en minutos enteros y el resultado monetario se redondea a centavos. Se conserva el tratamiento de IVA existente.
 
 La modalidad sin falla utiliza una tarifa general de diagnóstico y limpieza, común a todos los equipos; administración puede bonificarla por completo. Los técnicos no reciben importes en los recursos de intervención ni de selección de repuestos. Si falta una tarifa, se permite enviar la carga técnica y se bloquea la emisión hasta completarla y actualizar el cálculo.
+
+Los trabajos con precio final configurado cubren la reparación completa: se cobran una sola vez e incluyen todos los repuestos y la mano de obra de la orden. Las horas se registran sin agregarse al importe. Administración puede elegir y ajustar el precio completo antes de emitir; las piezas siguen detalladas para el stock. Al volver al cobro por horas se recuperan sus precios individuales. Cuando se seleccionan varios trabajos con precio final, la emisión exige revisar expresamente el modo de cobro.
 
 La acción existente «Controlado sin defecto» también activa esta modalidad. Un artículo desactivado del catálogo conserva su ejecución en las intervenciones donde ya estaba seleccionado.
 

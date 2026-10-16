@@ -15,6 +15,7 @@ export default function TechnicalCatalogAdmin() {
   const [requests, setRequests] = useState([]);
   const [rate, setRate] = useState(newRate);
   const [diagnostic, setDiagnostic] = useState("");
+  const [fixedPrice, setFixedPrice] = useState({ trabajo_id: "", precio_final: "" });
   const [newWork, setNewWork] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -56,6 +57,15 @@ export default function TechnicalCatalogAdmin() {
             <button disabled={busy} className="border rounded px-3 py-2">Guardar tarifa</button>
           </form>
           <ul className="text-sm space-y-1 mt-3">{data.tarifas.map((row) => <li key={row.tipo_equipo}><button type="button" className="text-blue-700 underline text-left" onClick={() => setRate(editableRate(row))}>{row.tipo_equipo}{row.marca ? ` (marca: ${row.marca})` : ""}</button>: primera hora $ {row.primera_hora}; de la 2.ª a la 6.ª $ {row.hora_adicional}; desde la 7.ª $ {row.hora_desde_septima ?? row.hora_adicional}</li>)}</ul>
+        </section>
+        <section><h3 className="font-semibold mb-2">Precios finales por reparación</h3>
+          <p className="text-sm text-slate-600 mb-3">Cubren todos los repuestos y la mano de obra de la orden. Se cobran una sola vez por reparación, sin sumar las horas. Dejá el importe vacío para retirar el precio fijo de un trabajo.</p>
+          <form className="flex flex-wrap gap-3 items-end" onSubmit={(e) => { e.preventDefault(); run(() => saveTechnicalRates(fixedPrice)); }}>
+            <label className="text-sm">Trabajo<select required className="block border rounded p-2" value={fixedPrice.trabajo_id} onChange={(e) => { const row = data.precios_finales.find((work) => String(work.id) === e.target.value); setFixedPrice({ trabajo_id: e.target.value, precio_final: row?.precio_final ?? "" }); }}><option value="">Seleccionar trabajo</option>{data.precios_finales.map((row) => <option key={row.id} value={row.id}>{row.nombre}{!row.activo ? " (inactivo)" : ""}</option>)}</select></label>
+            <label className="text-sm">Precio final<input type="number" step="0.01" min="0" className="block border rounded p-2 w-40" value={fixedPrice.precio_final} onChange={(e) => setFixedPrice({ ...fixedPrice, precio_final: e.target.value })} /></label>
+            <button disabled={busy} className="border rounded px-3 py-2">Guardar precio final</button>
+          </form>
+          <ul className="text-sm mt-3 space-y-1">{data.precios_finales.filter((row) => row.precio_final != null).map((row) => <li key={row.id}>{row.nombre}: $ {row.precio_final}</li>)}</ul>
         </section>
         <form className="flex flex-wrap gap-3 items-end" onSubmit={(e) => { e.preventDefault(); run(() => saveTechnicalRates({ diagnostico_limpieza: diagnostic })); }}>
           <label className="text-sm">Diagnóstico y limpieza sin falla · tarifa general<input required type="number" min="0" step="0.01" className="block border rounded p-2 w-40" value={diagnostic} onChange={(e) => setDiagnostic(e.target.value)} /></label>

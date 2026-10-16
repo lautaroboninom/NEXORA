@@ -107,6 +107,110 @@ class TechnicalInterventionAPITests(TestCase):
         self.assertEqual(Decimal(quote['mano_obra']),Decimal('120.00'))
         self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],20)
 
+    def configure_fixed(self, amount='35000.00'):
+        self.client.force_authenticate(self.manager)
+        response=self.client.put('/api/tarifas-mano-obra/',{'trabajo_id':self.work,'precio_final':amount},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        self.client.force_authenticate(self.tech)
+
+    def test_complete_fixed_price_is_charged_once_without_hourly_or_part_extras(self):
+        self.configure_fixed();self.save(minutos_estimados=180);self.send();self.send()
+        quote=self.quote()
+        self.assertEqual(Decimal(quote['subtotal']),35000)
+        self.assertEqual(Decimal(quote['mano_obra']),0)
+        self.assertEqual(Decimal(quote['tot_repuestos']),0)
+        part=next(row for row in quote['items'] if row['tipo']=='repuesto')
+        self.assertTrue(part['incluido_precio_final'])
+        self.assertEqual(Decimal(part['costo_u_neto']),10)
+        self.assertEqual(quote['technical']['labor_snapshot']['modo_cobro'],'precio_final')
+        for payload in [{'precio_u':999},{'costo_u_neto':99}]:
+            self.assertEqual(self.client.patch(self.quote_base+f"items/{part['id']}/",payload,format='json').status_code,400)
+        self.issue();self.approve();self.approve()
+        self.assertEqual(q('SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s',[self.part],one=True)['stock_on_hand'],19)
+
+    def test_fixed_price_review_restores_separate_prices_when_returning_to_hours(self):
+        self.save();self.send();quote=self.quote()
+        part=next(row for row in quote['items'] if row['tipo']=='repuesto')
+        self.assertEqual(self.client.patch(self.quote_base+f"items/{part['id']}/",{'precio_u':99},format='json').status_code,200)
+        self.configure_fixed()
+        self.client.force_authenticate(self.manager)
+        result=self.client.patch(self.quote_base+'mano-obra-tecnica/',{'precio_final_trabajo_id':self.work,'importe_precio_final':'34000.00'},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        self.assertEqual(Decimal(result.json()['subtotal']),34000)
+        result=self.client.patch(self.quote_base+'mano-obra-tecnica/',{'precio_final_trabajo_id':None,'minutos_presupuestados':80},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        quote=result.json()
+        self.assertEqual(Decimal(quote['subtotal']),219)
+        self.assertFalse(next(row for row in quote['items'] if row['tipo']=='repuesto')['incluido_precio_final'])
+        self.assertFalse(q('SELECT id FROM quote_items WHERE quote_id=%s AND technical_final_price',[quote['quote_id']],one=True))
+
+    def test_fixed_prices_and_configuration_are_never_exposed_to_technicians(self):
+        self.configure_fixed()
+        works=self.client.get('/api/catalogo-trabajos/?todos=1').json()
+        self.assertTrue(all(set(row)=={'id','nombre','activo'} for row in works))
+        self.assertEqual(self.client.get('/api/tarifas-mano-obra/').status_code,403)
+        self.assertEqual(self.client.put('/api/tarifas-mano-obra/',{'trabajo_id':self.work,'precio_final':1},format='json').status_code,403)
+        data=self.save();self.send()
+        self.assertNotIn('precio_final',str(self.client.get(self.base).json()))
+        self.assertEqual(self.client.patch(self.base,{'revision':data['revision'],'precio_final':1},format='json').status_code,400)
+
+    def test_fixed_price_works_without_hourly_tariff_and_is_preserved_after_issue(self):
+        self.configure_fixed()
+        exec_void("DELETE FROM technical_labor_rates WHERE tipo_equipo='concentrador'")
+        self.save();self.send();issued=self.issue()
+        self.configure_fixed('40000.00')
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json()
+        for item in data['items']:item['cantidad_realizada']=item['cantidad_prevista']
+        self.save(items=data['items'],minutos_reales=180)
+        unchanged=self.quote()
+        self.assertEqual(unchanged['subtotal'],issued['subtotal'])
+        self.assertFalse(unchanged['technical']['requiere_actualizacion'])
+
+    def test_fixed_price_extension_preserves_pdf_and_applies_only_stock_difference(self):
+        self.configure_fixed();self.save();self.send();original=self.issue();self.approve()
+        self.client.force_authenticate(self.tech)
+        data=self.client.get(self.base).json();data['items'][1]['cantidad_prevista']=3
+        self.save(items=data['items']);self.send()
+        self.client.force_authenticate(self.manager)
+        version=self.client.post(self.quote_base+'versiones/',{},format='json')
+        self.assertEqual(version.status_code,200,version.content)
+        self.assertEqual(Decimal(version.json()['subtotal']),35000)
+        self.issue();self.approve();self.approve()
+        self.assertEqual(q('SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s',[self.part],one=True)['stock_on_hand'],17)
+        document=self.client.get(self.quote_base+f"pdf/?quote_id={original['quote_id']}")
+        self.assertEqual(document.content,b'%PDF-documento-original')
+
+    def test_multiple_fixed_jobs_require_explicit_review_of_the_whole_repair(self):
+        self.configure_fixed()
+        second=exec_returning("INSERT INTO technical_work_catalog(nombre,precio_final) VALUES ('Otro trabajo completo',140000) RETURNING id")
+        saved=self.save()
+        self.save(items=[*saved['items'],dict(tipo='trabajo',trabajo_id=second,cantidad_prevista=1,cantidad_realizada=0)])
+        self.send();quote=self.quote()
+        self.assertTrue(quote['technical']['labor_snapshot']['requiere_seleccion_precio_final'])
+        result=self.client.patch(self.quote_base+'mano-obra-tecnica/',{},format='json')
+        self.assertTrue(result.json()['technical']['labor_snapshot']['requiere_seleccion_precio_final'])
+        result=self.client.post(self.quote_base+'emitir/',{'technical_revision':quote['technical']['technical_revision']},format='json')
+        self.assertEqual(result.status_code,400)
+        result=self.client.patch(self.quote_base+'mano-obra-tecnica/',{'precio_final_trabajo_id':second},format='json')
+        self.assertEqual(result.status_code,200,result.content)
+        self.assertEqual(Decimal(result.json()['subtotal']),140000)
+        self.issue()
+
+    def test_full_price_pdf_explains_that_parts_and_labor_are_included(self):
+        import fitz
+        self.configure_fixed();self.save();self.send();quote=self.quote()
+        response=self.client.post(self.quote_base+'emitir/',{'technical_revision':quote['technical']['technical_revision']},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        pdf=self.client.get(self.quote_base+'pdf/')
+        with fitz.open(stream=pdf.content,filetype='pdf') as document:
+            text='\n'.join(page.get_text() for page in document)
+        self.assertIn('mano de obra y repuestos incluidos',text)
+
+    def test_configured_fixed_prices_keep_confirmed_amounts(self):
+        from service.management.commands.load_technical_fixed_prices import FIXED_PRICES
+        self.assertEqual([Decimal(amount) for _,amount in FIXED_PRICES],list(map(Decimal,['35000','30000','40000','140000'])))
+
     def test_rate_administration_and_brand_override_are_frozen_at_issue(self):
         self.client.force_authenticate(self.manager)
         response=self.client.put('/api/tarifas-mano-obra/',dict(tipo_equipo='Inogen',marca='Inogen',

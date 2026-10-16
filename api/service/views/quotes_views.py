@@ -829,6 +829,7 @@ def _load_quote_payload(ingreso_id: int, quote_id: int | None = None):
         """
         SELECT
           qi.id, qi.tipo, qi.repuesto_id, qi.repuesto_codigo, qi.descripcion, qi.qty, qi.precio_u,
+          (qi.precio_u_fuera_precio_final IS NOT NULL) AS incluido_precio_final,
           ROUND(qi.qty * qi.precio_u, 2) AS subtotal,
           qi.costo_u_neto,
           ROUND(qi.qty * COALESCE(qi.costo_u_neto,0), 2) AS costo_total_neto
@@ -1152,7 +1153,7 @@ class QuoteItemDetailView(APIView):
         auto_precio = _QUOTE_COST_MISSING
         current_item = q(
             """
-            SELECT qi.tipo, qi.repuesto_id, qi.repuesto_codigo
+            SELECT qi.tipo, qi.repuesto_id, qi.repuesto_codigo,qi.precio_u_fuera_precio_final
             FROM quote_items qi
             WHERE qi.quote_id=%s AND qi.id=%s
             """,
@@ -1161,6 +1162,8 @@ class QuoteItemDetailView(APIView):
         )
         if not current_item:
             raise ValidationError("\u00cdtem no encontrado")
+        if structured and current_item['precio_u_fuera_precio_final'] is not None:
+            raise ValidationError('El repuesto está incluido en el precio final de la reparación. Revisá ese precio completo.')
 
         final_tipo = (current_item.get("tipo") or "").strip()
         if structured and final_tipo != 'repuesto':

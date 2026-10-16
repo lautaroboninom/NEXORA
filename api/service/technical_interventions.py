@@ -255,6 +255,13 @@ def stored_document(quote_id):
     return (row[0],bytes(row[1])) if row and row[1] else None
 
 
+def _fixed_price_choice(ingreso_id):
+    candidates = q("""SELECT DISTINCT w.id FROM technical_intervention_items t
+        JOIN technical_work_catalog w ON w.id=t.trabajo_id
+        WHERE t.ingreso_id=%s AND w.precio_final IS NOT NULL AND w.activo""",[ingreso_id])
+    return candidates[0]['id'] if len(candidates)==1 else None, len(candidates)>1
+
+
 def _labor(ingreso_id, quote_id, overrides=None):
     data = detail(ingreso_id)
     ingreso = ingreso_data(ingreso_id)
@@ -264,8 +271,24 @@ def _labor(ingreso_id, quote_id, overrides=None):
     bonified = overrides.get('bonificado',previous.get('bonificado',False) if data['sin_falla'] else False)
     if not isinstance(bonified,bool):
         raise ValidationError("Bonificado debe ser verdadero o falso.")
-    result = dict(minutos_presupuestados=minutes,bonificado=bonified,sin_falla=data['sin_falla'],tipo_equipo=ingreso['tipo_equipo'])
+    suggested, ambiguous = _fixed_price_choice(ingreso_id)
+    selected = overrides.get('precio_final_trabajo_id',previous.get('precio_final_trabajo_id',suggested))
     if data['sin_falla']:
+        selected = None
+    result = dict(minutos_presupuestados=minutes,bonificado=bonified,sin_falla=data['sin_falla'],tipo_equipo=ingreso['tipo_equipo'],
+                  modo_cobro='precio_final' if selected is not None else 'horas',precio_final_trabajo_id=selected,
+                  requiere_seleccion_precio_final=(previous.get('requiere_seleccion_precio_final',ambiguous)
+                      if 'precio_final_trabajo_id' not in overrides else False))
+    if selected is not None:
+        selected = catalog_identifier(selected)
+        work = q('SELECT id,nombre,precio_final FROM technical_work_catalog WHERE id=%s AND activo',[selected],one=True)
+        if not work or work['precio_final'] is None:
+            raise ValidationError('Seleccioná un trabajo activo con precio final configurado.')
+        default = previous.get('importe') if previous.get('precio_final_trabajo_id')==selected else work['precio_final']
+        amount = decimal_value(overrides.get('importe_precio_final',default),'Precio final de la reparación')
+        result.update(precio_final_trabajo_id=selected,nombre_precio_final=work['nombre'],tarifa_precio_final=str(work['precio_final']),
+                      tarifa_pendiente=False,importe=str(amount))
+    elif data['sin_falla']:
         value = q("SELECT diagnostico_limpieza FROM technical_billing_config WHERE id=1",one=True)['diagnostico_limpieza']
         if value is None:
             result.update(tarifa_pendiente=True,importe=None)
@@ -287,6 +310,18 @@ def _labor(ingreso_id, quote_id, overrides=None):
         raise ValidationError("La bonificación prevista corresponde al diagnóstico y limpieza sin falla.")
     exec_void("UPDATE quotes SET labor_snapshot=%s::jsonb WHERE id=%s",[_json(result),quote_id])
     exec_void("DELETE FROM quote_items WHERE quote_id=%s AND tipo='mano_obra'",[quote_id])
+    exec_void('DELETE FROM quote_items WHERE quote_id=%s AND technical_final_price',[quote_id])
+    if selected is not None:
+        # Conservar cantidades, referencias y costos para stock; el precio acordado
+        # cubre toda la reparación y no debe volver a sumar sus repuestos.
+        exec_void('''UPDATE quote_items SET precio_u_fuera_precio_final=COALESCE(precio_u_fuera_precio_final,precio_u),precio_u=0
+                     WHERE quote_id=%s AND tipo IN ('repuesto','servicio')''',[quote_id])
+        exec_void("""INSERT INTO quote_items(quote_id,tipo,descripcion,qty,precio_u,technical_final_price)
+                     VALUES (%s,'servicio',%s,1,%s,TRUE)""",
+                  [quote_id,work['nombre']+' · Precio final de la reparación (mano de obra y repuestos incluidos)',amount])
+        return result
+    exec_void('''UPDATE quote_items SET precio_u=precio_u_fuera_precio_final,precio_u_fuera_precio_final=NULL
+                 WHERE quote_id=%s AND precio_u_fuera_precio_final IS NOT NULL''',[quote_id])
     hours = format(Decimal(minutes)/60, '.2f').rstrip('0').rstrip('.').replace('.',',')
     label = 'Diagnóstico y limpieza' + (' (bonificado)' if bonified else '') if data['sin_falla'] else f"Mano de obra ({hours} h)"
     exec_void("INSERT INTO quote_items(quote_id,tipo,descripcion,qty,precio_u) VALUES (%s,'mano_obra',%s,1,%s)",[quote_id,label,result['importe'] or 0])
@@ -314,7 +349,12 @@ def sync_draft(ingreso_id, quote_id):
             exec_void("""INSERT INTO quote_items(quote_id,tipo,descripcion,qty,precio_u,technical_item_id)
                          VALUES (%s,'servicio',%s,%s,0,%s)""",[quote_id,item['descripcion'],quantity,item['id']])
     # Una nueva estimación técnica reemplaza el tiempo sugerido, que administración vuelve a revisar.
-    _labor(ingreso_id,quote_id,{'minutos_presupuestados':snapshot['minutos_estimados']})
+    suggested, ambiguous = _fixed_price_choice(ingreso_id)
+    result = _labor(ingreso_id,quote_id,{'minutos_presupuestados':snapshot['minutos_estimados'],
+                                       'precio_final_trabajo_id':suggested})
+    if ambiguous and not snapshot['sin_falla']:
+        result['requiere_seleccion_precio_final'] = True
+        exec_void('UPDATE quotes SET labor_snapshot=%s::jsonb WHERE id=%s',[_json(result),quote_id])
     exec_void("UPDATE quotes SET technical_revision=%s,technical_snapshot=%s::jsonb WHERE id=%s",[snapshot['scope_revision'],_json(snapshot),quote_id])
     _refresh_quote_totals(quote_id)
 
@@ -371,6 +411,16 @@ def validate_issue(ingreso_id,quote_id,expected_revision):
         raise Conflict("El diagnóstico cambió después del envío a presupuestar.")
     if not info['labor_snapshot'] or info['labor_snapshot'].get('tarifa_pendiente'):
         raise ValidationError("Falta configurar la tarifa de mano de obra. Revisala antes de emitir.")
+    labor = info['labor_snapshot']
+    if labor.get('requiere_seleccion_precio_final'):
+        raise ValidationError('Hay varios trabajos con precio final. Seleccioná el precio que cubre toda la reparación o revisá el cobro por horas.')
+    if labor.get('modo_cobro')=='precio_final':
+        totals = q('''SELECT COUNT(*) FILTER (WHERE technical_final_price) AS fixed_count,
+            COALESCE(SUM(qty*precio_u),0) AS total,
+            COUNT(*) FILTER (WHERE tipo='mano_obra' OR (tipo='repuesto' AND precio_u<>0)) AS extras
+            FROM quote_items WHERE quote_id=%s''',[quote_id],one=True)
+        if totals['fixed_count']!=1 or totals['extras'] or Decimal(str(totals['total']))!=Decimal(labor['importe']):
+            raise ValidationError('El precio final debe incluir todos los repuestos y la mano de obra. Actualizá el cálculo antes de emitir.')
     if q("SELECT id FROM technical_catalog_requests WHERE ingreso_id=%s AND estado='pendiente' LIMIT 1",[ingreso_id],one=True):
         raise ValidationError("Hay solicitudes de alta pendientes.")
 
@@ -406,9 +456,9 @@ def new_version(ingreso_id,user):
         new_id = _clone_quote_version(current['id'])
         # Evitar copiar además los mismos artículos como manuales.
         exec_void("DELETE FROM quote_items WHERE quote_id=%s",[new_id])
-        exec_void("""INSERT INTO quote_items(quote_id,tipo,descripcion,qty,precio_u,repuesto_id,repuesto_codigo,costo_u_neto,technical_item_id)
-                    SELECT %s,tipo,descripcion,qty,precio_u,repuesto_id,repuesto_codigo,costo_u_neto,technical_item_id
-                    FROM quote_items WHERE quote_id=%s AND tipo<>'mano_obra'""",[new_id,current['id']])
+        exec_void("""INSERT INTO quote_items(quote_id,tipo,descripcion,qty,precio_u,repuesto_id,repuesto_codigo,costo_u_neto,technical_item_id,precio_u_fuera_precio_final)
+                    SELECT %s,tipo,descripcion,qty,precio_u,repuesto_id,repuesto_codigo,costo_u_neto,technical_item_id,precio_u_fuera_precio_final
+                    FROM quote_items WHERE quote_id=%s AND tipo<>'mano_obra' AND NOT technical_final_price""",[new_id,current['id']])
         exec_void("UPDATE quotes SET supersedes_quote_id=%s WHERE id=%s",[baseline['id'] if baseline else None,new_id])
         sync_draft(ingreso_id,new_id)
         exec_void("UPDATE ingresos SET presupuesto_estado='pendiente', resolucion=CASE WHEN resolucion='presupuesto_rechazado' THEN NULL ELSE resolucion END WHERE id=%s",[ingreso_id])

@@ -946,6 +946,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
           )}
 
           <h3 className="font-medium mb-2">Repuestos</h3>
+          {quote.technical?.labor_snapshot?.modo_cobro === "precio_final" && <p className="text-sm text-blue-800 mb-2">Estos repuestos están incluidos en el precio final de la reparación. Conservan sus cantidades y costos para el control de stock.</p>}
           {quote.technical && <p className="text-sm text-slate-600 mb-2">Los artículos y sus cantidades se modifican desde Diagnóstico y Reparación. Aquí podés revisar sus costos y precios.</p>}
           <table className="min-w-full text-sm mb-3">
             <thead>
@@ -1050,7 +1051,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                               void commitItemDraft(it);
                             }
                           }}
-                          disabled={isReadOnlyQuote}
+                          disabled={isReadOnlyQuote || it.incluido_precio_final}
                         />
                       </td>
                     ) : null}
@@ -1070,7 +1071,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                               void commitItemDraft(it);
                             }
                           }}
-                          disabled={isReadOnlyQuote}
+                          disabled={isReadOnlyQuote || it.incluido_precio_final}
                         />
                       </td>
                     ) : null}
@@ -1088,7 +1089,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
                             void commitItemDraft(it);
                           }
                         }}
-                        disabled={isReadOnlyQuote}
+                        disabled={isReadOnlyQuote || it.incluido_precio_final}
                       />
                     </td>
                     <td className="p-2 text-right">{money(it.subtotal)}</td>
@@ -1215,8 +1216,8 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
               <div className="text-lg font-semibold">{money(quote.tot_repuestos)}</div>
             </div>
             <div className="border rounded p-3">
-              <div className="text-gray-600 text-sm">Mano de obra</div>
-              <div className="text-lg font-semibold">{money(quote.mano_obra)}</div>
+              <div className="text-gray-600 text-sm">{quote.technical?.labor_snapshot?.modo_cobro === "precio_final" ? "Precio final de la reparación" : "Mano de obra"}</div>
+              <div className="text-lg font-semibold">{money(quote.technical?.labor_snapshot?.modo_cobro === "precio_final" ? quote.technical.labor_snapshot.importe : quote.mano_obra)}</div>
             </div>
             <div className="border rounded p-3">
               <div className="text-gray-600 text-sm">IVA 21%</div>

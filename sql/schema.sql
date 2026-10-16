@@ -3717,6 +3717,7 @@ CREATE TABLE IF NOT EXISTS technical_work_catalog (
   activo BOOLEAN NOT NULL DEFAULT TRUE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_technical_work_name ON technical_work_catalog (LOWER(BTRIM(nombre)));
+ALTER TABLE technical_work_catalog ADD COLUMN IF NOT EXISTS precio_final NUMERIC(12,2) NULL CHECK (precio_final >= 0);
 INSERT INTO technical_work_catalog(nombre) VALUES
  ('Limpieza y desinfección interna y externa'), ('Revisión técnica') ON CONFLICT DO NOTHING;
 
@@ -3789,6 +3790,8 @@ CREATE TABLE IF NOT EXISTS technical_quote_documents (
 );
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS stock_applied BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS technical_item_id INTEGER NULL;
+ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS technical_final_price BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS precio_u_fuera_precio_final NUMERIC(12,2) NULL CHECK (precio_u_fuera_precio_final >= 0);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_technical_item ON quote_items(quote_id,technical_item_id)
   WHERE technical_item_id IS NOT NULL;
 

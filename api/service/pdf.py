@@ -1183,11 +1183,14 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
 
     from . import technical_interventions as technical
     if head.get('quote_id') and technical.available():
-        stored = technical.q("SELECT technical_snapshot FROM quotes WHERE id=%s", [head['quote_id']], one=True)
+        stored = technical.q("SELECT technical_snapshot,labor_snapshot FROM quotes WHERE id=%s", [head['quote_id']], one=True)
         if stored and stored['technical_snapshot']:
             snapshot = technical.json_object(stored['technical_snapshot'])
             head['descripcion_problema'] = snapshot.get('diagnostico','')
             head['trabajos_realizados'] = technical.work_text(snapshot)
+            labor = technical.json_object(stored.get('labor_snapshot'))
+            if labor.get('modo_cobro')=='precio_final':
+                head['trabajos_realizados'] += '\n' + labor['nombre_precio_final'] + ': precio final de la reparación, con mano de obra y repuestos incluidos.'
 
     # Recalcular totales desde items (evita depender de quotes.subtotal desactualizado)
     try:

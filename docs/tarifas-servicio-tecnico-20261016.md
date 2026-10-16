@@ -22,7 +22,7 @@ Las variantes del catálogo se asignan según `RATES` en el comando `load_techni
 
 ## Conceptos fijos anotados en la hoja
 
-Estos importes no reciben el 34 %. Antes de configurar su cobro se debe confirmar si corresponden solo a mano de obra o al trabajo completo con repuestos.
+Estos importes no reciben el 34 %. El usuario confirmó que los tres trabajos de Polywatch y la reparación de compresores son **precios finales del trabajo completo, con repuestos incluidos**. Se cargan como precios fijos de reparación, independientes de las tarifas por hora.
 
 | Concepto | Importe leído |
 | --- | ---: |
@@ -34,13 +34,26 @@ Estos importes no reciben el 34 %. Antes de configurar su cobro se debe confirma
 
 Se consultó el catálogo real en SERVERDATA en una transacción de solo lectura. Se identificó el artículo existente **1504010 — Canister ceolita EVERFLO + Válvula**, asociado a **Philips Respironics | EVERFLO**. Se conserva esa referencia para vincular el trabajo sin duplicarlo ni modificar el catálogo productivo.
 
+EverFlo permanece como referencia del repuesto existente; no se crea otro artículo ni se cambia su precio con la carga de los cuatro trabajos completos confirmados.
+
+## Cobro de una reparación completa
+
+Administración configura el importe en «Precios finales por reparación» y puede ajustarlo en la revisión de cada presupuesto. Si el técnico selecciona un único trabajo con precio final configurado, el borrador propone ese cobro. Si selecciona varios, se exige elegir expresamente el precio que cubre la reparación completa o revisar el cobro por horas antes de emitir.
+
+El precio final se cobra una sola vez por orden. Las horas se conservan como información técnica, sin sumarlas al importe; los repuestos conservan sus cantidades, referencias y costos, pero su venta individual queda incluida. No se permiten cambios de precio o costo individuales que vuelvan a agregar un cargo. Si se vuelve al cobro por horas, se recuperan los precios individuales revisados previamente.
+
+La selección y el importe quedan congelados en cada versión emitida. Los documentos indican que la reparación incluye mano de obra y repuestos. La aprobación descuenta las piezas presupuestadas, incluso cuando su venta individual está incluida. Una ampliación aplica solamente la diferencia de stock con la versión aprobada anterior.
+
 ## Aplicación y validación en desarrollo
 
 ```powershell
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py apply_technical_interventions_schema
 docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_hourly_rates --apply --refresh-drafts
+docker compose -f docker-compose.technical-dev.yml exec -T api python manage.py load_technical_fixed_prices --apply
 ```
 
 La importación parte siempre de los valores originales y aplica el factor 1,34 una sola vez, incluso si se repite. Actualiza borradores vigentes enviados a revisión, conservando las horas revisadas y las bonificaciones. Las versiones emitidas mantienen sus tarifas y documentos. El seed ya no repone importes de demostración cuando encuentra tarifas de tres tramos.
 
 Se verificaron las dos columnas nuevas y su índice en PostgreSQL, la coincidencia con `sql/schema.sql`, los once grupos importados, los límites de seis y siete horas, fracciones, prioridad por marca y conservación de documentos emitidos.
+
+Para los precios completos se verificaron `technical_work_catalog.precio_final`, `quote_items.technical_final_price` y `quote_items.precio_u_fuera_precio_final`. La carga y el seed se repitieron sin duplicar trabajos, cambiar órdenes existentes ni alterar los cinco documentos emitidos anteriores. El seed incorpora las OS 22–25 con los cuatro casos completos y piezas ficticias identificadas como DEMO; los precios finales son los confirmados por el negocio.

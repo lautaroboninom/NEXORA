@@ -272,6 +272,7 @@ class QuoteItemSerializer(serializers.Serializer):
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2)
     costo_u_neto = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
     costo_total_neto = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True, required=False)
+    incluido_precio_final = serializers.BooleanField(required=False, default=False)
 
 
 class QuoteVersionSummarySerializer(serializers.Serializer):

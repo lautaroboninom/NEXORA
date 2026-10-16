@@ -27,4 +27,16 @@ Se ejecutó `apply_technical_interventions_schema` en desarrollo y en su base ai
 
 Pasaron 47 pruebas focalizadas de intervención, cálculos y PDF. Se probaron los límites de seis y siete horas, minutos proporcionales, compatibilidad con tarifas anteriores, prioridad de marca, rechazo de marcas duplicadas y conservación de una versión emitida después de cambiar las tarifas. La compilación del frontend y la revisión visual de los tres tramos y de Inogen en administración finalizaron correctamente, sin errores de JavaScript.
 
-Se repitió la importación y se confirmó que no acumula el 34 %. También se repitió el seed y se verificó que conserva las tarifas confirmadas. Los cinco PDF emitidos de demostración mantuvieron sus hashes. Las consultas al catálogo de SERVERDATA se realizaron dentro de transacciones de solo lectura; no hubo cambios ni pruebas en producción. La aplicación de los importes fijos queda pendiente de confirmar si incluyen repuestos.
+Se repitió la importación y se confirmó que no acumula el 34 %. También se repitió el seed y se verificó que conserva las tarifas confirmadas. Los cinco PDF emitidos de demostración mantuvieron sus hashes. Las consultas al catálogo de SERVERDATA se realizaron dentro de transacciones de solo lectura; no hubo cambios ni pruebas en producción.
+
+## Precios finales de reparaciones completas
+
+El usuario confirmó que Polywatch y compresores incluyen los repuestos. Se cargaron $35.000, $30.000, $40.000 y $140.000, sin aumento, mediante `load_technical_fixed_prices --apply`. Administración puede configurar y revisar estos precios completos; los técnicos solo reciben nombres y datos técnicos.
+
+Se ejecutó `apply_technical_interventions_schema` en desarrollo y en la base de pruebas. Se verificaron en PostgreSQL el precio opcional del catálogo de trabajos y los dos campos de artículos de presupuesto que identifican el cargo fijo y conservan el precio separado. El DDL se reflejó también en `sql/schema.sql`.
+
+Pasaron 55 pruebas focalizadas. La cobertura nueva comprueba cobro único sin sumar horas o repuestos, preservación de costos, precios individuales recuperables al volver a horas, permisos y respuestas técnicas, precio congelado, ampliaciones con diferencias de stock y documentos anteriores, selección explícita ante varios trabajos completos y texto de inclusión en el PDF.
+
+La carga de precios y el seed se repitieron sin duplicados ni alteraciones de los cinco PDF anteriores. Se agregaron cuatro casos en revisión, OS 22–25, con piezas de demostración. La compilación del frontend finalizó correctamente.
+
+La revisión en Chromium verificó los cuatro importes, la edición y persistencia del precio completo, los campos de piezas incluidos deshabilitados y la ausencia de importes en la vista y el catálogo del técnico. Se inspeccionaron las capturas de escritorio y móvil, sin errores de JavaScript.

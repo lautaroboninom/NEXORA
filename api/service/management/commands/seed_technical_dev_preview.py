@@ -22,6 +22,9 @@ PARTS = [
     ('SENSOR', 'Sensor de saturación para monitor', 24000, 42000, 10, 'Monitor multiparamétrico'),
     ('CABLE', 'Cable de alimentación', 4500, 9000, 25, 'Monitor multiparamétrico'),
     ('NEBULIZADOR', 'Kit de nebulización', 3800, 7600, 30, 'Nebulizador'),
+    ('CANULA-POLYWATCH', 'Cánula nasal para Polywatch · DEMO', 8000, 16000, 10, 'Polywatch'),
+    ('PILA-POLYWATCH', 'Pila para Polywatch · DEMO', 2000, 4000, 20, 'Polywatch'),
+    ('KIT-COMPRESOR', 'Kit de reparación de compresor · DEMO', 40000, 80000, 10, 'Compresor'),
 ]
 
 # Clave estable, caso, tipo de equipo, minutos, repuestos y etapa inicial.
@@ -46,7 +49,18 @@ SCENARIOS = [
     ('DIAG-MONITOR', 'Diagnóstico pendiente: monitor con lectura intermitente', 'Monitor multiparamétrico', 0, [], 'nuevo'),
     ('DIAG-NEBULIZADOR', 'Diagnóstico pendiente: nebulizador que no nebuliza', 'Nebulizador', 0, [], 'nuevo'),
     ('DIAG-CONCENTRADOR', 'Diagnóstico pendiente: concentrador con alarma', 'Concentrador de oxígeno', 0, [], 'nuevo'),
+    ('FIJO-CANULA', 'Polywatch: cambio de cánula con precio final', 'Polywatch', 30, ['CANULA-POLYWATCH'], 'revision'),
+    ('FIJO-PILA', 'Polywatch: cambio de pila con precio final', 'Polywatch', 30, ['PILA-POLYWATCH'], 'revision'),
+    ('FIJO-SOFTWARE', 'Polywatch: cambio de pila y software con precio final', 'Polywatch', 60, ['PILA-POLYWATCH'], 'revision'),
+    ('FIJO-COMPRESOR', 'Reparación completa de compresor con precio final', 'Compresor', 120, ['KIT-COMPRESOR'], 'revision'),
 ]
+
+FIXED_SCENARIOS = {
+    'FIJO-CANULA': 'Polywatch: cambio de cánula nasal',
+    'FIJO-PILA': 'Polywatch: cambio de pila',
+    'FIJO-SOFTWARE': 'Polywatch: cambio de pila y actualización de software',
+    'FIJO-COMPRESOR': 'Reparación de compresores en general',
+}
 
 
 class Command(BaseCommand):
@@ -127,6 +141,12 @@ class Command(BaseCommand):
         self.post(f'/api/quotes/{ingreso}/emitir/', {'technical_revision': revision})
 
     def seed_scenario(self, index, code, label, kind, minutes, part_codes, stage):
+        fixed_work = None
+        if code in FIXED_SCENARIOS:
+            fixed_work = q('SELECT id FROM technical_work_catalog WHERE nombre=%s AND precio_final IS NOT NULL AND activo',[FIXED_SCENARIOS[code]],one=True)
+            if not fixed_work:
+                self.stdout.write(f'{label}: pendiente de configurar con load_technical_fixed_prices --apply.')
+                return
         serial = 'DEMO-TEC-'+code
         existing = q('SELECT i.id FROM ingresos i JOIN devices d ON d.id=i.device_id WHERE d.numero_serie=%s', [serial], one=True)
         if existing:
@@ -144,6 +164,9 @@ class Command(BaseCommand):
         if stage not in {'nuevo', 'sin_asignar'}:
             rows = [dict(tipo='trabajo', trabajo_id=w['id'], cantidad_prevista=1, cantidad_realizada=0,
                          observaciones='Realizar y verificar el funcionamiento antes de la entrega.') for w in self.works]
+            if fixed_work:
+                rows.append(dict(tipo='trabajo',trabajo_id=fixed_work['id'],cantidad_prevista=1,cantidad_realizada=0,
+                                 observaciones='Reparación completa según el diagnóstico.'))
             rows += [dict(tipo='repuesto', repuesto_id=self.parts[c], cantidad_prevista=1, cantidad_realizada=0,
                           observaciones='Reemplazo previsto según el diagnóstico.') for c in part_codes]
             saved = technical.save(ingreso, self.tech, dict(revision=0,

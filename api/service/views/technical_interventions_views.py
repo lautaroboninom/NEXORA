@@ -78,6 +78,7 @@ class TechnicalRatesView(APIView):
     def get(self,request):
         require_manager(request)
         return Response(dict(tarifas=q("SELECT tipo_equipo,marca,primera_hora,hora_adicional,hora_desde_septima FROM technical_labor_rates ORDER BY tipo_equipo"),
+            precios_finales=q("SELECT id,nombre,precio_final,activo FROM technical_work_catalog ORDER BY nombre"),
             configuracion=q("SELECT diagnostico_limpieza FROM technical_billing_config WHERE id=1",one=True),
             tipos_equipo=q("SELECT nombre FROM catalogo_tipos_equipo WHERE activo ORDER BY nombre")))
 
@@ -86,6 +87,13 @@ class TechnicalRatesView(APIView):
         data = request.data
         with transaction.atomic():
             technical._audit(request.user,0)
+            if 'trabajo_id' in data:
+                work_id = technical.catalog_identifier(data['trabajo_id'])
+                if not q('SELECT id FROM technical_work_catalog WHERE id=%s',[work_id],one=True):
+                    raise ValidationError('El trabajo no existe en el catálogo.')
+                value = data.get('precio_final')
+                value = technical.decimal_value(value,'Precio final') if value not in (None,'') else None
+                exec_void('UPDATE technical_work_catalog SET precio_final=%s WHERE id=%s',[value,work_id])
             if 'diagnostico_limpieza' in data:
                 value = technical.decimal_value(data['diagnostico_limpieza'],'Diagnóstico y limpieza')
                 exec_void("UPDATE technical_billing_config SET diagnostico_limpieza=%s WHERE id=1",[value])
