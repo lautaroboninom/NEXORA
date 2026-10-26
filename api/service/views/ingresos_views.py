@@ -9256,6 +9256,11 @@ class IngresoDetalleView(APIView):
             }
 
         diag_present = desc_present or trab_present or fecha_present
+        if diag_present and estado_actual in {'ingresado','asignado'}:
+            from .. import technical_interventions as technical
+            # Con carga técnica, estos campos son un borrador o una corrección
+            # de fecha. Completar el diagnóstico requiere el envío explícito.
+            diag_present = not technical.available()
         promote_from_ingresado = diag_present and estado_actual == "ingresado"
         promote_from_asignado = diag_present and estado_actual == "asignado"
         if promote_from_ingresado:

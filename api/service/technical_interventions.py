@@ -214,9 +214,7 @@ def save(ingreso_id, user, data):
         exec_void("""UPDATE technical_interventions SET revision=revision+1,scope_revision=scope_revision+%s,
                    minutos_estimados=%s,minutos_reales=%s,sin_falla=%s,observaciones=%s,updated_at=now(),updated_by=%s WHERE ingreso_id=%s""",
                   [int(changed),estimated,actual,no_fault,notes,user.id,ingreso_id])
-        exec_void("""UPDATE ingresos SET descripcion_problema=%s,
-                    estado=CASE WHEN estado::text IN ('ingresado','asignado') AND %s<>'' THEN 'diagnosticado' ELSE estado END,
-                    fecha_servicio=CASE WHEN %s<>'' THEN COALESCE(fecha_servicio,now()) ELSE fecha_servicio END WHERE id=%s""", [diagnosis,diagnosis,diagnosis,ingreso_id])
+        exec_void('UPDATE ingresos SET descripcion_problema=%s WHERE id=%s',[diagnosis,ingreso_id])
     return detail(ingreso_id,user)
 
 
@@ -383,6 +381,10 @@ def submit(ingreso_id,user,expected):
         elif current['estado'] not in {'presupuestado','emitido','aprobado'}:
             raise ValidationError("Administración debe abrir una nueva versión para esta orden.")
         exec_void("UPDATE technical_interventions SET submitted_revision=scope_revision,submitted_at=now() WHERE ingreso_id=%s",[ingreso_id])
+        # Guardar es preparar el diagnóstico. Solo un envío confirmado completa
+        # esta etapa, sin retroceder estados de reparación o resoluciones especiales.
+        exec_void("""UPDATE ingresos SET estado='diagnosticado',fecha_servicio=COALESCE(fecha_servicio,now())
+                     WHERE id=%s AND estado::text IN ('ingresado','asignado')""",[ingreso_id])
     return detail(ingreso_id,user)
 
 

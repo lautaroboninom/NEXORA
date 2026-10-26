@@ -101,11 +101,76 @@ class TechnicalInterventionAPITests(TestCase):
     def test_single_load_submit_and_idempotent_draft(self):
         saved=self.save()
         self.assertEqual(saved['estado_revision'],'en_preparacion')
-        self.send(); self.send()
+        self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                         dict(estado='ingresado',fecha_servicio=None))
+        self.send()
+        confirmed=q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True)
+        self.assertEqual(confirmed['estado'],'diagnosticado')
+        self.assertIsNotNone(confirmed['fecha_servicio'])
+        self.send()
+        self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),confirmed)
         quote=self.quote()
         self.assertEqual(len(quote['items']),3)
         self.assertEqual(Decimal(quote['mano_obra']),Decimal('120.00'))
         self.assertEqual(q("SELECT stock_on_hand FROM catalogo_repuestos WHERE id=%s",[self.part],one=True)['stock_on_hand'],20)
+
+    def test_incomplete_submission_keeps_diagnosis_in_preparation(self):
+        for changes in [dict(diagnostico=''),dict(items=[]),dict(minutos_estimados=0)]:
+            with self.subTest(changes=changes):
+                saved=self.save(**changes)
+                response=self.client.post(self.base+'enviar/',{'revision':saved['revision']},format='json')
+                self.assertEqual(response.status_code,400,response.content)
+                self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                                 dict(estado='ingresado',fecha_servicio=None))
+                self.assertIsNone(self.client.get(self.base).json()['submitted_revision'])
+
+    def test_failed_draft_generation_does_not_complete_diagnosis(self):
+        from rest_framework.exceptions import ValidationError
+        saved=self.save()
+        with patch('service.technical_interventions.sync_draft',side_effect=ValidationError('No se pudo preparar el borrador.')):
+            response=self.client.post(self.base+'enviar/',{'revision':saved['revision']},format='json')
+        self.assertEqual(response.status_code,400,response.content)
+        self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                         dict(estado='ingresado',fecha_servicio=None))
+        self.assertIsNone(self.client.get(self.base).json()['submitted_revision'])
+
+    def test_general_sheet_fields_do_not_bypass_explicit_submission(self):
+        endpoint=f'/api/ingresos/{self.ingreso}/'
+        with patch('service.views.ingresos_views.sync_plan_from_ingreso_fecha_servicio',return_value={'status':'skipped'}):
+            response=self.client.patch(endpoint,{'descripcion_problema':'Diagnóstico en preparación.'},format='json')
+            self.assertEqual(response.status_code,200,response.content)
+            self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                             dict(estado='ingresado',fecha_servicio=None))
+            response=self.client.patch(endpoint,{'fecha_servicio':'2026-10-25T12:00:00Z'},format='json')
+            self.assertEqual(response.status_code,200,response.content)
+            before=q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True)
+            self.assertEqual(before['estado'],'ingresado')
+            self.save()
+            response=self.client.patch(endpoint,{'descripcion_problema':'Diagnóstico corregido, todavía sin enviar.'},format='json')
+            self.assertEqual(response.status_code,200,response.content)
+            self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),before)
+        self.send()
+        self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                         dict(estado='diagnosticado',fecha_servicio=before['fecha_servicio']))
+
+    def test_legacy_sheet_without_technical_schema_keeps_its_transition(self):
+        with patch('service.technical_interventions.available',return_value=False), \
+                patch('service.views.ingresos_views.sync_plan_from_ingreso_fecha_servicio',return_value={'status':'skipped'}):
+            response=self.client.patch(f'/api/ingresos/{self.ingreso}/',{'descripcion_problema':'Diagnóstico por el circuito anterior.'},format='json')
+        self.assertEqual(response.status_code,200,response.content)
+        self.assertEqual(q('SELECT estado::text FROM ingresos WHERE id=%s',[self.ingreso],one=True)['estado'],'diagnosticado')
+
+    def test_submission_preserves_existing_service_date_and_advanced_states(self):
+        exec_void("UPDATE ingresos SET fecha_servicio=now()-interval '3 days' WHERE id=%s",[self.ingreso])
+        date=q('SELECT fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True)['fecha_servicio']
+        self.save();self.send()
+        self.assertEqual(q('SELECT fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True)['fecha_servicio'],date)
+        for state in ['presupuestado','reparar','reparado','controlado_sin_defecto','no_se_repara']:
+            with self.subTest(state=state):
+                exec_void('UPDATE ingresos SET estado=%s WHERE id=%s',[state,self.ingreso])
+                self.save(observaciones='Actualización técnica en estado '+state+'.');self.send()
+                self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                                 dict(estado=state,fecha_servicio=date))
 
     def configure_fixed(self, amount='35000.00'):
         self.client.force_authenticate(self.manager)
@@ -347,6 +412,8 @@ class TechnicalInterventionAPITests(TestCase):
         data=self.client.get(self.base).json()
         self.assertEqual(data['estado_revision'],'alta_pendiente')
         self.assertEqual(self.client.post(self.base+'enviar/',{'revision':data['revision']},format='json').status_code,400)
+        self.assertEqual(q('SELECT estado::text,fecha_servicio FROM ingresos WHERE id=%s',[self.ingreso],one=True),
+                         dict(estado='ingresado',fecha_servicio=None))
         self.client.force_authenticate(self.manager)
         created=self.client.post('/api/catalogo-trabajos/',{'nombre':'Calibración solicitada'},format='json')
         result=self.client.patch(f"/api/solicitudes-catalogo/{response.json()['id']}/",{'estado':'aprobada','catalog_id':created.json()['id']},format='json')
