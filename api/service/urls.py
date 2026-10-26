@@ -553,6 +553,8 @@ urlpatterns = [
     path("quotes/<int:ingreso_id>/items/<int:item_id>/", QuoteItemDetailView.as_view()),  # PATCH/DELETE
     path("quotes/<int:ingreso_id>/resumen/", QuoteResumenView.as_view()),  # PATCH {mano_obra}
     path("quotes/<int:ingreso_id>/pdf/", QuotePdfView.as_view()),
+    path("quotes/<int:ingreso_id>/pdf-info/", QuotePdfView.as_view(), {'metadata':True}),
+    path("quotes/<int:ingreso_id>/pdf/<str:filename>", QuotePdfView.as_view(), name='quote-pdf-named'),
     path("quotes/<int:ingreso_id>/anular/", AnularPresupuestoView.as_view()),
 
     # ténico / ingresos (acciones)

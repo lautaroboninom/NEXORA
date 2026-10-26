@@ -528,8 +528,22 @@ class TechnicalInterventionAPITests(TestCase):
         self.assertTrue(response['Content-Disposition'].startswith('inline;'))
         self.assertIn(quote(title+'.pdf'),response['Content-Disposition'])
         self.assertEqual(response.content,pdf)
+        metadata=self.client.get(self.quote_base+f"pdf-info/?quote_id={current['quote_id']}")
+        self.assertEqual(metadata.status_code,200,metadata.content)
+        self.assertEqual(metadata.json()['filename'],title+'.pdf')
+        named_url=metadata.json()['url']
+        self.assertTrue(named_url.endswith('/'+quote(title+'.pdf')+f"?quote_id={current['quote_id']}"),named_url)
+        named=self.client.get(named_url)
+        self.assertEqual(named.status_code,200,named.content)
+        self.assertEqual(named.content,pdf)
+        self.assertEqual(named['Content-Location'],named_url)
+        incorrect=self.client.get(named_url.replace(quote(title+'.pdf'),'nombre-incorrecto.pdf'))
+        self.assertEqual(incorrect.status_code,302)
+        self.assertEqual(incorrect['Location'],named_url)
         self.client.force_authenticate(self.tech)
         self.assertEqual(self.client.get(self.quote_base+'pdf/').status_code,403)
+        self.assertEqual(self.client.get(named_url).status_code,403)
+        self.assertEqual(self.client.get(self.quote_base+'pdf-info/').status_code,403)
 
     def test_complete_repair_keeps_real_time(self):
         self.save();self.send();self.issue();self.approve()

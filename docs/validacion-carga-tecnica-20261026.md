@@ -17,3 +17,11 @@ En documentos ya emitidos se obtiene el título de sus metadatos, con el nombre 
 Pasaron 64 pruebas focalizadas de títulos, PDF e intervenciones, incluida la preservación de los bytes de un PDF emitido y la denegación de acceso comercial a un técnico sin permiso. La primera ejecución se interrumpió por un reinicio de PostgreSQL; se repitió correctamente con la base de desarrollo disponible. La compilación del frontend finalizó correctamente.
 
 En una sesión de prueba de Edge se abrió el PDF mediante la cookie de autenticación y se comprobó una descarga real: el navegador propuso `OS 00021-1 Centro Respiratorio del Sur · DEMO.pdf`. El hash del archivo descargado coincidió con el PDF servido y no hubo errores de JavaScript. No se ejecutaron pruebas ni cambios en producción.
+
+### Compatibilidad con el nombre tomado por Acrobat
+
+La prueba anterior cubría la descarga de Edge, pero no la extensión de Acrobat. La captura posterior del usuario mostró que Acrobat proponía `pdf.pdf` porque tomaba el último segmento de la dirección `/pdf/`, pese al nombre indicado en el encabezado.
+
+Se agregó una consulta autenticada de información del PDF y una dirección que termina en el título completo con extensión `.pdf`. La selección de la versión permanece fijada por `quote_id`; los permisos se aplican también a ambas rutas nuevas. Un nombre de URL que no coincide con el documento se redirige a su dirección correcta. La ruta anterior continúa funcionando para los clientes existentes.
+
+Se repitieron las 64 pruebas focalizadas, con comprobaciones adicionales del nombre en la URL, sus bytes originales, el redireccionamiento y los permisos. La compilación del frontend terminó correctamente. En Edge se verificó el flujo desde el botón del presupuesto para las OS 7 y 21: el nombre figura en el último tramo de ambas direcciones y coincide con el propuesto en las descargas. Se conservaron los hashes de los PDF, sin errores de JavaScript. La extensión de Acrobat del usuario no estuvo incluida en esta sesión automatizada.

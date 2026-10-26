@@ -4,7 +4,8 @@ import unicodedata
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import connection, transaction
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
+from django.urls import reverse
 from django.utils.http import content_disposition_header
 
 from rest_framework import permissions
@@ -1492,7 +1493,7 @@ class EmitirPresupuestoView(APIView):
 class QuotePdfView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request, ingreso_id: int):
+    def get(self, request, ingreso_id: int, filename=None, metadata=False):
         require_roles(request, ["jefe", "admin", "jefe_veedor", "tecnico", "recepcion"])
         if not any(user_has_permission(request.user, code) for code in ("action.presupuesto.manage", "action.presupuesto.view_costs", "page.budget_queues")):
             raise PermissionDenied("No autorizado para consultar información comercial.")
@@ -1508,8 +1509,16 @@ class QuotePdfView(APIView):
             fname, pdf = render_quote_pdf(ingreso_id, quote_id=quote_id)
         if not pdf:
             raise ValidationError("Ingreso no encontrado o sin presupuesto")
+        canonical_name = quote_document_filename(pdf, fname)
+        canonical_url = reverse('quote-pdf-named',kwargs={'ingreso_id':ingreso_id,'filename':canonical_name})
+        canonical_url += f"?quote_id={selected['id']}"
+        if metadata:
+            return Response({'filename':canonical_name,'url':canonical_url})
+        if filename is not None and filename != canonical_name:
+            return HttpResponseRedirect(canonical_url)
         resp = HttpResponse(pdf, content_type="application/pdf")
-        resp["Content-Disposition"] = content_disposition_header(False, quote_document_filename(pdf, fname))
+        resp["Content-Disposition"] = content_disposition_header(False, canonical_name)
+        resp['Content-Location'] = canonical_url
         return resp
 
 

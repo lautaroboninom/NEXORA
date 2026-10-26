@@ -1562,6 +1562,9 @@ export const postModelo = (brandId, payloadOrNombre) => {
   export const postQuoteQuitarNoAplica = (ingresoId) =>
     api.post(`/api/quotes/${ingresoId}/no-aplica/quitar/`);
 
+  export const getQuotePdfInfo = (ingresoId, quoteId) =>
+    api.get(`/api/quotes/${ingresoId}/pdf-info/?${new URLSearchParams({ quote_id: String(quoteId) })}`);
+
   // === GET binario (Blob) con auth y cookies ===
   // Devuelve tambin los headers: algunos endpoints (el lote de rdenes de
   // salida) responden el PDF y cuentan aparte qu sali y qu fall.

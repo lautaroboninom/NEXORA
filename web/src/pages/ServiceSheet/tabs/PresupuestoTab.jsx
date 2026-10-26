@@ -1,7 +1,7 @@
 import TechnicalQuoteReview from "../../../components/TechnicalQuoteReview";
 import TechnicalCatalogAdmin from "../../../components/TechnicalCatalogAdmin";
 import { useEffect, useRef, useState } from "react";
-import { resolveApiUrl } from "../../../lib/api";
+import { getQuotePdfInfo, resolveApiUrl } from "../../../lib/api";
 import RejectedBudgetChargeModal from "../../../components/RejectedBudgetChargeModal";
 import { formatDateTime as formatDateTimeHelper, isMgOwned } from "../../../lib/ui-helpers";
 import {
@@ -179,7 +179,8 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     return () => { alive = false; clearTimeout(handle); };
   }, [repQuery, equipoHints.join("||")]);
 
-  function abrirPdf(targetQuoteId = quote?.quote_id) {
+  async function abrirPdf(targetQuoteId = quote?.quote_id) {
+    let targetWindow = null;
     try {
       setQErr("");
       const requestedQuoteId =
@@ -188,11 +189,16 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
           : targetQuoteId;
       const resolvedQuoteId = Number(requestedQuoteId ?? activeQuoteId ?? currentQuoteId ?? 0) || null;
       if (!resolvedQuoteId) throw new Error(`No hay ${tituloDoc} para imprimir.`);
-      // La navegación usa la cookie de sesión. Conservar la respuesta HTTP
-      // permite que el visor tome el nombre indicado en Content-Disposition.
-      const url = resolveApiUrl(`/api/quotes/${id}/pdf/?quote_id=${resolvedQuoteId}`);
-      window.open(url, "_blank", "noopener");
+      targetWindow = window.open("about:blank", "_blank");
+      if (!targetWindow) throw new Error("El navegador bloqueó la pestaña del PDF. Permití las ventanas emergentes y volvé a abrirlo.");
+      targetWindow.opener = null;
+      targetWindow.document.title = `Preparando ${tituloDoc}...`;
+      const documentInfo = await getQuotePdfInfo(id, resolvedQuoteId);
+      // Acrobat puede ignorar Content-Disposition: el título también debe
+      // ser el último tramo de la dirección, con su extensión .pdf.
+      if (!targetWindow.closed) targetWindow.location.replace(resolveApiUrl(documentInfo.url));
     } catch (e) {
+      if (targetWindow && !targetWindow.closed) targetWindow.close();
       setQErr(e?.message || `No se pudo abrir el PDF de la ${tituloDoc}`);
     }
   }
