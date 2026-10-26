@@ -5,10 +5,26 @@ from unittest.mock import patch
 import fitz
 from django.test import SimpleTestCase
 
-from service.pdf import _customer_display_name, os_version_title, render_quote_pdf
+from service.pdf import _customer_display_name, os_version_title, quote_document_filename, quote_pdf_filename, render_quote_pdf
 
 
 class PdfTitleFormatTest(SimpleTestCase):
+    def test_download_filename_preserves_visible_title_and_unicode(self):
+        title='OS 00021-1 Centro Respiratorio del Sur · DEMO'
+        self.assertEqual(quote_pdf_filename(title),title+'.pdf')
+        self.assertEqual(quote_pdf_filename('OS 00012-3 Clínica Pérez / Sucursal: "Norte"'),
+                         'OS 00012-3 Clínica Pérez Sucursal Norte.pdf')
+
+    def test_existing_document_uses_its_own_frozen_title(self):
+        title='OS 00021-1 Centro Respiratorio del Sur · DEMO'
+        with fitz.open() as document:
+            document.new_page()
+            document.set_metadata({'title':title})
+            pdf=document.tobytes()
+        self.assertEqual(quote_document_filename(pdf,'codigo-anterior.pdf'),title+'.pdf')
+        self.assertEqual(quote_document_filename(b'%PDF-sin-metadatos','OS 00021-1 Cliente anterior.pdf'),
+                         'OS 00021-1 Cliente anterior.pdf')
+
     def test_os_version_title_uses_hyphen(self):
         self.assertEqual(os_version_title(29207, 1), "OS 29207-1")
 

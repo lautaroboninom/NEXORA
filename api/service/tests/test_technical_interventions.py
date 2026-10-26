@@ -511,6 +511,26 @@ class TechnicalInterventionAPITests(TestCase):
         self.assertIn('No concentra correctamente.',text)
         self.assertIn('Filtro técnico de prueba',text)
 
+    def test_existing_pdf_download_uses_frozen_title_without_changing_bytes(self):
+        import fitz
+        from urllib.parse import quote
+        title='OS 00021-1 Centro Respiratorio del Sur · DEMO'
+        with fitz.open() as document:
+            document.new_page()
+            document.set_metadata({'title':title})
+            pdf=document.tobytes()
+        self.save();self.send();current=self.quote()
+        with patch('service.views.quotes_views.render_quote_pdf',return_value=('nombre-anterior.pdf',pdf)):
+            issued=self.client.post(self.quote_base+'emitir/',{'technical_revision':current['technical']['technical_revision']},format='json')
+        self.assertEqual(issued.status_code,200,issued.content)
+        response=self.client.get(self.quote_base+f"pdf/?quote_id={current['quote_id']}")
+        self.assertEqual(response.status_code,200,response.content)
+        self.assertTrue(response['Content-Disposition'].startswith('inline;'))
+        self.assertIn(quote(title+'.pdf'),response['Content-Disposition'])
+        self.assertEqual(response.content,pdf)
+        self.client.force_authenticate(self.tech)
+        self.assertEqual(self.client.get(self.quote_base+'pdf/').status_code,403)
+
     def test_complete_repair_keeps_real_time(self):
         self.save();self.send();self.issue();self.approve()
         self.client.force_authenticate(self.tech)

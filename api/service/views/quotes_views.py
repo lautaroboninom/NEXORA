@@ -5,13 +5,14 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.db import connection, transaction
 from django.http import HttpResponse
+from django.utils.http import content_disposition_header
 
 from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..pdf import render_quote_pdf
+from ..pdf import quote_document_filename, render_quote_pdf
 from ..email_delivery import dispatch_email_delivery
 from ..notifications import (
     emit_notification,
@@ -1508,7 +1509,7 @@ class QuotePdfView(APIView):
         if not pdf:
             raise ValidationError("Ingreso no encontrado o sin presupuesto")
         resp = HttpResponse(pdf, content_type="application/pdf")
-        resp["Content-Disposition"] = f'inline; filename="{fname}"'
+        resp["Content-Disposition"] = content_disposition_header(False, quote_document_filename(pdf, fname))
         return resp
 
 

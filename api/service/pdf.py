@@ -272,6 +272,30 @@ def safe_name(s: str) -> str:
     return s[:80]
 
 
+def quote_pdf_filename(title: str) -> str:
+    # Conservar el título visible, incluidos tildes y punto medio. Solo retirar
+    # caracteres que no se pueden usar en nombres de archivo de Windows.
+    name = re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', '', str(title or ''))
+    name = re.sub(r'\s+', ' ', name).strip().rstrip('. ')
+    if name.lower().endswith('.pdf'):
+        name = name[:-4]
+    return (name[:180].rstrip('. ') or 'Presupuesto') + '.pdf'
+
+
+def quote_document_filename(pdf: bytes, fallback: str) -> str:
+    # El título del PDF emitido es inmutable aunque luego cambie el cliente.
+    # Leerlo permite corregir la descarga sin regenerar el documento histórico.
+    try:
+        import fitz
+        with fitz.open(stream=pdf, filetype='pdf') as document:
+            title = (document.metadata or {}).get('title', '').strip()
+        if title:
+            return quote_pdf_filename(title)
+    except Exception:
+        pass
+    return quote_pdf_filename(fallback)
+
+
 def render_serial_barcode_pdf(value: str, title: str = "N/S", subtitle: str = ""):
     serial = (value or "").strip()
     if not serial:
@@ -1226,7 +1250,7 @@ def render_quote_pdf(ingreso_id: int, quote_id: int | None = None):
 
     cliente_display = _customer_display_name(head)
     title = f"{os_version_title(head.get('ingreso_id'), head.get('quote_version_num'))} {cliente_display}".strip()
-    filename = f"{safe_name(title)}.pdf"
+    filename = quote_pdf_filename(title)
 
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)

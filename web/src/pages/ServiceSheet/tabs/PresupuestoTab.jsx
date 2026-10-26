@@ -1,7 +1,7 @@
 import TechnicalQuoteReview from "../../../components/TechnicalQuoteReview";
 import TechnicalCatalogAdmin from "../../../components/TechnicalCatalogAdmin";
 import { useEffect, useRef, useState } from "react";
-import { getBlob } from "../../../lib/api";
+import { resolveApiUrl } from "../../../lib/api";
 import RejectedBudgetChargeModal from "../../../components/RejectedBudgetChargeModal";
 import { formatDateTime as formatDateTimeHelper, isMgOwned } from "../../../lib/ui-helpers";
 import {
@@ -179,7 +179,7 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
     return () => { alive = false; clearTimeout(handle); };
   }, [repQuery, equipoHints.join("||")]);
 
-  async function abrirPdf(targetQuoteId = quote?.quote_id) {
+  function abrirPdf(targetQuoteId = quote?.quote_id) {
     try {
       setQErr("");
       const requestedQuoteId =
@@ -188,11 +188,10 @@ export default function PresupuestoTab({ id, data, canManagePresupuesto, canSeeC
           : targetQuoteId;
       const resolvedQuoteId = Number(requestedQuoteId ?? activeQuoteId ?? currentQuoteId ?? 0) || null;
       if (!resolvedQuoteId) throw new Error(`No hay ${tituloDoc} para imprimir.`);
-      const blob = await getBlob(`/api/quotes/${id}/pdf/?quote_id=${resolvedQuoteId}`);
-      if (!(blob instanceof Blob)) throw new Error("La respuesta del API no fue un Blob.");
-      const url = URL.createObjectURL(blob);
+      // La navegación usa la cookie de sesión. Conservar la respuesta HTTP
+      // permite que el visor tome el nombre indicado en Content-Disposition.
+      const url = resolveApiUrl(`/api/quotes/${id}/pdf/?quote_id=${resolvedQuoteId}`);
       window.open(url, "_blank", "noopener");
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (e) {
       setQErr(e?.message || `No se pudo abrir el PDF de la ${tituloDoc}`);
     }

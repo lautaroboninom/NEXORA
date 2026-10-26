@@ -59,6 +59,7 @@ Para empezar desde la lista de trabajo, ingresar como `tecnico@tecnica.invalid` 
 3. En Pendientes de presupuesto se distingue la preparación, las altas pendientes, la revisión y las ampliaciones. Desde «Trabajos, tarifas y solicitudes de alta» se administran los catálogos y los valores monetarios.
 4. Administración revisa los precios de los repuestos y el tiempo facturable. La lista técnica define los artículos; los cambios de alcance se hacen allí y se vuelven a enviar.
 5. Una vez emitida, la versión queda cerrada y se conserva el PDF original. Marcar trabajos como realizados o repuestos como instalados no modifica lo cotizado. Un cambio de horas pasa por revisión en una nueva versión.
+   «Ver/Descargar PDF» abre el documento desde su dirección autenticada y propone como nombre el título de esa versión, por ejemplo `OS 00021-1 Centro Respiratorio del Sur · DEMO.pdf`. Conserva tildes y punto medio, retirando solo caracteres incompatibles con nombres de archivo. Los PDF anteriores toman el título guardado en el propio documento, sin regenerar sus bytes ni usar el nombre actual de un cliente que haya cambiado.
 6. Para un adicional, el técnico modifica el alcance y vuelve a enviarlo. Administración crea una nueva versión, la revisa y la emite. La aprobación sustituye la anterior y aplica solamente la diferencia de stock. El Portal Cliente utiliza la misma regla.
 
 ## Cálculo
